@@ -261,6 +261,12 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
             if !sched::init_runtime(cap.tasks) {
                 return None;
             }
+            if !proc::init_runtime(cap.tasks) {
+                return None;
+            }
+            if !mm::pin::init_runtime(cap.tasks) {
+                return None;
+            }
             if !crate::ring::init_runtime(cap.tasks, cap.objects) {
                 return None;
             }

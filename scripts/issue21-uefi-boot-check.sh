@@ -449,6 +449,7 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native
   grep -aqE $'^/usr\r?$' "$OUT/serial.log"
   grep -aqE $'^jasper-registry-ok\r?$' "$OUT/serial.log"
   grep -aqE $'^external-ok\r?$' "$OUT/serial.log"
+  grep -aqE $'^jasper-orphan-vfork-ok\r?$' "$OUT/serial.log"
   if [ "$MODE" = sandbox-launch ]; then
     grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
     grep -aqE '^\[JSR-SANDBOX-LAUNCH\] started plan=0x[0-9a-f]+ child_handle=0x[0-9a-f]+ workload=0x[0-9a-f]+' "$OUT/serial.log"

@@ -474,8 +474,23 @@ fn execute_root_linux_probe(root: &Ext4Reader, enforce_resources: bool) -> Resul
     let calls_before = crate::syscall::call_count();
     let calls = compat_core::syscall::LinuxSyscallSet::of(&[
         compat_core::syscall::LinuxSyscall::Write,
+        compat_core::syscall::LinuxSyscall::Close,
+        compat_core::syscall::LinuxSyscall::Mmap,
+        compat_core::syscall::LinuxSyscall::Mprotect,
+        compat_core::syscall::LinuxSyscall::Munmap,
+        compat_core::syscall::LinuxSyscall::SchedYield,
+        compat_core::syscall::LinuxSyscall::Clone,
+        compat_core::syscall::LinuxSyscall::Wait4,
         compat_core::syscall::LinuxSyscall::GetPid,
         compat_core::syscall::LinuxSyscall::GetTid,
+        compat_core::syscall::LinuxSyscall::Futex,
+        compat_core::syscall::LinuxSyscall::EpollWait,
+        compat_core::syscall::LinuxSyscall::EpollCtl,
+        compat_core::syscall::LinuxSyscall::EpollCreate1,
+        compat_core::syscall::LinuxSyscall::Pipe2,
+        compat_core::syscall::LinuxSyscall::IoUringSetup,
+        compat_core::syscall::LinuxSyscall::IoUringEnter,
+        compat_core::syscall::LinuxSyscall::IoUringRegister,
         compat_core::syscall::LinuxSyscall::ExitGroup,
     ]);
     let pid = crate::proc::create_linux("root-linux-probe", calls)

@@ -418,6 +418,35 @@ int main(void) {
 #ifdef JASPER_ANDROID_ONLY
     goto jasper_android_tests;
 #endif
+    if (getenv("JASPER_ORPHAN_VFORK_EXEC") != NULL) {
+        const struct timespec delay = {
+            .tv_sec = 0,
+            .tv_nsec = 1000000L,
+        };
+        const char ready = 'A';
+        if (write(9, &ready, 1) != 1) {
+            _exit(1);
+        }
+        for (int attempt = 0; attempt < 2000; attempt++) {
+            if (getppid() == 0) {
+                break;
+            }
+            nanosleep(&delay, NULL);
+        }
+        const char orphaned = 'B';
+        const char marker[] = "jasper-orphan-vfork-ok\n";
+        if (getppid() != 0) {
+            _exit(3);
+        }
+        if (write(9, &orphaned, 1) != 1) {
+            _exit(4);
+        }
+        if (write(STDOUT_FILENO, marker, sizeof(marker) - 1) !=
+            (ssize_t)(sizeof(marker) - 1)) {
+            _exit(5);
+        }
+        _exit(0);
+    }
     if (getenv("JASPER_EXEC_CHILD") != NULL) {
         printf("jasper-exec-child pid=%d ppid=%d\n", getpid(), getppid());
         fflush(stdout);
@@ -3891,12 +3920,19 @@ jasper_android_binder:
     }
     scheduler_attr.sched_policy = SCHED_OTHER;
     scheduler_attr.sched_flags = SCHED_FLAG_RESET_ON_FORK;
-    errno = 0;
-    if (syscall(SYS_sched_setattr, 0, &scheduler_attr, 0) != -1 ||
-        errno != EOPNOTSUPP) {
+    if (syscall(SYS_sched_setattr, 0, &scheduler_attr, 0) != 0) {
         return 324;
     }
+    struct sched_attr scheduler_readback = {.size = sizeof(scheduler_readback)};
+    if (syscall(SYS_sched_getattr, 0, &scheduler_readback,
+                sizeof(scheduler_readback), 0) != 0 ||
+        (scheduler_readback.sched_flags & SCHED_FLAG_RESET_ON_FORK) == 0) {
+        return 715;
+    }
     scheduler_attr.sched_flags = 0;
+    if (syscall(SYS_sched_setattr, 0, &scheduler_attr, 0) != 0) {
+        return 716;
+    }
     if (syscall(SYS_sched_getattr, 0, &scheduler_attr,
                 sizeof(scheduler_attr), 0) != 0 ||
         scheduler_attr.sched_policy != SCHED_OTHER ||
@@ -8144,6 +8180,72 @@ jasper_android_binder:
         !WIFEXITED(child_status) ||
         WEXITSTATUS(child_status) != 0) {
         return 704;
+    }
+    int orphan_vfork_pipe[2];
+    int orphan_subreaper = 1;
+    if (prctl(PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0) != 0 ||
+        prctl(PR_GET_CHILD_SUBREAPER, &orphan_subreaper, 0, 0, 0) != 0 ||
+        orphan_subreaper != 0) {
+        return 717;
+    }
+    if (pipe(orphan_vfork_pipe) != 0) {
+        return 711;
+    }
+    pid_t orphan_vfork_parent = fork();
+    if (orphan_vfork_parent < 0) {
+        close(orphan_vfork_pipe[0]);
+        close(orphan_vfork_pipe[1]);
+        return 712;
+    }
+    if (orphan_vfork_parent == 0) {
+        close(orphan_vfork_pipe[0]);
+        if (dup2(orphan_vfork_pipe[1], 9) != 9) {
+            _exit(1);
+        }
+        if (orphan_vfork_pipe[1] != 9) {
+            close(orphan_vfork_pipe[1]);
+        }
+        char *orphan_argv[] = {
+            "/usr/bin/jasper-getppid",
+            NULL,
+        };
+        char *orphan_envp[] = {
+            "JASPER_ORPHAN_VFORK_EXEC=1",
+            NULL,
+        };
+        pid_t orphan_vfork_child = vfork();
+        if (orphan_vfork_child < 0) {
+            _exit(2);
+        }
+        if (orphan_vfork_child == 0) {
+            execve(orphan_argv[0], orphan_argv, orphan_envp);
+            _exit(3);
+        }
+        _exit(0);
+    }
+    close(orphan_vfork_pipe[1]);
+    child_status = 0;
+    char orphan_vfork_ready = 0;
+    char orphan_vfork_finish = 0;
+    if (waitpid(orphan_vfork_parent, &child_status, 0) !=
+            orphan_vfork_parent ||
+        !WIFEXITED(child_status) ||
+        WEXITSTATUS(child_status) != 0 ||
+        read(orphan_vfork_pipe[0], &orphan_vfork_ready, 1) != 1 ||
+        orphan_vfork_ready != 'A' ||
+        read(orphan_vfork_pipe[0], &orphan_vfork_finish, 1) != 1 ||
+        orphan_vfork_finish != 'B' ||
+        close(orphan_vfork_pipe[0]) != 0) {
+        return 713;
+    }
+    struct timespec orphan_reap_delay = {
+        .tv_sec = 0,
+        .tv_nsec = 20000000L,
+    };
+    nanosleep(&orphan_reap_delay, NULL);
+    errno = 0;
+    if (waitpid(-1, &child_status, WNOHANG) != -1 || errno != ECHILD) {
+        return 714;
     }
     if (lseek(fd, 0, SEEK_SET) != 0) {
         return 81;

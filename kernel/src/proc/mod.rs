@@ -927,6 +927,32 @@ static REG: IrqSpinLock<Registry> = IrqSpinLock::ranked(
         members: Vec::new(),
     },
 );
+
+/// Reserve process-thread registry storage during boot capacity admission.
+///
+/// The registry retains its capacity when a thread exits. Pre-admitting both
+/// vectors avoids a hidden first-spawn heap growth and keeps the first-program
+/// resource baseline exact.
+pub fn init_runtime(tasks: usize) -> bool {
+    if tasks == 0 {
+        return false;
+    }
+    let mut starts = Vec::new();
+    if starts.try_reserve_exact(tasks).is_err() {
+        return false;
+    }
+    let mut members = Vec::new();
+    if members.try_reserve_exact(tasks).is_err() {
+        return false;
+    }
+    let mut registry = REG.lock();
+    if !registry.starts.is_empty() || !registry.members.is_empty() {
+        return false;
+    }
+    registry.starts = starts;
+    registry.members = members;
+    true
+}
 /// 线程任务 ID 分配（与其它演示任务的 ID 区分开）。
 static TASK_IDS: kernel_core::object::IdAllocator = kernel_core::object::IdAllocator::new();
 

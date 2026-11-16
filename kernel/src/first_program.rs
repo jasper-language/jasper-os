@@ -74,6 +74,9 @@ pub(crate) fn image() -> &'static [u8] {
 /// Loads and runs the production first program; requires exit code zero and full frame reclamation.
 pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
     let free_before = frame::free_frames();
+    let (heap_total_before, heap_free_before, _, heap_mapped_before) =
+        crate::mm::heap::stats();
+    let heap_used_before = heap_total_before.saturating_sub(heap_free_before);
     #[cfg(feature = "native-install-abi-verify")]
     let allowed = SyscallSet::of(&[
         abi::SYSTEM_CONSOLE_WRITE,
@@ -185,5 +188,30 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
     // reap 只释放所有权；对象销毁由统一清理阶段完成。
     // reap releases ownership only; the common cleanup phase destroys objects.
     kobj::run_cleanup(usize::MAX);
-    (state, frame::free_frames() == free_before)
+    let free_after = frame::free_frames();
+    let (heap_total_after, heap_free_after, _, heap_mapped_after) =
+        crate::mm::heap::stats();
+    let heap_used_after = heap_total_after.saturating_sub(heap_free_after);
+    let heap_growth_frames = (heap_mapped_after.saturating_sub(heap_mapped_before)
+        / kernel_core::frame::FRAME_SIZE)
+        as usize;
+    let frames_reclaimed = free_after.saturating_add(heap_growth_frames) == free_before;
+    let heap_reclaimed = heap_used_after <= heap_used_before;
+    if !frames_reclaimed || !heap_reclaimed {
+        let (live, pending, _) = kobj::stats();
+        let (pins, orphaned) = crate::mm::pin::stats();
+        crate::kprintln!(
+            "[JSR-PROD-DIAG] first_program frames={}/{} heap_growth_frames={} heap_used={}/{} live={} pending={} pins={} orphaned={}",
+            free_after,
+            free_before,
+            heap_growth_frames,
+            heap_used_after,
+            heap_used_before,
+            live,
+            pending,
+            pins,
+            orphaned
+        );
+    }
+    (state, frames_reclaimed && heap_reclaimed)
 }

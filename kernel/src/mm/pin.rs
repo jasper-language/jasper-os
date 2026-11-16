@@ -21,6 +21,19 @@ struct Pin {
 
 static PINS: IrqSpinLock<Vec<Pin>> = IrqSpinLock::ranked(crate::lockorder::MEMORY_PINS, Vec::new());
 
+/// Reserve the diagnostic pin registry before user tasks start.
+///
+/// The registry intentionally retains its storage after the last unpin. A
+/// capacity-stage reservation prevents the first user buffer from growing the
+/// kernel heap and keeps the first-program resource baseline exact.
+pub fn init_runtime(tasks: usize) -> bool {
+    if tasks == 0 {
+        return false;
+    }
+    let mut pins = PINS.lock();
+    pins.is_empty() && pins.try_reserve_exact(tasks).is_ok()
+}
+
 /// 累计：所有者放弃时帧仍被固定（因而延后归还）的次数。验收用它证明「固定期间确实发生了取消映射」，
 /// 也就是并发竞态真的出现过、并且被固定挡住了。
 /// Cumulative count of frames released by their owner while still pinned.

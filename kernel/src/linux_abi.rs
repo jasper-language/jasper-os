@@ -4901,7 +4901,7 @@ fn linux_sched_setattr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             Err(CompatErrno::Invalid)
         };
     }
-    let (previous_reset_on_fork, previous_util_min, previous_util_max) =
+    let (_, previous_util_min, previous_util_max) =
         proc::linux_sched_attributes(target).ok_or(CompatErrno::NoProcess)?;
     let util_min = if size >= SCHED_ATTR_BYTES_V2
         && attr_flags & SCHED_FLAG_UTIL_CLAMP_MIN != 0
@@ -4922,8 +4922,7 @@ fn linux_sched_setattr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if util_min > 1024 || util_max > 1024 || util_min > util_max {
         return Err(CompatErrno::Invalid);
     }
-    let reset_on_fork = attr_flags & SCHED_FLAG_RESET_ON_FORK != 0
-        || (attr_flags & SCHED_FLAG_RESET_ON_FORK == 0 && previous_reset_on_fork);
+    let reset_on_fork = attr_flags & SCHED_FLAG_RESET_ON_FORK != 0;
     if proc::linux_set_sched_attributes(target, reset_on_fork, util_min, util_max)
         && (keep_params || proc::linux_set_nice(target, nice))
     {
@@ -8065,7 +8064,7 @@ fn linux_clock_getres(args: [u64; 6]) -> Result<u64, CompatErrno> {
         CLOCK_MONOTONIC => crate::hrtime::tick_ns().max(1),
         CLOCK_REALTIME => {
             crate::arch::wall_clock_ns().ok_or(CompatErrno::NoSys)?;
-            crate::hrtime::tick_ns().max(1)
+            1_000_000_000
         }
         _ => return Err(CompatErrno::Invalid),
     };
