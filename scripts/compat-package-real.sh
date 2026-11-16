@@ -23,7 +23,7 @@ mkdir -p "$OUT"
 if [ -z "$ARCHIVE" ]; then
     ARCHIVE="$WORK/dxvk-${DXVK_VERSION}.tar.gz"
     curl --fail --location --retry 3 \
-        --output "$ARCHIVE" "$DXVK_URL" >"$OUT/download.log" 2>&1
+        --output "$ARCHIVE" "$DXVK_URL" 2>&1 | tee "$OUT/download.log"
 fi
 actual_sha256=$(sha256sum "$ARCHIVE" | awk '{ print $1 }')
 [ "$actual_sha256" = "$DXVK_SHA256" ] || {
@@ -31,10 +31,16 @@ actual_sha256=$(sha256sum "$ARCHIVE" | awk '{ print $1 }')
     exit 1
 }
 
-env -u CARGO_TARGET_DIR "$ROOT/scripts/guarded-cargo.sh" \
-    build --locked --release --target-dir "$TARGET" \
-    -p jasper-compat-packages --bin jasper-compat-pkg \
-    >"$OUT/build.log" 2>&1
+if [ "${COMPAT_PACKAGE_REAL_DIRECT_CARGO:-0}" = 1 ]; then
+    CARGO_BUILD_JOBS=2 cargo build --locked --release --target-dir "$TARGET" \
+        -p jasper-compat-packages --bin jasper-compat-pkg \
+        2>&1 | tee "$OUT/build.log"
+else
+    env -u CARGO_TARGET_DIR "$ROOT/scripts/guarded-cargo.sh" \
+        build --locked --release --target-dir "$TARGET" \
+        -p jasper-compat-packages --bin jasper-compat-pkg \
+        2>&1 | tee "$OUT/build.log"
+fi
 CLI="$TARGET/release/jasper-compat-pkg"
 
 install_root="$WORK/root"
