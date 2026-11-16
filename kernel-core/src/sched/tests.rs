@@ -631,6 +631,25 @@ fn core_queue_refusals_leave_no_change() {
 }
 
 #[test]
+fn runtime_policy_replacement_requires_an_idle_queue() {
+    let old = QosParams::DEFAULT;
+    let new = QosParams {
+        quantum: [7; QOS_CLASSES],
+        ..old
+    };
+    let mut q = queue::CoreQueue::new(TimeSharePolicy::new(old), 0);
+    let mut e = SchedEntity::new(Qos::UserInitiated, TimeShareState::INITIAL);
+    q.enqueue(&mut e, Enqueue::Spawn).unwrap();
+
+    assert!(!q.replace_policy_if_idle(TimeSharePolicy::new(new)));
+    assert_eq!(*q.policy().params(), old);
+
+    q.dequeue(&mut e, Dequeue::Exit).unwrap();
+    assert!(q.replace_policy_if_idle(TimeSharePolicy::new(new)));
+    assert_eq!(*q.policy().params(), new);
+}
+
+#[test]
 fn separately_locked_core_queues_migrate_exactly_once() {
     use queue::QueueError::*;
     let policy = TimeSharePolicy::new(QosParams::DEFAULT);

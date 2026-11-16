@@ -40,6 +40,7 @@ pub mod turnstile;
 pub use turnstile::{KMutex, KMutexGuard};
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use spin::Once;
 
 use crate::sync::{IrqSpinLock, IrqU64};
 use crate::arch::{self as cpu, switch_context};
@@ -48,7 +49,9 @@ use crate::task::TaskId;
 use kernel_core::smp::CpuSet;
 use kernel_core::sync_origin::Origin;
 
-use policy::{kernel_policy, CpuLimitStats, KernelPolicy, LatencyHistogram, Qos, WatchdogLog};
+use policy::{
+    kernel_policy, CpuLimitStats, KernelPolicy, LatencyHistogram, Qos, QosParams, WatchdogLog,
+};
 pub use scheduler::{AffinityError, CpuStats, NohzStats, ScanStats, SetCallsError, TimerIdentityAudit, WaitDeadline};
 pub use scheduler::GrowError;
 use scheduler::{BlockError, Cause, CpuGroupId, GroupError, IdleStep, QosError, Scheduler, SpawnError, SwitchObserver, WATCHDOG_LOG};
@@ -59,6 +62,7 @@ use scheduler::{BlockError, Cause, CpuGroupId, GroupError, IdleStep, QosError, S
 /// 切换路径先在锁内算出切换计划、放锁，再执行栈切换。
 static KERNEL_SCHED: IrqSpinLock<Scheduler> =
     IrqSpinLock::ranked(crate::lockorder::SCHED, Scheduler::new(kernel_policy()));
+static QOS_PLAN: Once<QosParams> = Once::new();
 
 // Author: chatgpt. Every scheduler access uses this guard, including switch
 // preparation. Drop publishes after mutation, while the global IRQ lock remains
@@ -486,6 +490,39 @@ pub fn clear_observer() {
 /// 前 [`stack::STATIC_STACKS`] 个槽位在内核堆初始化之前即可用。
 pub fn grow(slots: usize) -> Result<usize, GrowError> {
     with_mut(|s| s.grow(slots))
+}
+
+/// Reconfigure all per-CPU policies from admitted runtime scheduling facts.
+pub fn init_runtime(tasks: usize) -> bool {
+    let timer_hz = crate::config::ACTIVE.clock.timer_hz;
+    let Some(plan) = kernel_core::config::plan_qos_params(
+        crate::config::ACTIVE.sched.qos,
+        timer_hz,
+        tasks,
+    ) else {
+        crate::kprintln!(
+            "[JSR-SCHED] reject=qos_capacity timer_hz={timer_hz} tasks={tasks}"
+        );
+        return false;
+    };
+    if !with_mut(|scheduler| scheduler.reconfigure_qos(plan)) {
+        crate::kprintln!("[JSR-SCHED] reject=qos_not_quiescent");
+        return false;
+    }
+    crate::kprintln!(
+        "[JSR-SCHED] qos quantum={:?} decay={} owed_cap={} timer_hz={} tasks={} dynamic=true",
+        plan.quantum,
+        plan.decay_period,
+        plan.owed_cap,
+        timer_hz,
+        tasks
+    );
+    QOS_PLAN.call_once(|| plan);
+    true
+}
+
+pub fn qos_plan() -> Option<QosParams> {
+    QOS_PLAN.get().copied()
 }
 
 /// 任务表的槽位总数（启动期扩容之前为内联槽位数）。

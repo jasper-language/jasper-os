@@ -1283,6 +1283,36 @@ impl Scheduler {
         result
     }
 
+    /// Replace every per-CPU policy instance from runtime-admitted QoS facts.
+    ///
+    /// This is a boot-time transaction: only the boot thread may be active,
+    /// only the boot CPU may be online, and no runnable task may be queued.
+    pub fn reconfigure_qos(&mut self, qos: kernel_core::sched::QosParams) -> bool {
+        let quiescent = self.online.len() == 1
+            && leaf_current(0) == BOOT_SLOT
+            && (0..MAX_CPUS).all(|cpu| {
+                with_leaf(cpu, |leaf| {
+                    leaf.queue.queued() == 0
+                        && leaf.current == if cpu == 0 {
+                            BOOT_SLOT
+                        } else {
+                            crate::smp::percpu::IDLE_SLOT
+                        }
+                })
+            });
+        if !quiescent {
+            return false;
+        }
+        // The scheduler lock keeps every leaf quiescent between the complete
+        // preflight above and this commit pass, so no leaf may fail midway.
+        (0..MAX_CPUS).all(|cpu| {
+            with_leaf(cpu, |leaf| {
+                leaf.queue
+                    .replace_policy_if_idle(super::policy::kernel_policy_with_qos(qos))
+            })
+        })
+    }
+
     /// 启动期扩容：把任务表（及组表、调度暂存）扩到 `slots` 个槽位，并为新增槽位分配内核栈。
     /// 返回有栈可用的槽位总数。
     ///

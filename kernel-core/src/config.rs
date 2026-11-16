@@ -20,7 +20,7 @@
 //! `for_each_field` 里列出。已有字段的含义不改；新档位只加常量，不改旧档的值。
 
 use crate::pressure::PressureParams;
-use crate::sched::{QosParams, QOS_CLASSES};
+use crate::sched::{QosParams, QOS_CLASSES, TICK_UNITS};
 
 /// 页大小（字节）：栈、堆增长步长都必须是它的整数倍。
 const PAGE: u64 = 4096;
@@ -158,6 +158,54 @@ pub fn plan_ipc_quotas(
         max_queue_bytes: queue,
         max_process_bytes: process,
         max_total_bytes: total,
+    })
+}
+
+/// Derive scheduler QoS parameters from the active policy, timer granularity,
+/// and admitted task capacity.
+///
+/// The Profile provides relative policy preferences. A larger task set gets a
+/// longer usage-decay horizon, and low-frequency timers cannot retain a full
+/// round of policy quanta without violating the bounded response window.
+pub fn plan_qos_params(
+    policy: QosParams,
+    timer_hz: u32,
+    tasks: usize,
+) -> Option<QosParams> {
+    if timer_hz == 0 || tasks == 0 || policy.decay_period == 0 {
+        return None;
+    }
+    let mut quantum = policy.quantum;
+    let sum = quantum
+        .iter()
+        .try_fold(0u32, |total, value| total.checked_add(*value))?;
+    let target_round = (timer_hz / 50).max(1);
+    if sum > target_round {
+        for value in &mut quantum {
+            *value = ((*value as u64)
+                .checked_mul(target_round as u64)?
+                .div_ceil(sum as u64))
+            .max(1)
+            .try_into()
+            .ok()?;
+        }
+    }
+    let quantum_sum = quantum
+        .iter()
+        .try_fold(0u32, |total, value| total.checked_add(*value))?;
+    let task_waves = u32::try_from(tasks.div_ceil(64)).ok()?.max(1);
+    let decay_period = policy
+        .decay_period
+        .max(quantum_sum)
+        .checked_mul(task_waves)?;
+    let owed_cap = policy
+        .owed_cap
+        .max(quantum.iter().copied().max().unwrap_or(1).checked_mul(TICK_UNITS)?);
+    Some(QosParams {
+        quantum,
+        decay_period,
+        owed_cap,
+        ..policy
     })
 }
 
@@ -791,5 +839,19 @@ mod tests {
         assert!(large.max_endpoints_per_process > 0);
         assert_eq!(plan_ipc_quotas(0, 64, 1024, 96, policy), None);
         assert_eq!(plan_ipc_quotas(1024, 64, 1024, 96, policy), None);
+    }
+
+    #[test]
+    fn runtime_qos_plan_follows_timer_and_task_capacity() {
+        let policy = KernelConfig::STANDARD.sched.qos;
+        let small = plan_qos_params(policy, 1_000, 64).unwrap();
+        let large = plan_qos_params(policy, 1_000, 512).unwrap();
+        let low_hz = plan_qos_params(policy, 50, 64).unwrap();
+        assert_eq!(small.quantum, policy.quantum);
+        assert!(large.decay_period > small.decay_period);
+        assert!(large.owed_cap >= small.owed_cap);
+        assert!(low_hz.quantum.iter().sum::<u32>() <= small.quantum.iter().sum::<u32>());
+        assert_eq!(plan_qos_params(policy, 0, 64), None);
+        assert_eq!(plan_qos_params(policy, 1_000, 0), None);
     }
 }

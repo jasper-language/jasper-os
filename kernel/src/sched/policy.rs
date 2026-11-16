@@ -32,13 +32,25 @@ pub type KernelPolicy = kernel_core::sched::RoundRobin;
 /// 构造内核策略（`const`，用于静态初始化）。参数取生效配置档。
 #[cfg(not(feature = "sched-rr"))]
 pub const fn kernel_policy() -> KernelPolicy {
-    kernel_core::sched::TimeSharePolicy::new(crate::config::ACTIVE.sched.qos)
+    kernel_policy_with_qos(crate::config::ACTIVE.sched.qos)
 }
 
 /// 构造内核策略（`const`，用于静态初始化）。时间片取配置档里默认档位（用户发起）的时间片。
 #[cfg(feature = "sched-rr")]
 pub const fn kernel_policy() -> KernelPolicy {
-    kernel_core::sched::RoundRobin::new(crate::config::ACTIVE.sched.qos.quantum[Qos::UserInitiated.index()])
+    kernel_policy_with_qos(crate::config::ACTIVE.sched.qos)
+}
+
+/// Construct the selected policy from runtime-admitted QoS parameters.
+#[cfg(not(feature = "sched-rr"))]
+pub const fn kernel_policy_with_qos(qos: QosParams) -> KernelPolicy {
+    kernel_core::sched::TimeSharePolicy::new(qos)
+}
+
+/// Construct the selected policy from runtime-admitted QoS parameters.
+#[cfg(feature = "sched-rr")]
+pub const fn kernel_policy_with_qos(qos: QosParams) -> KernelPolicy {
+    kernel_core::sched::RoundRobin::new(qos.quantum[Qos::UserInitiated.index()])
 }
 
 /// 策略私有的每实体状态（任务表据此定长保存，不需要堆）。

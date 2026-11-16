@@ -57,6 +57,16 @@ impl<P: SchedPolicy> CoreQueue<P> {
         &self.policy
     }
 
+    /// Replace policy state only while no entity is queued. This is reserved
+    /// for the quiescent boot-time capacity reconfiguration.
+    pub fn replace_policy_if_idle(&mut self, policy: P) -> bool {
+        if self.queued != 0 {
+            return false;
+        }
+        self.policy = policy;
+        true
+    }
+
     /// 处理器编号。
     pub const fn id(&self) -> usize {
         self.id as usize

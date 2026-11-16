@@ -157,7 +157,10 @@ impl ClassMask {
     }
 }
 
-/// 策略参数（构建期选定；以后由内核配置档统一提供）。
+/// Scheduler policy parameters. Profiles provide only the relative policy seed;
+/// the kernel derives effective quanta, decay and owed capacity from admitted
+/// runtime timer and task capacity before any workload is scheduled.
+/// 调度策略参数；Profile 只提供相对策略种子，实际容量在启动期推导。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QosParams {
     /// 各档的时间片（tick）。必须 ≥ 1。
