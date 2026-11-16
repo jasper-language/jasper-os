@@ -130,6 +130,17 @@ pub struct CoordinatedPreparedUpdate {
     pub update: PreparedUpdate,
 }
 
+/// Immutable audit copy of a terminal update transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArchivedTransaction {
+    /// Archive root.
+    pub root: PathBuf,
+    /// Manifest digest bound to the transaction.
+    pub manifest_sha256: [u8; 32],
+    /// Terminal transaction record.
+    pub record: TransactionRecord,
+}
+
 /// Coordinator failure.
 #[derive(Debug)]
 pub enum CoordinatorError {
@@ -548,6 +559,10 @@ pub enum StagingError {
         /// 清理失败。Cleanup failure.
         cleanup: io::Error,
     },
+    /// The transaction is not in a terminal success/rollback state.
+    NotTerminal(UpdateStage),
+    /// The audit archive does not match the staging transaction.
+    ArchiveMismatch,
     /// 磁盘可用空间不足。Available disk space is insufficient.
     InsufficientSpace {
         /// 当前可用字节。Available bytes.
@@ -604,6 +619,10 @@ impl fmt::Display for StagingError {
             Self::Cleanup { cause, cleanup } => {
                 write!(formatter, "{cause}; staging cleanup failed: {cleanup}")
             }
+            Self::NotTerminal(stage) => {
+                write!(formatter, "transaction is not terminal: {stage:?}")
+            }
+            Self::ArchiveMismatch => write!(formatter, "archive does not match staging journal"),
             Self::InsufficientSpace {
                 available,
                 required,
@@ -842,6 +861,81 @@ pub fn persist_transaction_record(
         }
     }
     sync_directory(staging_root)
+}
+
+/// Archive the exact manifest and dual journal of a terminal update.
+pub fn archive_completed_transaction(
+    staging_root: &Path,
+    archive_root: &Path,
+) -> Result<ArchivedTransaction, StagingError> {
+    let record = load_transaction_record(staging_root)?;
+    if !matches!(
+        record.stage(),
+        UpdateStage::Complete | UpdateStage::RolledBack
+    ) {
+        return Err(StagingError::NotTerminal(record.stage()));
+    }
+    match fs::symlink_metadata(archive_root) {
+        Ok(_) => return Err(StagingError::AlreadyExists(archive_root.to_path_buf())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(io_error(
+                "inspect transaction archive",
+                archive_root,
+                source,
+            ))
+        }
+    }
+    fs::create_dir(archive_root)
+        .map_err(|source| io_error("create transaction archive", archive_root, source))?;
+    let result = (|| {
+        let manifest = read_file(&staging_root.join(MANIFEST_FILE))?;
+        if Sha256::digest(&manifest).as_slice() != record.manifest_sha256() {
+            return Err(StagingError::ArchiveMismatch);
+        }
+        write_new(&archive_root.join(MANIFEST_FILE), &manifest)?;
+        for name in TRANSACTION_COPIES {
+            let bytes = read_file(&staging_root.join(name))?;
+            write_new(&archive_root.join(name), &bytes)?;
+        }
+        sync_directory(archive_root)
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_dir_all(archive_root);
+        return Err(error);
+    }
+    Ok(ArchivedTransaction {
+        root: archive_root.to_path_buf(),
+        manifest_sha256: record.manifest_sha256(),
+        record,
+    })
+}
+
+/// Remove staging only after the terminal journal is archived byte-for-byte.
+pub fn cleanup_staged_transaction(
+    staging_root: &Path,
+    archive: &ArchivedTransaction,
+) -> Result<(), StagingError> {
+    let staged = load_transaction_record(staging_root)?;
+    let archived = load_transaction_record(&archive.root)?;
+    if staged != archive.record
+        || archived != archive.record
+        || staged.manifest_sha256() != archive.manifest_sha256
+    {
+        return Err(StagingError::ArchiveMismatch);
+    }
+    let manifest = read_file(&archive.root.join(MANIFEST_FILE))?;
+    if Sha256::digest(&manifest).as_slice() != archive.manifest_sha256 {
+        return Err(StagingError::ArchiveMismatch);
+    }
+    let parent = staging_root
+        .parent()
+        .ok_or(StagingError::InconsistentManifest(
+            "staging root has no parent",
+        ))?;
+    fs::remove_dir_all(staging_root)
+        .map_err(|source| io_error("remove staged transaction", staging_root, source))?;
+    sync_directory(parent)
 }
 
 /// 按实际文件系统块大小检查暂存预算；`metadata_headroom` 由协调器显式提供。
@@ -1635,6 +1729,13 @@ mod tests {
             load_transaction_record(&staging_root).unwrap().stage(),
             UpdateStage::Complete
         );
+        let archive_root = temp.path().join("audit-archive");
+        let archive = archive_completed_transaction(&staging_root, &archive_root).unwrap();
+        assert_eq!(archive.record.stage(), UpdateStage::Complete);
+        cleanup_staged_transaction(&staging_root, &archive).unwrap();
+        assert!(!staging_root.exists());
+        assert!(archive_root.join(MANIFEST_FILE).is_file());
+        assert!(archive_root.join(TRANSACTION_COPIES[0]).is_file());
 
         let rollback_manifest_bytes = b"signed-rollback-manifest";
         let mut rollback_manifest = manifest(
@@ -1686,6 +1787,13 @@ mod tests {
             load_transaction_record(&rollback_root).unwrap().stage(),
             UpdateStage::RolledBack
         );
+        let rollback_archive = archive_completed_transaction(
+            &rollback_root,
+            &temp.path().join("rollback-audit-archive"),
+        )
+        .unwrap();
+        cleanup_staged_transaction(&rollback_root, &rollback_archive).unwrap();
+        assert!(!rollback_root.exists());
     }
 
     #[test]
