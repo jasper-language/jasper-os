@@ -22,6 +22,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
+use jasper_lifecycle_model::boot::{BootControlError, Candidate, ControlBlock, Slot};
 use jasper_lifecycle_model::manifest::{authorize_install, LocalInstallGrant, ManifestError};
 use jasper_lifecycle_model::manifest_cbor::{
     ArtifactKind, VerifiedArtifact, VerifiedCborManifest, MAX_MANIFEST_CBOR_BYTES,
@@ -29,6 +30,8 @@ use jasper_lifecycle_model::manifest_cbor::{
 use jasper_lifecycle_model::transaction::{recover, TransactionError, TransactionRecord};
 use jasper_lifecycle_model::update::{TransitionError, UpdateEvent, UpdateMachine, UpdateStage};
 use sha2::{Digest, Sha256};
+
+use crate::control::{ControlStoreError, FileControlStore};
 
 const MANIFEST_FILE: &str = "manifest.cbor";
 const ARTIFACT_DIR: &str = "artifacts";
@@ -133,6 +136,10 @@ pub enum CoordinatorError {
     Staging(StagingError),
     /// Prepared transaction recovery failed or does not match the machine.
     Transaction(TransactionError),
+    /// The candidate cannot be admitted into boot control.
+    Control(BootControlError),
+    /// The dual-copy boot-control commit failed.
+    ControlStore(ControlStoreError),
     /// Recovered transaction and coordinator phase disagree.
     InconsistentStage {
         /// Required coordinator phase.
@@ -148,6 +155,8 @@ impl fmt::Display for CoordinatorError {
             Self::Transition(error) => write!(formatter, "update transition failed: {error:?}"),
             Self::Staging(error) => write!(formatter, "{error}"),
             Self::Transaction(error) => write!(formatter, "prepared transaction failed: {error:?}"),
+            Self::Control(error) => write!(formatter, "boot-control admission failed: {error:?}"),
+            Self::ControlStore(error) => write!(formatter, "boot-control commit failed: {error}"),
             Self::InconsistentStage { expected, actual } => write!(
                 formatter,
                 "coordinator stage mismatch: expected {expected:?}, got {actual:?}"
@@ -251,6 +260,47 @@ impl UpdateCoordinator {
         })?;
         self.machine = next;
         Ok(())
+    }
+
+    /// Commit a staged candidate into the inactive slot and dual-copy control store.
+    ///
+    /// The coordinator publishes `Committed` only after control flush and readback
+    /// succeed. This does not enter a trial boot or claim the candidate is healthy.
+    pub fn commit_prepared(
+        &mut self,
+        prepared: &PreparedUpdate,
+        control: &mut FileControlStore,
+        slot: Slot,
+        transaction_id: u64,
+    ) -> Result<ControlBlock, CoordinatorError> {
+        if self.stage() != UpdateStage::Prepared {
+            return Err(CoordinatorError::InconsistentStage {
+                expected: UpdateStage::Prepared,
+                actual: self.stage(),
+            });
+        }
+        let mut next = control.current();
+        next.stage_candidate(
+            slot,
+            Candidate {
+                release: prepared.manifest.manifest.release_sequence,
+                digest: prepared.manifest.manifest.manifest_sha256,
+                transaction_id,
+                security_epoch: prepared.manifest.manifest.security_epoch,
+                data_schema_min: prepared.manifest.data_schema.0,
+                data_schema_max: prepared.manifest.data_schema.1,
+            },
+        )
+        .map_err(CoordinatorError::Control)?;
+        let mut machine = self.machine;
+        machine
+            .apply(UpdateEvent::Commit)
+            .map_err(CoordinatorError::Transition)?;
+        control
+            .commit_next(next)
+            .map_err(CoordinatorError::ControlStore)?;
+        self.machine = machine;
+        Ok(next)
     }
 }
 
@@ -864,6 +914,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use jasper_lifecycle_model::boot::SlotState;
     use jasper_lifecycle_model::manifest::VerifiedManifest;
     use jasper_lifecycle_model::manifest_cbor::Channel;
     use sha2::{Digest, Sha256};
@@ -1192,6 +1243,57 @@ mod tests {
         recovered.cancel_prepared(&staging_root).unwrap();
         assert_eq!(recovered.stage(), UpdateStage::Aborted);
         assert!(!staging_root.exists());
+    }
+
+    #[test]
+    fn coordinator_commits_candidate_only_after_control_readback() {
+        let temp = TestDir::new("coordinator-commit");
+        let manifest_bytes = b"signed-commit-manifest";
+        let bytes = b"kernel-image";
+        let source_path = temp.path().join("kernel.source");
+        fs::write(&source_path, bytes).unwrap();
+        let manifest = manifest(
+            manifest_bytes,
+            vec![artifact(ArtifactKind::Kernel, "kernel", bytes)],
+        );
+        let grant = LocalInstallGrant {
+            locally_authenticated: true,
+            purpose: 1,
+            manifest_sha256: manifest.manifest.manifest_sha256,
+            profile: manifest.manifest.target_profile,
+            expires_at: 10,
+        };
+        let staging_root = temp.path().join("commit-staging");
+        let mut coordinator = UpdateCoordinator::idle();
+        let prepared = coordinator
+            .prepare(
+                manifest,
+                manifest_bytes,
+                grant,
+                9,
+                &[],
+                &[ArtifactSource {
+                    name: "kernel",
+                    path: &source_path,
+                }],
+                &staging_root,
+                4096,
+            )
+            .unwrap();
+        let control_root = temp.path().join("control");
+        let initial = ControlBlock::initialize(Slot::A, 1, [1; 32], 1, 1, 1, 2).unwrap();
+        let mut control = FileControlStore::initialize(&control_root, initial).unwrap();
+        let committed = coordinator
+            .commit_prepared(&prepared, &mut control, Slot::B, 2)
+            .unwrap();
+        assert_eq!(coordinator.stage(), UpdateStage::Committed);
+        assert_eq!(committed.active_slot(), Slot::A);
+        assert_eq!(committed.slot(Slot::B).state(), SlotState::Candidate);
+        assert_eq!(committed.transaction_id(), 2);
+        assert_eq!(
+            FileControlStore::open(&control_root).unwrap().current(),
+            committed
+        );
     }
 
     #[test]
