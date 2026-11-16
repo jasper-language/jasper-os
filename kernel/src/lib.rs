@@ -77,6 +77,7 @@ pub mod linux_abi;
 #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
 #[cfg(all(
     any(
+        feature = "compat-syscall-verify",
         feature = "compat-dynamic-libc-verify",
         feature = "lifecycle-root-exec-verify",
         feature = "workload-io-verify"

@@ -66,6 +66,10 @@ gpu-dynamic = []
 # Native Profile resolution, module assembly and module lifecycle use heap-backed
 # metadata in the kernel. User ABI crates keep the allocation-free default surface.
 runtime-registries = []
+# Compatibility mechanism adapters retain a bounded fixed-capacity provenance
+# table for host-testable state machines. The production kernel uses the
+# heap-backed table admitted through runtime-registries.
+compat-native-bounded = []
 # Device interrupt routing and throttling tables follow the complete platform
 # inventory instead of a fixed line-count envelope.
 irq-dynamic = []

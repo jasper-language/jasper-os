@@ -3014,13 +3014,14 @@ check_compatelfbackend() {
 }
 
 check_compatsyscall() {
-  if has '^\[JSR-LINUX-ABI\] exec=true flavor=true write=true getpid=true gettid=true denied=true exit=true cpl3=true syscalls=[1-9][0-9]* frames_before=[0-9]+ resources=true failed=0' \
+  if has '^\[JSR-LINUX-ABI\] exec=true flavor=true write=true getpid=true gettid=true denied=true exit=true cpl3=true native=true epoll=true futex=true mmap=true io_uring=true syscalls=[1-9][0-9]* frames_before=[0-9]+ resources=true failed=0' \
      && has '^linux-abi: fd1 raw x86_64 ET_EXEC entered' \
      && has '^linux-abi: fd2 raw bytes accepted' \
+     && has '^linux-native: epoll=true futex=true mmap=true io_uring=true' \
      && ! has '^\[JSR-LINUX-ABI-FAIL\]'; then
-    record COMPAT-SYSCALL PASS "真实 CPL3 静态 Linux ET_EXEC 经 flavor 分发执行 fd1/fd2 任意字节 write、getpid/gettid/exit_group；未授权 getppid 返回负 errno，退出与页帧回收通过"
+    record COMPAT-SYSCALL PASS "真实 CPL3 静态 Linux ET_EXEC 经 flavor 分发执行 write/getpid/gettid，并在同一进程/共享页上完成 epoll ONESHOT、futex 阻塞唤醒、mmap/mprotect/munmap、io_uring NOP/fixed-file register；退出、未授权 getppid 拒绝与页帧回收通过"
   else
-    record COMPAT-SYSCALL FAIL "缺少真实 Linux ET_EXEC 执行、syscall、权限拒绝、退出或资源回收证据"
+    record COMPAT-SYSCALL FAIL "缺少真实 Linux ET_EXEC 的 epoll/futex/mmap/io_uring、权限拒绝、退出或资源回收证据"
   fi
 }
 

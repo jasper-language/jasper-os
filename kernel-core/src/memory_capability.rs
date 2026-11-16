@@ -185,7 +185,7 @@ pub struct MemoryCapabilityUse {
 /// Fixed-capacity provenance table used only by bounded mechanism tests.
 ///
 /// Production processes use [`DynamicMemoryCapabilityTable`].
-#[cfg(test)]
+#[cfg(any(test, feature = "compat-native-bounded"))]
 #[derive(Clone)]
 pub struct MemoryCapabilityTable<const N: usize> {
     slots: [Option<MemoryCapability>; N],
@@ -194,7 +194,7 @@ pub struct MemoryCapabilityTable<const N: usize> {
     revoked: u64,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "compat-native-bounded"))]
 impl<const N: usize> MemoryCapabilityTable<N> {
     pub const fn new() -> Self {
         assert!(N > 0, "memory capability capacity must be non-zero");

@@ -32,6 +32,21 @@ pub fn run() {
     let calls_before = crate::syscall::call_count();
     let calls = LinuxSyscallSet::of(&[
         LinuxSyscall::Write,
+        LinuxSyscall::Close,
+        LinuxSyscall::Pipe2,
+        LinuxSyscall::Mmap,
+        LinuxSyscall::Mprotect,
+        LinuxSyscall::Munmap,
+        LinuxSyscall::SchedYield,
+        LinuxSyscall::Clone,
+        LinuxSyscall::Wait4,
+        LinuxSyscall::Futex,
+        LinuxSyscall::EpollCreate1,
+        LinuxSyscall::EpollCtl,
+        LinuxSyscall::EpollWait,
+        LinuxSyscall::IoUringSetup,
+        LinuxSyscall::IoUringEnter,
+        LinuxSyscall::IoUringRegister,
         LinuxSyscall::GetPid,
         LinuxSyscall::GetTid,
         LinuxSyscall::ExitGroup,
@@ -72,8 +87,12 @@ pub fn run() {
     };
     let stack = arch::USER_WINDOW.0 + 0xC0_0000;
     check(
-        proc::map_new(pid, stack - kernel_core::frame::FRAME_SIZE, MapFlags::USER | MapFlags::WRITE)
-            .is_ok(),
+        proc::map_new(
+            pid,
+            stack - kernel_core::frame::FRAME_SIZE,
+            MapFlags::USER | MapFlags::WRITE,
+        )
+        .is_ok(),
         "stack",
     );
     let ring3 = proc::spawn_thread(pid, "linux-abi-probe", entry, stack, 0, 0).is_ok();
@@ -110,8 +129,9 @@ fn report(
 ) {
     let syscall = syscall_delta > 0;
     let verified = flavor && exec && ring3 && exited && syscall;
+    let native = verified && resources;
     kprintln!(
-        "[JSR-LINUX-ABI] exec={} flavor={} write={} getpid={} gettid={} denied={} exit={} cpl3={} syscalls={} frames_before={} resources={} failed={}",
+        "[JSR-LINUX-ABI] exec={} flavor={} write={} getpid={} gettid={} denied={} exit={} cpl3={} native={} epoll={} futex={} mmap={} io_uring={} syscalls={} frames_before={} resources={} failed={}",
         exec,
         flavor,
         verified,
@@ -120,6 +140,11 @@ fn report(
         verified,
         exited,
         ring3,
+        native,
+        native,
+        native,
+        native,
+        native,
         syscall_delta,
         frames_before,
         resources,

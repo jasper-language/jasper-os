@@ -5,5 +5,5 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
-kernel-core = { path = "../kernel-core" }
+kernel-core = { path = "../kernel-core", features = ["compat-native-bounded"] }
 linux-raw-sys = { version = "=0.12.1", default-features = false, features = ["general", "errno", "no_std"] }
