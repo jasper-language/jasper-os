@@ -24,6 +24,26 @@ wireguard-sans-io = { version = "=1.0.0", default-features = false }
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
+[[test]]
+name = "sandbox_lifecycle"
+path = "tests/sandbox_lifecycle.rs"
+required-features = ["runtime-registries"]
+
+[[test]]
+name = "workload_io_quota"
+path = "tests/workload_io_quota.rs"
+required-features = ["runtime-registries"]
+
+[[test]]
+name = "workload_io_rate"
+path = "tests/workload_io_rate.rs"
+required-features = ["runtime-registries"]
+
+[[test]]
+name = "workload_ring_quota"
+path = "tests/workload_ring_quota.rs"
+required-features = ["runtime-registries"]
+
 [features]
 # Runtime-sized networking state requires the caller's allocator. User
 # programs that only share ABI/layout types keep the default allocation-free
@@ -40,9 +60,15 @@ terminal-dynamic = []
 display-dynamic = []
 # Per-vCPU guest mapping tables are allocated from the admitted kernel heap.
 hwvirt-vcpu-dynamic = []
+# Virtio-GPU resource metadata follows the admitted per-session budget in the
+# kernel. User ABI crates retain the allocation-free protocol surface.
+gpu-dynamic = []
 # Native Profile resolution, module assembly and module lifecycle use heap-backed
 # metadata in the kernel. User ABI crates keep the allocation-free default surface.
 runtime-registries = []
+# Device interrupt routing and throttling tables follow the complete platform
+# inventory instead of a fixed line-count envelope.
+irq-dynamic = []
 # Persistent installation requires the kernel heap for bounded transactional
 # state snapshots; core profiles that do not use it remain allocation-free.
 persistent-install = []

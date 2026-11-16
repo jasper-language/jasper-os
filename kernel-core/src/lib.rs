@@ -62,6 +62,7 @@
     feature = "terminal-dynamic",
     feature = "display-dynamic",
     feature = "hwvirt-vcpu-dynamic",
+    feature = "gpu-dynamic",
     feature = "ext4-view",
     feature = "persistent-install",
     feature = "runtime-registries"

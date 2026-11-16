@@ -341,15 +341,7 @@ fn receiver_table_full() {
     kobj::run_cleanup(usize::MAX);
 }
 
-/// 字节配额用例中每个端点排队的满长消息条数：恰好填满单个端点的字节配额（且不超过消息条数上限）。
-const PER_ENDPOINT: usize = {
-    let n = ipc::MAX_QUEUE_BYTES / ipc::MAX_MSG_BYTES;
-    if n < ipc::MAX_QUEUE_MSGS { n } else { ipc::MAX_QUEUE_MSGS }
-};
-/// 字节配额用例使用的端点数：比填满每进程配额所需的多一个，多出的那个端点上的发送全部应被拒。
-const QUOTA_ENDPOINTS: usize = ipc::MAX_PROCESS_IPC_BYTES / (PER_ENDPOINT * ipc::MAX_MSG_BYTES) + 1;
-
-/// 6：每进程排队字节配额。向若干端点各发满一个端点的配额（默认档 5 个端点 × 16 条 × 64 KiB）：
+/// 6：每进程排队字节配额。向若干端点各发满一个运行时端点配额：
 /// 前「每进程配额」那么多字节成功，之后 quota_exceeded。
 fn byte_quota() {
     let (live0, _, _) = kobj::stats();
@@ -362,11 +354,21 @@ fn byte_quota() {
         check(false, "Ring 创建失败");
         return;
     };
+    let Some(plan) = ipc::runtime_plan() else {
+        check(false, "IPC 运行时配额未初始化");
+        return;
+    };
+    let Some(charge) = ipc::message_charge(ipc::MAX_MSG_BYTES) else {
+        check(false, "IPC 消息计费溢出");
+        return;
+    };
+    let per_endpoint = plan.max_queue_bytes / charge;
+    let quota_endpoints = plan.max_process_bytes / (per_endpoint.max(1) * charge) + 1;
     let total0 = ipc::queued_total();
     let (mut ok, mut over, mut other) = (0u32, 0u32, 0u32);
-    for _ in 0..QUOTA_ENDPOINTS {
+    for _ in 0..quota_endpoints {
         let Ok((hs, _)) = ipc::create_pair(s, r) else { continue };
-        for _ in 0..PER_ENDPOINT {
+        for _ in 0..per_endpoint {
             let req = ring::submit_send_for(s, rh, hs, vec![0x42u8; ipc::MAX_MSG_BYTES], vec![]);
             let res = ring::ring_of(s, rh).map(|x| ring::reap_kernel(x, 4)).unwrap_or_default();
             match (req, res.first()) {
@@ -377,8 +379,12 @@ fn byte_quota() {
         }
     }
     let charged = proc::ring_quota(s).map(|q| q.ipc_bytes as usize);
-    let quota_ok = ok as usize * ipc::MAX_MSG_BYTES == ipc::MAX_PROCESS_IPC_BYTES && over as usize == PER_ENDPOINT && other == 0
-        && charged == Some(ipc::MAX_PROCESS_IPC_BYTES);
+    let accepted_bytes = ok as usize * charge;
+    let quota_ok = accepted_bytes <= plan.max_process_bytes
+        && accepted_bytes + charge > plan.max_process_bytes
+        && over > 0
+        && other == 0
+        && charged == Some(accepted_bytes);
     check(quota_ok, "字节配额：到上限后 send 应以 quota_exceeded 失败");
     // 接收方退出：其端点关闭，队列中的消息被销毁，发送方的配额与全系统计数归还
     check(proc::exit_idle(r, 0), "接收方未能退出");

@@ -12,7 +12,7 @@ use kernel_core::virtio_fs::{
     VirtioFsBackend, FUSE_OUT_HEADER_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, OP_WRITE,
 };
 use kernel_core::virtio_gpu::{
-    GpuFrontendError, GpuPolicy, VirtioGpuBackend, CONTROL_HEADER_BYTES, RESOURCE_STORAGE_SLOTS,
+    GpuFrontendError, GpuPolicy, VirtioGpuBackend, CONTROL_HEADER_BYTES,
 };
 use kernel_core::virtio_net::{
     NetPolicy, VirtioNetBackend, VirtioNetFacts, VirtioNetHeader, FEATURE_MAC, FEATURE_MTU,
@@ -214,8 +214,7 @@ impl VirtioGuestBus {
             // Keep three quarters of currently free RAM outside this virtual GPU.
             let backing_budget = free_bytes / 4;
             let resource_budget = usize::try_from(backing_budget / frame_bytes)
-                .unwrap_or(0)
-                .min(RESOURCE_STORAGE_SLOTS);
+                .map_err(|_| GpuFrontendError::InvalidPolicy)?;
             GpuPolicy::single_display(
                 display_width,
                 display_height,
@@ -224,7 +223,13 @@ impl VirtioGuestBus {
             )
         })();
         match policy {
-            Ok(policy) => VirtioGpuBackend::new(policy),
+            Ok(policy) => match VirtioGpuBackend::new(policy) {
+                Ok(backend) => backend,
+                Err(error) => {
+                    kprintln!("[JSR-HWV4-LINUX-FAIL] gpu_policy={:?}", error);
+                    VirtioGpuBackend::disabled()
+                }
+            },
             Err(error) => {
                 kprintln!("[JSR-HWV4-LINUX-FAIL] gpu_policy={:?}", error);
                 VirtioGpuBackend::disabled()

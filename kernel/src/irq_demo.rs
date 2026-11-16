@@ -331,7 +331,7 @@ fn route(online: CpuSet, lines: usize) {
     for l in 0..lines {
         let _ = device::set_handler(l, None);
     }
-    let clean = baseline() == before && device::enabled_lines() == 0;
+    let clean = baseline() == before && device::enabled_lines().is_empty();
     check(exact, "设备中断未只送达亲和集合指定的处理器");
     check(handler_ok, "处理函数调用次数与处理计数不一致");
     check(clean, "送达用例后线未停用或资源未回到基线");
@@ -573,7 +573,7 @@ fn recovery(n: usize, lines: usize) {
     let lat = sched::latency(Qos::Interactive);
     let done = INTERACTIVE_DONE.load(Ordering::Relaxed);
     let after = total_counts(lines);
-    let quiet_lines = device::enabled_lines() == 0 && after == 0;
+    let quiet_lines = device::enabled_lines().is_empty() && after == 0;
     check(ok, "恢复任务创建失败");
     check(done == ROUNDS && lat.count() == ROUNDS, "恢复任务未完成全部睡眠");
     check(lat.max() == 0, "风暴撤销后唤醒延迟应为 0");

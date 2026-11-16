@@ -29,35 +29,66 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
+use kernel_core::config::{plan_ipc_quotas, IpcParams};
 use kernel_core::object::{HandleId, HandleRaw, ObjectRef, ObjectType, Rights, HANDLE_BYTES};
 use kernel_core::objtable::ObjId;
 use kernel_core::ring_abi::MsgDesc;
 use kernel_core::security::SecurityContext;
+use spin::Once;
 
+use crate::config;
 use crate::kobj::{self, KObject, Table};
 use crate::mm::pin::PinnedRange;
 use crate::proc::{self, ProcError};
-use crate::config;
 use crate::syscall::err;
 use crate::syscall::table::*;
 use crate::task::TaskId;
 
-/// 每进程端点数上限（取自配置档）。
-pub const MAX_ENDPOINTS_PER_PROCESS: u32 = config::ACTIVE.ipc.max_endpoints_per_process;
 /// 单条消息的消息体上限（用户态契约，不随配置档变化）。
 pub const MAX_MSG_BYTES: usize = kernel_core::config::bounds::MSG_BYTES;
 /// 单条消息可携带的句柄数上限。
 pub const MAX_MSG_HANDLES: usize = 8;
-/// 每个端点接收队列的消息数上限。
-pub const MAX_QUEUE_MSGS: usize = 64;
-/// 每个端点接收队列的总字节上限。
-pub const MAX_QUEUE_BYTES: usize = config::ACTIVE.ipc.max_queue_bytes;
-/// 每进程发出、仍在队列中的消息体总字节上限（防止单个进程耗尽内核堆）。
-pub const MAX_PROCESS_IPC_BYTES: usize = config::ACTIVE.ipc.max_process_bytes;
-/// 全系统仍在队列中的消息体总字节上限（多个进程合计也不能耗尽内核堆）。
-pub const MAX_TOTAL_IPC_BYTES: usize = config::ACTIVE.ipc.max_total_bytes;
 
-/// 全系统仍在队列中的消息体总字节数（只在对象表锁内修改）。
+static RUNTIME_PLAN: Once<IpcParams> = Once::new();
+
+/// Admit IPC endpoint and byte quotas from the runtime heap/task/object facts.
+pub fn init_runtime(tasks: usize, objects: usize) -> bool {
+    let memory_budget = crate::mm::heap::limit();
+    let Some(plan) = plan_ipc_quotas(
+        memory_budget,
+        tasks,
+        objects,
+        core::mem::size_of::<Message>(),
+        config::ACTIVE.ipc,
+    ) else {
+        crate::kprintln!(
+            "[JSR-IPC] reject=runtime_budget tasks={tasks} objects={objects} budget={memory_budget}"
+        );
+        return false;
+    };
+    crate::kprintln!(
+        "[JSR-IPC] capacity endpoints={} queue_bytes={} process_bytes={} total_bytes={} tasks={} objects={} budget={} dynamic=true",
+        plan.max_endpoints_per_process,
+        plan.max_queue_bytes,
+        plan.max_process_bytes,
+        plan.max_total_bytes,
+        tasks,
+        objects,
+        memory_budget
+    );
+    RUNTIME_PLAN.call_once(|| plan);
+    true
+}
+
+pub fn runtime_plan() -> Option<IpcParams> {
+    RUNTIME_PLAN.get().copied()
+}
+
+pub fn message_charge(body_bytes: usize) -> Option<usize> {
+    body_bytes.checked_add(core::mem::size_of::<Message>())
+}
+
+/// 全系统仍在队列中的消息体与元数据计费字节（只在对象表锁内修改）。
 static QUEUED_TOTAL: AtomicUsize = AtomicUsize::new(0);
 
 /// 端点句柄的权限：接收（READ）、发送（WRITE）、等待（WAIT）、控制（CONTROL）、进程内复制（DUPLICATE）；**v1 不带 TRANSFER**。
@@ -67,8 +98,9 @@ pub const ENDPOINT_RIGHTS: Rights = kernel_core::kobj_type::Kind::Endpoint.contr
 /// 一条消息：消息体 + 随消息移动的句柄（持有各对象的外部所有权）。
 struct Message {
     body: Vec<u8>,
+    charged_bytes: usize,
     handles: Vec<(ObjectRef, Rights)>,
-    /// 发送方进程（弱回指：消息体字节记在它的配额上，出队或销毁时归还）。
+    /// 发送方进程（弱回指：消息体与元数据计费记在它的配额上，出队或销毁时归还）。
     sender: ObjId,
     /// 发送时定格的发送方应用身份（0 = 发送时未绑定）；接收方据此判断来源，发送方无法伪造。
     sender_app: u32,
@@ -100,7 +132,9 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    fn wait_key(&self) -> u64 { self as *const Self as usize as u64 }
+    fn wait_key(&self) -> u64 {
+        self as *const Self as usize as u64
+    }
 }
 
 fn ep_mut(t: &mut Table, id: ObjId) -> Option<&mut Endpoint> {
@@ -120,14 +154,14 @@ fn is_closed(t: &mut Table, id: Option<ObjId>) -> bool {
 
 /// 归还一条消息占用的字节配额（出队交付或销毁时）。
 fn uncharge(t: &mut Table, m: &Message) {
-    let n = m.body.len();
+    let n = m.charged_bytes;
     QUEUED_TOTAL.fetch_sub(n, Ordering::Relaxed);
     if let Some(q) = proc::ring_quota_in(t, m.sender) {
         q.ipc_bytes = q.ipc_bytes.saturating_sub(n as u32);
     }
 }
 
-/// 全系统仍在队列中的消息体总字节数（诊断与验收用）。
+/// 全系统仍在队列中的消息体与元数据计费字节（诊断与验收用）。
 pub fn queued_total() -> usize {
     QUEUED_TOTAL.load(Ordering::Relaxed)
 }
@@ -148,16 +182,35 @@ fn drop_message(t: &mut Table, m: Message) {
 /// 进程间通道在 v1 由创建方建立并分别放入双方的句柄表。
 pub fn create_pair(pa: ObjId, pb: ObjId) -> Result<(HandleId, HandleId), i64> {
     kobj::with(|t| {
-        for (pid, need) in [(pa, if pa == pb { 2 } else { 1 }), (pb, if pa == pb { 2 } else { 1 })] {
+        for (pid, need) in [
+            (pa, if pa == pb { 2 } else { 1 }),
+            (pb, if pa == pb { 2 } else { 1 }),
+        ] {
             proc::syscalls_in(t, pid).map_err(proc_err)?;
             let q = proc::ring_quota_in(t, pid).ok_or(err(SYSTEM_ERROR_RIGHTS_DENIED))?;
-            if kernel_core::quota::reserve_u32(q.endpoints, need, MAX_ENDPOINTS_PER_PROCESS).is_none() {
+            let endpoint_limit = runtime_plan()
+                .ok_or(err(SYSTEM_ERROR_QUOTA_EXCEEDED))?
+                .max_endpoints_per_process;
+            if kernel_core::quota::reserve_u32(q.endpoints, need, endpoint_limit).is_none() {
                 return Err(err(SYSTEM_ERROR_QUOTA_EXCEEDED));
             }
         }
-        let new = |owner| KObject::Endpoint(Box::new(Endpoint { owner, peer: None, queue: VecDeque::new(), queued_bytes: 0, closed: false, waiters: VecDeque::new(), sleepers: Vec::new(), service_task: None }));
-        let (ha, a) = proc::grant_new_in(t, pa, new(pa), ObjectType::Channel, ENDPOINT_RIGHTS).map_err(proc_err)?;
-        let (hb, b) = match proc::grant_new_in(t, pb, new(pb), ObjectType::Channel, ENDPOINT_RIGHTS) {
+        let new = |owner| {
+            KObject::Endpoint(Box::new(Endpoint {
+                owner,
+                peer: None,
+                queue: VecDeque::new(),
+                queued_bytes: 0,
+                closed: false,
+                waiters: VecDeque::new(),
+                sleepers: Vec::new(),
+                service_task: None,
+            }))
+        };
+        let (ha, a) = proc::grant_new_in(t, pa, new(pa), ObjectType::Channel, ENDPOINT_RIGHTS)
+            .map_err(proc_err)?;
+        let (hb, b) = match proc::grant_new_in(t, pb, new(pb), ObjectType::Channel, ENDPOINT_RIGHTS)
+        {
             Ok(x) => x,
             Err(e) => {
                 // 回滚：关闭第一个端点的句柄（其唯一外部所有权）⇒ closing ⇒ 由清理过程销毁
@@ -176,7 +229,11 @@ pub fn create_pair(pa: ObjId, pb: ObjId) -> Result<(HandleId, HandleId), i64> {
                 q.endpoints += 1;
             }
         }
-        crate::kprintln!("[JSR-IPC] event=system.channel.created a={:#x} b={:#x}", a.raw(), b.raw());
+        crate::kprintln!(
+            "[JSR-IPC] event=system.channel.created a={:#x} b={:#x}",
+            a.raw(),
+            b.raw()
+        );
         Ok((ha, hb))
     })
 }
@@ -203,7 +260,11 @@ pub fn close_in(t: &mut Table, id: ObjId) {
         wake_in(t, p);
         wake_sleepers_in(t, p);
     }
-    crate::kprintln!("[JSR-IPC] event=system.channel.closing endpoint={:#x} dropped_messages={}", id.raw(), dropped);
+    crate::kprintln!(
+        "[JSR-IPC] event=system.channel.closing endpoint={:#x} dropped_messages={}",
+        id.raw(),
+        dropped
+    );
 }
 
 /// Endpoint 对象所属模块的唯一锁外销毁入口，归还创建者的端点配额。
@@ -227,7 +288,13 @@ fn proc_err(e: ProcError) -> i64 {
 
 /// send 的阶段 B（锁内，唯一转移点）：复核后一次性移动句柄并入队。阶段 A（复制消息体与句柄值）由调用者完成。
 /// 返回值即 send 的终态：成功为消息体字节数，失败为 `-(错误 ID)`，失败时句柄表与队列均无变化。
-pub(crate) fn send_in(t: &mut Table, pid: ObjId, h: HandleId, body: Vec<u8>, handle_vals: &[u64]) -> i64 {
+pub(crate) fn send_in(
+    t: &mut Table,
+    pid: ObjId,
+    h: HandleId,
+    body: Vec<u8>,
+    handle_vals: &[u64],
+) -> i64 {
     if body.len() > MAX_MSG_BYTES || handle_vals.len() > MAX_MSG_HANDLES {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     }
@@ -243,12 +310,17 @@ pub(crate) fn send_in(t: &mut Table, pid: ObjId, h: HandleId, body: Vec<u8>, han
         Err(e) => return proc_err(e),
     };
     #[cfg(feature = "rt3-verify")]
-    crate::rt3_demo::observe_ipc_service(crate::sched::current_qos(), crate::sched::current_effective_qos());
+    crate::rt3_demo::observe_ipc_service(
+        crate::sched::current_qos(),
+        crate::sched::current_effective_qos(),
+    );
     let peer = ep_mut(t, me).and_then(|e| e.peer);
     if is_closed(t, peer) {
         return err(SYSTEM_CHANNEL_ERROR_PEER_CLOSED);
     }
-    let Some(peer) = peer else { return err(SYSTEM_CHANNEL_ERROR_PEER_CLOSED) };
+    let Some(peer) = peer else {
+        return err(SYSTEM_CHANNEL_ERROR_PEER_CLOSED);
+    };
     let receiver = match t.get(peer) {
         Ok(KObject::Endpoint(endpoint)) => endpoint.owner,
         _ => return err(SYSTEM_CHANNEL_ERROR_PEER_CLOSED),
@@ -259,14 +331,31 @@ pub(crate) fn send_in(t: &mut Table, pid: ObjId, h: HandleId, body: Vec<u8>, han
     if crate::ifc::authorize_ipc(sender_security, sink_security).is_err() {
         return err(SYSTEM_ERROR_RIGHTS_DENIED);
     }
+    let Some(plan) = runtime_plan() else {
+        return err(SYSTEM_ERROR_QUOTA_EXCEEDED);
+    };
+    let Some(charged) = message_charge(body.len()) else {
+        return err(SYSTEM_ERROR_QUOTA_EXCEEDED);
+    };
     match ep_mut(t, peer) {
-        Some(p) if p.queue.len() < MAX_QUEUE_MSGS && p.queued_bytes + body.len() <= MAX_QUEUE_BYTES => {}
+        Some(p)
+            if p.queued_bytes
+                .checked_add(charged)
+                .is_some_and(|bytes| bytes <= plan.max_queue_bytes) => {}
         _ => return err(SYSTEM_CHANNEL_ERROR_QUEUE_FULL),
     }
     // 字节配额：发送方进程与全系统各有上限（超额原子失败，不入队、不动句柄）
-    let mine = proc::ring_quota_in(t, pid).map(|q| q.ipc_bytes as usize).unwrap_or(usize::MAX);
-    if kernel_core::quota::reserve_usize(mine, body.len(), MAX_PROCESS_IPC_BYTES).is_none()
-        || kernel_core::quota::reserve_usize(QUEUED_TOTAL.load(Ordering::Relaxed), body.len(), MAX_TOTAL_IPC_BYTES).is_none() {
+    let mine = proc::ring_quota_in(t, pid)
+        .map(|q| q.ipc_bytes as usize)
+        .unwrap_or(usize::MAX);
+    if kernel_core::quota::reserve_usize(mine, charged, plan.max_process_bytes).is_none()
+        || kernel_core::quota::reserve_usize(
+            QUEUED_TOTAL.load(Ordering::Relaxed),
+            charged,
+            plan.max_total_bytes,
+        )
+        .is_none()
+    {
         return err(SYSTEM_ERROR_QUOTA_EXCEEDED);
     }
     // 复核每个要移动的句柄：有效、带 TRANSFER、叶子对象、互不相同、不是本次发送所用的端点
@@ -297,9 +386,10 @@ pub(crate) fn send_in(t: &mut Table, pid: ObjId, h: HandleId, body: Vec<u8>, han
             handles.push((r, rights));
         }
     }
-    let n = body.len();
+    let n = charged;
+    let reply_bytes = body.len();
     if let Some(q) = proc::ring_quota_in(t, pid) {
-        q.ipc_bytes += n as u32;
+        q.ipc_bytes = q.ipc_bytes.checked_add(n as u32).unwrap_or(u32::MAX);
     }
     QUEUED_TOTAL.fetch_add(n, Ordering::Relaxed);
     // 身份在入队时定格：读取与入队都在本函数已持有的同一把表锁内，发送方此后退出/被回收也不改变这个值。
@@ -308,6 +398,7 @@ pub(crate) fn send_in(t: &mut Table, pid: ObjId, h: HandleId, body: Vec<u8>, han
         p.queued_bytes += n;
         p.queue.push_back(Message {
             body,
+            charged_bytes: charged,
             handles,
             sender: pid,
             sender_app,
@@ -316,7 +407,7 @@ pub(crate) fn send_in(t: &mut Table, pid: ObjId, h: HandleId, body: Vec<u8>, han
     }
     wake_in(t, peer);
     wake_sleepers_in(t, peer);
-    n as i64
+    reply_bytes as i64
 }
 
 /// SEC-1 inspection helper: context of the oldest queued message.
@@ -359,7 +450,9 @@ fn set_sleeper_in(t: &mut Table, id: ObjId, task: TaskId, on: bool) {
 fn wake_in(t: &mut Table, id: ObjId) {
     loop {
         let Some(e) = ep_mut(t, id) else { return };
-        let Some((ring, req)) = e.waiters.pop_front() else { return };
+        let Some((ring, req)) = e.waiters.pop_front() else {
+            return;
+        };
         if !crate::ring::deliver_waiter_in(t, ring, req) {
             // 仍需等待（队列已空且对端仍开着）：放回队首，停止
             if let Some(e) = ep_mut(t, id) {
@@ -392,17 +485,48 @@ pub enum Delivery {
 
 /// 建立 recv 目标（锁内）：解析端点（READ 权限）、取得它的一个内部引用、固定接收缓冲区 / 句柄数组 / 描述输出字段。
 /// 任一步失败 ⇒ 不保留任何引用与固定。
-pub(crate) fn prepare_recv_in(t: &mut Table, pid: ObjId, h: HandleId, desc_ptr: u64, d: &MsgDesc) -> Result<RecvTarget, i64> {
+pub(crate) fn prepare_recv_in(
+    t: &mut Table,
+    pid: ObjId,
+    h: HandleId,
+    desc_ptr: u64,
+    d: &MsgDesc,
+) -> Result<RecvTarget, i64> {
     if d.data_len as usize > MAX_MSG_BYTES || d.handles_cap as usize > MAX_MSG_HANDLES {
         return Err(err(SYSTEM_ERROR_INVALID_ARGUMENT));
     }
     let ep = proc::resolve_in(t, pid, h, ObjectType::Channel, Rights::READ).map_err(proc_err)?;
     let (off, len) = MsgDesc::OUTPUT_RANGE;
-    let out = proc::pin_user_in(t, pid, desc_ptr.checked_add(off as u64).ok_or(err(SYSTEM_ERROR_INVALID_ARGUMENT))?, len, true).map_err(proc_err)?;
-    let data = proc::pin_user_in(t, pid, d.data_ptr, d.data_len as usize, true).map_err(proc_err)?;
-    let handles = proc::pin_user_in(t, pid, d.handles_ptr, d.handles_cap as usize * HANDLE_BYTES, true).map_err(proc_err)?;
-    t.acquire_internal(ep).map_err(|_| err(SYSTEM_HANDLE_ERROR_INVALID))?;
-    Ok(RecvTarget { endpoint: ep, receiver: pid, data, handles, handles_cap: d.handles_cap as usize, out })
+    let out = proc::pin_user_in(
+        t,
+        pid,
+        desc_ptr
+            .checked_add(off as u64)
+            .ok_or(err(SYSTEM_ERROR_INVALID_ARGUMENT))?,
+        len,
+        true,
+    )
+    .map_err(proc_err)?;
+    let data =
+        proc::pin_user_in(t, pid, d.data_ptr, d.data_len as usize, true).map_err(proc_err)?;
+    let handles = proc::pin_user_in(
+        t,
+        pid,
+        d.handles_ptr,
+        d.handles_cap as usize * HANDLE_BYTES,
+        true,
+    )
+    .map_err(proc_err)?;
+    t.acquire_internal(ep)
+        .map_err(|_| err(SYSTEM_HANDLE_ERROR_INVALID))?;
+    Ok(RecvTarget {
+        endpoint: ep,
+        receiver: pid,
+        data,
+        handles,
+        handles_cap: d.handles_cap as usize,
+        out,
+    })
 }
 
 /// 释放 recv 目标（锁内；请求结束或提交失败时）：撤销等待登记（`waiter` 为其登记的 (Ring, 请求 ID)，
@@ -426,7 +550,9 @@ pub(crate) fn add_waiter_in(t: &mut Table, target: &RecvTarget, ring: ObjId, req
 /// Returns the live service task on the peer endpoint, if one has registered
 /// by receiving there. Ring waits use this while holding the object-table lock
 /// to install the event registration and PI edge in one scheduler transaction.
-pub(crate) fn recv_endpoint(target: &RecvTarget) -> ObjId { target.endpoint }
+pub(crate) fn recv_endpoint(target: &RecvTarget) -> ObjId {
+    target.endpoint
+}
 
 pub(crate) fn donation_owner_in(t: &mut Table, target_endpoint: ObjId) -> Option<(TaskId, u64)> {
     let endpoint = ep_mut(t, target_endpoint)?;
@@ -450,13 +576,19 @@ fn write_out(target: &RecvTarget, data_len: usize, nhandles: usize, sender: u32,
 /// 尝试交付端点队首的消息（锁内；调用者已确认请求仍未裁决）。见模块文档的「先检查、再执行」。
 pub(crate) fn try_deliver_in(t: &mut Table, target: &RecvTarget) -> Delivery {
     let ep = target.endpoint;
-    let Some(e) = ep_mut(t, ep) else { return Delivery::Done(err(SYSTEM_ASYNC_ERROR_CANCELLED)) };
+    let Some(e) = ep_mut(t, ep) else {
+        return Delivery::Done(err(SYSTEM_ASYNC_ERROR_CANCELLED));
+    };
     if e.closed {
         return Delivery::Done(err(SYSTEM_ASYNC_ERROR_CANCELLED));
     }
     let peer = e.peer;
     let Some(m) = e.queue.front() else {
-        return if is_closed(t, peer) { Delivery::Done(err(SYSTEM_CHANNEL_ERROR_PEER_CLOSED)) } else { Delivery::Empty };
+        return if is_closed(t, peer) {
+            Delivery::Done(err(SYSTEM_CHANNEL_ERROR_PEER_CLOSED))
+        } else {
+            Delivery::Empty
+        };
     };
     let (n, nh) = (m.body.len(), m.handles.len());
     // 先把身份取出来，避免与后面可变借用 `t` 冲突。
@@ -472,8 +604,12 @@ pub(crate) fn try_deliver_in(t: &mut Table, target: &RecvTarget) -> Delivery {
         return Delivery::Done(err(SYSTEM_HANDLE_ERROR_TABLE_FULL));
     }
     // —— 执行（不再有可失败的步骤）——
-    let Some(e) = ep_mut(t, ep) else { return Delivery::Empty };
-    let Some(m) = e.queue.pop_front() else { return Delivery::Empty };
+    let Some(e) = ep_mut(t, ep) else {
+        return Delivery::Empty;
+    };
+    let Some(m) = e.queue.pop_front() else {
+        return Delivery::Empty;
+    };
     e.queued_bytes -= n;
     uncharge(t, &m);
     target.data.write_at(0, &m.body);
@@ -516,7 +652,9 @@ pub fn queued(pid: ObjId, h: HandleId) -> Option<usize> {
 
 /// `system.channel.create(out_ptr)`：在当前进程建立一对端点，把两个句柄值（各 `HANDLE_BYTES` 字节）写到 `out_ptr`。返回 0。
 pub fn sys_create(out_ptr: u64) -> i64 {
-    let Some(pid) = proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
     let span = 2 * HANDLE_BYTES;
     let mut v = [0u8; 2 * HANDLE_BYTES];
     // 先确认输出位置可写：创建之后不会出现「对象建了却交不回句柄」
@@ -543,9 +681,11 @@ pub(crate) fn copy_send_args(desc_ptr: u64) -> Result<(Vec<u8>, Vec<u64>), i64> 
         return Err(err(SYSTEM_ERROR_INVALID_ARGUMENT));
     }
     let mut body = alloc::vec![0u8; d.data_len as usize];
-    crate::mm::user::copy_from_user(&mut body, d.data_ptr, MAX_MSG_BYTES).map_err(crate::ring::user_err)?;
+    crate::mm::user::copy_from_user(&mut body, d.data_ptr, MAX_MSG_BYTES)
+        .map_err(crate::ring::user_err)?;
     let mut raw = alloc::vec![0u8; d.handles_cap as usize * HANDLE_BYTES];
-    crate::mm::user::copy_from_user(&mut raw, d.handles_ptr, MAX_MSG_HANDLES * HANDLE_BYTES).map_err(crate::ring::user_err)?;
+    crate::mm::user::copy_from_user(&mut raw, d.handles_ptr, MAX_MSG_HANDLES * HANDLE_BYTES)
+        .map_err(crate::ring::user_err)?;
     let vals = raw
         .chunks_exact(HANDLE_BYTES)
         .map(|c| HandleRaw::from_le_bytes(c.try_into().expect("句柄元素宽度由 HANDLE_BYTES 保证")))
@@ -556,15 +696,20 @@ pub(crate) fn copy_send_args(desc_ptr: u64) -> Result<(Vec<u8>, Vec<u64>), i64> 
 /// 从当前进程复制一份消息描述（可信快照）。
 pub(crate) fn copy_desc(desc_ptr: u64) -> Result<MsgDesc, i64> {
     let mut b = [0u8; kernel_core::ring_abi::MSG_DESC_SIZE];
-    crate::mm::user::copy_from_user(&mut b, desc_ptr, kernel_core::ring_abi::MSG_DESC_SIZE).map_err(crate::ring::user_err)?;
+    crate::mm::user::copy_from_user(&mut b, desc_ptr, kernel_core::ring_abi::MSG_DESC_SIZE)
+        .map_err(crate::ring::user_err)?;
     Ok(MsgDesc::decode(&b))
 }
 
 /// `system.channel.send(endpoint, desc)` 的同步形式：返回 send 的终态（与经 ring 提交时的完成结果相同）。
 pub fn sys_send(h: u64, desc_ptr: u64) -> i64 {
-    let Some(pid) = proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
     match copy_send_args(desc_ptr) {
-        Ok((body, vals)) => kobj::with(|t| send_in(t, pid, crate::syscall::handle_arg(h), body, &vals)),
+        Ok((body, vals)) => {
+            kobj::with(|t| send_in(t, pid, crate::syscall::handle_arg(h), body, &vals))
+        }
         Err(e) => e,
     }
 }
@@ -578,12 +723,16 @@ pub fn sys_send(h: u64, desc_ptr: u64) -> i64 {
 /// 休眠到下一个 tick 仍然保留作为兜底：唤醒丢失（登记之后、睡下之前就被唤醒）最多让这一次多等一个 tick。
 /// 退出前撤销登记，端点里不会留下指向已离开任务的项。
 pub fn sys_recv(h: u64, desc_ptr: u64) -> i64 {
-    let Some(pid) = proc::current_process() else { return err(SYSTEM_ERROR_RIGHTS_DENIED) };
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
     let d = match copy_desc(desc_ptr) {
         Ok(d) => d,
         Err(e) => return e,
     };
-    let target = match kobj::with(|t| prepare_recv_in(t, pid, crate::syscall::handle_arg(h), desc_ptr, &d)) {
+    let target = match kobj::with(|t| {
+        prepare_recv_in(t, pid, crate::syscall::handle_arg(h), desc_ptr, &d)
+    }) {
         Ok(x) => x,
         Err(e) => return e,
     };
@@ -592,24 +741,37 @@ pub fn sys_recv(h: u64, desc_ptr: u64) -> i64 {
         let attempt = kobj::with(|t| {
             let d = try_deliver_in(t, &target);
             if matches!(d, Delivery::Done(_)) {
-                if let Some(endpoint) = ep_mut(t,target.endpoint) {endpoint.service_task=Some(me);}
-                return Ok((d,false));
+                if let Some(endpoint) = ep_mut(t, target.endpoint) {
+                    endpoint.service_task = Some(me);
+                }
+                return Ok((d, false));
             }
             set_sleeper_in(t, target.endpoint, me, true);
-            if let Some(endpoint)=ep_mut(t,target.endpoint) {endpoint.service_task=Some(me);}
-            let donation = ep_mut(t,target.endpoint).and_then(|endpoint|endpoint.peer)
-                .and_then(|peer|ep_mut(t,peer).and_then(|endpoint|endpoint.service_task))
-                .filter(|owner|crate::sched::task_is_live(*owner));
-            let key=ep_mut(t,target.endpoint).map(|endpoint|endpoint.wait_key()).unwrap_or(0);
-            if let Some(owner)=donation {
-                crate::sched::block_on_owner(owner,key).map_err(|_|err(SYSTEM_ERROR_INVALID_ARGUMENT))?;
-                Ok((d,true))
-            } else {Ok((d,false))}
+            if let Some(endpoint) = ep_mut(t, target.endpoint) {
+                endpoint.service_task = Some(me);
+            }
+            let donation = ep_mut(t, target.endpoint)
+                .and_then(|endpoint| endpoint.peer)
+                .and_then(|peer| ep_mut(t, peer).and_then(|endpoint| endpoint.service_task))
+                .filter(|owner| crate::sched::task_is_live(*owner));
+            let key = ep_mut(t, target.endpoint)
+                .map(|endpoint| endpoint.wait_key())
+                .unwrap_or(0);
+            if let Some(owner) = donation {
+                crate::sched::block_on_owner(owner, key)
+                    .map_err(|_| err(SYSTEM_ERROR_INVALID_ARGUMENT))?;
+                Ok((d, true))
+            } else {
+                Ok((d, false))
+            }
         });
-        let (d,donated)=match attempt {
-            Ok(value)=>value,
-            Err(error)=>{
-                kobj::with(|t| {set_sleeper_in(t,target.endpoint,me,false);release_target_in(t,target,None);});
+        let (d, donated) = match attempt {
+            Ok(value) => value,
+            Err(error) => {
+                kobj::with(|t| {
+                    set_sleeper_in(t, target.endpoint, me, false);
+                    release_target_in(t, target, None);
+                });
                 return error;
             }
         };
@@ -623,10 +785,12 @@ pub fn sys_recv(h: u64, desc_ptr: u64) -> i64 {
             }
             Delivery::Empty => {
                 // 进程终止打断等待：先撤销登记与目标（解除固定、释放端点引用）再返回
-                let cancelled=if donated {
+                let cancelled = if donated {
                     crate::sched::yield_with_cause(crate::sched::scheduler::Cause::BLOCK);
                     proc::current_exiting()
-                } else {proc::block_step().is_err()};
+                } else {
+                    proc::block_step().is_err()
+                };
                 if cancelled {
                     kobj::with(|t| {
                         set_sleeper_in(t, target.endpoint, me, false);

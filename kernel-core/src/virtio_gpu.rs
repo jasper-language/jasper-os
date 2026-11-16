@@ -4,23 +4,16 @@
 //! 边界：不进行像素复制、virgl/vulkan 渲染或真实 GPU 命令执行。
 //! Responsibility: host-side control-plane resource bookkeeping.
 //!
-//! [`RESOURCE_STORAGE_SLOTS`] is the no-allocation implementation envelope, not
-//! a device or session capability. Every backend instance receives a runtime
-//! [`GpuPolicy`] whose resource count and backing-byte budget are produced by
-//! the platform from its display facts and available memory.
+//! Resource metadata is allocated from the per-session [`GpuPolicy`] budget,
+//! which is produced by the platform from display facts and available memory.
+
+#[cfg(any(test, feature = "gpu-dynamic"))]
+use alloc::vec::Vec;
 
 pub const CONTROL_HEADER_BYTES: usize = 24;
 /// Protocol-defined scanout slots in `resp_display_info`.
 pub const DISPLAY_SCANOUTS: usize = 16;
 pub const DISPLAY_INFO_BYTES: usize = CONTROL_HEADER_BYTES + DISPLAY_SCANOUTS * 24;
-/// Storage envelope for the allocation-free backend state machine.
-///
-/// The active session budget is supplied by [`GpuPolicy`]; this is only the
-/// implementation's storage bound. A platform admitting more than this must
-/// use an allocating backend rather than silently treating the bound as a
-/// device capability.
-pub const RESOURCE_STORAGE_SLOTS: usize = 8;
-
 pub const CMD_GET_DISPLAY_INFO: u32 = 0x0100;
 pub const CMD_RESOURCE_CREATE_2D: u32 = 0x0101;
 pub const CMD_RESOURCE_UNREF: u32 = 0x0102;
@@ -87,9 +80,7 @@ impl GpuPolicy {
     pub fn validate(self) -> Result<(), GpuFrontendError> {
         let display_valid =
             !self.display_enabled || (self.display_width != 0 && self.display_height != 0);
-        let resources_valid = self.resource_budget != 0
-            && self.resource_budget <= RESOURCE_STORAGE_SLOTS
-            && self.backing_byte_budget != 0;
+        let resources_valid = self.resource_budget != 0 && self.backing_byte_budget != 0;
         if !display_valid || !resources_valid {
             return Err(GpuFrontendError::InvalidPolicy);
         }
@@ -140,9 +131,10 @@ struct Scanout {
     height: u32,
 }
 
+#[cfg(any(test, feature = "gpu-dynamic"))]
 pub struct VirtioGpuBackend {
     policy: GpuPolicy,
-    resources: [Option<Resource>; RESOURCE_STORAGE_SLOTS],
+    resources: Vec<Option<Resource>>,
     resident_bytes: u64,
     scanout: Option<Scanout>,
     generation: u32,
@@ -155,14 +147,18 @@ pub struct VirtioGpuBackend {
     flushes: u64,
 }
 
+#[cfg(any(test, feature = "gpu-dynamic"))]
 impl VirtioGpuBackend {
-    pub fn new(policy: GpuPolicy) -> Self {
-        if policy.validate().is_err() {
-            return Self::disabled();
-        }
-        Self {
+    pub fn new(policy: GpuPolicy) -> Result<Self, GpuFrontendError> {
+        policy.validate()?;
+        let mut resources = Vec::new();
+        resources
+            .try_reserve_exact(policy.resource_budget)
+            .map_err(|_| GpuFrontendError::Capacity)?;
+        resources.resize(policy.resource_budget, None);
+        Ok(Self {
             policy,
-            resources: [None; RESOURCE_STORAGE_SLOTS],
+            resources,
             resident_bytes: 0,
             scanout: None,
             generation: 1,
@@ -173,7 +169,7 @@ impl VirtioGpuBackend {
             scanouts: 0,
             transfers: 0,
             flushes: 0,
-        }
+        })
     }
 
     /// A fail-closed backend used when the platform has no verified display
@@ -187,7 +183,7 @@ impl VirtioGpuBackend {
                 resource_budget: 1,
                 backing_byte_budget: 1,
             },
-            resources: [None; RESOURCE_STORAGE_SLOTS],
+            resources: Vec::new(),
             resident_bytes: 0,
             scanout: None,
             generation: 1,
@@ -675,6 +671,7 @@ mod tests {
 
     fn gpu() -> VirtioGpuBackend {
         VirtioGpuBackend::new(GpuPolicy::single_display(1024, 768, 8, 16 * 1024 * 1024).unwrap())
+            .unwrap()
     }
 
     #[test]
@@ -806,10 +803,12 @@ mod tests {
     #[test]
     fn display_facts_follow_policy_instead_of_fixed_mode() {
         let mut first =
-            VirtioGpuBackend::new(GpuPolicy::single_display(800, 600, 2, 8 * 1024 * 1024).unwrap());
+            VirtioGpuBackend::new(GpuPolicy::single_display(800, 600, 2, 8 * 1024 * 1024).unwrap())
+                .unwrap();
         let mut second = VirtioGpuBackend::new(
             GpuPolicy::single_display(1920, 1080, 2, 16 * 1024 * 1024).unwrap(),
-        );
+        )
+        .unwrap();
         let mut first_response = [0u8; DISPLAY_INFO_BYTES];
         let mut second_response = [0u8; DISPLAY_INFO_BYTES];
         first
@@ -833,7 +832,8 @@ mod tests {
     fn policy_budget_not_implementation_slots_controls_capacity() {
         let mut gpu = VirtioGpuBackend::new(
             GpuPolicy::single_display(1024, 768, 1, 16 * 1024 * 1024).unwrap(),
-        );
+        )
+        .unwrap();
         let mut response = [0u8; 512];
         assert_eq!(gpu.handle_command(&create(), &mut response), Ok(24));
         assert_response(&response, RESP_OK_NODATA);
@@ -850,6 +850,31 @@ mod tests {
     }
 
     #[test]
+    fn heap_backed_resources_grow_past_previous_eight_slot_envelope() {
+        let mut gpu = VirtioGpuBackend::new(
+            GpuPolicy::single_display(1024, 768, 32, 512 * 1024 * 1024).unwrap(),
+        )
+        .unwrap();
+        let mut response = [0u8; 512];
+        for id in 1..=20u32 {
+            let mut payload = [0u8; 16];
+            put_u32(&mut payload, 0, id);
+            put_u32(&mut payload, 4, FORMAT_B8G8R8X8);
+            put_u32(&mut payload, 8, 64);
+            put_u32(&mut payload, 12, 64);
+            assert_eq!(
+                gpu.handle_command(
+                    &command(CMD_RESOURCE_CREATE_2D, id as u64, &payload),
+                    &mut response,
+                ),
+                Ok(CONTROL_HEADER_BYTES)
+            );
+            assert_response(&response, RESP_OK_NODATA);
+        }
+        assert_eq!(gpu.resource_count(), 20);
+    }
+
+    #[test]
     fn missing_display_facts_fail_closed() {
         let mut gpu = VirtioGpuBackend::disabled();
         let mut response = [0u8; 512];
@@ -863,7 +888,8 @@ mod tests {
     fn dimensions_are_bounded_by_bytes_and_backing_entries_are_not_capped() {
         let mut gpu = VirtioGpuBackend::new(
             GpuPolicy::single_display(1024, 768, 1, 512 * 1024 * 1024).unwrap(),
-        );
+        )
+        .unwrap();
         let mut response = [0u8; 512];
         let mut large = [0u8; 16];
         put_u32(&mut large, 0, 1);

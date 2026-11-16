@@ -258,6 +258,9 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
             if !workload::init_registry(cap.tasks) {
                 return None;
             }
+            if !crate::ipc::init_runtime(cap.tasks, cap.objects) {
+                return None;
+            }
             if !sandbox::init_registry(cap.tasks) {
                 return None;
             }

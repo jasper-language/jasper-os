@@ -19,10 +19,8 @@
 
 use crate::msi::MAX_SLOTS;
 use crate::smp::{CpuSet, MAX_CPUS};
-
-/// 可登记的设备中断线上限（节流集合用 32 位位图表示）。
-/// Maximum number of device interrupt lines.
-pub const MAX_LINES: usize = 32;
+#[cfg(any(test, feature = "irq-dynamic"))]
+use alloc::vec::Vec;
 
 /// 中断子系统的错误。
 /// Errors of the interrupt subsystem.
@@ -54,6 +52,22 @@ impl IrqError {
     }
 }
 
+/// Admit the complete discovered line inventory inside a metadata budget.
+///
+/// Returns `None` when backing every discovered line would exceed the budget;
+/// callers must fail closed rather than publish a partial routing topology.
+pub fn plan_runtime_lines(
+    discovered: usize,
+    metadata_budget: usize,
+    bytes_per_line: usize,
+) -> Option<usize> {
+    if bytes_per_line == 0 {
+        return None;
+    }
+    let capacity = metadata_budget / bytes_per_line;
+    (capacity >= discovered).then_some(discovered)
+}
+
 // ---------------------------------------------------------------------------
 // 每核预算
 // ---------------------------------------------------------------------------
@@ -71,7 +85,10 @@ pub struct QuotaParams {
 impl QuotaParams {
     /// 默认：四分之一的处理器时间、每 tick 至多 64 次。
     /// Default: a quarter of each tick, at most 64 interrupts per tick.
-    pub const DEFAULT: QuotaParams = QuotaParams { permille: 250, max_per_tick: 64 };
+    pub const DEFAULT: QuotaParams = QuotaParams {
+        permille: 250,
+        max_per_tick: 64,
+    };
     /// 千分比上限：至少留十分之一给任务。
     /// Upper bound of `permille`: at least a tenth of each tick stays with tasks.
     pub const MAX_PERMILLE: u32 = 900;
@@ -156,8 +173,6 @@ impl SlotSet {
 /// What a tick refill releases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Released {
-    /// 被节流的传统中断线（位图）。
-    pub lines: u32,
     /// 被节流的 MSI 向量槽位。
     pub msi: SlotSet,
 }
@@ -171,7 +186,8 @@ pub const STRETCH_DEN: u64 = 2;
 
 /// 一个处理器的设备中断预算（只由所属处理器在关中断状态下修改）。
 /// Device-interrupt quota of one processor.
-#[derive(Debug, Clone, Copy)]
+#[cfg(any(test, feature = "irq-dynamic"))]
+#[derive(Debug, Clone)]
 pub struct CoreQuota {
     params: QuotaParams,
     /// 上一个 tick 的周期计数（0 = 尚未见过 tick）。
@@ -180,8 +196,10 @@ pub struct CoreQuota {
     tick_cycles: u64,
     used_cycles: u64,
     used_count: u32,
-    /// 因预算而被节流的中断线集合。
-    throttled: u32,
+    /// 因预算而被节流的中断线集合（每 64 线一个机器字）。
+    throttled: Vec<u64>,
+    /// 最近一次 tick 交还调用者解除屏蔽的线号。
+    released_lines: Vec<usize>,
     /// 因预算而被节流的 MSI 向量槽位集合。
     msi_throttled: SlotSet,
     /// 累计节流次数（中断线）。
@@ -195,6 +213,7 @@ pub struct CoreQuota {
     cycles_total: u64,
 }
 
+#[cfg(any(test, feature = "irq-dynamic"))]
 impl CoreQuota {
     /// 新建一份预算（参数应已校验）。
     /// Create a quota with validated parameters.
@@ -205,7 +224,8 @@ impl CoreQuota {
             tick_cycles: 0,
             used_cycles: 0,
             used_count: 0,
-            throttled: 0,
+            throttled: Vec::new(),
+            released_lines: Vec::new(),
             msi_throttled: SlotSet::EMPTY,
             throttle_events: 0,
             msi_throttle_events: 0,
@@ -226,6 +246,29 @@ impl CoreQuota {
     /// Current parameters.
     pub const fn params(&self) -> QuotaParams {
         self.params
+    }
+
+    /// Allocate the throttle inventory for the platform's discovered line count.
+    ///
+    /// Called once after the heap is ready and before interrupts can use the
+    /// table. Existing state is rejected rather than partially reconfigured.
+    pub fn configure_lines(&mut self, lines: usize) -> Result<(), IrqError> {
+        if !self.throttled.is_empty() || !self.released_lines.is_empty() {
+            return Err(IrqError::NoLine);
+        }
+        let words = lines.saturating_add(63) / 64;
+        self.throttled
+            .try_reserve_exact(words)
+            .map_err(|_| IrqError::NoLine)?;
+        self.released_lines
+            .try_reserve_exact(lines)
+            .map_err(|_| IrqError::NoLine)?;
+        self.throttled.resize(words, 0);
+        Ok(())
+    }
+
+    pub fn line_capacity(&self) -> usize {
+        self.throttled.len().saturating_mul(64)
     }
 
     /// 本 tick 的中断次数上限。
@@ -253,8 +296,10 @@ impl CoreQuota {
     /// 本处理器是否还需要周期 tick：本 tick 处理过设备中断（预算窗口正在消耗）或有被节流的线
     /// （只有下一个 tick 才会解除屏蔽）。是 ⇒ 不得空闲停表，否则风暴下的补充与解除屏蔽会被推迟。
     /// Whether this CPU still needs its periodic tick for quota refill.
-    pub const fn needs_tick(&self) -> bool {
-        self.used_count != 0 || self.throttled != 0 || !self.msi_throttled.is_empty()
+    pub fn needs_tick(&self) -> bool {
+        self.used_count != 0
+            || self.throttled.iter().any(|word| *word != 0)
+            || !self.msi_throttled.is_empty()
     }
 
     /// 被判为拉长、未计入长度测量的 tick 数。
@@ -267,11 +312,13 @@ impl CoreQuota {
     /// 中断线超出上限时只记账、不节流（调用者已校验过线号）。
     /// Charge one handled interrupt of `line`.
     pub fn charge(&mut self, line: usize, cycles: u64) -> Charge {
-        if self.spend(cycles) && line < MAX_LINES {
-            if self.throttled & (1 << line) == 0 {
+        if self.spend(cycles) && line < self.line_capacity() {
+            let word = line / 64;
+            let bit = 1u64 << (line % 64);
+            if self.throttled[word] & bit == 0 {
                 self.throttle_events += 1;
             }
-            self.throttled |= 1 << line;
+            self.throttled[word] |= bit;
             Charge::Exhausted
         } else {
             Charge::Within
@@ -314,23 +361,43 @@ impl CoreQuota {
     pub fn on_tick(&mut self, now: u64) -> Released {
         if self.last_tick != 0 && now > self.last_tick {
             let delta = now - self.last_tick;
-            let stretched = self.tick_cycles != 0 && delta.saturating_mul(STRETCH_DEN) > self.tick_cycles.saturating_mul(STRETCH_NUM);
+            let stretched = self.tick_cycles != 0
+                && delta.saturating_mul(STRETCH_DEN) > self.tick_cycles.saturating_mul(STRETCH_NUM);
             if stretched {
                 self.stretched = self.stretched.saturating_add(1);
             } else {
-                self.tick_cycles = if self.tick_cycles == 0 { delta } else { (self.tick_cycles * 3 + delta) / 4 };
+                self.tick_cycles = if self.tick_cycles == 0 {
+                    delta
+                } else {
+                    (self.tick_cycles * 3 + delta) / 4
+                };
             }
         }
         self.last_tick = now;
         self.used_cycles = 0;
         self.used_count = 0;
-        Released { lines: core::mem::take(&mut self.throttled), msi: core::mem::take(&mut self.msi_throttled) }
+        self.released_lines.clear();
+        for (word_index, word) in self.throttled.iter_mut().enumerate() {
+            let mut pending = core::mem::take(word);
+            while pending != 0 {
+                let bit = pending.trailing_zeros() as usize;
+                self.released_lines.push(word_index * 64 + bit);
+                pending &= pending - 1;
+            }
+        }
+        Released {
+            msi: core::mem::take(&mut self.msi_throttled),
+        }
     }
 
     /// 当前被节流的中断线集合。
     /// Lines currently throttled on this processor.
-    pub const fn throttled(&self) -> u32 {
-        self.throttled
+    pub fn is_line_throttled(&self, line: usize) -> bool {
+        line < self.line_capacity() && self.throttled[line / 64] & (1u64 << (line % 64)) != 0
+    }
+
+    pub fn released_lines(&self) -> &[usize] {
+        &self.released_lines
     }
 
     /// 当前被节流的 MSI 槽位集合。
@@ -387,12 +454,23 @@ pub trait AffinityPolicy {
 
     /// `lines[i]` 的目标写到 `out[i]`；`base[c]` 是处理器 c 上中断以外的已有负载（与 `load` 同一单位）。
     /// Write the target processor of `lines[i]` into `out[i]`.
-    fn assign(&self, lines: &[LineLoad], online: CpuSet, base: &[u64; MAX_CPUS], out: &mut [usize]) -> Result<(), IrqError>;
+    fn assign(
+        &self,
+        lines: &[LineLoad],
+        online: CpuSet,
+        base: &[u64],
+        out: &mut [usize],
+    ) -> Result<(), IrqError>;
 }
 
 /// 每条线的候选集合 = 允许 ∩ 在线；任一为空即拒绝（空允许集合单独报告）。
-fn validate(lines: &[LineLoad], online: CpuSet, out: &[usize]) -> Result<(), IrqError> {
-    if lines.len() > MAX_LINES || out.len() < lines.len() {
+fn validate(
+    lines: &[LineLoad],
+    online: CpuSet,
+    base: &[u64],
+    out: &[usize],
+) -> Result<(), IrqError> {
+    if base.len() < MAX_CPUS || out.len() < lines.len() {
         return Err(IrqError::NoLine);
     }
     for l in lines {
@@ -422,24 +500,34 @@ pub struct Spread {
 impl Spread {
     /// 默认迟滞：该线负载的四分之一。
     /// Default hysteresis: a quarter of the line's own load.
-    pub const DEFAULT: Spread = Spread { hysteresis_permille: 250 };
+    pub const DEFAULT: Spread = Spread {
+        hysteresis_permille: 250,
+    };
 }
 
+#[cfg(any(test, feature = "irq-dynamic"))]
 impl AffinityPolicy for Spread {
     fn name(&self) -> &'static str {
         "spread"
     }
 
-    fn assign(&self, lines: &[LineLoad], online: CpuSet, base: &[u64; MAX_CPUS], out: &mut [usize]) -> Result<(), IrqError> {
-        validate(lines, online, out)?;
+    fn assign(
+        &self,
+        lines: &[LineLoad],
+        online: CpuSet,
+        base: &[u64],
+        out: &mut [usize],
+    ) -> Result<(), IrqError> {
+        validate(lines, online, base, out)?;
         // 按负载从大到小（同负载按线号）排出处理顺序
-        let mut order = [0usize; MAX_LINES];
-        for (i, o) in order.iter_mut().enumerate().take(lines.len()) {
-            *o = i;
-        }
-        let order = &mut order[..lines.len()];
+        let mut order = Vec::new();
+        order
+            .try_reserve_exact(lines.len())
+            .map_err(|_| IrqError::NoLine)?;
+        order.extend(0..lines.len());
         order.sort_unstable_by(|&a, &b| lines[b].load.cmp(&lines[a].load).then(a.cmp(&b)));
-        let mut proj = *base;
+        let mut proj = [0u64; MAX_CPUS];
+        proj.copy_from_slice(&base[..MAX_CPUS]);
         for &i in order.iter() {
             let l = &lines[i];
             let cands = candidates(l, online);
@@ -476,11 +564,21 @@ impl AffinityPolicy for Keep {
         "keep"
     }
 
-    fn assign(&self, lines: &[LineLoad], online: CpuSet, _base: &[u64; MAX_CPUS], out: &mut [usize]) -> Result<(), IrqError> {
-        validate(lines, online, out)?;
+    fn assign(
+        &self,
+        lines: &[LineLoad],
+        online: CpuSet,
+        base: &[u64],
+        out: &mut [usize],
+    ) -> Result<(), IrqError> {
+        validate(lines, online, base, out)?;
         for (i, l) in lines.iter().enumerate() {
             let cands = candidates(l, online);
-            out[i] = l.current.filter(|&c| cands.contains(c)).or_else(|| cands.iter().next()).unwrap_or(0);
+            out[i] = l
+                .current
+                .filter(|&c| cands.contains(c))
+                .or_else(|| cands.iter().next())
+                .unwrap_or(0);
         }
         Ok(())
     }
@@ -499,67 +597,119 @@ mod tests {
     }
 
     fn line(allowed: CpuSet, current: Option<usize>, load: u64) -> LineLoad {
-        LineLoad { allowed, current, load }
+        LineLoad {
+            allowed,
+            current,
+            load,
+        }
+    }
+
+    fn quota(params: QuotaParams) -> CoreQuota {
+        let mut q = CoreQuota::new(params);
+        q.configure_lines(64).unwrap();
+        q
     }
 
     #[test]
     fn quota_params_validate_bounds() {
         assert!(QuotaParams::DEFAULT.validate().is_ok());
-        assert_eq!(QuotaParams { permille: 0, max_per_tick: 8 }.validate(), Err(IrqError::BadQuota));
-        assert_eq!(QuotaParams { permille: 901, max_per_tick: 8 }.validate(), Err(IrqError::BadQuota));
-        assert_eq!(QuotaParams { permille: 500, max_per_tick: 0 }.validate(), Err(IrqError::BadQuota));
+        assert_eq!(
+            QuotaParams {
+                permille: 0,
+                max_per_tick: 8
+            }
+            .validate(),
+            Err(IrqError::BadQuota)
+        );
+        assert_eq!(
+            QuotaParams {
+                permille: 901,
+                max_per_tick: 8
+            }
+            .validate(),
+            Err(IrqError::BadQuota)
+        );
+        assert_eq!(
+            QuotaParams {
+                permille: 500,
+                max_per_tick: 0
+            }
+            .validate(),
+            Err(IrqError::BadQuota)
+        );
         assert_eq!(IrqError::BadQuota.name(), "system.irq.error.bad_quota");
     }
 
     #[test]
+    fn runtime_line_plan_covers_more_than_old_envelope_or_fails_closed() {
+        assert_eq!(plan_runtime_lines(40, 40 * 128, 128), Some(40));
+        assert_eq!(plan_runtime_lines(256, 256 * 64, 64), Some(256));
+        assert_eq!(plan_runtime_lines(41, 40 * 128, 128), None);
+        assert_eq!(plan_runtime_lines(1, usize::MAX, 0), None);
+    }
+
+    #[test]
     fn quota_counts_until_tick_length_known_then_time() {
-        let mut b = CoreQuota::new(QuotaParams { permille: 250, max_per_tick: 4 });
+        let mut b = quota(QuotaParams {
+            permille: 250,
+            max_per_tick: 4,
+        });
         // 尚未见过 tick：只有次数限制
         assert_eq!(b.limit_cycles(), None);
         for _ in 0..3 {
             assert_eq!(b.charge(1, 1_000_000), Charge::Within);
         }
         assert_eq!(b.charge(1, 1), Charge::Exhausted);
-        assert_eq!(b.throttled(), 1 << 1);
+        assert!(b.is_line_throttled(1));
         // 两个 tick 之后测得长度 1000，预算 250
-        assert_eq!(b.on_tick(10_000).lines, 1 << 1);
-        assert_eq!(b.throttled(), 0);
-        assert_eq!(b.on_tick(11_000).lines, 0);
+        b.on_tick(10_000);
+        assert_eq!(b.released_lines(), [1]);
+        assert!(!b.is_line_throttled(1));
+        b.on_tick(11_000);
+        assert!(b.released_lines().is_empty());
         assert_eq!(b.limit_cycles(), Some(250));
         assert_eq!(b.charge(3, 100), Charge::Within);
         assert_eq!(b.charge(3, 100), Charge::Within);
         assert_eq!(b.charge(5, 60), Charge::Exhausted);
         // 被节流的线再到一次只算一次节流事件
         assert_eq!(b.charge(5, 1), Charge::Exhausted);
-        assert_eq!(b.throttled(), 1 << 5);
+        assert!(b.is_line_throttled(5));
         let (handled, cycles, events) = b.stats();
         assert_eq!((handled, events), (8, 2));
         assert_eq!(cycles, 3_000_000 + 1 + 100 + 100 + 60 + 1);
         // 补充：交还节流集合，预算清零
-        assert_eq!(b.on_tick(12_000).lines, 1 << 5);
+        b.on_tick(12_000);
+        assert_eq!(b.released_lines(), [5]);
         assert_eq!(b.charge(5, 10), Charge::Within);
     }
 
     #[test]
     fn stretched_tick_does_not_inflate_the_quota() {
-        let p = QuotaParams { permille: 250, max_per_tick: 10 };
-        let mut q = CoreQuota::new(p);
+        let p = QuotaParams {
+            permille: 250,
+            max_per_tick: 10,
+        };
+        let mut q = quota(p);
         q.on_tick(1000);
         q.on_tick(2000);
         assert_eq!(q.limit_cycles(), Some(250));
         assert!(!q.needs_tick(), "没有处理过中断的空闲窗口可以停表");
         // 空闲停表：一个间隔是平常的 4 倍。预算不随之放大，被节流的线照常交还。
         q.charge(2, 300);
-        assert_eq!(q.throttled(), 1 << 2);
+        assert!(q.is_line_throttled(2));
         assert!(q.needs_tick(), "有被节流的线时必须保持周期 tick");
-        assert_eq!(q.on_tick(6000).lines, 1 << 2);
+        q.on_tick(6000);
+        assert_eq!(q.released_lines(), [2]);
         assert_eq!(q.tick_cycles(), 1000);
         assert_eq!(q.limit_cycles(), Some(250));
         assert_eq!(q.count_limit(), 10);
         assert_eq!(q.stretched_ticks(), 1);
         assert!(!q.needs_tick(), "补充之后窗口清零");
         q.charge(40, 1);
-        assert!(q.needs_tick(), "窗口内处理过中断（即便线号越界未节流）也要保持周期 tick");
+        assert!(
+            q.needs_tick(),
+            "窗口内处理过中断（即便线号越界未节流）也要保持周期 tick"
+        );
         // 恢复周期 tick 之后照常测量
         q.on_tick(7100);
         assert_eq!(q.tick_cycles(), (3000 + 1100) / 4);
@@ -568,7 +718,7 @@ mod tests {
 
     #[test]
     fn quota_smooths_tick_length_and_ignores_backwards_clock() {
-        let mut b = CoreQuota::new(QuotaParams::DEFAULT);
+        let mut b = quota(QuotaParams::DEFAULT);
         b.on_tick(1000);
         b.on_tick(2000);
         assert_eq!(b.tick_cycles(), 1000);
@@ -582,23 +732,50 @@ mod tests {
 
     #[test]
     fn quota_set_params_rejects_without_change_and_line_out_of_range_not_throttled() {
-        let mut b = CoreQuota::new(QuotaParams { permille: 100, max_per_tick: 1 });
-        assert_eq!(b.set_params(QuotaParams { permille: 0, max_per_tick: 1 }), Err(IrqError::BadQuota));
-        assert_eq!(b.params(), QuotaParams { permille: 100, max_per_tick: 1 });
-        assert_eq!(b.charge(MAX_LINES, 1), Charge::Within);
-        assert_eq!(b.throttled(), 0);
+        let mut b = quota(QuotaParams {
+            permille: 100,
+            max_per_tick: 1,
+        });
+        assert_eq!(
+            b.set_params(QuotaParams {
+                permille: 0,
+                max_per_tick: 1
+            }),
+            Err(IrqError::BadQuota)
+        );
+        assert_eq!(
+            b.params(),
+            QuotaParams {
+                permille: 100,
+                max_per_tick: 1
+            }
+        );
+        assert_eq!(b.charge(64, 1), Charge::Within);
+        assert!(!b.is_line_throttled(64));
         b.reset_stats();
         assert_eq!(b.stats(), (0, 0, 0));
-        assert!(b.set_params(QuotaParams { permille: 500, max_per_tick: 2 }).is_ok());
+        assert!(b
+            .set_params(QuotaParams {
+                permille: 500,
+                max_per_tick: 2
+            })
+            .is_ok());
         assert_eq!(b.params().max_per_tick, 2);
     }
 
     #[test]
     fn spread_puts_equal_lines_on_distinct_cores() {
         let all = CpuSet::first(4);
-        let lines = [line(all, Some(0), 100), line(all, Some(0), 100), line(all, Some(0), 100), line(all, Some(0), 100)];
+        let lines = [
+            line(all, Some(0), 100),
+            line(all, Some(0), 100),
+            line(all, Some(0), 100),
+            line(all, Some(0), 100),
+        ];
         let mut out = [9usize; 4];
-        Spread::DEFAULT.assign(&lines, all, &[0; MAX_CPUS], &mut out).unwrap();
+        Spread::DEFAULT
+            .assign(&lines, all, &[0; MAX_CPUS], &mut out)
+            .unwrap();
         let mut seen = CpuSet::EMPTY;
         for &c in &out {
             assert!(seen.insert(c), "两条线落在同一个核 {out:?}");
@@ -614,7 +791,9 @@ mod tests {
         base[1] = 500;
         let lines = [line(all, None, 300), line(set(&[0, 1]), None, 300)];
         let mut out = [0usize; 2];
-        Spread::DEFAULT.assign(&lines, all, &base, &mut out).unwrap();
+        Spread::DEFAULT
+            .assign(&lines, all, &base, &mut out)
+            .unwrap();
         assert!(out[0] == 2 || out[0] == 3);
         assert_eq!(out[1], 1);
     }
@@ -628,11 +807,15 @@ mod tests {
         base[1] = 100;
         let lines = [line(all, Some(0), 100)];
         let mut out = [9usize; 1];
-        Spread::DEFAULT.assign(&lines, all, &base, &mut out).unwrap();
+        Spread::DEFAULT
+            .assign(&lines, all, &base, &mut out)
+            .unwrap();
         assert_eq!(out[0], 0);
         // 差距远大于迟滞：搬
         base[0] = 400;
-        Spread::DEFAULT.assign(&lines, all, &base, &mut out).unwrap();
+        Spread::DEFAULT
+            .assign(&lines, all, &base, &mut out)
+            .unwrap();
         assert_eq!(out[0], 1);
     }
 
@@ -641,23 +824,39 @@ mod tests {
         let online = CpuSet::first(2);
         let mut out = [7usize; 2];
         let bad_empty = [line(online, Some(0), 1), line(CpuSet::EMPTY, None, 1)];
-        assert_eq!(Spread::DEFAULT.assign(&bad_empty, online, &[0; MAX_CPUS], &mut out), Err(IrqError::EmptySet));
+        assert_eq!(
+            Spread::DEFAULT.assign(&bad_empty, online, &[0; MAX_CPUS], &mut out),
+            Err(IrqError::EmptySet)
+        );
         assert_eq!(out, [7, 7]);
         let bad_off = [line(set(&[3]), None, 1)];
-        assert_eq!(Keep.assign(&bad_off, online, &[0; MAX_CPUS], &mut out), Err(IrqError::Offline));
+        assert_eq!(
+            Keep.assign(&bad_off, online, &[0; MAX_CPUS], &mut out),
+            Err(IrqError::Offline)
+        );
         assert_eq!(out, [7, 7]);
-        let too_many = [line(online, None, 1); MAX_LINES + 1];
-        let mut big = [0usize; MAX_LINES + 1];
-        assert_eq!(Spread::DEFAULT.assign(&too_many, online, &[0; MAX_CPUS], &mut big), Err(IrqError::NoLine));
-        assert_eq!(Spread::DEFAULT.assign(&bad_off[..0], online, &[0; MAX_CPUS], &mut out[..0]), Ok(()));
+        let many = [line(online, None, 1); 40];
+        let mut big = [0usize; 40];
+        Spread::DEFAULT
+            .assign(&many, online, &[0; MAX_CPUS], &mut big)
+            .unwrap();
+        assert_eq!(
+            Spread::DEFAULT.assign(&bad_off[..0], online, &[0; MAX_CPUS], &mut out[..0]),
+            Ok(())
+        );
     }
 
     #[test]
     fn keep_only_repairs_illegal_placement() {
         let online = CpuSet::first(4);
-        let lines = [line(online, Some(3), 1000), line(set(&[1, 2]), Some(0), 1), line(online, None, 1)];
+        let lines = [
+            line(online, Some(3), 1000),
+            line(set(&[1, 2]), Some(0), 1),
+            line(online, None, 1),
+        ];
         let mut out = [0usize; 3];
-        Keep.assign(&lines, online, &[0; MAX_CPUS], &mut out).unwrap();
+        Keep.assign(&lines, online, &[0; MAX_CPUS], &mut out)
+            .unwrap();
         assert_eq!(out, [3, 1, 0]);
         assert_eq!(Keep.name(), "keep");
         assert_eq!(Spread::DEFAULT.name(), "spread");
@@ -665,7 +864,10 @@ mod tests {
 
     /// 测得 tick 长度 1000（时间预算 = 1000 × permille / 1000）的预算。
     fn measured(permille: u32, max_per_tick: u32) -> CoreQuota {
-        let mut q = CoreQuota::new(QuotaParams { permille, max_per_tick });
+        let mut q = quota(QuotaParams {
+            permille,
+            max_per_tick,
+        });
         q.on_tick(1000);
         q.on_tick(2000);
         assert_eq!(q.tick_cycles(), 1000);
@@ -675,25 +877,34 @@ mod tests {
     #[test]
     fn msi_shares_quota_with_lines_both_ways() {
         // 线先用完 ⇒ 随后的 MSI 立即被节流
-        let mut q = CoreQuota::new(QuotaParams { permille: 250, max_per_tick: 3 });
+        let mut q = quota(QuotaParams {
+            permille: 250,
+            max_per_tick: 3,
+        });
         assert_eq!(q.charge(0, 1), Charge::Within);
         assert_eq!(q.charge(0, 1), Charge::Within);
         assert_eq!(q.charge_msi(40, 1), Ok(Charge::Exhausted));
         assert!(q.msi_throttled().contains(40));
-        assert_eq!(q.throttled(), 0);
+        assert!(!q.is_line_throttled(0));
         // MSI 先用完 ⇒ 随后的线立即被节流
-        let mut q = CoreQuota::new(QuotaParams { permille: 250, max_per_tick: 2 });
+        let mut q = quota(QuotaParams {
+            permille: 250,
+            max_per_tick: 2,
+        });
         assert_eq!(q.charge_msi(41, 1), Ok(Charge::Within));
         assert_eq!(q.charge_msi(41, 1), Ok(Charge::Exhausted));
         assert_eq!(q.charge(3, 1), Charge::Exhausted);
-        assert_eq!(q.throttled(), 1 << 3);
+        assert!(q.is_line_throttled(3));
         assert_eq!(q.msi_throttled().len(), 1);
         assert_eq!(q.stats().0, 3);
     }
 
     #[test]
     fn msi_throttled_by_count() {
-        let mut q = CoreQuota::new(QuotaParams { permille: 900, max_per_tick: 4 });
+        let mut q = quota(QuotaParams {
+            permille: 900,
+            max_per_tick: 4,
+        });
         for _ in 0..3 {
             assert_eq!(q.charge_msi(200, 0), Ok(Charge::Within));
         }
@@ -722,7 +933,7 @@ mod tests {
         q.charge_msi(9, 0).unwrap();
         q.charge_msi(255, 0).unwrap();
         let r = q.on_tick(3000);
-        assert_eq!(r.lines, 0);
+        assert!(q.released_lines().is_empty());
         assert_eq!(r.msi.iter().collect::<std::vec::Vec<_>>(), [9, 255]);
         assert!(q.msi_throttled().is_empty());
         assert!(!q.needs_tick());
@@ -743,7 +954,10 @@ mod tests {
         assert_eq!(q.charge_msi(usize::MAX, 1), Err(IrqError::NoLine));
         assert_eq!((q.stats(), q.msi_throttled(), q.needs_tick()), before);
         // 未超额：下一次记账仍在预算内（越界调用没有消耗次数）
-        let mut fresh = CoreQuota::new(QuotaParams { permille: 250, max_per_tick: 2 });
+        let mut fresh = quota(QuotaParams {
+            permille: 250,
+            max_per_tick: 2,
+        });
         assert!(fresh.charge_msi(MAX_SLOTS, 0).is_err());
         assert_eq!(fresh.charge_msi(0, 0), Ok(Charge::Within));
         assert!(!SlotSet::EMPTY.contains(MAX_SLOTS));
@@ -751,15 +965,38 @@ mod tests {
 
     #[test]
     fn msi_set_params_takes_effect_immediately() {
-        let mut q = CoreQuota::new(QuotaParams { permille: 250, max_per_tick: 64 });
+        let mut q = quota(QuotaParams {
+            permille: 250,
+            max_per_tick: 64,
+        });
         assert_eq!(q.charge_msi(5, 0), Ok(Charge::Within));
-        q.set_params(QuotaParams { permille: 250, max_per_tick: 2 }).unwrap();
+        q.set_params(QuotaParams {
+            permille: 250,
+            max_per_tick: 2,
+        })
+        .unwrap();
         assert_eq!(q.charge_msi(5, 0), Ok(Charge::Exhausted));
         // 非法参数被拒，原参数不变
-        assert_eq!(q.set_params(QuotaParams { permille: 0, max_per_tick: 2 }), Err(IrqError::BadQuota));
-        assert_eq!(q.params(), QuotaParams { permille: 250, max_per_tick: 2 });
+        assert_eq!(
+            q.set_params(QuotaParams {
+                permille: 0,
+                max_per_tick: 2
+            }),
+            Err(IrqError::BadQuota)
+        );
+        assert_eq!(
+            q.params(),
+            QuotaParams {
+                permille: 250,
+                max_per_tick: 2
+            }
+        );
         q.on_tick(10);
-        q.set_params(QuotaParams { permille: 250, max_per_tick: 64 }).unwrap();
+        q.set_params(QuotaParams {
+            permille: 250,
+            max_per_tick: 64,
+        })
+        .unwrap();
         assert_eq!(q.charge_msi(5, 0), Ok(Charge::Within));
     }
 }

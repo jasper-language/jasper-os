@@ -108,12 +108,57 @@ pub struct RingParams {
 pub struct IpcParams {
     /// 每进程端点数上限。
     pub max_endpoints_per_process: u32,
-    /// 每个端点接收队列的总字节上限。
+    /// 每个端点接收队列的消息体与元数据计费上限。
     pub max_queue_bytes: usize,
-    /// 每进程仍在队列中的消息体总字节上限。
+    /// 每进程仍在队列中的消息体与元数据计费上限。
     pub max_process_bytes: usize,
-    /// 全系统仍在队列中的消息体总字节上限。
+    /// 全系统仍在队列中的消息体与元数据计费上限。
     pub max_total_bytes: usize,
+}
+
+/// Derive IPC metadata and byte budgets from runtime memory/task/object facts.
+///
+/// The values are policy ceilings supplied by the active Profile. The planner
+/// only shrinks them; it never lets a small topology inherit a larger default.
+pub fn plan_ipc_quotas(
+    memory_budget: u64,
+    tasks: usize,
+    objects: usize,
+    message_overhead_bytes: usize,
+    policy: IpcParams,
+) -> Option<IpcParams> {
+    if tasks == 0 || objects == 0 || memory_budget == 0 {
+        return None;
+    }
+    let heap = usize::try_from(memory_budget).ok()?;
+    let total = (heap / 16).min(policy.max_total_bytes);
+    let message_charge = bounds::MSG_BYTES.checked_add(message_overhead_bytes)?;
+    if policy.max_queue_bytes < message_charge {
+        return None;
+    }
+    if total < message_charge.checked_mul(2)? {
+        return None;
+    }
+    // Up to sixteen simultaneously active IPC producers share the process pool;
+    // additional tasks still share the same total and cannot multiply it.
+    let concurrent = tasks.min(16).max(1);
+    let process = (total / concurrent.max(1)).min(policy.max_process_bytes);
+    let queue = (process / 4)
+        .min(policy.max_queue_bytes)
+        .max(message_charge);
+    if process < queue {
+        return None;
+    }
+    let endpoint_slots = objects / tasks.saturating_mul(2).max(1);
+    let endpoints = endpoint_slots
+        .min(policy.max_endpoints_per_process as usize)
+        .max(1);
+    Some(IpcParams {
+        max_endpoints_per_process: u32::try_from(endpoints).ok()?,
+        max_queue_bytes: queue,
+        max_process_bytes: process,
+        max_total_bytes: total,
+    })
 }
 
 /// 诊断参数。
@@ -731,5 +776,20 @@ mod tests {
         });
         rejects("trace_capacity", |c| c.diag.trace_capacity = 0);
         rejects("irq_queue_len", |c| c.diag.irq_queue_len = 0);
+    }
+
+    #[test]
+    fn runtime_ipc_plan_follows_heap_tasks_and_objects() {
+        let policy = KernelConfig::STANDARD.ipc;
+        let small = plan_ipc_quotas(64 * 1024 * 1024, 64, 1024, 96, policy).unwrap();
+        let large = plan_ipc_quotas(512 * 1024 * 1024, 256, 4096, 96, policy).unwrap();
+        let wide = plan_ipc_quotas(512 * 1024 * 1024, 1024, 65536, 96, policy).unwrap();
+        assert!(large.max_total_bytes > small.max_total_bytes);
+        assert!(large.max_process_bytes >= small.max_process_bytes);
+        assert!(wide.max_process_bytes >= bounds::MSG_BYTES + 96);
+        assert!(large.max_queue_bytes >= bounds::MSG_BYTES + 96);
+        assert!(large.max_endpoints_per_process > 0);
+        assert_eq!(plan_ipc_quotas(0, 64, 1024, 96, policy), None);
+        assert_eq!(plan_ipc_quotas(1024, 64, 1024, 96, policy), None);
     }
 }

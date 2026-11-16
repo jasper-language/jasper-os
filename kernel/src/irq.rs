@@ -22,12 +22,16 @@
 //! 本处理器下一个 tick 调用解除屏蔽回调；设备在屏蔽期间只置挂起位，解除后重新送达，到达不丢。
 //! Core 不知道消息表项在哪里：回调与上下文值由绑定方登记。
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-use kernel_core::irq::{AffinityPolicy, Charge, CoreQuota, IrqError, LineLoad, QuotaParams, Released, MAX_LINES};
+use alloc::vec::Vec;
+use kernel_core::irq::{
+    plan_runtime_lines, AffinityPolicy, Charge, CoreQuota, IrqError, LineLoad, QuotaParams,
+    Released,
+};
 use kernel_core::msi::MsiError;
 use kernel_core::smp::{CpuSet, MAX_CPUS};
-use spin::Mutex;
+use spin::{Mutex, Once};
 
 use crate::sync::{IrqSpinLock, IrqU64};
 use crate::{arch, clock, lockorder, sched};
@@ -54,8 +58,12 @@ struct PendingQueue {
     dropped: usize,
 }
 
-static PENDING: Mutex<PendingQueue> =
-    Mutex::new(PendingQueue { buf: [None; QUEUE_LEN], head: 0, tail: 0, dropped: 0 });
+static PENDING: Mutex<PendingQueue> = Mutex::new(PendingQueue {
+    buf: [None; QUEUE_LEN],
+    head: 0,
+    tail: 0,
+    dropped: 0,
+});
 
 /// 中断上下文入口：由 arch 中断处理程序在 **EOI 之后**调用。
 ///
@@ -92,10 +100,10 @@ pub fn on_hardware_irq(line: IrqLine, from_user: bool) {
                 #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
                 crate::linux_abi::settle_posix_timers(now);
             }
-            #[cfg(feature="rt2-verify")]
-            let diagnostic=crate::rt2_demo::timer_irq();
-            #[cfg(not(feature="rt2-verify"))]
-            let diagnostic=false;
+            #[cfg(feature = "rt2-verify")]
+            let diagnostic = crate::rt2_demo::timer_irq();
+            #[cfg(not(feature = "rt2-verify"))]
+            let diagnostic = false;
             if !diagnostic && crate::hrtime::enabled() {
                 let entry = crate::arch::clock_counter();
                 #[cfg(feature = "krn2-observe")]
@@ -107,8 +115,7 @@ pub fn on_hardware_irq(line: IrqLine, from_user: bool) {
                     return;
                 }
                 sched::on_highres_timer(entry, interrupt_entry);
-            }
-            else if !diagnostic {
+            } else if !diagnostic {
                 let entry = crate::arch::clock_counter();
                 crate::smp::on_local_tick();
                 device::on_cpu_tick();
@@ -187,7 +194,6 @@ pub fn on_device_irq(line: usize) {
     device::dispatch(line)
 }
 
-
 /// 设备 MSI 的处理函数（中断上下文；处理器与向量由登记位置确定）。
 /// MSI handler (interrupt context).
 pub type MsiHandler = fn();
@@ -233,7 +239,11 @@ static MSI_MASK_CTX: [[AtomicUsize; MSI_SLOTS]; MAX_CPUS] =
 /// 登记要求该向量已绑定处理函数（否则 [`MsiError::NotAllocated`]）；处理器或向量越界返回错误。失败时登记表不变。
 /// 解绑处理函数之前必须先清除登记。
 /// Register or clear the throttle actions of `vector` on `cpu`.
-pub fn msi_set_mask_ops(cpu: usize, vector: u8, ops: Option<(&'static MsiMaskOps, usize)>) -> Result<(), MsiError> {
+pub fn msi_set_mask_ops(
+    cpu: usize,
+    vector: u8,
+    ops: Option<(&'static MsiMaskOps, usize)>,
+) -> Result<(), MsiError> {
     if cpu >= MAX_CPUS {
         return Err(MsiError::NoSuchCpu);
     }
@@ -269,7 +279,9 @@ fn msi_mask_ops(cpu: usize, vector: usize) -> Option<(&'static MsiMaskOps, usize
 /// 处理器 `cpu` 上的 `vector` 是否已绑定处理函数。
 /// Whether `vector` on `cpu` has a handler.
 pub fn msi_is_bound(cpu: usize, vector: u8) -> bool {
-    cpu < MAX_CPUS && (vector as usize) < MSI_SLOTS && MSI_HANDLERS[cpu][vector as usize].load(Ordering::Acquire) != 0
+    cpu < MAX_CPUS
+        && (vector as usize) < MSI_SLOTS
+        && MSI_HANDLERS[cpu][vector as usize].load(Ordering::Acquire) != 0
 }
 
 /// 在处理器 `cpu` 上为 `vector` 安装（或以 `None` 清除）处理函数。
@@ -283,7 +295,8 @@ pub fn msi_bind(cpu: usize, vector: u8, handler: Option<MsiHandler>) -> Result<(
     if vector as usize >= MSI_SLOTS {
         return Err(MsiError::OutOfRange);
     }
-    MSI_HANDLERS[cpu][vector as usize].store(handler.map(|h| h as usize).unwrap_or(0), Ordering::Release);
+    MSI_HANDLERS[cpu][vector as usize]
+        .store(handler.map(|h| h as usize).unwrap_or(0), Ordering::Release);
     Ok(())
 }
 
@@ -340,7 +353,10 @@ pub fn msi_count(cpu: usize, vector: u8) -> u32 {
 /// 处理器 `cpu` 上的伪 MSI 次数（未绑定处理函数的向量）。
 /// Spurious MSI count of `cpu`.
 pub fn msi_spurious(cpu: usize) -> u32 {
-    MSI_SPURIOUS.get(cpu).map(|c| c.load(Ordering::Relaxed)).unwrap_or(0)
+    MSI_SPURIOUS
+        .get(cpu)
+        .map(|c| c.load(Ordering::Relaxed))
+        .unwrap_or(0)
 }
 
 /// 清零伪 MSI 计数，以及**没有登记处理函数**的槽位的 MSI 计数。
@@ -375,32 +391,66 @@ pub mod device {
 
     /// 路由表：允许集合、当前目标、启用集合与均衡策略（一把登记过级别的锁）。
     struct Routing {
-        allowed: [CpuSet; MAX_LINES],
-        target: [Option<usize>; MAX_LINES],
-        enabled: u32,
+        allowed: Vec<CpuSet>,
+        target: Vec<Option<usize>>,
+        enabled: Vec<bool>,
         policy: Option<&'static (dyn AffinityPolicy + Sync)>,
         moves: u32,
+        initialized: bool,
     }
 
-    static ROUTING: IrqSpinLock<Routing> = IrqSpinLock::ranked(
-        lockorder::IRQ_ROUTING,
-        Routing { allowed: [CpuSet::EMPTY; MAX_LINES], target: [None; MAX_LINES], enabled: 0, policy: None, moves: 0 },
-    );
+    impl Routing {
+        const fn new() -> Self {
+            Self {
+                allowed: Vec::new(),
+                target: Vec::new(),
+                enabled: Vec::new(),
+                policy: None,
+                moves: 0,
+                initialized: false,
+            }
+        }
+
+        fn initialize(&mut self, lines: usize) -> bool {
+            if self.initialized {
+                return self.allowed.len() == lines;
+            }
+            if self.allowed.try_reserve_exact(lines).is_err()
+                || self.target.try_reserve_exact(lines).is_err()
+                || self.enabled.try_reserve_exact(lines).is_err()
+            {
+                return false;
+            }
+            self.allowed.resize(lines, CpuSet::EMPTY);
+            self.target.resize(lines, None);
+            self.enabled.resize(lines, false);
+            self.initialized = true;
+            true
+        }
+    }
+
+    static ROUTING: IrqSpinLock<Routing> =
+        IrqSpinLock::ranked(lockorder::IRQ_ROUTING, Routing::new());
 
     /// 每核预算（只由所属处理器在中断里改写；参数与统计可由其他处理器读写）。
     static QUOTAS: [IrqSpinLock<CoreQuota>; MAX_CPUS] =
-        [const { IrqSpinLock::ranked(lockorder::IRQ_QUOTA, CoreQuota::new(QuotaParams::DEFAULT)) }; MAX_CPUS];
+        [const { IrqSpinLock::ranked(lockorder::IRQ_QUOTA, CoreQuota::new(QuotaParams::DEFAULT)) };
+            MAX_CPUS];
 
-    /// 处理函数表（函数指针按地址存放；0 = 只做设备侧确认与计数）。
-    static HANDLERS: [AtomicUsize; MAX_LINES] = [const { AtomicUsize::new(0) }; MAX_LINES];
-    /// 每条线在每个处理器上被处理的次数。
-    static COUNTS: [[AtomicU32; MAX_CPUS]; MAX_LINES] = [const { [const { AtomicU32::new(0) }; MAX_CPUS] }; MAX_LINES];
-    /// 每条线本均衡窗口的处理次数（均衡后清零）。
-    static WINDOW: [IrqU64; MAX_LINES] = [const { IrqU64::new(0) }; MAX_LINES];
+    struct LineStorage {
+        /// 函数指针按地址存放；0 = 只做设备侧确认与计数。
+        handlers: Vec<AtomicUsize>,
+        /// 每条线在每个处理器上被处理的次数。
+        counts: Vec<Vec<AtomicU32>>,
+        /// 每条线本均衡窗口的处理次数（均衡后清零）。
+        window: Vec<IrqU64>,
+    }
+
+    static LINES: Once<Option<LineStorage>> = Once::new();
     /// 未知线号的中断数（平台报告了超出范围的线）。
     static STRAY: AtomicU32 = AtomicU32::new(0);
-    /// 拓扑事实只发布一次，避免运行期重复打印。
-    static TOPOLOGY_REPORTED: AtomicBool = AtomicBool::new(false);
+    /// Topology admission is immutable after the first successful reservation.
+    static TOPOLOGY: Once<LineTopology> = Once::new();
 
     /// Complete platform-to-routing-table admission facts.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -411,56 +461,109 @@ pub mod device {
         pub capacity: usize,
     }
 
-    /// Admit the platform's complete IRQ inventory into the routing table.
-    ///
-    /// A bounded table is valid only when every discovered line is represented.
-    /// The platform source, accepted subset, rejected remainder and implementation
-    /// capacity are published together before any consumer can use the table.
+    fn line_cost() -> usize {
+        core::mem::size_of::<CpuSet>()
+            + core::mem::size_of::<Option<usize>>()
+            + core::mem::size_of::<bool>()
+            + core::mem::size_of::<AtomicUsize>()
+            + core::mem::size_of::<IrqU64>()
+            + core::mem::size_of::<Vec<AtomicU32>>()
+            + MAX_CPUS * core::mem::size_of::<AtomicU32>()
+    }
+
+    fn reserve_lines(lines: usize) -> bool {
+        if !ROUTING.lock().initialize(lines) {
+            return false;
+        }
+        let storage = LINES.call_once(|| {
+            let mut handlers = Vec::new();
+            let mut counts = Vec::new();
+            let mut window = Vec::new();
+            if handlers.try_reserve_exact(lines).is_err()
+                || counts.try_reserve_exact(lines).is_err()
+                || window.try_reserve_exact(lines).is_err()
+            {
+                return None;
+            }
+            for _ in 0..lines {
+                handlers.push(AtomicUsize::new(0));
+                let mut row = Vec::new();
+                if row.try_reserve_exact(MAX_CPUS).is_err() {
+                    return None;
+                }
+                for _ in 0..MAX_CPUS {
+                    row.push(AtomicU32::new(0));
+                }
+                counts.push(row);
+                window.push(IrqU64::new(0));
+            }
+            Some(LineStorage {
+                handlers,
+                counts,
+                window,
+            })
+        });
+        if storage.is_none() {
+            return false;
+        }
+        for quota in QUOTAS.iter() {
+            if quota.lock().configure_lines(lines).is_err() {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Admit the complete firmware inventory into heap-backed routing storage.
     pub fn admit_topology(source: &'static str) -> LineTopology {
-        let discovered = arch::device_irq_count();
-        let admitted = discovered.min(MAX_LINES); // JASPER-HARDCODE-REVIEW: issue=32 source=runtime platform IRQ inventory reason=bounded routing table only publishes a complete inventory
-        let topology = LineTopology {
-            discovered,
-            admitted,
-            rejected: discovered - admitted,
-            capacity: MAX_LINES,
-        };
-        if !TOPOLOGY_REPORTED.swap(true, Ordering::AcqRel) {
+        *TOPOLOGY.call_once(|| {
+            let discovered = arch::device_irq_count();
+            let cost = line_cost().max(1);
+            let metadata_budget = match usize::try_from(crate::mm::heap::limit() / 1024) {
+                Ok(budget) => budget,
+                Err(_) => 0,
+            };
+            let admitted = match plan_runtime_lines(discovered, metadata_budget, cost) {
+                Some(admitted) => admitted,
+                None => 0,
+            };
+            let topology = LineTopology {
+                discovered,
+                admitted,
+                rejected: discovered - admitted,
+                capacity: admitted,
+            };
             crate::kprintln!(
-                "[JSR-IRQ] topology source={} discovered={} admitted={} rejected={} capacity={} complete={}",
+                "[JSR-IRQ] topology source={} discovered={} admitted={} rejected={} capacity={} budget={} dynamic=true complete={}",
                 source,
                 topology.discovered,
                 topology.admitted,
                 topology.rejected,
                 topology.capacity,
+                metadata_budget,
                 topology.rejected == 0
             );
-        }
-        if topology.rejected != 0 {
-            crate::kprintln!(
-                "[JSR-IRQ] reject=incomplete_line_table discovered={} admitted={} rejected={} capacity={}",
-                topology.discovered,
-                topology.admitted,
-                topology.rejected,
-                topology.capacity
-            );
-            arch::halt_forever();
-        }
-        topology
+            if topology.rejected != 0 || !reserve_lines(topology.admitted) {
+                crate::kprintln!(
+                    "[JSR-IRQ] reject=runtime_line_storage discovered={} admitted={} rejected={} capacity={} budget={}",
+                    topology.discovered,
+                    topology.admitted,
+                    topology.rejected,
+                    topology.capacity,
+                    metadata_budget
+                );
+                arch::halt_forever();
+            }
+            topology
+        })
     }
 
-    /// 平台已接好的设备中断线数；当前固定表无法容纳时失败关闭。
-    ///
-    /// `MAX_LINES` 仍是待整改实现边界，不能静默截断固件发现结果。超过边界
-    /// 时拒绝发布不完整路由拓扑并停止启动，动态扩容属于 HC-11 后续工作。
-    /// Number of reported device lines, failing closed when the legacy table
-    /// cannot represent the complete discovered topology.
+    /// Number of admitted device lines in runtime storage.
     pub fn line_count() -> usize {
-        let discovered = arch::device_irq_count();
-        if discovered > MAX_LINES {
-            return admit_topology("line_table_access").admitted;
-        }
-        discovered
+        TOPOLOGY.get().map_or_else(
+            || admit_topology("line_table_access").admitted,
+            |topology| topology.admitted,
+        )
     }
 
     /// 中断线的规范名。
@@ -485,7 +588,15 @@ pub mod device {
     /// Install or clear the handler of a line.
     pub fn set_handler(line: usize, handler: Option<DeviceHandler>) -> Result<(), IrqError> {
         check_line(line)?;
-        HANDLERS[line].store(handler.map(|h| h as usize).unwrap_or(0), Ordering::Release);
+        let storage = LINES
+            .get()
+            .and_then(Option::as_ref)
+            .ok_or(IrqError::NoLine)?;
+        let raw = match handler {
+            Some(handler) => handler as usize,
+            None => 0,
+        };
+        storage.handlers[line].store(raw, Ordering::Release);
         Ok(())
     }
 
@@ -501,7 +612,10 @@ pub mod device {
         let online = sched::online_cpus();
         let cands = set.intersect(online);
         let mut r = ROUTING.lock();
-        let target = r.target[line].filter(|&c| cands.contains(c)).or_else(|| cands.iter().next()).ok_or(IrqError::Offline)?;
+        let target = r.target[line]
+            .filter(|&c| cands.contains(c))
+            .or_else(|| cands.iter().next())
+            .ok_or(IrqError::Offline)?;
         if r.target[line] != Some(target) {
             arch::device_irq_route(line, target)?;
         }
@@ -513,7 +627,7 @@ pub mod device {
     /// 当前路由到的处理器（尚未路由时为 `None`）。
     /// Processor the line is routed to.
     pub fn routed_to(line: usize) -> Option<usize> {
-        if line >= MAX_LINES {
+        if line >= line_count() {
             return None;
         }
         ROUTING.lock().target[line]
@@ -528,9 +642,9 @@ pub mod device {
             return Err(IrqError::Offline);
         }
         if on {
-            r.enabled |= 1 << line;
+            r.enabled[line] = true;
         } else {
-            r.enabled &= !(1 << line);
+            r.enabled[line] = false;
             let _ = arch::device_irq_self_trigger(line, false);
         }
         arch::device_irq_set_masked(line, !on);
@@ -539,15 +653,21 @@ pub mod device {
 
     /// 已启用的线集合（位图）。
     /// Enabled lines, as a bit map.
-    pub fn enabled_lines() -> u32 {
-        ROUTING.lock().enabled
+    pub fn enabled_lines() -> Vec<usize> {
+        ROUTING
+            .lock()
+            .enabled
+            .iter()
+            .enumerate()
+            .filter_map(|(line, enabled)| enabled.then_some(line))
+            .collect()
     }
 
     /// 打开 / 关闭设备的持续自触发（中断风暴演练用）；线必须已启用。
     /// Turn the device's continuous self-trigger on or off.
     pub fn set_self_trigger(line: usize, on: bool) -> Result<(), IrqError> {
         check_line(line)?;
-        if on && ROUTING.lock().enabled & (1 << line) == 0 {
+        if on && !ROUTING.lock().enabled[line] {
             return Err(IrqError::Offline);
         }
         arch::device_irq_self_trigger(line, on)
@@ -610,7 +730,13 @@ pub mod device {
             Some(b) => {
                 let b = b.lock();
                 let (handled, cycles, throttles) = b.stats();
-                CpuIrqStats { handled, cycles, throttles, msi_throttles: b.msi_throttles(), tick_cycles: b.tick_cycles() }
+                CpuIrqStats {
+                    handled,
+                    cycles,
+                    throttles,
+                    msi_throttles: b.msi_throttles(),
+                    tick_cycles: b.tick_cycles(),
+                }
             }
             None => CpuIrqStats::default(),
         }
@@ -619,8 +745,10 @@ pub mod device {
     /// 线 `line` 在处理器 `cpu` 上被处理的次数。
     /// Times `line` was handled on `cpu`.
     pub fn count_on(line: usize, cpu: usize) -> u32 {
-        match (COUNTS.get(line), cpu < MAX_CPUS) {
-            (Some(row), true) => row[cpu].load(Ordering::Relaxed),
+        match (LINES.get().and_then(Option::as_ref), cpu < MAX_CPUS) {
+            (Some(storage), true) if line < storage.counts.len() => {
+                storage.counts[line][cpu].load(Ordering::Relaxed)
+            }
             _ => 0,
         }
     }
@@ -637,29 +765,44 @@ pub mod device {
         for b in QUOTAS.iter() {
             b.lock().reset_stats();
         }
-        for row in COUNTS.iter() {
-            for c in row.iter() {
-                c.store(0, Ordering::Relaxed);
+        if let Some(storage) = LINES.get().and_then(Option::as_ref) {
+            for row in storage.counts.iter() {
+                for count in row.iter() {
+                    count.store(0, Ordering::Relaxed);
+                }
             }
-        }
-        for w in WINDOW.iter() {
-            w.store(0, Ordering::Relaxed);
+            for window in storage.window.iter() {
+                window.store(0, Ordering::Relaxed);
+            }
         }
         ROUTING.lock().moves = 0;
     }
 
     /// 中断上下文：设备侧确认 → 计数 → 处理函数 → 记账；预算用完就屏蔽这条线。
     pub(super) fn dispatch(line: usize) {
-        if line >= MAX_LINES {
+        let Some(storage) = LINES.get().and_then(Option::as_ref) else {
+            STRAY.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        if line >= storage.handlers.len() || line >= line_count() {
             STRAY.fetch_add(1, Ordering::Relaxed);
             return;
         }
         let t0 = arch::cycles();
         arch::device_irq_ack(line);
         let cpu = arch::cpu_index();
-        COUNTS[line][cpu].fetch_add(1, Ordering::Relaxed);
-        WINDOW[line].fetch_add(1, Ordering::Relaxed);
-        let h = HANDLERS[line].load(Ordering::Acquire);
+        if cpu >= MAX_CPUS {
+            crate::kprintln!(
+                "[JSR-IRQ] reject=cpu_index_out_of_range line={} index={} max={}",
+                line,
+                cpu,
+                MAX_CPUS
+            );
+            arch::halt_forever();
+        }
+        storage.counts[line][cpu].fetch_add(1, Ordering::Relaxed);
+        storage.window[line].fetch_add(1, Ordering::Relaxed);
+        let h = storage.handlers[line].load(Ordering::Acquire);
         if h != 0 {
             // SAFETY：非零值只来自 `set_handler` 写入的 `DeviceHandler` 函数指针。
             let f: DeviceHandler = unsafe { core::mem::transmute::<usize, DeviceHandler>(h) };
@@ -687,7 +830,8 @@ pub mod device {
     /// 并对被节流的 MSI 槽位调用其解除屏蔽动作（槽位已解除登记的跳过）。
     pub(super) fn on_cpu_tick() {
         let cpu = arch::cpu_index();
-        let Released { lines, msi } = QUOTAS[cpu].lock().on_tick(arch::cycles());
+        let mut quota = QUOTAS[cpu].lock();
+        let Released { msi } = quota.on_tick(arch::cycles());
         if !msi.is_empty() {
             for slot in msi.iter() {
                 if let Some((ops, ctx)) = msi_mask_ops(cpu, slot) {
@@ -695,12 +839,12 @@ pub mod device {
                 }
             }
         }
-        if lines == 0 {
+        if quota.released_lines().is_empty() {
             return;
         }
-        let enabled = ROUTING.lock().enabled;
-        for line in 0..MAX_LINES {
-            if lines & enabled & (1 << line) != 0 {
+        let enabled = ROUTING.lock();
+        for &line in quota.released_lines() {
+            if matches!(enabled.enabled.get(line), Some(true)) {
                 arch::device_irq_set_masked(line, false);
             }
         }
@@ -731,20 +875,31 @@ pub mod device {
         let Some(policy) = r.policy else {
             return Ok(0);
         };
-        let mut lines = [LineLoad { allowed: CpuSet::EMPTY, current: None, load: 0 }; MAX_LINES];
-        let mut idx = [0usize; MAX_LINES];
-        let mut k = 0;
+        let mut lines = Vec::new();
+        let mut idx = Vec::new();
+        lines.try_reserve_exact(n).map_err(|_| IrqError::NoLine)?;
+        idx.try_reserve_exact(n).map_err(|_| IrqError::NoLine)?;
         for line in 0..n {
-            if r.enabled & (1 << line) != 0 {
-                lines[k] = LineLoad { allowed: r.allowed[line], current: r.target[line], load: WINDOW[line].swap(0, Ordering::Relaxed) };
-                idx[k] = line;
-                k += 1;
+            if r.enabled[line] {
+                let storage = LINES
+                    .get()
+                    .and_then(Option::as_ref)
+                    .ok_or(IrqError::NoLine)?;
+                lines.push(LineLoad {
+                    allowed: r.allowed[line],
+                    current: r.target[line],
+                    load: storage.window[line].swap(0, Ordering::Relaxed),
+                });
+                idx.push(line);
             }
         }
-        let mut out = [0usize; MAX_LINES];
-        policy.assign(&lines[..k], online, &[0; MAX_CPUS], &mut out[..k])?;
+        let mut out = Vec::new();
+        out.try_reserve_exact(lines.len())
+            .map_err(|_| IrqError::NoLine)?;
+        out.resize(lines.len(), 0);
+        policy.assign(&lines, online, &[0; MAX_CPUS], &mut out)?;
         let mut moved = 0;
-        for i in 0..k {
+        for i in 0..lines.len() {
             let line = idx[i];
             if r.target[line] != Some(out[i]) && arch::device_irq_route(line, out[i]).is_ok() {
                 r.target[line] = Some(out[i]);
@@ -757,4 +912,9 @@ pub mod device {
 }
 
 /// Legacy device/smp credit follows elapsed accounting, not sub-tick IRQ count.
-pub(crate) fn on_elapsed_cpu_ticks(credits:u64){for _ in 0..credits{crate::smp::on_local_tick();device::on_cpu_tick();}}
+pub(crate) fn on_elapsed_cpu_ticks(credits: u64) {
+    for _ in 0..credits {
+        crate::smp::on_local_tick();
+        device::on_cpu_tick();
+    }
+}
