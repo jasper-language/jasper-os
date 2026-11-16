@@ -21,6 +21,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use alloc::vec::Vec;
 use kernel_core::assembly::{self, Assembly, AuditError, Binding, Health, Policy, State};
 use kernel_core::service_gate::{Gate, Lease};
 
@@ -66,8 +67,9 @@ fn operation_audit(live: bool) -> Result<OperationAudit, &'static str> {
     };
     for entry in ENTRIES.iter().filter(|entry| entry.kind == AbiKind::Op) {
         report.operations += 1;
-        let full = kernel_core::assembly::operation_route(&kernel_core::profile::HEADLESS, entry.name)
-            .ok_or(entry.name)?;
+        let full =
+            kernel_core::assembly::operation_route(&kernel_core::profile::HEADLESS, entry.name)
+                .ok_or(entry.name)?;
         if full.is_kernel_base() {
             report.kernel_base += 1;
         } else {
@@ -85,15 +87,69 @@ fn operation_audit(live: bool) -> Result<OperationAudit, &'static str> {
 
 /// 内核能构建的全部模块的绑定（生效 Profile 未声明的条目被忽略）。
 static BINDINGS: [Binding; 9] = [
-    Binding { module: "core", version: "1.0.0", conflicts: &[], activate: core_activate, deactivate: None },
-    Binding { module: "memory", version: "1.0.0", conflicts: &[], activate: memory_ready, deactivate: None },
-    Binding { module: "time", version: "1.0.0", conflicts: &[], activate: time_ready, deactivate: None },
-    Binding { module: "sched", version: "1.0.0", conflicts: &[], activate: sched_activate, deactivate: None },
-    Binding { module: "channel", version: "1.0.0", conflicts: &[], activate: channel_ready, deactivate: None },
-    Binding { module: "realtime", version: "1.0.0", conflicts: &[], activate: realtime_activate, deactivate: None },
-    Binding { module: "job", version: "1.0.0", conflicts: &[], activate: job_activate, deactivate: None },
-    Binding { module: "async", version: "1.0.0", conflicts: &[], activate: async_ready, deactivate: None },
-    Binding { module: "devices", version: "1.0.0", conflicts: &[], activate: devices_activate, deactivate: None },
+    Binding {
+        module: "core",
+        version: "1.0.0",
+        conflicts: &[],
+        activate: core_activate,
+        deactivate: None,
+    },
+    Binding {
+        module: "memory",
+        version: "1.0.0",
+        conflicts: &[],
+        activate: memory_ready,
+        deactivate: None,
+    },
+    Binding {
+        module: "time",
+        version: "1.0.0",
+        conflicts: &[],
+        activate: time_ready,
+        deactivate: None,
+    },
+    Binding {
+        module: "sched",
+        version: "1.0.0",
+        conflicts: &[],
+        activate: sched_activate,
+        deactivate: None,
+    },
+    Binding {
+        module: "channel",
+        version: "1.0.0",
+        conflicts: &[],
+        activate: channel_ready,
+        deactivate: None,
+    },
+    Binding {
+        module: "realtime",
+        version: "1.0.0",
+        conflicts: &[],
+        activate: realtime_activate,
+        deactivate: None,
+    },
+    Binding {
+        module: "job",
+        version: "1.0.0",
+        conflicts: &[],
+        activate: job_activate,
+        deactivate: None,
+    },
+    Binding {
+        module: "async",
+        version: "1.0.0",
+        conflicts: &[],
+        activate: async_ready,
+        deactivate: None,
+    },
+    Binding {
+        module: "devices",
+        version: "1.0.0",
+        conflicts: &[],
+        activate: devices_activate,
+        deactivate: None,
+    },
 ];
 
 pub(crate) fn bindings() -> &'static [Binding] {
@@ -154,7 +210,10 @@ fn core_activate() -> Result<(), &'static str> {
             return Err(reason);
         }
     }
-    kprintln!("[JSR-ASSEMBLY] activate module=core objects={}", crate::kobj::capacity());
+    kprintln!(
+        "[JSR-ASSEMBLY] activate module=core objects={}",
+        crate::kobj::capacity()
+    );
     Ok(())
 }
 
@@ -186,14 +245,20 @@ fn sched_activate() -> Result<(), &'static str> {
     let stacks = match crate::sched::grow(cap.tasks) {
         Ok(n) if n == cap.tasks => n,
         Ok(_) => return Err("task table capacity mismatch"),
-        Err(crate::sched::GrowError::OutOfMemory { .. }) => return Err("task table allocation failed"),
+        Err(crate::sched::GrowError::OutOfMemory { .. }) => {
+            return Err("task table allocation failed")
+        }
         Err(crate::sched::GrowError::Shrink) => return Err("task table shrink"),
         Err(crate::sched::GrowError::NotQuiescent) => return Err("task table not quiescent"),
     };
     if crate::sched::capacity() < 2 {
         return Err("task table too small");
     }
-    kprintln!("[JSR-ASSEMBLY] activate module=sched tasks={} stacks={}", crate::sched::capacity(), stacks);
+    kprintln!(
+        "[JSR-ASSEMBLY] activate module=sched tasks={} stacks={}",
+        crate::sched::capacity(),
+        stacks
+    );
     Ok(())
 }
 
@@ -214,7 +279,10 @@ fn realtime_activate() -> Result<(), &'static str> {
         Err(None) => return Err("realtime table allocation failed"),
         Err(Some(e)) => return Err(e.as_str()),
     }
-    kprintln!("[JSR-ASSEMBLY] activate module=realtime rt={}", crate::rt::capacity());
+    kprintln!(
+        "[JSR-ASSEMBLY] activate module=realtime rt={}",
+        crate::rt::capacity()
+    );
     Ok(())
 }
 
@@ -259,14 +327,20 @@ fn async_ready() -> Result<(), &'static str> {
 pub fn boot() -> u32 {
     let base = boot_resources();
     *BOOT_BASE.lock() = Some(base);
-    let Some(declared) = profile::resolved() else {
-        kprintln!("[JSR-ASSEMBLY] error={}", assembly::AssemblyError::ProfileInvalid.name());
+    let Some(declared) = profile::resolved_ref() else {
+        kprintln!(
+            "[JSR-ASSEMBLY] error={}",
+            assembly::AssemblyError::ProfileInvalid.name()
+        );
         return 1;
     };
     let ownership = match operation_audit(false) {
         Ok(report) => report,
         Err(operation) => {
-            kprintln!("[JSR-K06-FAIL] unclaimed op={} ownership=incomplete", operation);
+            kprintln!(
+                "[JSR-K06-FAIL] unclaimed op={} ownership=incomplete",
+                operation
+            );
             return 1;
         }
     };
@@ -275,16 +349,12 @@ pub fn boot() -> u32 {
         return 1;
     };
     kprintln!(
-        "[JSR-ASSEMBLY] capacity modules={} capabilities={} services={} metadata={} budget={} fixed_modules={} fixed_capabilities={} fixed_services={} fixed_dependencies={} dynamic=false",
+        "[JSR-ASSEMBLY] capacity modules={} capabilities={} services={} metadata={} budget={} dynamic=true",
         capacity.modules,
         capacity.capabilities,
         capacity.services,
         capacity.metadata_bytes,
-        capacity.memory_budget,
-        assembly::MAX_MODULES,
-        kernel_core::profile::MAX_CAPABILITIES,
-        kernel_core::profile::MAX_SERVICES,
-        kernel_core::native_module_lifecycle::MAX_MODULE_DEPENDENCIES
+        capacity.memory_budget
     );
     let mut asm = match Assembly::new(&ACTIVE, &BINDINGS) {
         Ok(a) => a,
@@ -314,13 +384,19 @@ pub fn boot() -> u32 {
             version
         );
     }
-    let mask = asm.published_mask(&declared);
-    let audit = asm.audit(&declared, mask);
+    let mask = asm.published_mask(declared);
+    let audit = asm.audit(declared, mask);
     // 只有审计通过才发布；失败时掩码保持 0（所有能力不可用），由调用方拒绝启动。
     // 重复启动必须被拒绝且不再调用任何激活函数。
-    let again = asm.start(Policy::AllOrNothing).err().map_or("none", |e| e.name());
+    let again = asm
+        .start(Policy::AllOrNothing)
+        .err()
+        .map_or("none", |e| e.name());
     let stop = asm.stop("core").err().map_or("none", |e| e.name());
-    let stop_devices = asm.preflight_stop("devices").err().map_or("none", |e| e.name());
+    let stop_devices = asm
+        .preflight_stop("devices")
+        .err()
+        .map_or("none", |e| e.name());
     let publish = audit.is_ok() && report.failed == 0 && report.blocked == 0;
     if publish {
         bootcap::restore_heap();
@@ -373,7 +449,13 @@ pub fn boot() -> u32 {
         PUBLICATIONS.epoch(),
         PUBLICATIONS.readers()
     );
-    u32::from(report.failed) + u32::from(report.blocked) + u32::from(audit.is_err())
+    u32::try_from(
+        report
+            .failed
+            .saturating_add(report.blocked)
+            .saturating_add(audit.is_err() as usize),
+    )
+    .unwrap_or(u32::MAX)
 }
 
 /// `assembly` 阶段的启动期回滚：释放本阶段安装且仍为空的服务表，并逐项核对资源基线。
@@ -396,8 +478,9 @@ pub fn rollback_boot() -> bool {
     let used_after = now.heap_total.saturating_sub(now.heap_free);
     // The heap deliberately grows without shrinking. Baseline is allocated bytes,
     // not mapped capacity: newly mapped but fully free pages are not occupied.
-    let heap_used_restored =
-        used_after == used_before && now.heap_total >= base.heap_total && now.heap_free >= base.heap_free;
+    let heap_used_restored = used_after == used_before
+        && now.heap_total >= base.heap_total
+        && now.heap_free >= base.heap_free;
     let resources_baseline = objects
         && rt
         && jobs
@@ -458,8 +541,11 @@ pub fn published_mask() -> u32 {
 /// 租约必须覆盖真正的服务操作；只查询 [`published_mask`] 后释放租约不能阻止同一时刻的停用。
 /// English: acquire a lease covering the actual service operation.
 pub fn acquire(capability: &str) -> Option<Lease<'static>> {
-    let declared = profile::resolved()?;
-    let bit = declared.capabilities().iter().position(|c| *c == capability)?;
+    let declared = profile::resolved_ref()?;
+    let bit = declared
+        .capabilities()
+        .iter()
+        .position(|c| *c == capability)?;
     PUBLICATIONS.acquire(bit as u32)
 }
 
@@ -478,7 +564,10 @@ pub enum ServiceEntry {
 /// Acquire the unique owner's lease; `None` means the owner is absent or unavailable.
 pub fn enter_service(operation: &str) -> Option<ServiceEntry> {
     let owner = assembly::operation_route(&ACTIVE, operation)?;
-    let module = ACTIVE.modules.iter().find(|module| module.name == owner.module)?;
+    let module = ACTIVE
+        .modules
+        .iter()
+        .find(|module| module.name == owner.module)?;
     for capability in module.provides {
         if let Some(lease) = acquire(capability) {
             return Some(ServiceEntry::Held(lease));
@@ -507,17 +596,16 @@ pub struct ModuleStatus {
     pub reason: &'static str,
 }
 
-/// 固定容量的模块状态快照。
-#[derive(Clone, Copy)]
+/// Heap-backed module status snapshot.
+#[derive(Clone)]
 pub struct StatusSnapshot {
-    modules: [Option<ModuleStatus>; assembly::MAX_MODULES],
-    len: usize,
+    modules: alloc::vec::Vec<ModuleStatus>,
 }
 
 impl StatusSnapshot {
     /// 有效模块状态。
     pub fn modules(&self) -> impl Iterator<Item = ModuleStatus> + '_ {
-        self.modules[..self.len].iter().filter_map(|m| *m)
+        self.modules.iter().copied()
     }
 }
 
@@ -525,18 +613,25 @@ impl StatusSnapshot {
 /// Read the persistent per-module status; empty before boot-time assembly completes.
 pub fn statuses() -> StatusSnapshot {
     let runtime = RUNTIME.lock();
-    let mut snapshot = StatusSnapshot { modules: [None; assembly::MAX_MODULES], len: 0 };
+    let mut snapshot = StatusSnapshot {
+        modules: Vec::new(),
+    };
     let Some(asm) = runtime.as_ref() else {
         return snapshot;
     };
+    if snapshot.modules.try_reserve(asm.len()).is_err() {
+        return snapshot;
+    }
     let published = PUBLICATIONS.mask();
     for k in 0..asm.len() {
         let Some(name) = asm.order(k) else { break };
         let (state, reason) = asm.state(name).unwrap_or((State::Declared, ""));
         let health = asm.health(name).unwrap_or(Health::Unknown);
         let effective_health = asm.effective_health(name).unwrap_or(Health::Unknown);
-        let available = asm.module_mask(name).is_some_and(|bits| bits & published != 0);
-        snapshot.modules[snapshot.len] = Some(ModuleStatus {
+        let available = asm
+            .module_mask(name)
+            .is_some_and(|bits| bits & published != 0);
+        snapshot.modules.push(ModuleStatus {
             name,
             version: asm.version(name).unwrap_or(""),
             state,
@@ -545,7 +640,6 @@ pub fn statuses() -> StatusSnapshot {
             available,
             reason,
         });
-        snapshot.len += 1;
     }
     snapshot
 }
@@ -581,10 +675,12 @@ pub fn report_health(module: &str, health: Health) -> Result<(), assembly::Assem
         return Err(assembly::AssemblyError::InvalidHealth);
     }
     let _writer = begin_lifespan_change()?;
-    let declared = profile::resolved().ok_or(assembly::AssemblyError::ProfileInvalid)?;
+    let declared = profile::resolved_ref().ok_or(assembly::AssemblyError::ProfileInvalid)?;
     let (old_mask, next_mask) = {
         let runtime = RUNTIME.lock();
-        let asm = runtime.as_ref().ok_or(assembly::AssemblyError::NotStarted)?;
+        let asm = runtime
+            .as_ref()
+            .ok_or(assembly::AssemblyError::NotStarted)?;
         if asm.health(module).is_none() {
             return Err(assembly::AssemblyError::UnknownModule);
         }
@@ -593,11 +689,11 @@ pub fn report_health(module: &str, health: Health) -> Result<(), assembly::Assem
                 asm.state(module).map(|s| s.0).unwrap_or(State::Declared),
             ));
         }
-        let old = asm.published_mask(&declared);
+        let old = asm.published_mask(declared);
         let next = asm
-            .mask_with_health(module, health, &declared)
+            .mask_with_health(module, health, declared)
             .ok_or(assembly::AssemblyError::UnknownModule)?;
-        if let Err(why) = asm.audit_with_health(module, health, &declared, next) {
+        if let Err(why) = asm.audit_with_health(module, health, declared, next) {
             kprintln!(
                 "[JSR-ASSEMBLY] health_audit phase=pre module={} mask={:#x} reason={}",
                 module,
@@ -616,7 +712,9 @@ pub fn report_health(module: &str, health: Health) -> Result<(), assembly::Assem
     }
     let (from, published, readers) = {
         let mut runtime = RUNTIME.lock();
-        let asm = runtime.as_mut().ok_or(assembly::AssemblyError::NotStarted)?;
+        let asm = runtime
+            .as_mut()
+            .ok_or(assembly::AssemblyError::NotStarted)?;
         let from = asm.set_health(module, health)?;
         if PUBLICATIONS.mask() != old_mask & !removed {
             kprintln!(
@@ -632,7 +730,11 @@ pub fn report_health(module: &str, health: Health) -> Result<(), assembly::Assem
         }
         let published = asm.published_mask(&declared);
         if published != next_mask || asm.audit(&declared, published).is_err() {
-            let reason = asm.audit(&declared, published).err().map(|e| audit_name(Err(e))).unwrap_or("mask_mismatch");
+            let reason = asm
+                .audit(&declared, published)
+                .err()
+                .map(|e| audit_name(Err(e)))
+                .unwrap_or("mask_mismatch");
             kprintln!(
                 "[JSR-ASSEMBLY] health_audit phase=post module={} expected={:#x} actual={:#x} reason={}",
                 module,
@@ -663,7 +765,9 @@ pub fn stop(module: &str) -> Result<(), assembly::AssemblyError> {
     let _writer = begin_lifespan_change()?;
     let bits = {
         let runtime = RUNTIME.lock();
-        let asm = runtime.as_ref().ok_or(assembly::AssemblyError::NotStarted)?;
+        let asm = runtime
+            .as_ref()
+            .ok_or(assembly::AssemblyError::NotStarted)?;
         asm.preflight_stop(module)?
     };
     if bits != 0 {
@@ -672,11 +776,13 @@ pub fn stop(module: &str) -> Result<(), assembly::AssemblyError> {
     }
     let (published, readers) = {
         let mut runtime = RUNTIME.lock();
-        let asm = runtime.as_mut().ok_or(assembly::AssemblyError::NotStarted)?;
+        let asm = runtime
+            .as_mut()
+            .ok_or(assembly::AssemblyError::NotStarted)?;
         asm.stop_with(module, |_| {})?;
-        let declared = profile::resolved().ok_or(assembly::AssemblyError::ProfileInvalid)?;
-        let published = asm.published_mask(&declared);
-        if asm.audit(&declared, published).is_err() || PUBLICATIONS.mask() & bits != 0 {
+        let declared = profile::resolved_ref().ok_or(assembly::AssemblyError::ProfileInvalid)?;
+        let published = asm.published_mask(declared);
+        if asm.audit(declared, published).is_err() || PUBLICATIONS.mask() & bits != 0 {
             return Err(assembly::AssemblyError::AuditFailed);
         }
         (published, PUBLICATIONS.readers())
@@ -699,13 +805,15 @@ pub fn stop(module: &str) -> Result<(), assembly::AssemblyError> {
 /// the ServiceCatalog event source receives that same live mask.
 pub(crate) fn start_runtime_module(module: &str) -> Result<(), assembly::AssemblyError> {
     let _writer = begin_lifespan_change()?;
-    let declared = profile::resolved().ok_or(assembly::AssemblyError::ProfileInvalid)?;
+    let declared = profile::resolved_ref().ok_or(assembly::AssemblyError::ProfileInvalid)?;
     let (before, next) = {
         let mut runtime = RUNTIME.lock();
-        let asm = runtime.as_mut().ok_or(assembly::AssemblyError::NotStarted)?;
+        let asm = runtime
+            .as_mut()
+            .ok_or(assembly::AssemblyError::NotStarted)?;
         asm.start_one(module)?;
-        let next = asm.published_mask(&declared);
-        if asm.audit(&declared, next).is_err() {
+        let next = asm.published_mask(declared);
+        if asm.audit(declared, next).is_err() {
             let _ = asm.stop_with(module, |_| {});
             return Err(assembly::AssemblyError::AuditFailed);
         }

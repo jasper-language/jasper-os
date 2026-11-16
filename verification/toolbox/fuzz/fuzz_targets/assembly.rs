@@ -69,7 +69,15 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
 });
 
 fn check(p: &'static SystemProfile, data: &[u8], n: usize, all_or_nothing: bool, deps: &[Vec<usize>]) {
-    let binds: Vec<Binding> = (0..n).map(|k| Binding { module: NAMES[k], activate: ACTS[k], deactivate: None }).collect();
+    let binds: Vec<Binding> = (0..n)
+        .map(|k| Binding {
+            module: NAMES[k],
+            version: "1.0.0",
+            conflicts: &[],
+            activate: ACTS[k],
+            deactivate: None,
+        })
+        .collect();
     let declared = profile::resolve(p).unwrap();
     let mut a = Assembly::new(p, &binds).unwrap();
     let order: Vec<usize> = (0..n).map(|k| NAMES.iter().position(|x| *x == a.order(k).unwrap()).unwrap()).collect();

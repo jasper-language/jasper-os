@@ -63,7 +63,8 @@
     feature = "display-dynamic",
     feature = "hwvirt-vcpu-dynamic",
     feature = "ext4-view",
-    feature = "persistent-install"
+    feature = "persistent-install",
+    feature = "runtime-registries"
 ))]
 extern crate alloc;
 
@@ -140,6 +141,7 @@ pub mod numa;
 pub mod profile;
 pub mod program_caps;
 /// 服务装配契约：模块运行时状态、依赖顺序、能力发布与审计（issue #6）。
+#[cfg(any(test, feature = "runtime-registries"))]
 pub mod assembly;
 /// 可撤回能力发布门：读者租约、撤位与排空（issue #6）。
 pub mod service_gate;
@@ -226,6 +228,7 @@ pub mod native_install_abi;
 pub mod persistent_install;
 #[cfg(any(test, feature = "persistent-install"))]
 pub mod native_install_service;
+#[cfg(any(test, feature = "runtime-registries"))]
 pub mod native_module_lifecycle;
 
 // issue #3：统一定时事件契约。 / Unified timer-event contract.

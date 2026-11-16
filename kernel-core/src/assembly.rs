@@ -37,12 +37,12 @@
 //! * 本切片不支持停用后重新启动、动态装载或热卸载（issue #6 工作要求 3）。
 //!
 //! # 边界
-//! 纯数据结构，`no_std`、零分配、不含锁；发布到多核可见的方式（原子掩码）由内核侧负责。
+//! 纯 `no_std` 数据与状态机；模块、依赖和启动顺序由内核堆后备，不持有锁。
+//! 发布到多核可见的方式（32 位原子掩码）仍由内核侧负责，因此能力数超过该
+//! versioned 协议宽度时明确拒绝装配。
 
 use crate::profile::{self, ModuleDecl, ResolvedProfile, SystemProfile};
-
-/// 一份装配最多容纳的模块数（依赖关系以 `u16` 位图表示）。
-pub const MAX_MODULES: usize = 16;
+use alloc::vec::Vec;
 
 /// 模块的运行时状态。
 /// Runtime state of one declared module.
@@ -142,8 +142,10 @@ pub enum Policy {
 pub enum AssemblyError {
     /// Profile 自身不合法（[`profile::resolve`] 失败）。
     ProfileInvalid,
-    /// 模块数超过 [`MAX_MODULES`]。
-    TooManyModules,
+    /// The versioned publication mask cannot represent every declared capability.
+    TooManyCapabilities,
+    /// Heap backing for assembly metadata was unavailable.
+    Allocation,
     /// 声明的模块没有绑定。
     MissingBinding(&'static str),
     /// 同一模块有多条绑定。
@@ -179,7 +181,8 @@ impl AssemblyError {
     pub const fn name(self) -> &'static str {
         match self {
             AssemblyError::ProfileInvalid => "system.module.error.profile_invalid",
-            AssemblyError::TooManyModules => "system.module.error.table_full",
+            AssemblyError::TooManyCapabilities => "system.module.error.too_many_capabilities",
+            AssemblyError::Allocation => "system.module.error.allocation",
             AssemblyError::MissingBinding(_) => "system.module.error.missing_binding",
             AssemblyError::DuplicateBinding(_) => "system.module.error.duplicate_binding",
             AssemblyError::InvalidVersion(_) => "system.module.error.invalid_version",
@@ -246,7 +249,10 @@ pub fn operation_route(profile: &SystemProfile, operation: &str) -> Option<Opera
                 .strip_prefix(service)
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
             {
-                return Some(OperationRoute { module: module.name, service });
+                return Some(OperationRoute {
+                    module: module.name,
+                    service,
+                });
             }
         }
     }
@@ -257,15 +263,15 @@ pub fn operation_route(profile: &SystemProfile, operation: &str) -> Option<Opera
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Report {
     /// 结束时处于 `Ready` 的模块数。
-    pub ready: u8,
+    pub ready: usize,
     /// `activate` 失败的模块数。
-    pub failed: u8,
+    pub failed: usize,
     /// 因依赖未就绪而未尝试的模块数。
-    pub blocked: u8,
+    pub blocked: usize,
     /// 整体回滚撤回的模块数。
-    pub rolled_back: u8,
+    pub rolled_back: usize,
     /// 回滚后从未尝试的模块数（保持 `Declared`）。
-    pub unattempted: u8,
+    pub unattempted: usize,
 }
 
 /// Runtime metadata admitted for one Profile assembly.
@@ -281,8 +287,8 @@ pub struct AssemblyCapacityPlan {
 /// Derive assembly metadata demand from the Profile and heap budget.
 ///
 /// Issue #33 HC-23 policy: module runtime state and resolved Profile entries
-/// receive at most 1/1024 of the admitted heap. Fixed implementation envelopes
-/// remain authoritative until their backing storage is dynamic.
+/// receive at most 1/1024 of the admitted heap. Backing vectors reserve from
+/// that plan and fail closed if the allocator cannot provide the declared shape.
 pub fn plan_assembly_capacity(
     profile: &SystemProfile,
     memory_budget: u64,
@@ -291,18 +297,28 @@ pub fn plan_assembly_capacity(
     let modules = profile.modules.len();
     let capabilities = resolved.capabilities().len();
     let services = resolved.services().len();
-    let entry_bytes = core::mem::size_of::<usize>();
-    if modules == 0 || entry_bytes == 0 {
+    if modules == 0 {
         return None;
     }
-    // Seven runtime vectors plus resolved capability/service metadata and the
-    // bounded error report are represented by conservative machine-word units.
-    let units = modules
-        .checked_mul(7)?
-        .checked_add(capabilities)?
-        .checked_add(services)?
-        .checked_add(crate::profile::MAX_ERRORS)?;
-    let metadata_bytes = units.checked_mul(entry_bytes)?;
+    let per_module = core::mem::size_of::<&'static ModuleDecl>()
+        .checked_add(core::mem::size_of::<Binding>())?
+        .checked_add(core::mem::size_of::<State>())?
+        .checked_add(core::mem::size_of::<&'static str>())?
+        .checked_add(core::mem::size_of::<Vec<usize>>())?
+        .checked_add(core::mem::size_of::<u32>())?
+        .checked_add(core::mem::size_of::<Health>())?
+        .checked_add(core::mem::size_of::<usize>().checked_mul(2)?)?;
+    let dependency_entries = profile.modules.iter().try_fold(0usize, |total, module| {
+        total.checked_add(module.requires.len())
+    })?;
+    let metadata_bytes = modules
+        .checked_mul(per_module)?
+        .checked_add(dependency_entries.checked_mul(core::mem::size_of::<usize>())?)?
+        .checked_add(
+            capabilities
+                .checked_add(services)?
+                .checked_mul(core::mem::size_of::<&'static str>())?,
+        )?;
     let memory_budget = usize::try_from(memory_budget / 1024).ok()?;
     (metadata_bytes <= memory_budget).then_some(AssemblyCapacityPlan {
         modules,
@@ -337,21 +353,20 @@ enum Phase {
 /// 一份 Profile 的运行时装配状态。
 #[derive(Clone)]
 pub struct Assembly {
-    modules: [Option<&'static ModuleDecl>; MAX_MODULES],
-    bindings: [Option<Binding>; MAX_MODULES],
-    state: [State; MAX_MODULES],
-    reason: [&'static str; MAX_MODULES],
-    /// 第 i 个模块依赖的提供者模块位图。
-    deps: [u16; MAX_MODULES],
+    modules: Vec<&'static ModuleDecl>,
+    bindings: Vec<Binding>,
+    state: Vec<State>,
+    reason: Vec<&'static str>,
+    /// 第 i 个模块依赖的提供者模块下标。
+    deps: Vec<Vec<usize>>,
     /// 第 i 个模块提供的能力位图（对应解析后的 Profile 能力顺序）。
-    provides_mask: [u32; MAX_MODULES],
+    provides_mask: Vec<u32>,
     /// 第 i 个模块的运行时健康状态。
-    health: [Health; MAX_MODULES],
+    health: Vec<Health>,
     /// 启动顺序（模块下标）。
-    order: [u8; MAX_MODULES],
+    order: Vec<usize>,
     /// 实际就绪顺序（用于逆序回滚 / 停用）。
-    started: [u8; MAX_MODULES],
-    started_len: usize,
+    started: Vec<usize>,
     count: usize,
     phase: Phase,
 }
@@ -359,28 +374,32 @@ pub struct Assembly {
 impl Assembly {
     /// 为一份 Profile 建立装配：校验 Profile、为每个声明的模块找唯一绑定、推出依赖与启动顺序。
     /// English: build the assembly; validates the profile, bindings and dependency order.
-    pub fn new(profile: &'static SystemProfile, bindings: &[Binding]) -> Result<Self, AssemblyError> {
+    pub fn new(
+        profile: &'static SystemProfile,
+        bindings: &[Binding],
+    ) -> Result<Self, AssemblyError> {
         let declared = profile::resolve(profile).map_err(|_| AssemblyError::ProfileInvalid)?;
-        if profile.modules.len() > MAX_MODULES {
-            return Err(AssemblyError::TooManyModules);
+        if declared.capabilities().len() > u32::BITS as usize {
+            return Err(AssemblyError::TooManyCapabilities);
         }
         let count = profile.modules.len();
+        let capacity = count.max(1);
         let mut a = Assembly {
-            modules: [None; MAX_MODULES],
-            bindings: [None; MAX_MODULES],
-            state: [State::Declared; MAX_MODULES],
-            reason: [""; MAX_MODULES],
-            deps: [0; MAX_MODULES],
-            provides_mask: [0; MAX_MODULES],
-            health: [Health::Unknown; MAX_MODULES],
-            order: [0; MAX_MODULES],
-            started: [0; MAX_MODULES],
-            started_len: 0,
+            modules: Vec::new(),
+            bindings: Vec::new(),
+            state: Vec::new(),
+            reason: Vec::new(),
+            deps: Vec::new(),
+            provides_mask: Vec::new(),
+            health: Vec::new(),
+            order: Vec::new(),
+            started: Vec::new(),
             count,
             phase: Phase::Idle,
         };
+        a.reserve_metadata(capacity)?;
         for (i, m) in profile.modules.iter().enumerate() {
-            a.modules[i] = Some(m);
+            a.modules.push(m);
             let mut found = None;
             for b in bindings.iter().filter(|b| b.module == m.name) {
                 if found.is_some() {
@@ -388,10 +407,17 @@ impl Assembly {
                 }
                 found = Some(*b);
             }
-            a.bindings[i] = Some(found.ok_or(AssemblyError::MissingBinding(m.name))?);
+            a.bindings
+                .push(found.ok_or(AssemblyError::MissingBinding(m.name))?);
+            a.state.push(State::Declared);
+            a.reason.push("");
+            a.deps.push(Vec::new());
+            a.provides_mask.push(0);
+            a.health.push(Health::Unknown);
+            a.order.push(i);
         }
         for i in 0..count {
-            let binding = a.bindings[i].expect("binding slot below count is filled");
+            let binding = a.bindings[i];
             if !valid_module_version(binding.version) {
                 return Err(AssemblyError::InvalidVersion(binding.module));
             }
@@ -403,25 +429,64 @@ impl Assembly {
         }
         // resolve 已保证每项所需能力恰好有一个提供者，且模块不依赖自己提供的能力。
         for i in 0..count {
-            let m = a.module(i);
+            let m = profile.modules[i];
             for (bit, capability) in declared.capabilities().iter().enumerate() {
                 if m.provides.contains(capability) {
                     a.provides_mask[i] |= 1 << bit;
                 }
             }
+            let mut providers = Vec::new();
+            providers
+                .try_reserve_exact(m.requires.len())
+                .map_err(|_| AssemblyError::Allocation)?;
             for cap in m.requires {
                 debug_assert!(declared.has_capability(cap));
-                if let Some(p) = a.provider(cap) {
-                    a.deps[i] |= 1 << p;
+                if let Some(p) =
+                    (0..count).find(|&candidate| profile.modules[candidate].provides.contains(&cap))
+                {
+                    providers.push(p);
                 }
             }
+            a.deps[i] = providers;
         }
         a.order_by_dependencies()?;
         Ok(a)
     }
 
     fn module(&self, i: usize) -> &'static ModuleDecl {
-        self.modules[i].expect("module slot below count is filled")
+        self.modules[i]
+    }
+
+    fn reserve_metadata(&mut self, count: usize) -> Result<(), AssemblyError> {
+        let allocation = || AssemblyError::Allocation;
+        self.modules
+            .try_reserve_exact(count)
+            .map_err(|_| allocation())?;
+        self.bindings
+            .try_reserve_exact(count)
+            .map_err(|_| allocation())?;
+        self.state
+            .try_reserve_exact(count)
+            .map_err(|_| allocation())?;
+        self.reason
+            .try_reserve_exact(count)
+            .map_err(|_| allocation())?;
+        self.deps
+            .try_reserve_exact(count)
+            .map_err(|_| allocation())?;
+        self.provides_mask
+            .try_reserve_exact(count)
+            .map_err(|_| allocation())?;
+        self.health
+            .try_reserve_exact(count)
+            .map_err(|_| allocation())?;
+        self.order
+            .try_reserve_exact(count)
+            .map_err(|_| allocation())?;
+        self.started
+            .try_reserve_exact(count)
+            .map_err(|_| allocation())?;
+        Ok(())
     }
 
     /// 提供某能力的模块下标。
@@ -431,16 +496,21 @@ impl Assembly {
 
     /// 稳定拓扑序（Kahn）：每轮取声明顺序最靠前、依赖已全部排入的模块。
     fn order_by_dependencies(&mut self) -> Result<(), AssemblyError> {
-        let mut placed: u16 = 0;
+        let mut placed = Vec::new();
+        placed
+            .try_reserve_exact(self.count)
+            .map_err(|_| AssemblyError::Allocation)?;
+        placed.resize(self.count, false);
         for slot in 0..self.count {
-            let next = (0..self.count).find(|&i| placed & (1 << i) == 0 && self.deps[i] & !placed == 0);
+            let next = (0..self.count)
+                .find(|&i| !placed[i] && self.deps[i].iter().all(|dependency| placed[*dependency]));
             match next {
                 Some(i) => {
-                    self.order[slot] = i as u8;
-                    placed |= 1 << i;
+                    self.order[slot] = i;
+                    placed[i] = true;
                 }
                 None => {
-                    let first = (0..self.count).find(|&i| placed & (1 << i) == 0).unwrap_or(0);
+                    let first = (0..self.count).find(|&i| !placed[i]).unwrap_or(0);
                     return Err(AssemblyError::DependencyCycle(self.module(first).name));
                 }
             }
@@ -448,8 +518,10 @@ impl Assembly {
         Ok(())
     }
 
-    fn ready_mask(&self) -> u16 {
-        (0..self.count).filter(|&i| self.state[i] == State::Ready).fold(0, |m, i| m | (1 << i))
+    fn deps_ready(&self, i: usize) -> bool {
+        self.deps[i]
+            .iter()
+            .all(|dependency| self.state[*dependency] == State::Ready)
     }
 
     /// 模块自身及其全部传递依赖的生效健康状态。
@@ -459,13 +531,11 @@ impl Assembly {
             return Health::Unhealthy;
         }
         let mut result = self.health[i];
-        for j in 0..self.count {
-            if self.deps[i] & (1 << j) != 0 {
-                match self.effective_health_at(j) {
-                    Health::Unhealthy => return Health::Unhealthy,
-                    Health::Degraded | Health::Unknown => result = Health::Degraded,
-                    Health::Healthy => {}
-                }
+        for dependency in &self.deps[i] {
+            match self.effective_health_at(*dependency) {
+                Health::Unhealthy => return Health::Unhealthy,
+                Health::Degraded | Health::Unknown => result = Health::Degraded,
+                Health::Healthy => {}
             }
         }
         result
@@ -498,20 +568,19 @@ impl Assembly {
                 report.unattempted += 1;
                 continue;
             }
-            if self.deps[i] & !self.ready_mask() != 0 {
+            if !self.deps_ready(i) {
                 self.state[i] = State::Blocked;
                 self.reason[i] = self.first_unmet(i);
                 report.blocked += 1;
                 continue;
             }
             self.state[i] = State::Initializing;
-            let binding = self.bindings[i].expect("binding slot below count is filled");
+            let binding = self.bindings[i];
             match (binding.activate)() {
                 Ok(()) => {
                     self.state[i] = State::Ready;
                     self.health[i] = Health::Healthy;
-                    self.started[self.started_len] = i as u8;
-                    self.started_len += 1;
+                    self.started.push(i);
                 }
                 Err(why) => {
                     self.state[i] = State::Failed;
@@ -524,7 +593,11 @@ impl Assembly {
                 }
             }
         }
-        report.ready = self.ready_mask().count_ones() as u8;
+        report.ready = self
+            .state
+            .iter()
+            .filter(|state| **state == State::Ready)
+            .count();
         Ok(report)
     }
 
@@ -544,12 +617,12 @@ impl Assembly {
         if matches!(self.state[i], State::Ready | State::Initializing) {
             return Err(AssemblyError::NotReady(self.state[i]));
         }
-        if self.deps[i] & !self.ready_mask() != 0 {
+        if !self.deps_ready(i) {
             self.state[i] = State::Blocked;
             self.reason[i] = self.first_unmet(i);
             return Err(AssemblyError::NotReady(State::Blocked));
         }
-        let binding = self.bindings[i].expect("binding slot below count is filled");
+        let binding = self.bindings[i];
         if binding.deactivate.is_none() {
             return Err(AssemblyError::Permanent);
         }
@@ -559,8 +632,7 @@ impl Assembly {
                 self.state[i] = State::Ready;
                 self.health[i] = Health::Healthy;
                 self.reason[i] = "";
-                self.started[self.started_len] = i as u8;
-                self.started_len += 1;
+                self.started.push(i);
                 Ok(())
             }
             Err(reason) => {
@@ -572,14 +644,12 @@ impl Assembly {
     }
 
     /// 按就绪逆序撤回全部就绪模块；可停用者调用 `deactivate`。返回撤回个数。
-    fn rollback(&mut self) -> u8 {
+    fn rollback(&mut self) -> usize {
         let mut n = 0;
-        while self.started_len > 0 {
-            self.started_len -= 1;
-            let i = self.started[self.started_len] as usize;
+        while let Some(i) = self.started.pop() {
             self.state[i] = State::Stopped;
             self.health[i] = Health::Unknown;
-            if let Some(fini) = self.bindings[i].and_then(|b| b.deactivate) {
+            if let Some(fini) = self.bindings[i].deactivate {
                 fini();
             }
             n += 1;
@@ -596,14 +666,20 @@ impl Assembly {
         if self.phase != Phase::Started {
             return Err(AssemblyError::NotStarted);
         }
-        let i = (0..self.count).find(|&i| self.module(i).name == name).ok_or(AssemblyError::UnknownModule)?;
+        let i = (0..self.count)
+            .find(|&i| self.module(i).name == name)
+            .ok_or(AssemblyError::UnknownModule)?;
         if self.state[i] != State::Ready {
             return Err(AssemblyError::NotReady(self.state[i]));
         }
-        if let Some(user) = (0..self.count).find(|&j| self.state[j] == State::Ready && self.deps[j] & (1 << i) != 0) {
+        if let Some(user) =
+            (0..self.count).find(|&j| self.state[j] == State::Ready && self.deps[j].contains(&i))
+        {
             return Err(AssemblyError::InUse(self.module(user).name));
         }
-        self.bindings[i].and_then(|b| b.deactivate).ok_or(AssemblyError::Permanent)?;
+        self.bindings[i]
+            .deactivate
+            .ok_or(AssemblyError::Permanent)?;
         Ok(self.provides_mask[i])
     }
 
@@ -611,16 +687,27 @@ impl Assembly {
     ///
     /// 所有拒绝条件在调用 `withdraw` 之前检查，因此 `in_use` / `permanent` 不会造成部分撤位。
     /// English: stop one module after the publisher withdraws its bits and drains readers.
-    pub fn stop_with(&mut self, name: &str, mut withdraw: impl FnMut(u32)) -> Result<(), AssemblyError> {
+    pub fn stop_with(
+        &mut self,
+        name: &str,
+        mut withdraw: impl FnMut(u32),
+    ) -> Result<(), AssemblyError> {
         let bits = self.preflight_stop(name)?;
-        let i = (0..self.count).find(|&i| self.module(i).name == name).expect("preflight found the module");
-        let fini = self.bindings[i].and_then(|b| b.deactivate).expect("preflight checked deactivate");
+        let i = (0..self.count)
+            .find(|&i| self.module(i).name == name)
+            .expect("preflight found the module");
+        let fini = self.bindings[i]
+            .deactivate
+            .expect("preflight checked deactivate");
         withdraw(bits);
         self.state[i] = State::Stopped;
         self.health[i] = Health::Unknown;
-        let at = self.started[..self.started_len].iter().position(|&s| s as usize == i).expect("ready module is in the started list");
-        self.started.copy_within(at + 1..self.started_len, at);
-        self.started_len -= 1;
+        let at = self
+            .started
+            .iter()
+            .position(|started| *started == i)
+            .expect("ready module is in the started list");
+        self.started.remove(at);
         fini();
         Ok(())
     }
@@ -635,10 +722,12 @@ impl Assembly {
     /// 按就绪逆序停用全部可停用模块；返回 (停用个数, 因常驻或仍被常驻模块依赖而保留的个数)。
     pub fn stop_all(&mut self) -> (usize, usize) {
         let (mut stopped, mut kept) = (0, 0);
-        let mut k = self.started_len;
-        while k > 0 {
-            k -= 1;
-            let i = self.started[k] as usize;
+        let mut pending = Vec::new();
+        if pending.try_reserve_exact(self.started.len()).is_err() {
+            return (0, self.started.len());
+        }
+        pending.extend_from_slice(&self.started);
+        for i in pending.into_iter().rev() {
             match self.stop(self.module(i).name) {
                 Ok(()) => stopped += 1,
                 Err(_) => kept += 1,
@@ -659,25 +748,29 @@ impl Assembly {
 
     /// 第 k 个启动的模块名（依赖顺序）。
     pub fn order(&self, k: usize) -> Option<&'static str> {
-        (k < self.count).then(|| self.module(self.order[k] as usize).name)
+        (k < self.count).then(|| self.module(self.order[k]).name)
     }
 
     /// 某模块的状态与原因（失败原因或缺的能力名；无则为空串）。
     pub fn state(&self, name: &str) -> Option<(State, &'static str)> {
-        (0..self.count).find(|&i| self.module(i).name == name).map(|i| (self.state[i], self.reason[i]))
+        (0..self.count)
+            .find(|&i| self.module(i).name == name)
+            .map(|i| (self.state[i], self.reason[i]))
     }
 
     /// 某模块的运行时健康状态。
     /// Runtime health of one module.
     pub fn health(&self, name: &str) -> Option<Health> {
-        (0..self.count).find(|&i| self.module(i).name == name).map(|i| self.health[i])
+        (0..self.count)
+            .find(|&i| self.module(i).name == name)
+            .map(|i| self.health[i])
     }
 
     /// 已绑定实现版本。
     pub fn version(&self, name: &str) -> Option<&'static str> {
         (0..self.count)
             .find(|&i| self.module(i).name == name)
-            .and_then(|i| self.bindings[i])
+            .map(|i| self.bindings[i])
             .map(|binding| binding.version)
     }
 
@@ -698,7 +791,9 @@ impl Assembly {
         if health == Health::Unknown {
             return Err(AssemblyError::InvalidHealth);
         }
-        let i = (0..self.count).find(|&i| self.module(i).name == name).ok_or(AssemblyError::UnknownModule)?;
+        let i = (0..self.count)
+            .find(|&i| self.module(i).name == name)
+            .ok_or(AssemblyError::UnknownModule)?;
         if self.state[i] != State::Ready {
             return Err(AssemblyError::NotReady(self.state[i]));
         }
@@ -710,12 +805,19 @@ impl Assembly {
     /// 模块提供的能力位图。
     /// Capability bits provided by one module.
     pub fn module_mask(&self, name: &str) -> Option<u32> {
-        (0..self.count).find(|&i| self.module(i).name == name).map(|i| self.provides_mask[i])
+        (0..self.count)
+            .find(|&i| self.module(i).name == name)
+            .map(|i| self.provides_mask[i])
     }
 
     /// 假设只改变一个模块的健康状态时，装配应发布的完整掩码；不修改装配。
     /// Publication mask that would follow one health change, without mutating the assembly.
-    pub fn mask_with_health(&self, name: &str, health: Health, declared: &ResolvedProfile) -> Option<u32> {
+    pub fn mask_with_health(
+        &self,
+        name: &str,
+        health: Health,
+        declared: &ResolvedProfile,
+    ) -> Option<u32> {
         let i = (0..self.count).find(|&i| self.module(i).name == name)?;
         let mut copy = self.clone();
         copy.health[i] = health;
@@ -731,7 +833,9 @@ impl Assembly {
         declared: &ResolvedProfile,
         mask: u32,
     ) -> Result<(), AuditError> {
-        let i = (0..self.count).find(|&i| self.module(i).name == name).ok_or(AuditError::UnknownModule)?;
+        let i = (0..self.count)
+            .find(|&i| self.module(i).name == name)
+            .ok_or(AuditError::UnknownModule)?;
         let mut copy = self.clone();
         copy.health[i] = health;
         copy.audit(declared, mask)
@@ -757,7 +861,12 @@ impl Assembly {
             .capabilities()
             .iter()
             .enumerate()
-            .filter(|(_, c)| matches!(self.availability(c), Availability::Ready | Availability::Degraded))
+            .filter(|(_, c)| {
+                matches!(
+                    self.availability(c),
+                    Availability::Ready | Availability::Degraded
+                )
+            })
             .fold(0, |m, (b, _)| m | (1 << b))
     }
 
@@ -765,13 +874,20 @@ impl Assembly {
     /// English: audit a published mask against the runtime state.
     pub fn audit(&self, declared: &ResolvedProfile, mask: u32) -> Result<(), AuditError> {
         let caps = declared.capabilities();
-        let known = if caps.len() >= 32 { u32::MAX } else { (1u32 << caps.len()) - 1 };
+        let known = if caps.len() >= 32 {
+            u32::MAX
+        } else {
+            (1u32 << caps.len()) - 1
+        };
         if mask & !known != 0 {
             return Err(AuditError::UnknownBit(mask & !known));
         }
         for (b, cap) in caps.iter().enumerate() {
             let published = mask & (1 << b) != 0;
-            let ready = matches!(self.availability(cap), Availability::Ready | Availability::Degraded);
+            let ready = matches!(
+                self.availability(cap),
+                Availability::Ready | Availability::Degraded
+            );
             if published && !ready {
                 return Err(AuditError::PublishedNotReady(cap));
             }
@@ -780,7 +896,8 @@ impl Assembly {
             }
         }
         for i in 0..self.count {
-            if mask & self.provides_mask[i] != 0 && self.effective_health_at(i) == Health::Unhealthy {
+            if mask & self.provides_mask[i] != 0 && self.effective_health_at(i) == Health::Unhealthy
+            {
                 return Err(AuditError::DependencyNotReady(self.module(i).name));
             }
         }
@@ -791,7 +908,11 @@ impl Assembly {
 /// 读发布掩码：`cap` 在 `declared` 中且对应位已置 ⇒ 可用。
 /// English: true when `cap` is declared and its bit is set in `mask`.
 pub fn mask_has(declared: &ResolvedProfile, mask: u32, cap: &str) -> bool {
-    declared.capabilities().iter().position(|c| *c == cap).is_some_and(|b| b < 32 && mask & (1 << b) != 0)
+    declared
+        .capabilities()
+        .iter()
+        .position(|c| *c == cap)
+        .is_some_and(|b| b < 32 && mask & (1 << b) != 0)
 }
 
 /// Validate the stable module version form without allocation.
@@ -832,7 +953,11 @@ mod tests {
         mine
     }
 
-    const fn decl(name: &'static str, provides: &'static [&'static str], requires: &'static [&'static str]) -> ModuleDecl {
+    const fn decl(
+        name: &'static str,
+        provides: &'static [&'static str],
+        requires: &'static [&'static str],
+    ) -> ModuleDecl {
         ModuleDecl {
             name,
             provides,
@@ -893,7 +1018,11 @@ mod tests {
         log("a:fini top");
     }
 
-    const fn b(module: &'static str, activate: Activate, deactivate: Option<Deactivate>) -> Binding {
+    const fn b(
+        module: &'static str,
+        activate: Activate,
+        deactivate: Option<Deactivate>,
+    ) -> Binding {
         Binding {
             module,
             version: "1.0.0",
@@ -917,17 +1046,33 @@ mod tests {
         let order: Vec<_> = (0..4).map(|k| a.order(k).unwrap()).collect();
         assert_eq!(order, ["base", "mid", "top", "side"]);
         let declared = profile::resolve(&T_PROFILE).unwrap();
-        assert_eq!(a.published_mask(&declared), 0, "nothing is published before start");
-        assert_eq!(a.availability("t.base"), Availability::Pending(State::Declared));
+        assert_eq!(
+            a.published_mask(&declared),
+            0,
+            "nothing is published before start"
+        );
+        assert_eq!(
+            a.availability("t.base"),
+            Availability::Pending(State::Declared)
+        );
         assert_eq!(a.availability("t.none"), Availability::NotDeclared);
         let r = a.start(Policy::AllOrNothing).unwrap();
-        assert_eq!(r, Report { ready: 4, ..Report::default() });
+        assert_eq!(
+            r,
+            Report {
+                ready: 4,
+                ..Report::default()
+            }
+        );
         assert_eq!(take("a:"), ["a:base", "a:mid", "a:top", "a:side"]);
         let mask = a.published_mask(&declared);
         assert_eq!(mask.count_ones(), 4);
         assert!(mask_has(&declared, mask, "t.top"));
         assert_eq!(a.audit(&declared, mask), Ok(()));
-        assert_eq!(a.start(Policy::AllOrNothing), Err(AssemblyError::AlreadyStarted));
+        assert_eq!(
+            a.start(Policy::AllOrNothing),
+            Err(AssemblyError::AlreadyStarted)
+        );
         assert!(take("a:").is_empty(), "repeated start runs no activate");
         // 停用：被依赖者拒绝；常驻拒绝；依赖者先停后才能停被依赖者。
         assert_eq!(a.stop("base"), Err(AssemblyError::InUse("mid")));
@@ -953,53 +1098,129 @@ mod tests {
         ];
         let mut a = Assembly::new(&T_PROFILE, &binds).unwrap();
         let r = a.start(Policy::AllOrNothing).unwrap();
-        assert_eq!(r, Report { ready: 0, failed: 1, blocked: 0, rolled_back: 1, unattempted: 2 });
+        assert_eq!(
+            r,
+            Report {
+                ready: 0,
+                failed: 1,
+                blocked: 0,
+                rolled_back: 1,
+                unattempted: 2
+            }
+        );
         assert_eq!(take("a:"), ["a:base", "a:mid-fail", "a:fini base"]);
         assert_eq!(a.state("mid"), Some((State::Failed, "mid broke")));
         assert_eq!(a.state("base"), Some((State::Stopped, "")));
         assert_eq!(a.state("top"), Some((State::Declared, "")));
         let declared = profile::resolve(&T_PROFILE).unwrap();
         assert_eq!(a.published_mask(&declared), 0);
-        assert_eq!(a.audit(&declared, 1), Err(AuditError::PublishedNotReady(declared.capabilities()[0])));
+        assert_eq!(
+            a.audit(&declared, 1),
+            Err(AuditError::PublishedNotReady(declared.capabilities()[0]))
+        );
     }
 
     #[test]
     fn failure_partial_blocks_dependents_only() {
         let _serial = serial();
-        let binds = [b("top", ok_top, None), b("mid", bad_mid, None), b("base", ok_base, None), b("side", ok_side, None)];
+        let binds = [
+            b("top", ok_top, None),
+            b("mid", bad_mid, None),
+            b("base", ok_base, None),
+            b("side", ok_side, None),
+        ];
         let mut a = Assembly::new(&T_PROFILE, &binds).unwrap();
         let r = a.start(Policy::Partial).unwrap();
-        assert_eq!(r, Report { ready: 2, failed: 1, blocked: 1, rolled_back: 0, unattempted: 0 });
-        assert_eq!(take("a:"), ["a:base", "a:mid-fail", "a:side"], "blocked top never activates");
+        assert_eq!(
+            r,
+            Report {
+                ready: 2,
+                failed: 1,
+                blocked: 1,
+                rolled_back: 0,
+                unattempted: 0
+            }
+        );
+        assert_eq!(
+            take("a:"),
+            ["a:base", "a:mid-fail", "a:side"],
+            "blocked top never activates"
+        );
         assert_eq!(a.state("top"), Some((State::Blocked, "t.mid")));
-        assert_eq!(a.availability("t.top"), Availability::Pending(State::Blocked));
+        assert_eq!(
+            a.availability("t.top"),
+            Availability::Pending(State::Blocked)
+        );
         let declared = profile::resolve(&T_PROFILE).unwrap();
         let mask = a.published_mask(&declared);
         assert!(mask_has(&declared, mask, "t.side") && !mask_has(&declared, mask, "t.mid"));
         assert_eq!(a.audit(&declared, mask), Ok(()));
         let all = (1u32 << declared.capabilities().len()) - 1;
-        assert!(matches!(a.audit(&declared, all), Err(AuditError::PublishedNotReady(_))));
-        assert!(matches!(a.audit(&declared, 0), Err(AuditError::ReadyNotPublished(_))));
-        assert_eq!(a.audit(&declared, 1 << 20), Err(AuditError::UnknownBit(1 << 20)));
+        assert!(matches!(
+            a.audit(&declared, all),
+            Err(AuditError::PublishedNotReady(_))
+        ));
+        assert!(matches!(
+            a.audit(&declared, 0),
+            Err(AuditError::ReadyNotPublished(_))
+        ));
+        assert_eq!(
+            a.audit(&declared, 1 << 20),
+            Err(AuditError::UnknownBit(1 << 20))
+        );
     }
 
-    static C_MODULES: &[ModuleDecl] = &[decl("x", &["c.x"], &["c.y"]), decl("y", &["c.y"], &["c.x"])];
-    static C_PROFILE: SystemProfile = SystemProfile { modules: C_MODULES, name: "cycle-test", ..T_BASE };
+    static C_MODULES: &[ModuleDecl] =
+        &[decl("x", &["c.x"], &["c.y"]), decl("y", &["c.y"], &["c.x"])];
+    static C_PROFILE: SystemProfile = SystemProfile {
+        modules: C_MODULES,
+        name: "cycle-test",
+        ..T_BASE
+    };
 
     #[test]
     fn construction_rejects_bad_bindings_cycles_and_invalid_profiles() {
-        let binds = [b("top", ok_top, None), b("mid", ok_mid, None), b("base", ok_base, None)];
-        assert_eq!(Assembly::new(&T_PROFILE, &binds).err(), Some(AssemblyError::MissingBinding("side")));
-        let dup = [b("top", ok_top, None), b("mid", ok_mid, None), b("base", ok_base, None), b("side", ok_side, None), b("mid", ok_mid, None)];
-        assert_eq!(Assembly::new(&T_PROFILE, &dup).err(), Some(AssemblyError::DuplicateBinding("mid")));
+        let binds = [
+            b("top", ok_top, None),
+            b("mid", ok_mid, None),
+            b("base", ok_base, None),
+        ];
+        assert_eq!(
+            Assembly::new(&T_PROFILE, &binds).err(),
+            Some(AssemblyError::MissingBinding("side"))
+        );
+        let dup = [
+            b("top", ok_top, None),
+            b("mid", ok_mid, None),
+            b("base", ok_base, None),
+            b("side", ok_side, None),
+            b("mid", ok_mid, None),
+        ];
+        assert_eq!(
+            Assembly::new(&T_PROFILE, &dup).err(),
+            Some(AssemblyError::DuplicateBinding("mid"))
+        );
         let cb = [b("x", ok_top, None), b("y", ok_mid, None)];
-        assert_eq!(Assembly::new(&C_PROFILE, &cb).err(), Some(AssemblyError::DependencyCycle("x")));
+        assert_eq!(
+            Assembly::new(&C_PROFILE, &cb).err(),
+            Some(AssemblyError::DependencyCycle("x"))
+        );
         static BAD_MODULES: &[ModuleDecl] = &[decl("lonely", &["b.x"], &["b.missing"])];
-        static BAD: SystemProfile = SystemProfile { modules: BAD_MODULES, name: "bad", ..T_BASE };
-        assert_eq!(Assembly::new(&BAD, &[b("lonely", ok_top, None)]).err(), Some(AssemblyError::ProfileInvalid));
+        static BAD: SystemProfile = SystemProfile {
+            modules: BAD_MODULES,
+            name: "bad",
+            ..T_BASE
+        };
+        assert_eq!(
+            Assembly::new(&BAD, &[b("lonely", ok_top, None)]).err(),
+            Some(AssemblyError::ProfileInvalid)
+        );
         let mut a = Assembly::new(&T_PROFILE, &dup[..4]).unwrap();
         assert_eq!(a.stop("top"), Err(AssemblyError::NotStarted));
-        assert_eq!(AssemblyError::DependencyCycle("").name(), "system.module.error.dependency_cycle");
+        assert_eq!(
+            AssemblyError::DependencyCycle("").name(),
+            "system.module.error.dependency_cycle"
+        );
         take("a:");
     }
 
@@ -1049,7 +1270,9 @@ mod tests {
         fn ok() -> Result<(), &'static str> {
             Ok(())
         }
-        let names = ["core", "memory", "time", "sched", "channel", "realtime", "job", "async", "devices"];
+        let names = [
+            "core", "memory", "time", "sched", "channel", "realtime", "job", "async", "devices",
+        ];
         let binds: Vec<Binding> = names.iter().map(|n| b(n, ok, None)).collect();
         let mut a = Assembly::new(&HEADLESS, &binds).unwrap();
         assert_eq!(a.order(0), Some("core"));
@@ -1058,7 +1281,9 @@ mod tests {
         let mask = a.published_mask(&declared);
         assert_eq!(mask.count_ones() as usize, declared.capabilities().len());
         assert_eq!(a.audit(&declared, mask), Ok(()));
-        let degraded = a.mask_with_health("devices", Health::Unhealthy, &declared).unwrap();
+        let degraded = a
+            .mask_with_health("devices", Health::Unhealthy, &declared)
+            .unwrap();
         assert_eq!(a.availability("device.pci"), Availability::Ready);
         assert!(!mask_has(&declared, degraded, "device.pci"));
         assert_eq!(
@@ -1067,6 +1292,64 @@ mod tests {
             "prospective health audit must use the prospective state"
         );
         take("a:");
+    }
+
+    #[test]
+    fn heap_backed_assembly_grows_past_previous_sixteen_module_limit() {
+        fn ready() -> Result<(), &'static str> {
+            Ok(())
+        }
+        let modules: Vec<ModuleDecl> = (0..20)
+            .map(|index| {
+                let name = Box::leak(format!("module-{index}").into_boxed_str());
+                let capability = Box::leak(format!("dyn.c{index:02}").into_boxed_str());
+                let provides = Box::leak(vec![&*capability].into_boxed_slice());
+                decl(name, provides, &[])
+            })
+            .collect();
+        let modules: &'static [ModuleDecl] = Box::leak(modules.into_boxed_slice());
+        let profile: &'static SystemProfile = Box::leak(Box::new(SystemProfile {
+            name: "large-assembly",
+            modules,
+            ..T_BASE
+        }));
+        let bindings: Vec<Binding> = modules
+            .iter()
+            .map(|module| b(module.name, ready, None))
+            .collect();
+        let mut assembly = Assembly::new(profile, &bindings).unwrap();
+        assert_eq!(assembly.len(), 20);
+        assert_eq!(assembly.start(Policy::AllOrNothing).unwrap().ready, 20);
+        assert_eq!(assembly.order(19), Some("module-19"));
+    }
+
+    #[test]
+    fn capability_publication_protocol_width_is_reported_explicitly() {
+        fn ready() -> Result<(), &'static str> {
+            Ok(())
+        }
+        let modules: Vec<ModuleDecl> = (0..33)
+            .map(|index| {
+                let name = Box::leak(format!("cap-module-{index}").into_boxed_str());
+                let capability = Box::leak(format!("wide.c{index:02}").into_boxed_str());
+                let provides = Box::leak(vec![&*capability].into_boxed_slice());
+                decl(name, provides, &[])
+            })
+            .collect();
+        let modules: &'static [ModuleDecl] = Box::leak(modules.into_boxed_slice());
+        let profile: &'static SystemProfile = Box::leak(Box::new(SystemProfile {
+            name: "wide-capabilities",
+            modules,
+            ..T_BASE
+        }));
+        let bindings: Vec<Binding> = modules
+            .iter()
+            .map(|module| b(module.name, ready, None))
+            .collect();
+        assert_eq!(
+            Assembly::new(profile, &bindings).err(),
+            Some(AssemblyError::TooManyCapabilities)
+        );
     }
 
     #[test]
@@ -1099,11 +1382,17 @@ mod tests {
         assert_eq!(operations, kernel_base + module_services);
         assert_eq!(
             operation_route(&HEADLESS, "system.sync.mutex.try.acquire"),
-            Some(OperationRoute { module: "core", service: "system.sync" })
+            Some(OperationRoute {
+                module: "core",
+                service: "system.sync"
+            })
         );
         assert_eq!(
             operation_route(&HEADLESS, "system.event.source.create"),
-            Some(OperationRoute { module: "async", service: "system.event" })
+            Some(OperationRoute {
+                module: "async",
+                service: "system.event"
+            })
         );
         assert_eq!(
             operation_route(&profile::HEADLESS_MIN, "system.event.source.create"),
@@ -1112,7 +1401,10 @@ mod tests {
         );
         assert_eq!(
             operation_route(&profile::HEADLESS_MIN, "system.time.now"),
-            Some(OperationRoute { module: "time", service: "system.time" })
+            Some(OperationRoute {
+                module: "time",
+                service: "system.time"
+            })
         );
         assert_eq!(operation_route(&HEADLESS, "system.taskish.escape"), None);
     }
@@ -1168,7 +1460,10 @@ mod tests {
         let mask = a.published_mask(&declared);
         assert!(mask_has(&declared, mask, "t.top"));
         assert_eq!(a.audit(&declared, mask), Ok(()));
-        assert_eq!(a.start_one("top"), Err(AssemblyError::NotReady(State::Ready)));
+        assert_eq!(
+            a.start_one("top"),
+            Err(AssemblyError::NotReady(State::Ready))
+        );
         a.stop("top").unwrap();
         take("a:");
     }
@@ -1186,25 +1481,43 @@ mod tests {
         a.start(Policy::AllOrNothing).unwrap();
         let declared = profile::resolve(&T_PROFILE).unwrap();
         let all = a.published_mask(&declared);
-        assert_eq!(a.set_health("base", Health::Unknown), Err(AssemblyError::InvalidHealth));
+        assert_eq!(
+            a.set_health("base", Health::Unknown),
+            Err(AssemblyError::InvalidHealth)
+        );
         assert_eq!(a.health("base"), Some(Health::Healthy));
-        assert_eq!(a.set_health("missing", Health::Degraded), Err(AssemblyError::UnknownModule));
+        assert_eq!(
+            a.set_health("missing", Health::Degraded),
+            Err(AssemblyError::UnknownModule)
+        );
         assert_eq!(a.set_health("base", Health::Degraded), Ok(Health::Healthy));
         assert_eq!(a.availability("t.base"), Availability::Degraded);
         assert_eq!(a.availability("t.mid"), Availability::Degraded);
-        assert_eq!(a.published_mask(&declared), all, "degraded services stay reachable");
+        assert_eq!(
+            a.published_mask(&declared),
+            all,
+            "degraded services stay reachable"
+        );
 
-        let next = a.mask_with_health("base", Health::Unhealthy, &declared).unwrap();
+        let next = a
+            .mask_with_health("base", Health::Unhealthy, &declared)
+            .unwrap();
         assert!(!mask_has(&declared, next, "t.base"));
         assert!(!mask_has(&declared, next, "t.mid"));
         assert!(!mask_has(&declared, next, "t.top"));
         assert!(mask_has(&declared, next, "t.side"));
-        assert_eq!(a.set_health("base", Health::Unhealthy), Ok(Health::Degraded));
+        assert_eq!(
+            a.set_health("base", Health::Unhealthy),
+            Ok(Health::Degraded)
+        );
         assert_eq!(a.state("base"), Some((State::Ready, "")));
         assert_eq!(a.health("base"), Some(Health::Unhealthy));
         assert_eq!(a.published_mask(&declared), next);
         assert_eq!(a.audit(&declared, next), Ok(()));
-        assert!(matches!(a.audit(&declared, all), Err(AuditError::PublishedNotReady(_))));
+        assert!(matches!(
+            a.audit(&declared, all),
+            Err(AuditError::PublishedNotReady(_))
+        ));
         assert_eq!(a.set_health("base", Health::Healthy), Ok(Health::Unhealthy));
         assert_eq!(a.published_mask(&declared), all);
         assert_eq!(a.audit(&declared, all), Ok(()));
@@ -1229,7 +1542,11 @@ mod proofs {
     use crate::config::KernelConfig;
     use crate::profile::SchedClass;
 
-    const fn decl(name: &'static str, provides: &'static [&'static str], requires: &'static [&'static str]) -> ModuleDecl {
+    const fn decl(
+        name: &'static str,
+        provides: &'static [&'static str],
+        requires: &'static [&'static str],
+    ) -> ModuleDecl {
         ModuleDecl {
             name,
             provides,
@@ -1268,14 +1585,42 @@ mod proofs {
     #[kani::proof]
     #[kani::unwind(10)]
     fn published_mask_never_reports_unready() {
-        let pick = |x: bool| -> Activate { if x { ok } else { bad } };
+        let pick = |x: bool| -> Activate {
+            if x {
+                ok
+            } else {
+                bad
+            }
+        };
         let binds = [
-            Binding { module: "c", version: "1.0.0", conflicts: &[], activate: pick(kani::any()), deactivate: None },
-            Binding { module: "b", version: "1.0.0", conflicts: &[], activate: pick(kani::any()), deactivate: None },
-            Binding { module: "a", version: "1.0.0", conflicts: &[], activate: pick(kani::any()), deactivate: None },
+            Binding {
+                module: "c",
+                version: "1.0.0",
+                conflicts: &[],
+                activate: pick(kani::any()),
+                deactivate: None,
+            },
+            Binding {
+                module: "b",
+                version: "1.0.0",
+                conflicts: &[],
+                activate: pick(kani::any()),
+                deactivate: None,
+            },
+            Binding {
+                module: "a",
+                version: "1.0.0",
+                conflicts: &[],
+                activate: pick(kani::any()),
+                deactivate: None,
+            },
         ];
         let all_or_nothing: bool = kani::any();
-        let policy = if all_or_nothing { Policy::AllOrNothing } else { Policy::Partial };
+        let policy = if all_or_nothing {
+            Policy::AllOrNothing
+        } else {
+            Policy::Partial
+        };
         let mut a = Assembly::new(&K_PROFILE, &binds).unwrap();
         let r = a.start(policy).unwrap();
         let declared = profile::resolve(&K_PROFILE).unwrap();
@@ -1293,9 +1638,27 @@ mod proofs {
     #[kani::unwind(10)]
     fn audit_rejects_any_divergent_mask() {
         let binds = [
-            Binding { module: "c", version: "1.0.0", conflicts: &[], activate: ok, deactivate: None },
-            Binding { module: "b", version: "1.0.0", conflicts: &[], activate: bad, deactivate: None },
-            Binding { module: "a", version: "1.0.0", conflicts: &[], activate: ok, deactivate: None },
+            Binding {
+                module: "c",
+                version: "1.0.0",
+                conflicts: &[],
+                activate: ok,
+                deactivate: None,
+            },
+            Binding {
+                module: "b",
+                version: "1.0.0",
+                conflicts: &[],
+                activate: bad,
+                deactivate: None,
+            },
+            Binding {
+                module: "a",
+                version: "1.0.0",
+                conflicts: &[],
+                activate: ok,
+                deactivate: None,
+            },
         ];
         let mut a = Assembly::new(&K_PROFILE, &binds).unwrap();
         a.start(Policy::Partial).unwrap();
@@ -1311,9 +1674,27 @@ mod proofs {
     #[kani::unwind(10)]
     fn health_changes_never_publish_unavailable_service() {
         let binds = [
-            Binding { module: "c", version: "1.0.0", conflicts: &[], activate: ok, deactivate: None },
-            Binding { module: "b", version: "1.0.0", conflicts: &[], activate: ok, deactivate: None },
-            Binding { module: "a", version: "1.0.0", conflicts: &[], activate: ok, deactivate: None },
+            Binding {
+                module: "c",
+                version: "1.0.0",
+                conflicts: &[],
+                activate: ok,
+                deactivate: None,
+            },
+            Binding {
+                module: "b",
+                version: "1.0.0",
+                conflicts: &[],
+                activate: ok,
+                deactivate: None,
+            },
+            Binding {
+                module: "a",
+                version: "1.0.0",
+                conflicts: &[],
+                activate: ok,
+                deactivate: None,
+            },
         ];
         let mut a = Assembly::new(&K_PROFILE, &binds).unwrap();
         a.start(Policy::AllOrNothing).unwrap();

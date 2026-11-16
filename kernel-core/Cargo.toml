@@ -40,6 +40,9 @@ terminal-dynamic = []
 display-dynamic = []
 # Per-vCPU guest mapping tables are allocated from the admitted kernel heap.
 hwvirt-vcpu-dynamic = []
+# Native Profile resolution, module assembly and module lifecycle use heap-backed
+# metadata in the kernel. User ABI crates keep the allocation-free default surface.
+runtime-registries = []
 # Persistent installation requires the kernel heap for bounded transactional
 # state snapshots; core profiles that do not use it remain allocation-free.
 persistent-install = []

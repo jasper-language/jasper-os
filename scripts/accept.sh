@@ -2971,6 +2971,17 @@ check_issue33capability() {
   fi
 }
 
+check_issue33assembly() {
+  if has '^\[JSR-ASSEMBLY\] capacity modules=[1-9][0-9]* capabilities=[1-9][0-9]* services=[1-9][0-9]* metadata=[1-9][0-9]* budget=[1-9][0-9]* dynamic=true' \
+     && has '^\[JSR-PROFILE\] active .* modules=[1-9][0-9]* services=[1-9][0-9]* capabilities=[1-9][0-9]*' \
+     && ! has '^\[JSR-ASSEMBLY\] capacity .*dynamic=false' \
+     && ! has '^\[JSR-ASSEMBLY\] reject=metadata_budget'; then
+    record ISSUE33-ASSEMBLY PASS "Profile/装配元数据按实际声明与堆预算准入，模块、依赖、状态和能力/服务清单由堆后备动态集合承载；运行日志声明 dynamic=true"
+  else
+    record ISSUE33-ASSEMBLY FAIL "缺少动态装配容量、预算准入或 runtime-registry 证据"
+  fi
+}
+
 check_compatelfbackend() {
   if has '^\[JSR-COMPAT-ELF\] backend=true map=true relocate=true stack=true ring3=true exit=true resources=true failed=0' \
      && ! has '^\[JSR-COMPAT-ELF-FAIL\]'; then
@@ -3079,11 +3090,11 @@ if [ "$SPOT" -eq 1 ]; then
   done
 elif [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_nativeecosystem; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_asm1; check_mod1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_drv3; check_blk1; check_sec1; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_issue33capability; check_hwv0; check_hwv1; check_hwv2; check_hwv3; check_hwv4
+  check_pol1; check_pol2; check_asm1; check_mod1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_drv3; check_blk1; check_sec1; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_issue33capability; check_issue33assembly; check_hwv0; check_hwv1; check_hwv2; check_hwv3; check_hwv4
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_nativeecosystem; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_asm1; check_mod1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_drv3; check_blk1; check_sec1; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_issue33capability; check_hwv0; check_hwv1; check_hwv2; check_hwv3; check_hwv4
+  check_pol1; check_pol2; check_asm1; check_mod1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_drv3; check_blk1; check_sec1; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_issue33capability; check_issue33assembly; check_hwv0; check_hwv1; check_hwv2; check_hwv3; check_hwv4
 fi
 
 check_jaso1_multi

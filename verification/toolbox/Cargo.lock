@@ -308,6 +308,9 @@ dependencies = [
 [[package]]
 name = "kernel-core"
 version = "0.1.0"
+dependencies = [
+ "wireguard-sans-io",
+]
 
 [[package]]
 name = "lazy_static"
@@ -806,3 +809,9 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "wireguard-sans-io"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4fc121e899ba74996f51ee00b16c12968d7570c83c64642e61bf7843cd21771"

@@ -12,21 +12,21 @@
 //!
 //! # 边界与约束
 //! * 纯数据 + 纯校验：不碰硬件、不读时钟、不做 IO，因此可在宿主上完整测试；
-//! * **不使用堆分配**：本 crate 会被极小的用户态程序链接，任何一处 `Vec` 都会把它们
-//!   变成「需要全局分配器」，所以解析结果与错误列表都是定长数组。
+//! * 解析结果与服务/错误清单使用内核堆后备的动态集合；极小程序只链接 ABI
+//!   布局类型时不会实例化这些注册表。`program_caps` 的 24 项宽度是 v1
+//!   线上格式，不是 Profile 注册表容量。
 //!
 //! # 探索阶段说明
 //! 当前是演示与探索阶段：字段与命令形状会继续调整。已实现的行为是真实的
 //! （校验与门都会运行），但不要把它当作冻结的对外契约。
 
 use crate::config::KernelConfig;
+#[cfg(any(test, feature = "runtime-registries"))]
+use alloc::vec::Vec;
 
-/// 解析结果能容纳的能力数上限。
-pub const MAX_CAPABILITIES: usize = 24;
-/// 解析结果能容纳的服务数上限。
-pub const MAX_SERVICES: usize = 24;
-/// 一次校验能报告的错误条数上限。
-pub const MAX_ERRORS: usize = 16;
+/// Version-1 program-capability note width. Profile resolution itself is
+/// heap-backed and is not capped by this wire-format array.
+pub const MAX_CAPABILITIES: usize = 24; // JASPER-HARDCODE-REVIEW: issue=33 source=program-caps-note-v1 reason=ABI-array-width-not-profile-registry-capacity
 
 /// 模块声明的调度类别。
 /// Scheduling class declared by a module.
@@ -133,8 +133,8 @@ pub enum ProfileErrorCode {
     UnsatisfiableObjects,
     /// 模块声明热加载但 Profile 未开启热加载。
     HotLoadNotAllowed,
-    /// 能力或服务数量超过解析结果容量。
-    TooMany,
+    /// Heap backing for the resolved inventory was unavailable.
+    Allocation,
 }
 
 impl ProfileErrorCode {
@@ -152,7 +152,7 @@ impl ProfileErrorCode {
             ProfileErrorCode::UnsatisfiableTasks => "unsatisfiable_tasks",
             ProfileErrorCode::UnsatisfiableObjects => "unsatisfiable_objects",
             ProfileErrorCode::HotLoadNotAllowed => "hot_load_not_allowed",
-            ProfileErrorCode::TooMany => "too_many",
+            ProfileErrorCode::Allocation => "allocation",
         }
     }
 }
@@ -167,27 +167,29 @@ pub struct ProfileError {
     pub subject: &'static str,
 }
 
-/// 定长的错误列表：一次报告全部问题（超出容量时标记 truncated）。
-/// Fixed-capacity error list: reports every problem, marks truncation.
-#[derive(Debug, Clone, Copy)]
+/// Heap-backed error list: reports every problem unless backing allocation fails.
+/// 堆后备错误列表：除非后备分配失败，否则一次报告全部问题。
+#[derive(Debug, Clone)]
+#[cfg(any(test, feature = "runtime-registries"))]
 pub struct ProfileErrors {
-    items: [ProfileError; MAX_ERRORS],
-    len: usize,
+    items: Vec<ProfileError>,
     truncated: bool,
 }
 
+#[cfg(any(test, feature = "runtime-registries"))]
 impl ProfileErrors {
     /// 空列表。
     const fn new() -> Self {
-        let placeholder = ProfileError { code: ProfileErrorCode::NoModules, subject: "" };
-        Self { items: [placeholder; MAX_ERRORS], len: 0, truncated: false }
+        Self {
+            items: Vec::new(),
+            truncated: false,
+        }
     }
 
-    /// 追加一条；容量用尽后只置 truncated，不再写。
+    /// Append one diagnostic; allocation failure is reported as truncation.
     fn push(&mut self, code: ProfileErrorCode, subject: &'static str) {
-        if self.len < MAX_ERRORS {
-            self.items[self.len] = ProfileError { code, subject };
-            self.len += 1;
+        if self.items.try_reserve(1).is_ok() {
+            self.items.push(ProfileError { code, subject });
         } else {
             self.truncated = true;
         }
@@ -195,12 +197,12 @@ impl ProfileErrors {
 
     /// 错误条数。
     pub fn len(&self) -> usize {
-        self.len
+        self.items.len()
     }
 
     /// 是否为空。
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.items.is_empty()
     }
 
     /// 是否因容量不足而截断了后续问题。
@@ -210,18 +212,17 @@ impl ProfileErrors {
 
     /// 逐条遍历。
     pub fn iter(&self) -> impl Iterator<Item = ProfileError> + '_ {
-        self.items[..self.len].iter().copied()
+        self.items.iter().copied()
     }
 }
 
 /// 解析后的 Profile：去重排序后的能力与服务，以及对参数档的硬性下限要求。
 /// Resolved profile: de-duplicated capabilities and services plus resource floors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(test, feature = "runtime-registries"))]
 pub struct ResolvedProfile {
-    capabilities: [&'static str; MAX_CAPABILITIES],
-    capability_count: usize,
-    services: [&'static str; MAX_SERVICES],
-    service_count: usize,
+    capabilities: Vec<&'static str>,
+    services: Vec<&'static str>,
     /// 全部模块要求的最小任务槽位（取最大值）。
     pub min_tasks: usize,
     /// 全部模块要求的最小对象表容量（取最大值）。
@@ -230,13 +231,12 @@ pub struct ResolvedProfile {
     pub hot_load_modules: usize,
 }
 
+#[cfg(any(test, feature = "runtime-registries"))]
 impl ResolvedProfile {
     const fn empty() -> Self {
         Self {
-            capabilities: [""; MAX_CAPABILITIES],
-            capability_count: 0,
-            services: [""; MAX_SERVICES],
-            service_count: 0,
+            capabilities: Vec::new(),
+            services: Vec::new(),
             min_tasks: 0,
             min_objects: 0,
             hot_load_modules: 0,
@@ -245,12 +245,12 @@ impl ResolvedProfile {
 
     /// 生效能力（字典序）。
     pub fn capabilities(&self) -> &[&'static str] {
-        &self.capabilities[..self.capability_count]
+        &self.capabilities
     }
 
     /// 生效系统服务前缀（字典序）。
     pub fn services(&self) -> &[&'static str] {
-        &self.services[..self.service_count]
+        &self.services
     }
 
     /// 判定本 Profile 是否提供某项能力（例如 `sched.realtime`）。
@@ -273,21 +273,25 @@ impl ResolvedProfile {
     }
 
     /// 追加一个能力（插入排序，保持字典序）。
-    fn add_capability(&mut self, value: &'static str) {
-        let at = self.capabilities[..self.capability_count]
+    fn add_capability(&mut self, value: &'static str) -> bool {
+        if self.capabilities.try_reserve(1).is_err() {
+            return false;
+        }
+        let at = self
+            .capabilities
             .partition_point(|existing| *existing < value);
-        self.capabilities.copy_within(at..self.capability_count, at + 1);
-        self.capabilities[at] = value;
-        self.capability_count += 1;
+        self.capabilities.insert(at, value);
+        true
     }
 
     /// 追加一个服务（插入排序，保持字典序）。
-    fn add_service(&mut self, value: &'static str) {
-        let at = self.services[..self.service_count]
-            .partition_point(|existing| *existing < value);
-        self.services.copy_within(at..self.service_count, at + 1);
-        self.services[at] = value;
-        self.service_count += 1;
+    fn add_service(&mut self, value: &'static str) -> bool {
+        if self.services.try_reserve(1).is_err() {
+            return false;
+        }
+        let at = self.services.partition_point(|existing| *existing < value);
+        self.services.insert(at, value);
+        true
     }
 }
 
@@ -321,6 +325,7 @@ pub(crate) fn is_capability(text: &str) -> bool {
 /// 只按点边界判定：`system.async` 与 `system.async.ring` 冲突，
 /// 但 `system.async` 与 `system.asynchronous` 不冲突。
 /// English: service prefixes overlap only on a dotted boundary.
+#[cfg(any(test, feature = "runtime-registries"))]
 fn service_prefixes_overlap(a: &str, b: &str) -> bool {
     let nested = |outer: &str, inner: &str| {
         inner
@@ -335,6 +340,7 @@ fn service_prefixes_overlap(a: &str, b: &str) -> bool {
 /// 返回**全部**问题而不是第一个：Profile 作者一次就能看到所有违规项。
 /// 失败时调用方必须拒绝启动或拒绝接受该 Profile。
 /// English: validate a profile, returning every problem found.
+#[cfg(any(test, feature = "runtime-registries"))]
 pub fn resolve(profile: &SystemProfile) -> Result<ResolvedProfile, ProfileErrors> {
     let mut errors = ProfileErrors::new();
     let mut resolved = ResolvedProfile::empty();
@@ -347,18 +353,20 @@ pub fn resolve(profile: &SystemProfile) -> Result<ResolvedProfile, ProfileErrors
         return Err(errors);
     }
 
-    let mut module_names: [&'static str; 16] = [""; 16];
-    let mut module_count = 0usize;
+    let mut module_names = Vec::new();
+    if module_names.try_reserve(profile.modules.len()).is_err() {
+        errors.push(ProfileErrorCode::Allocation, profile.name);
+        return Err(errors);
+    }
 
     for module in profile.modules {
         if !is_kebab(module.name) {
             errors.push(ProfileErrorCode::InvalidName, module.name);
         }
-        if module_names[..module_count].contains(&module.name) {
+        if module_names.contains(&module.name) {
             errors.push(ProfileErrorCode::DuplicateModule, module.name);
-        } else if module_count < module_names.len() {
-            module_names[module_count] = module.name;
-            module_count += 1;
+        } else {
+            module_names.push(module.name);
         }
         if module.hot_load {
             resolved.hot_load_modules += 1;
@@ -376,10 +384,8 @@ pub fn resolve(profile: &SystemProfile) -> Result<ResolvedProfile, ProfileErrors
             }
             if resolved.capabilities().contains(capability) {
                 errors.push(ProfileErrorCode::DuplicateCapability, capability);
-            } else if resolved.capability_count < MAX_CAPABILITIES {
-                resolved.add_capability(capability);
-            } else {
-                errors.push(ProfileErrorCode::TooMany, capability);
+            } else if !resolved.add_capability(capability) {
+                errors.push(ProfileErrorCode::Allocation, capability);
             }
             if module.requires.contains(capability) {
                 errors.push(ProfileErrorCode::CapabilityConflict, capability);
@@ -403,10 +409,8 @@ pub fn resolve(profile: &SystemProfile) -> Result<ResolvedProfile, ProfileErrors
                 .any(|existing| service_prefixes_overlap(existing, service))
             {
                 errors.push(ProfileErrorCode::AmbiguousService, service);
-            } else if resolved.service_count < MAX_SERVICES {
-                resolved.add_service(service);
-            } else {
-                errors.push(ProfileErrorCode::TooMany, service);
+            } else if !resolved.add_service(service) {
+                errors.push(ProfileErrorCode::Allocation, service);
             }
         }
     }
@@ -426,7 +430,7 @@ pub fn resolve(profile: &SystemProfile) -> Result<ResolvedProfile, ProfileErrors
         errors.push(ProfileErrorCode::UnsatisfiableObjects, profile.name);
     }
 
-    if errors.is_empty() {
+    if errors.is_empty() && !errors.truncated() {
         Ok(resolved)
     } else {
         Err(errors)

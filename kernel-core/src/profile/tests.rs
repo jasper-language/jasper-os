@@ -53,16 +53,14 @@ const fn sample(modules: &'static [ModuleDecl]) -> SystemProfile {
     }
 }
 
-fn codes(errors: &ProfileErrors) -> [Option<ProfileErrorCode>; MAX_ERRORS] {
-    let mut out = [None; MAX_ERRORS];
-    for (index, error) in errors.iter().enumerate() {
-        out[index] = Some(error.code);
-    }
-    out
+fn codes(errors: &ProfileErrors) -> Vec<ProfileErrorCode> {
+    errors.iter().map(|error| error.code).collect()
 }
 
 fn has(errors: &ProfileErrors, code: ProfileErrorCode, subject: &str) -> bool {
-    errors.iter().any(|e| e.code == code && e.subject == subject)
+    errors
+        .iter()
+        .any(|e| e.code == code && e.subject == subject)
 }
 
 #[test]
@@ -72,6 +70,70 @@ fn builtin_profiles_resolve() {
             panic!("{} 校验失败：{:?}", profile.name, codes(&errors));
         }
     }
+}
+
+#[test]
+fn local_experimental_capabilities_resolve_without_services() {
+    const MODULES: &[ModuleDecl] = &[
+        full("syscall-core", &["x.mech.syscall-core"], &[], &[], false, 0, 0),
+        full(
+            "hello-syscall",
+            &["x.mech.syscall-table"],
+            &["x.mech.syscall-core"],
+            &[],
+            false,
+            0,
+            0,
+        ),
+        full("discard", &["x.mech.discard"], &[], &[], false, 0, 0),
+    ];
+    resolve(&sample(MODULES)).expect("local experiment profile");
+}
+
+fn leaked_module(name: String, capability: Option<String>, service: Option<String>) -> ModuleDecl {
+    let name: &'static str = Box::leak(name.into_boxed_str());
+    let capabilities: &'static [&'static str] = match capability {
+        Some(capability) => Box::leak(
+            vec![Box::leak(capability.into_boxed_str()) as &'static str].into_boxed_slice(),
+        ),
+        None => &[],
+    };
+    let services: &'static [&'static str] = match service {
+        Some(service) => {
+            Box::leak(vec![Box::leak(service.into_boxed_str()) as &'static str].into_boxed_slice())
+        }
+        None => &[],
+    };
+    full(name, capabilities, &[], services, false, 0, 0)
+}
+
+#[test]
+fn profile_inventory_grows_past_previous_fixed_tables() {
+    let modules: Vec<ModuleDecl> = (0..30)
+        .map(|index| {
+            leaked_module(
+                format!("module-{index}"),
+                Some(format!("cap.c{index:02}")),
+                Some(format!("system.svc{index:02}")),
+            )
+        })
+        .collect();
+    let modules: &'static [ModuleDecl] = Box::leak(modules.into_boxed_slice());
+    let profile: &'static SystemProfile = Box::leak(Box::new(sample(modules)));
+    let resolved = resolve(profile).unwrap();
+    assert_eq!(resolved.capabilities().len(), 30);
+    assert_eq!(resolved.services().len(), 30);
+}
+
+#[test]
+fn diagnostic_list_grows_past_previous_sixteen_entry_limit() {
+    let modules: Vec<ModuleDecl> = (0..24)
+        .map(|index| leaked_module(format!("Bad{index}"), None, None))
+        .collect();
+    let modules: &'static [ModuleDecl] = Box::leak(modules.into_boxed_slice());
+    let errors = resolve(&sample(modules)).unwrap_err();
+    assert!(errors.len() > 16);
+    assert!(!errors.truncated());
 }
 
 #[test]
@@ -92,12 +154,10 @@ fn builtin_profiles_expose_different_service_sets() {
 fn capability_sets_are_sorted_and_unique() {
     let resolved = resolve(&HEADLESS).expect("headless");
     let capabilities = resolved.capabilities();
-    let mut sorted = [""; MAX_CAPABILITIES];
-    sorted[..capabilities.len()].copy_from_slice(capabilities);
-    sorted[..capabilities.len()].sort_unstable();
-    assert_eq!(&sorted[..capabilities.len()], capabilities);
-    let mut unique = [""; MAX_CAPABILITIES];
-    unique[..capabilities.len()].copy_from_slice(capabilities);
+    let mut sorted = capabilities.to_vec();
+    sorted.sort_unstable();
+    assert_eq!(sorted, capabilities);
+    let mut unique = capabilities.to_vec();
     let mut count = 1;
     for index in 1..capabilities.len() {
         if unique[index] != unique[index - 1] {
@@ -140,7 +200,11 @@ fn duplicate_module_is_rejected() {
 fn missing_capability_is_rejected() {
     const MODULES: &[ModuleDecl] = &[full("core", &[], &["memory.virtual"], &[], false, 0, 0)];
     let errors = resolve(&sample(MODULES)).unwrap_err();
-    assert!(has(&errors, ProfileErrorCode::MissingCapability, "memory.virtual"));
+    assert!(has(
+        &errors,
+        ProfileErrorCode::MissingCapability,
+        "memory.virtual"
+    ));
 }
 
 #[test]
@@ -150,14 +214,30 @@ fn duplicate_capability_is_rejected() {
         full("b", &["kernel.core"], &[], &[], false, 0, 0),
     ];
     let errors = resolve(&sample(MODULES)).unwrap_err();
-    assert!(has(&errors, ProfileErrorCode::DuplicateCapability, "kernel.core"));
+    assert!(has(
+        &errors,
+        ProfileErrorCode::DuplicateCapability,
+        "kernel.core"
+    ));
 }
 
 #[test]
 fn provide_and_require_same_capability_is_a_conflict() {
-    const MODULES: &[ModuleDecl] = &[full("a", &["kernel.core"], &["kernel.core"], &[], false, 0, 0)];
+    const MODULES: &[ModuleDecl] = &[full(
+        "a",
+        &["kernel.core"],
+        &["kernel.core"],
+        &[],
+        false,
+        0,
+        0,
+    )];
     let errors = resolve(&sample(MODULES)).unwrap_err();
-    assert!(has(&errors, ProfileErrorCode::CapabilityConflict, "kernel.core"));
+    assert!(has(
+        &errors,
+        ProfileErrorCode::CapabilityConflict,
+        "kernel.core"
+    ));
 }
 
 #[test]
@@ -167,7 +247,11 @@ fn duplicate_service_is_rejected() {
         full("b", &[], &[], &["system.time"], false, 0, 0),
     ];
     let errors = resolve(&sample(MODULES)).unwrap_err();
-    assert!(has(&errors, ProfileErrorCode::ServiceConflict, "system.time"));
+    assert!(has(
+        &errors,
+        ProfileErrorCode::ServiceConflict,
+        "system.time"
+    ));
 }
 
 #[test]
@@ -182,7 +266,11 @@ fn overlapping_service_prefixes_are_rejected_as_ambiguous() {
         0,
     )];
     let errors = resolve(&sample(MODULES)).unwrap_err();
-    assert!(has(&errors, ProfileErrorCode::AmbiguousService, "system.async.ring"));
+    assert!(has(
+        &errors,
+        ProfileErrorCode::AmbiguousService,
+        "system.async.ring"
+    ));
 }
 
 #[test]

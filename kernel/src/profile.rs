@@ -14,8 +14,12 @@
 use core::fmt::Write;
 
 use kernel_core::profile::{self, ResolvedProfile, SystemProfile};
+use spin::Once;
 
-use crate::syscall::{table::{AbiKind, ENTRIES}, SyscallSet};
+use crate::syscall::{
+    table::{AbiKind, ENTRIES},
+    SyscallSet,
+};
 use crate::{config::ACTIVE as CONFIG, kprintln};
 
 /// 本次构建生效的 Profile。
@@ -23,10 +27,10 @@ use crate::{config::ACTIVE as CONFIG, kprintln};
 /// 参数部分直接取 `crate::config::ACTIVE`（受 `profile-compact` 特性影响），
 /// 模块表与运行保证取 headless。这样「参数档」与「模块面」共享同一份声明，
 /// 不会出现两份互相矛盾的配置。
-#[cfg(feature="rt1-no-realtime")]
-const BASE:SystemProfile=profile::HEADLESS_MIN;
-#[cfg(not(feature="rt1-no-realtime"))]
-const BASE:SystemProfile=profile::HEADLESS;
+#[cfg(feature = "rt1-no-realtime")]
+const BASE: SystemProfile = profile::HEADLESS_MIN;
+#[cfg(not(feature = "rt1-no-realtime"))]
+const BASE: SystemProfile = profile::HEADLESS;
 pub const ACTIVE: SystemProfile = SystemProfile {
     name: BASE.name,
     display_zh: BASE.display_zh,
@@ -39,6 +43,7 @@ pub const ACTIVE: SystemProfile = SystemProfile {
 
 /// 渲染缓冲区的最小长度（再小一定放不下）。
 pub const MIN_TEXT: usize = 1536;
+static RESOLVED: Once<ResolvedProfile> = Once::new();
 
 /// 内建 Profile 的数量。
 pub fn count() -> usize {
@@ -55,7 +60,12 @@ pub fn active_index() -> usize {
 
 /// 解析生效 Profile；失败返回 None（启动期已经报告过原因）。
 pub fn resolved() -> Option<ResolvedProfile> {
-    profile::resolve(&ACTIVE).ok()
+    resolved_ref().cloned()
+}
+
+/// Parsed effective Profile published during the Profile boot stage.
+pub fn resolved_ref() -> Option<&'static ResolvedProfile> {
+    RESOLVED.get()
 }
 
 /// 某项能力（例如 `sched.realtime`）当前是否**可用**：生效 Profile 声明了它，且提供它的模块已在
@@ -100,15 +110,18 @@ pub fn boot_report() -> u32 {
         }
     }
     match profile::resolve(&ACTIVE) {
-        Ok(r) => kprintln!(
-            "[JSR-PROFILE] active name={} valid=true params={} modules={} services={} capabilities={} guarantees={}",
-            ACTIVE.name,
-            ACTIVE.config.name,
-            ACTIVE.modules.len(),
-            r.services().len(),
-            r.capabilities().len(),
-            ACTIVE.guarantees.len()
-        ),
+        Ok(r) => {
+            kprintln!(
+                "[JSR-PROFILE] active name={} valid=true params={} modules={} services={} capabilities={} guarantees={} dynamic=true",
+                ACTIVE.name,
+                ACTIVE.config.name,
+                ACTIVE.modules.len(),
+                r.services().len(),
+                r.capabilities().len(),
+                ACTIVE.guarantees.len()
+            );
+            RESOLVED.call_once(|| r);
+        }
         Err(errors) => {
             failed += 1;
             for e in errors.iter() {
@@ -144,7 +157,11 @@ fn render_with(index: usize, out: &mut [u8], calls: Option<SyscallSet>) -> Optio
     }
     let declared = profile::BUILTIN.get(index)?;
     let resolved = profile::resolve(declared).ok()?;
-    let mut sink = Sink { buf: out, len: 0, overflow: false };
+    let mut sink = Sink {
+        buf: out,
+        len: 0,
+        overflow: false,
+    };
     let _ = write!(
         sink,
         "profile={}\ndisplay_zh={}\ndisplay_en={}\nactive={}\nparams={}\nmodules={}\nmemory_policy={}\npower_policy={}\nhot_load={}\n",
@@ -164,7 +181,11 @@ fn render_with(index: usize, out: &mut [u8], calls: Option<SyscallSet>) -> Optio
     write_join(&mut sink, resolved.capabilities());
     // 运行时已发布（真正可用）的能力：只对生效 Profile 有意义，其他 Profile 恒为空。
     let _ = write!(sink, "\npublished=");
-    let mask = if index == active_index() { crate::assembly::published_mask() } else { 0 };
+    let mask = if index == active_index() {
+        crate::assembly::published_mask()
+    } else {
+        0
+    };
     let mut first = true;
     for (b, cap) in resolved.capabilities().iter().enumerate() {
         if mask & (1 << b) != 0 {
@@ -175,7 +196,11 @@ fn render_with(index: usize, out: &mut [u8], calls: Option<SyscallSet>) -> Optio
             first = false;
         }
     }
-    let statuses = if index == active_index() { Some(crate::assembly::statuses()) } else { None };
+    let statuses = if index == active_index() {
+        Some(crate::assembly::statuses())
+    } else {
+        None
+    };
     let mut feature_count = 0u32;
     let mut runtime_count = 0u32;
     let mut healthy_count = 0u32;
@@ -183,10 +208,14 @@ fn render_with(index: usize, out: &mut [u8], calls: Option<SyscallSet>) -> Optio
     let _ = write!(sink, "\nmodules_detail={}", declared.modules.len());
     for module in declared.modules.iter() {
         let compiled = crate::assembly::feature_compiled(module.name);
-        let status = statuses.and_then(|snapshot| snapshot.modules().find(|s| s.name == module.name));
+        let status = statuses
+            .as_ref()
+            .and_then(|snapshot| snapshot.modules().find(|s| s.name == module.name));
         let (runtime, health) = match status {
             Some(s) if s.available => ("available", s.effective_health.as_str()),
-            Some(s) if s.state == kernel_core::assembly::State::Ready => ("withdrawn", s.effective_health.as_str()),
+            Some(s) if s.state == kernel_core::assembly::State::Ready => {
+                ("withdrawn", s.effective_health.as_str())
+            }
             Some(s) => (s.state.as_str(), s.effective_health.as_str()),
             None if index == active_index() => ("missing", "unknown"),
             None => ("not_selected", "unknown"),
@@ -264,7 +293,10 @@ impl Authorization {
     }
 }
 
-fn service_authorization(module: &kernel_core::profile::ModuleDecl, calls: SyscallSet) -> Authorization {
+fn service_authorization(
+    module: &kernel_core::profile::ModuleDecl,
+    calls: SyscallSet,
+) -> Authorization {
     if module.services.is_empty() {
         return Authorization::NotApplicable;
     }
@@ -272,7 +304,10 @@ fn service_authorization(module: &kernel_core::profile::ModuleDecl, calls: Sysca
     let mut allowed = 0u32;
     for entry in ENTRIES.iter().filter(|e| e.kind == AbiKind::Op) {
         if module.services.iter().any(|service| {
-            entry.name.strip_prefix(service).is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+            entry
+                .name
+                .strip_prefix(service)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
         }) {
             seen += 1;
             if calls.contains(entry.id as u64) {

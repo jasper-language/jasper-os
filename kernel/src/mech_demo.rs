@@ -365,7 +365,26 @@ static BROKEN_BINDINGS: [Binding; 3] = [
 fn exercise_assembly(c: &Checker) -> Option<Assembly> {
     let declared = match profile::resolve(&MECH_PROFILE) {
         Ok(r) => r,
-        Err(_) => {
+        Err(errors) => {
+            let (heap_total, heap_free, heap_blocks, heap_mapped) = crate::mm::heap::stats();
+            kprintln!(
+                "[JSR-MECH-ASSEMBLY] errors={} truncated={} heap_total={} heap_free={} heap_blocks={} heap_mapped={} heap_limit={}",
+                errors.len(),
+                errors.truncated(),
+                heap_total,
+                heap_free,
+                heap_blocks,
+                heap_mapped,
+                crate::mm::heap::limit()
+            );
+            for error in errors.iter() {
+                kprintln!(
+                    "[JSR-MECH-ASSEMBLY] reject code={} subject={} truncated={}",
+                    error.code.as_str(),
+                    error.subject,
+                    errors.truncated()
+                );
+            }
             c.check(false, "assembly: 机制 Profile 校验");
             return None;
         }

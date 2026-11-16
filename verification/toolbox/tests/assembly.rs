@@ -99,7 +99,15 @@ fn build(c: &Case) -> &'static SystemProfile {
 }
 
 fn bindings(n: usize) -> Vec<Binding> {
-    (0..n).map(|k| Binding { module: NAMES[k], activate: ACTS[k], deactivate: Some(FINIS[k]) }).collect()
+    (0..n)
+        .map(|k| Binding {
+            module: NAMES[k],
+            version: "1.0.0",
+            conflicts: &[],
+            activate: ACTS[k],
+            deactivate: Some(FINIS[k]),
+        })
+        .collect()
 }
 
 fn idx(name: &str) -> usize {
