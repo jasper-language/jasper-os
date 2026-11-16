@@ -1302,6 +1302,415 @@ fn io_error(operation: &'static str, path: &Path, source: io::Error) -> StagingE
     }
 }
 
+/// One active transaction held by the lifecycle update service.
+struct ServiceUpdate {
+    generation: u64,
+    coordinator: UpdateCoordinator,
+    prepared: Option<PreparedUpdate>,
+    staging_root: PathBuf,
+    manifest_sha256: [u8; 32],
+}
+
+/// Stable service-level status for one update operation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceStatus {
+    /// Service command generation; every prepare or recovery advances it.
+    pub generation: u64,
+    /// Coordinator stage, or `None` when no update is active.
+    pub stage: Option<UpdateStage>,
+    /// Active transaction digest.
+    pub manifest_sha256: Option<[u8; 32]>,
+    /// Active staging root.
+    pub staging_root: Option<PathBuf>,
+    /// Control-store active slot.
+    pub active_slot: Slot,
+    /// Candidate slot, if the control record contains one.
+    pub candidate_slot: Option<Slot>,
+    /// Current control transaction id.
+    pub transaction_id: u64,
+}
+
+/// Service lifecycle error.
+#[derive(Debug)]
+pub enum ServiceError {
+    /// Another transaction is already active.
+    Busy,
+    /// No transaction is active.
+    NoActive,
+    /// The caller used a stale service generation.
+    StaleGeneration {
+        /// Generation expected by the service.
+        expected: u64,
+        /// Generation supplied by the caller.
+        actual: u64,
+    },
+    /// The operation is not valid in the current coordinator stage.
+    WrongStage {
+        /// Required coordinator stage.
+        expected: UpdateStage,
+        /// Actual coordinator stage.
+        actual: UpdateStage,
+    },
+    /// The prepared transaction value is no longer available.
+    PreparedUnavailable,
+    /// Underlying coordinator operation failed.
+    Coordinator(CoordinatorError),
+    /// Terminal transaction archiving failed.
+    Staging(StagingError),
+}
+
+impl fmt::Display for ServiceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Busy => write!(formatter, "an update transaction is already active"),
+            Self::NoActive => write!(formatter, "no update transaction is active"),
+            Self::StaleGeneration { expected, actual } => {
+                write!(formatter, "stale service generation: expected {expected}, got {actual}")
+            }
+            Self::WrongStage { expected, actual } => {
+                write!(formatter, "wrong update stage: expected {expected:?}, got {actual:?}")
+            }
+            Self::PreparedUnavailable => write!(formatter, "prepared transaction is unavailable"),
+            Self::Coordinator(error) => write!(formatter, "{error}"),
+            Self::Staging(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for ServiceError {}
+
+impl From<CoordinatorError> for ServiceError {
+    fn from(value: CoordinatorError) -> Self {
+        Self::Coordinator(value)
+    }
+}
+
+/// Stateful system-service facade over the single update coordinator and control store.
+///
+/// The facade does not create another authorization or trust path. Prepare calls still
+/// require a `LocalInstallGrant`, online/offline sources still pass the same manifest
+/// verification, and every mutating method delegates durable effects to
+/// [`UpdateCoordinator`] and [`FileControlStore`].
+pub struct UpdateService {
+    control: FileControlStore,
+    active: Option<ServiceUpdate>,
+    next_generation: u64,
+}
+
+impl UpdateService {
+    /// Open an existing dual-copy control store without creating a transaction.
+    pub fn open(control_root: impl Into<PathBuf>) -> Result<Self, CoordinatorError> {
+        let control =
+            FileControlStore::open(control_root).map_err(CoordinatorError::ControlStore)?;
+        let next_generation = control.current().generation().saturating_add(1);
+        Ok(Self {
+            control,
+            active: None,
+            next_generation,
+        })
+    }
+
+    /// Initialize a fresh service control store.
+    pub fn initialize(
+        control_root: impl Into<PathBuf>,
+        block: ControlBlock,
+    ) -> Result<Self, CoordinatorError> {
+        let control = FileControlStore::initialize(control_root, block)
+            .map_err(CoordinatorError::ControlStore)?;
+        let next_generation = control.current().generation().saturating_add(1);
+        Ok(Self {
+            control,
+            active: None,
+            next_generation,
+        })
+    }
+
+    /// Return a stable snapshot of the active transaction and control state.
+    pub fn status(&self) -> ServiceStatus {
+        let current = self.control.current();
+        let candidate_slot = current.candidate().map(|(slot, _)| slot);
+        match self.active.as_ref() {
+            Some(active) => ServiceStatus {
+                generation: active.generation,
+                stage: Some(active.coordinator.stage()),
+                manifest_sha256: Some(active.manifest_sha256),
+                staging_root: Some(active.staging_root.clone()),
+                active_slot: current.active_slot(),
+                candidate_slot,
+                transaction_id: current.transaction_id(),
+            },
+            None => ServiceStatus {
+                generation: self.next_generation.saturating_sub(1),
+                stage: None,
+                manifest_sha256: None,
+                staging_root: None,
+                active_slot: current.active_slot(),
+                candidate_slot,
+                transaction_id: current.transaction_id(),
+            },
+        }
+    }
+
+    /// Authorize, preflight and stage a verified manifest through the service.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare(
+        &mut self,
+        manifest: VerifiedCborManifest,
+        manifest_bytes: &[u8],
+        grant: LocalInstallGrant,
+        now: u64,
+        installed_dependencies: &[String],
+        sources: &[ArtifactSource<'_>],
+        staging_root: &Path,
+        metadata_headroom: u64,
+    ) -> Result<ServiceStatus, ServiceError> {
+        self.require_idle()?;
+        let generation = self.peek_generation()?;
+        let mut coordinator = UpdateCoordinator::idle();
+        let prepared = coordinator.prepare(
+            manifest,
+            manifest_bytes,
+            grant,
+            now,
+            installed_dependencies,
+            sources,
+            staging_root,
+            metadata_headroom,
+        )?;
+        let manifest_sha256 = prepared.manifest.manifest.manifest_sha256;
+        self.publish_active(generation, coordinator, prepared, staging_root, manifest_sha256)?;
+        Ok(self.status())
+    }
+
+    /// Acquire and stage one authenticated online or offline update bundle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_from_source<S: UpdateBundleSource + ?Sized>(
+        &mut self,
+        policy: TrustPolicy<'_>,
+        target: UpdateTarget,
+        source: &S,
+        grant: LocalInstallGrant,
+        now: u64,
+        installed_dependencies: &[String],
+        staging_root: &Path,
+        metadata_headroom: u64,
+    ) -> Result<ServiceStatus, ServiceError> {
+        self.require_idle()?;
+        let generation = self.peek_generation()?;
+        let mut coordinator = UpdateCoordinator::idle();
+        let prepared = coordinator.prepare_from_source(
+            policy,
+            target,
+            source,
+            grant,
+            now,
+            installed_dependencies,
+            staging_root,
+            metadata_headroom,
+        )?;
+        let manifest_sha256 = prepared.manifest.manifest.manifest_sha256;
+        self.publish_active(generation, coordinator, prepared, staging_root, manifest_sha256)?;
+        Ok(self.status())
+    }
+
+    /// Commit the prepared candidate into the inactive slot and dual-copy control store.
+    pub fn commit(
+        &mut self,
+        generation: u64,
+        slot: Slot,
+        transaction_id: u64,
+    ) -> Result<ServiceStatus, ServiceError> {
+        let active = Self::require_generation(&mut self.active, generation)?;
+        let expected = UpdateStage::Prepared;
+        if active.coordinator.stage() != expected {
+            return Err(ServiceError::WrongStage {
+                expected,
+                actual: active.coordinator.stage(),
+            });
+        }
+        let prepared = active
+            .prepared
+            .as_ref()
+            .ok_or(ServiceError::PreparedUnavailable)?;
+        active
+            .coordinator
+            .commit_prepared(prepared, &mut self.control, slot, transaction_id)?;
+        active.prepared = None;
+        Ok(self.status())
+    }
+
+    /// Persist the next trial attempt and return the boot decision.
+    pub fn begin_trial(&mut self, generation: u64) -> Result<BootDecision, ServiceError> {
+        let active = Self::require_generation(&mut self.active, generation)?;
+        Self::require_stage(active, UpdateStage::Committed)?;
+        active
+            .coordinator
+            .begin_trial(&mut self.control, &active.staging_root)
+            .map_err(ServiceError::Coordinator)
+    }
+
+    /// Record candidate health and advance to Confirmed or Rollback.
+    pub fn report_health(
+        &mut self,
+        generation: u64,
+        healthy: bool,
+    ) -> Result<ServiceStatus, ServiceError> {
+        let active = Self::require_generation(&mut self.active, generation)?;
+        Self::require_stage(active, UpdateStage::Trial)?;
+        active
+            .coordinator
+            .report_candidate_health(&mut self.control, &active.staging_root, healthy)?;
+        Ok(self.status())
+    }
+
+    /// Finalize a confirmed candidate while retaining the audit journal.
+    pub fn finalize_confirmed(&mut self, generation: u64) -> Result<ServiceStatus, ServiceError> {
+        let active = Self::require_generation(&mut self.active, generation)?;
+        Self::require_stage(active, UpdateStage::Confirmed)?;
+        active
+            .coordinator
+            .finalize_confirmed(&active.staging_root)?;
+        Ok(self.status())
+    }
+
+    /// Confirm the previous known-good slot after a failed candidate.
+    pub fn finish_rollback(&mut self, generation: u64) -> Result<Slot, ServiceError> {
+        let active = Self::require_generation(&mut self.active, generation)?;
+        Self::require_stage(active, UpdateStage::Rollback)?;
+        active
+            .coordinator
+            .finish_rollback(&mut self.control, &active.staging_root)
+            .map_err(ServiceError::Coordinator)
+    }
+
+    /// Cancel a prepared update before commit.
+    pub fn cancel_prepared(&mut self, generation: u64) -> Result<ServiceStatus, ServiceError> {
+        let active = Self::require_generation(&mut self.active, generation)?;
+        Self::require_stage(active, UpdateStage::Prepared)?;
+        active
+            .coordinator
+            .cancel_prepared(&active.staging_root)?;
+        self.active = None;
+        Ok(self.status())
+    }
+
+    /// Recover the active transaction from journal plus boot-control state.
+    pub fn recover(
+        &mut self,
+        staging_root: &Path,
+        manifest_sha256: [u8; 32],
+    ) -> Result<ServiceStatus, ServiceError> {
+        self.require_idle()?;
+        let generation = self.peek_generation()?;
+        let coordinator =
+            UpdateCoordinator::recover_with_control(staging_root, manifest_sha256, &self.control)?;
+        self.publish_recovered(generation, coordinator, staging_root, manifest_sha256)?;
+        Ok(self.status())
+    }
+
+    /// Archive and remove a Complete or RolledBack staging tree.
+    pub fn archive_and_cleanup(
+        &mut self,
+        generation: u64,
+        archive_root: &Path,
+    ) -> Result<ArchivedTransaction, ServiceError> {
+        let active = Self::require_generation(&mut self.active, generation)?;
+        match active.coordinator.stage() {
+            UpdateStage::Complete | UpdateStage::RolledBack => {}
+            actual => {
+                return Err(ServiceError::WrongStage {
+                    expected: UpdateStage::Complete,
+                    actual,
+                })
+            }
+        }
+        let archive =
+            archive_completed_transaction(&active.staging_root, archive_root)
+                .map_err(ServiceError::Staging)?;
+        cleanup_staged_transaction(&active.staging_root, &archive)
+            .map_err(ServiceError::Staging)?;
+        self.active = None;
+        Ok(archive)
+    }
+
+    fn require_idle(&self) -> Result<(), ServiceError> {
+        if self.active.is_some() {
+            Err(ServiceError::Busy)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn peek_generation(&self) -> Result<u64, ServiceError> {
+        self.next_generation
+            .checked_add(1)
+            .map(|_| self.next_generation)
+            .ok_or(ServiceError::Coordinator(CoordinatorError::Staging(
+                StagingError::BudgetOverflow,
+            )))
+    }
+
+    fn require_generation(
+        active: &mut Option<ServiceUpdate>,
+        generation: u64,
+    ) -> Result<&mut ServiceUpdate, ServiceError> {
+        let active = active.as_mut().ok_or(ServiceError::NoActive)?;
+        if active.generation != generation {
+            return Err(ServiceError::StaleGeneration {
+                expected: active.generation,
+                actual: generation,
+            });
+        }
+        Ok(active)
+    }
+
+    fn require_stage(active: &ServiceUpdate, expected: UpdateStage) -> Result<(), ServiceError> {
+        let actual = active.coordinator.stage();
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(ServiceError::WrongStage { expected, actual })
+        }
+    }
+
+    fn publish_active(
+        &mut self,
+        generation: u64,
+        coordinator: UpdateCoordinator,
+        prepared: PreparedUpdate,
+        staging_root: &Path,
+        manifest_sha256: [u8; 32],
+    ) -> Result<(), ServiceError> {
+        self.active = Some(ServiceUpdate {
+            generation,
+            coordinator,
+            prepared: Some(prepared),
+            staging_root: staging_root.to_path_buf(),
+            manifest_sha256,
+        });
+        self.next_generation = generation + 1;
+        Ok(())
+    }
+
+    fn publish_recovered(
+        &mut self,
+        generation: u64,
+        coordinator: UpdateCoordinator,
+        staging_root: &Path,
+        manifest_sha256: [u8; 32],
+    ) -> Result<(), ServiceError> {
+        self.active = Some(ServiceUpdate {
+            generation,
+            coordinator,
+            prepared: None,
+            staging_root: staging_root.to_path_buf(),
+            manifest_sha256,
+        });
+        self.next_generation = generation + 1;
+        Ok(())
+    }
+}
+
 fn now_nanos() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2193,6 +2602,136 @@ mod tests {
         assert!(matches!(
             load_prepared_transaction(&root, [0x44; 32]),
             Err(StagingError::Transaction(TransactionError::CorruptRecord))
+        ));
+    }
+
+    fn prepared_service(temp: &TestDir, tag: &str) -> (UpdateService, u64, PathBuf) {
+        let manifest_bytes = b"signed-service-manifest";
+        let bytes = b"service-kernel-image";
+        let source_path = temp.path().join(format!("{tag}.source"));
+        fs::write(&source_path, bytes).unwrap();
+        let verified_manifest = manifest(
+            manifest_bytes,
+            vec![artifact(ArtifactKind::Kernel, "kernel", bytes)],
+        );
+        let grant = LocalInstallGrant {
+            locally_authenticated: true,
+            purpose: 1,
+            manifest_sha256: verified_manifest.manifest.manifest_sha256,
+            profile: verified_manifest.manifest.target_profile,
+            expires_at: 10,
+        };
+        let staging_root = temp.path().join(format!("{tag}-staging"));
+        let control_root = temp.path().join(format!("{tag}-control"));
+        let initial = ControlBlock::initialize(Slot::A, 1, [1; 32], 1, 1, 1, 2).unwrap();
+        let mut service = UpdateService::initialize(&control_root, initial).unwrap();
+        let status = service
+            .prepare(
+                verified_manifest,
+                manifest_bytes,
+                grant,
+                9,
+                &[],
+                &[ArtifactSource {
+                    name: "kernel",
+                    path: &source_path,
+                }],
+                &staging_root,
+                4096,
+            )
+            .unwrap();
+        (service, status.generation, staging_root)
+    }
+
+    #[test]
+    fn service_generation_guards_full_commit_trial_health_and_archive_path() {
+        let temp = TestDir::new("service-success");
+        let (mut service, generation, _) = prepared_service(&temp, "success");
+        assert_eq!(service.status().stage, Some(UpdateStage::Prepared));
+        assert!(matches!(
+            service.commit(0, Slot::B, 2),
+            Err(ServiceError::StaleGeneration {
+                expected,
+                actual: 0
+            }) if expected == generation
+        ));
+
+        let committed = service.commit(generation, Slot::B, 2).unwrap();
+        assert_eq!(committed.stage, Some(UpdateStage::Committed));
+        let decision = service.begin_trial(generation).unwrap();
+        assert_eq!(decision.reason, BootReason::CandidateTrial);
+        let confirmed = service.report_health(generation, true).unwrap();
+        assert_eq!(confirmed.stage, Some(UpdateStage::Confirmed));
+        assert_eq!(confirmed.active_slot, Slot::B);
+
+        let complete = service.finalize_confirmed(generation).unwrap();
+        assert_eq!(complete.stage, Some(UpdateStage::Complete));
+        let archive = service
+            .archive_and_cleanup(
+                generation,
+                &temp.path().join("service-success-archive"),
+            )
+            .unwrap();
+        assert_eq!(archive.record.stage(), UpdateStage::Complete);
+        assert_eq!(service.status().stage, None);
+    }
+
+    #[test]
+    fn service_failed_health_is_the_only_path_to_rollback() {
+        let temp = TestDir::new("service-rollback");
+        let (mut service, generation, _) = prepared_service(&temp, "rollback");
+        service.commit(generation, Slot::B, 2).unwrap();
+        service.begin_trial(generation).unwrap();
+        assert!(matches!(
+            service.finalize_confirmed(generation),
+            Err(ServiceError::WrongStage {
+                expected: UpdateStage::Confirmed,
+                actual: UpdateStage::Trial
+            })
+        ));
+        assert_eq!(
+            service.report_health(generation, false).unwrap().stage,
+            Some(UpdateStage::Rollback)
+        );
+        assert_eq!(service.finish_rollback(generation).unwrap(), Slot::A);
+        assert_eq!(
+            service.status().stage,
+            Some(UpdateStage::RolledBack)
+        );
+        let archive = service
+            .archive_and_cleanup(
+                generation,
+                &temp.path().join("service-rollback-archive"),
+            )
+            .unwrap();
+        assert_eq!(archive.record.stage(), UpdateStage::RolledBack);
+    }
+
+    #[test]
+    fn service_recovery_repairs_control_commit_and_keeps_generation_boundary() {
+        let temp = TestDir::new("service-recovery");
+        let (mut service, generation, staging_root) = prepared_service(&temp, "recovery");
+        let prepared_record = service
+            .active
+            .as_ref()
+            .and_then(|active| active.prepared.as_ref())
+            .map(|prepared| prepared.record)
+            .unwrap();
+        let digest = service.status().manifest_sha256.unwrap();
+        let control_root = temp.path().join("recovery-control");
+        service.commit(generation, Slot::B, 2).unwrap();
+
+        // Simulate a crash after control commit but before the transaction journal update.
+        persist_transaction_record(&staging_root, prepared_record).unwrap();
+        drop(service);
+
+        let mut recovered = UpdateService::open(&control_root).unwrap();
+        let status = recovered.recover(&staging_root, digest).unwrap();
+        assert_eq!(status.stage, Some(UpdateStage::Committed));
+        assert!(status.generation > generation);
+        assert!(matches!(
+            recovered.report_health(generation, true),
+            Err(ServiceError::StaleGeneration { .. })
         ));
     }
 }
