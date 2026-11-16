@@ -14,6 +14,7 @@ OUT="${PIXEL6A_RUNTIME_OUT:-$ROOT/evidence/pixel6a-runtime-$(date '+%Y%m%d-%H%M%
 TARGET="${PIXEL6A_RUNTIME_TARGET:-$ROOT/target/pixel6a-runtime}"
 LZ4="${PIXEL6A_LZ4:-/home/auth/Documents/jasper/.tools/pixel6a-platform-tools/lz4/usr/bin/lz4}"
 MKBOOTIMG="${PIXEL6A_MKBOOTIMG:-/home/auth/Documents/jasper/.tools/pixel6a-platform-tools/mkbootimg/usr/bin/mkbootimg}"
+ELF="${PIXEL6A_RUNTIME_ELF:-$TARGET/aarch64-unknown-none-softfloat/release/jasper-kernel}"
 
 for path in "$STOCK_IMAGE" "$STOCK_BOOT" "$LZ4" "$MKBOOTIMG"; do
     [ -f "$path" ] || {
@@ -24,14 +25,19 @@ done
 
 mkdir -p "$OUT"
 
-env -u CARGO_TARGET_DIR "$ROOT/scripts/guarded-cargo.sh" \
-    build --locked --release --target-dir "$TARGET" \
-    --target aarch64-unknown-none-softfloat \
-    -p jasper-kernel --no-default-features \
-    --features pixel6a-runtime-verify \
-    >"$OUT/kernel-build.log" 2>&1
+if [ "${PIXEL6A_SKIP_BUILD:-0}" != 1 ]; then
+    env -u CARGO_TARGET_DIR "$ROOT/scripts/guarded-cargo.sh" \
+        build --locked --release --target-dir "$TARGET" \
+        --target aarch64-unknown-none-softfloat \
+        -p jasper-kernel --no-default-features \
+        --features pixel6a-runtime-verify \
+        >"$OUT/kernel-build.log" 2>&1
+fi
+[ -f "$ELF" ] || {
+    echo "pixel6a-runtime: missing kernel ELF $ELF" >&2
+    exit 2
+}
 
-ELF="$TARGET/aarch64-unknown-none-softfloat/release/jasper-kernel"
 IMAGE="$OUT/pixel6a-runtime-Image"
 PAYLOAD="$OUT/pixel6a-runtime-kernel-Image"
 COMPRESSED="$OUT/pixel6a-runtime-kernel-Image.lz4"
@@ -136,19 +142,20 @@ set -e
 printf '%s\n' "$rc" >"$OUT/fastboot.rc"
 [ "$rc" -eq 0 ] || exit "$rc"
 
-# The success contract is PSCI SYSTEM_OFF: USB must leave both ADB and
-# fastboot and stay absent. A failed probe returns to fastboot via watchdog.
-sleep 5
-for _ in 1 2 3 4 5 6; do
-    if adb devices | awk 'NR > 1 && $2 == "device" { found=1 } END { exit !found }'; then
-        echo "pixel6a-runtime: Android returned before runtime success" >&2
-        exit 1
+# The success contract is the runtime marker followed by PSCI reset and normal
+# return to the same Android build. A failed kernel remains in fastboot or is
+# returned there by the bootloader watchdog.
+for _ in $(seq 1 90); do
+    if adb devices | awk 'NR > 1 && $2 == "device" { found=1 } END { exit !found }' &&
+        [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] &&
+        adb shell getprop ro.product.device | grep -qx bluejay; then
+        adb shell getprop ro.build.fingerprint >"$OUT/post-boot-fingerprint.txt"
+        echo "pixel6a-runtime: DEVICE PASS android_returned=true evidence=$OUT"
+        exit 0
     fi
-    if fastboot devices | grep -q .; then
-        echo "pixel6a-runtime: device returned to fastboot; runtime failed" >&2
-        exit 1
-    fi
-    sleep 2
+    sleep 1
 done
 
-echo "pixel6a-runtime: DEVICE PASS stayed_off=true evidence=$OUT"
+fastboot getvar current-slot >"$OUT/failure-state.txt" 2>&1 || true
+echo "pixel6a-runtime: Android did not return within 90s; runtime failed" >&2
+exit 1

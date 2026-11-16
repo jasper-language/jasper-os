@@ -98,6 +98,12 @@ jobs:
             --target aarch64-unknown-none-softfloat \
             -p jasper-kernel --no-default-features \
             --features pixel6a-runtime-verify
+      - name: 上传 Pixel 6a 运行 ELF / upload Pixel 6a runtime ELF
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixel6a-runtime-elf
+          path: target/aarch64-unknown-none-softfloat/release/jasper-kernel
+          if-no-files-found: error
 
   accept:
     name: accept (x86_64 + AArch64 + RISC-V64 QEMU)

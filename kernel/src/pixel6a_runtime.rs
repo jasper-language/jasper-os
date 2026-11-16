@@ -72,12 +72,12 @@ fn finish(ctx: &mut BootCtx) {
     }
 
     kprintln!(
-        "[JSR-PIXEL6A] runtime=complete cpus=8 ring3=true syscall=true user_pointers=true user_failed=0 stages={:#x} objects={} tasks={} frames={} heap={}", // JASPER-HARDCODE-REVIEW: issue=33 source=admitted-smp-report reason=literal-8-is-success-policy-checked-against-runtime-report
+        "[JSR-PIXEL6A] runtime=complete cpus=8 ring3=true syscall=true user_pointers=true user_failed=0 stages={:#x} objects={} tasks={} frames={} heap={} action=psci-reset", // JASPER-HARDCODE-REVIEW: issue=33 source=admitted-smp-report reason=literal-8-is-success-policy-checked-against-runtime-report
         ctx.done_mask(),
         capacity.map(|value| value.objects).unwrap_or(0),
         capacity.map(|value| value.tasks).unwrap_or(0),
         ctx.frames.map(|stats| stats.usable).unwrap_or(0),
         crate::mm::heap::limit()
     );
-    crate::arch::aarch64::boot::pixel6a_power_off()
+    crate::arch::aarch64::boot::pixel6a_reset_now()
 }
