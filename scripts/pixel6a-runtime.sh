@@ -8,12 +8,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export PATH="${HOME}/.cargo/bin:${PATH}"
 
-STOCK_IMAGE="${PIXEL6A_STOCK_IMAGE:-/home/auth/Documents/jasper/pixel6a-evidence/factory-image/kernel-Image}"
-STOCK_BOOT="${PIXEL6A_STOCK_BOOT:-/home/auth/Documents/jasper/pixel6a-evidence/factory-image/boot.img}"
+STOCK_IMAGE="${PIXEL6A_STOCK_IMAGE:?set PIXEL6A_STOCK_IMAGE to the matching stock kernel Image}"
+STOCK_BOOT="${PIXEL6A_STOCK_BOOT:?set PIXEL6A_STOCK_BOOT to the matching stock boot.img}"
 OUT="${PIXEL6A_RUNTIME_OUT:-$ROOT/evidence/pixel6a-runtime-$(date '+%Y%m%d-%H%M%S')}"
 TARGET="${PIXEL6A_RUNTIME_TARGET:-$ROOT/target/pixel6a-runtime}"
-LZ4="${PIXEL6A_LZ4:-/home/auth/Documents/jasper/.tools/pixel6a-platform-tools/lz4/usr/bin/lz4}"
-MKBOOTIMG="${PIXEL6A_MKBOOTIMG:-/home/auth/Documents/jasper/.tools/pixel6a-platform-tools/mkbootimg/usr/bin/mkbootimg}"
+LZ4="${PIXEL6A_LZ4:?set PIXEL6A_LZ4 to a compatible lz4 executable}"
+MKBOOTIMG="${PIXEL6A_MKBOOTIMG:?set PIXEL6A_MKBOOTIMG to a compatible mkbootimg executable}"
+FASTBOOT="${PIXEL6A_FASTBOOT:?set PIXEL6A_FASTBOOT to an Android platform-tools fastboot binary}"
+ADB="${PIXEL6A_ADB:-adb}"
 ELF="${PIXEL6A_RUNTIME_ELF:-$TARGET/aarch64-unknown-none-softfloat/release/jasper-kernel}"
 
 for path in "$STOCK_IMAGE" "$STOCK_BOOT" "$LZ4" "$MKBOOTIMG"; do
@@ -22,6 +24,13 @@ for path in "$STOCK_IMAGE" "$STOCK_BOOT" "$LZ4" "$MKBOOTIMG"; do
         exit 2
     }
 done
+[ -x "$FASTBOOT" ] || {
+    echo "pixel6a-runtime: fastboot is not executable: $FASTBOOT" >&2
+    exit 2
+}
+if [ -n "${PIXEL6A_FASTBOOT_LIBS:-}" ]; then
+    export LD_LIBRARY_PATH="$PIXEL6A_FASTBOOT_LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 
 mkdir -p "$OUT"
 
@@ -124,38 +133,79 @@ if [ "${PIXEL6A_BOOT:-0}" != 1 ]; then
     exit 0
 fi
 
-adb_count=$(adb devices | awk 'NR > 1 && $2 == "device" { count++ } END { print count + 0 }')
+adb_count=$("$ADB" devices | awk 'NR > 1 && $2 == "device" { count++ } END { print count + 0 }')
 [ "$adb_count" -eq 1 ] || {
     echo "pixel6a-runtime: expected exactly one Android ADB device, found $adb_count" >&2
     exit 75
 }
-adb shell getprop ro.product.device | grep -qx bluejay
-adb reboot bootloader
-timeout 60 bash -c 'until fastboot devices | grep -q .; do sleep 1; done'
-fastboot getvar current-slot >"$OUT/preflight.txt" 2>&1
-fastboot getvar unlocked >>"$OUT/preflight.txt" 2>&1
+"$ADB" shell getprop ro.product.device | grep -qx bluejay
+"$ADB" reboot bootloader
+fastboot_ready=0
+for _ in $(seq 1 60); do
+    if "$FASTBOOT" devices | grep -q .; then
+        fastboot_ready=1
+        break
+    fi
+    sleep 1
+done
+[ "$fastboot_ready" -eq 1 ] || {
+    echo "pixel6a-runtime: device did not enter fastboot within 60s" >&2
+    exit 1
+}
+"$FASTBOOT" getvar current-slot >"$OUT/preflight.txt" 2>&1
+"$FASTBOOT" getvar unlocked >>"$OUT/preflight.txt" 2>&1
 
 set +e
-fastboot boot "$BOOT" >"$OUT/fastboot.log" 2>&1
+boot_start=$(date +%s.%N)
+"$FASTBOOT" boot "$BOOT" >"$OUT/fastboot.log" 2>&1
 rc=$?
 set -e
 printf '%s\n' "$rc" >"$OUT/fastboot.rc"
 [ "$rc" -eq 0 ] || exit "$rc"
 
-# The success contract is the runtime marker followed by PSCI reset and normal
-# return to the same Android build. A failed kernel remains in fastboot or is
-# returned there by the bootloader watchdog.
+# A failed runtime halts with interrupts masked after disabling the UEFI
+# watchdog. The success path is the only path that emits PSCI reset, so it must
+# first leave fastboot and then reappear in fastboot within 30 seconds.
+disconnected=0
+for _ in $(seq 1 50); do
+    if ! "$FASTBOOT" devices | grep -q .; then
+        disconnected=1
+        break
+    fi
+    sleep 0.2
+done
+[ "$disconnected" -eq 1 ] || {
+    echo "pixel6a-runtime: image never left fastboot" >&2
+    exit 1
+}
+
+returned=0
+for _ in $(seq 1 150); do
+    if "$FASTBOOT" devices | grep -q .; then
+        returned=1
+        break
+    fi
+    sleep 0.2
+done
+[ "$returned" -eq 1 ] || {
+    echo "pixel6a-runtime: runtime did not reach PSCI reset within 30s" >&2
+    exit 1
+}
+return_time=$(date +%s.%N)
+awk -v s="$boot_start" -v n="$return_time" 'BEGIN { printf "runtime_return_seconds=%.2f\n", n-s }' |
+    tee "$OUT/runtime-return.txt"
+
+"$FASTBOOT" reboot >"$OUT/recovery.log" 2>&1
 for _ in $(seq 1 90); do
-    if adb devices | awk 'NR > 1 && $2 == "device" { found=1 } END { exit !found }' &&
-        [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] &&
-        adb shell getprop ro.product.device | grep -qx bluejay; then
-        adb shell getprop ro.build.fingerprint >"$OUT/post-boot-fingerprint.txt"
-        echo "pixel6a-runtime: DEVICE PASS android_returned=true evidence=$OUT"
+    if "$ADB" devices | awk 'NR > 1 && $2 == "device" { found=1 } END { exit !found }' &&
+        [ "$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] &&
+        "$ADB" shell getprop ro.product.device | grep -qx bluejay; then
+        "$ADB" shell getprop ro.build.fingerprint >"$OUT/post-boot-fingerprint.txt"
+        echo "pixel6a-runtime: DEVICE PASS runtime_reset=true android_recovered=true evidence=$OUT"
         exit 0
     fi
     sleep 1
 done
 
-fastboot getvar current-slot >"$OUT/failure-state.txt" 2>&1 || true
-echo "pixel6a-runtime: Android did not return within 90s; runtime failed" >&2
+echo "pixel6a-runtime: runtime reset observed but Android did not recover within 90s" >&2
 exit 1
