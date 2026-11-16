@@ -2734,4 +2734,121 @@ mod tests {
             Err(ServiceError::StaleGeneration { .. })
         ));
     }
+
+    #[test]
+    fn service_online_and_offline_sources_keep_the_same_trust_and_staging_result() {
+        let temp = TestDir::new("service-source-parity");
+        let artifact_bytes = b"service-identical-kernel";
+        let (manifest_bytes, signature, signer) = signed_cbor_bundle(artifact_bytes);
+        let profile = [0x42; 32];
+        let manifest_sha256: [u8; 32] = Sha256::digest(&manifest_bytes).into();
+        let trusted = [signer];
+        let revoked = [[0u8; 32]];
+        let policy = TrustPolicy {
+            trusted_keys: &trusted,
+            revoked_keys: &revoked,
+            minimum_security_epoch: 3,
+        };
+        let target = UpdateTarget {
+            rollback_floor: 8,
+            profile,
+        };
+        let grant = LocalInstallGrant {
+            locally_authenticated: true,
+            purpose: 1,
+            manifest_sha256,
+            profile,
+            expires_at: 200,
+        };
+
+        let offline_root = temp.path().join("service-offline-bundle");
+        fs::create_dir_all(offline_root.join(crate::source::SOURCE_ARTIFACT_DIR)).unwrap();
+        fs::write(
+            offline_root.join(crate::source::SOURCE_MANIFEST_FILE),
+            &manifest_bytes,
+        )
+        .unwrap();
+        fs::write(
+            offline_root.join(crate::source::SOURCE_SIGNATURE_FILE),
+            signature,
+        )
+        .unwrap();
+        fs::write(
+            offline_root
+                .join(crate::source::SOURCE_ARTIFACT_DIR)
+                .join("kernel"),
+            artifact_bytes,
+        )
+        .unwrap();
+
+        let initial = ControlBlock::initialize(Slot::A, 1, [1; 32], 1, 1, 1, 2).unwrap();
+        let mut offline = UpdateService::initialize(
+            temp.path().join("service-offline-control"),
+            initial,
+        )
+        .unwrap();
+        let offline_status = offline
+            .prepare_from_source(
+                policy,
+                target,
+                &DirectoryBundle::new(&offline_root),
+                grant,
+                150,
+                &[],
+                &temp.path().join("service-offline-staging"),
+                4096,
+            )
+            .unwrap();
+
+        let memory = MemoryBundle {
+            manifest: manifest_bytes.clone(),
+            signature,
+            artifact: artifact_bytes.to_vec(),
+        };
+        let mut online = UpdateService::initialize(
+            temp.path().join("service-online-control"),
+            initial,
+        )
+        .unwrap();
+        let online_status = online
+            .prepare_from_source(
+                policy,
+                target,
+                &memory,
+                grant,
+                150,
+                &[],
+                &temp.path().join("service-online-staging"),
+                4096,
+            )
+            .unwrap();
+
+        assert_eq!(offline_status.stage, Some(UpdateStage::Prepared));
+        assert_eq!(online_status.stage, Some(UpdateStage::Prepared));
+        assert_eq!(offline_status.manifest_sha256, Some(manifest_sha256));
+        assert_eq!(
+            offline.status().manifest_sha256,
+            online.status().manifest_sha256
+        );
+        assert_eq!(
+            fs::read(
+                temp.path()
+                    .join("service-offline-staging")
+                    .join(ARTIFACT_DIR)
+                    .join("kernel")
+            )
+            .unwrap(),
+            artifact_bytes
+        );
+        assert_eq!(
+            fs::read(
+                temp.path()
+                    .join("service-online-staging")
+                    .join(ARTIFACT_DIR)
+                    .join("kernel")
+            )
+            .unwrap(),
+            artifact_bytes
+        );
+    }
 }
