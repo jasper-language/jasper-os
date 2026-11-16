@@ -384,8 +384,8 @@ fn run_dispatch(service: &ServiceProcess, generation: u32) -> bool {
         }
     };
     let final_state = vm.guest_state();
-    let lifecycle = vcpu::finish_run_for(service.pid, cpu, final_state).is_ok();
     let guest_marker = read_gpa(service.pid, cpu, 0x7000);
+    let lifecycle = vcpu::finish_run_for(service.pid, cpu, final_state).is_ok();
     let shutdown = vm.shutdown().is_ok();
     drop(vm);
     let _ = proc::close_handle_for(service.pid, cpu);
