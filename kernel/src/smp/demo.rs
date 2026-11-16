@@ -10,10 +10,14 @@ use kernel_core::paging::{MapFlags, VirtPage};
 use kernel_core::smp::{IpiKind, SmpError};
 
 use super::{percpu, StartReport};
-use crate::{arch, kprintln, mm};
+use crate::{arch, kprintln, mm, sched};
 
 static FAILED: AtomicU32 = AtomicU32::new(0);
 static CHECKS: AtomicU32 = AtomicU32::new(0);
+static PEX6_READY: AtomicU32 = AtomicU32::new(0);
+static PEX6_GO: AtomicU32 = AtomicU32::new(0);
+static PEX6_DONE: AtomicU32 = AtomicU32::new(0);
+static PEX6_FAILED: AtomicU32 = AtomicU32::new(0);
 
 /// 记一项断言（失败时打印原因）；同目录的其他演练共用计数。
 pub(super) fn check(ok: bool, what: &str) {
@@ -78,32 +82,125 @@ pub fn run(report: StartReport) {
         report.dropped,
         report.disabled
     );
-    check(report.failed == 0 && report.online == report.present, "有处理器未报到");
+    check(
+        report.failed == 0 && report.online == report.present,
+        "有处理器未报到",
+    );
     for cpu in 0..report.present {
         if let Some(p) = percpu::get(cpu) {
-            kprintln!("[JSR-SMP] cpu index={} hw={} state={}", cpu, p.hw_id(), p.state.get().name());
+            kprintln!(
+                "[JSR-SMP] cpu index={} hw={} state={}",
+                cpu,
+                p.hw_id(),
+                p.state.get().name()
+            );
         }
     }
     let before = ipi_total();
     refusals(report.present);
-    check(ipi_total() == before && super::shootdown_idle(), "拒绝路径发出了核间中断或留下了请求");
+    check(
+        ipi_total() == before && super::shootdown_idle(),
+        "拒绝路径发出了核间中断或留下了请求",
+    );
     if report.online > 1 {
         clocks(report.online);
         reschedule(report.online);
         calls(report.online);
         shootdown(report.online);
+        parallel_shootdown(report.online);
     } else {
         kprintln!("[JSR-SMP] single cpus=1 secondary=none");
     }
     super::shared_demo::run(report.online);
     let me = percpu::this();
-    check(arch::cpu_index() == 0 && me.current() == 0, "引导处理器的每核数据与当前任务不符");
+    check(
+        arch::cpu_index() == 0 && me.current() == 0,
+        "引导处理器的每核数据与当前任务不符",
+    );
     kprintln!(
         "[JSR-SMP] summary cpus={} online={} checks={} failed={}",
         report.present,
         super::online_set().len(),
         CHECKS.load(Ordering::Relaxed),
         failed()
+    );
+}
+
+/// One scheduled AP posts a real shootdown while every other AP is doing the
+/// same. The per-initiator boards must overlap rather than serialize through
+/// one global request slot.
+fn parallel_shootdown_worker() {
+    PEX6_READY.fetch_add(1, Ordering::AcqRel);
+    while PEX6_GO.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+    if super::tlb_shootdown(TLB_VA, 1).is_err() {
+        PEX6_FAILED.fetch_add(1, Ordering::AcqRel);
+    }
+    PEX6_DONE.fetch_add(1, Ordering::AcqRel);
+}
+
+fn parallel_shootdown(online: usize) {
+    if online < 3 {
+        kprintln!(
+            "[JSR-PEX6] parallel online={} required=3 admitted=true exercised=false",
+            online
+        );
+        return;
+    }
+    super::reset_shootdown_stats();
+    PEX6_READY.store(0, Ordering::Release);
+    PEX6_GO.store(0, Ordering::Release);
+    PEX6_DONE.store(0, Ordering::Release);
+    PEX6_FAILED.store(0, Ordering::Release);
+    let mut spawned = 0usize;
+    for cpu in 1..online {
+        let mut affinity = kernel_core::smp::CpuSet::EMPTY;
+        affinity.insert(cpu);
+        let id = crate::task::TaskId(0x5045_5836_0000 + cpu as u64);
+        spawned += usize::from(
+            sched::spawn_on(
+                id,
+                "pex6-shootdown",
+                parallel_shootdown_worker,
+                None,
+                affinity,
+            )
+            .is_ok(),
+        );
+    }
+    let all_ready = spin_until(|| {
+        super::service_shootdown(0);
+        PEX6_READY.load(Ordering::Acquire) as usize == online - 1
+    });
+    if all_ready {
+        PEX6_GO.store(1, Ordering::Release);
+    }
+    sched::run();
+    let completed = PEX6_DONE.load(Ordering::Acquire) as usize;
+    let request_failures = PEX6_FAILED.load(Ordering::Acquire);
+    let stats = super::shootdown_stats();
+    let parallel = stats.peak > 1;
+    check(
+        spawned == online - 1
+            && all_ready
+            && completed == online - 1
+            && request_failures == 0
+            && stats.requests >= (online - 1) as u32
+            && parallel
+            && super::shootdown_idle(),
+        "并行 TLB 击落未全部完成、未观察到并发或公告板未清空",
+    );
+    kprintln!(
+        "[JSR-PEX6] parallel initiators={} spawned={} completed={} request_failures={} requests={} peak_inflight={} overlapping={} idle={}",
+        online - 1,
+        spawned,
+        completed,
+        request_failures,
+        stats.requests,
+        stats.peak,
+        parallel,
+        super::shootdown_idle()
     );
 }
 
@@ -116,11 +213,25 @@ fn refusals(present: usize) {
     let r5 = super::tlb_shootdown(TLB_VA + 1, 1);
     let r6 = super::tlb_shootdown(TLB_VA, 0);
     let r7 = super::tlb_shootdown(TLB_VA, u64::MAX);
-    check(r1 == Err(SmpError::NoSuchCpu), "向不存在的处理器发重新调度未被拒绝");
+    check(
+        r1 == Err(SmpError::NoSuchCpu),
+        "向不存在的处理器发重新调度未被拒绝",
+    );
     check(r2 == Err(SmpError::SelfTarget), "向自己发核间中断未被拒绝");
-    check(r3 == Err(SmpError::NoSuchCpu), "向不存在的处理器投递调用未被拒绝");
-    check(r4 == Err(SmpError::SelfTarget), "向自己投递跨核调用未被拒绝");
-    check(r5 == Err(SmpError::BadRange) && r6 == Err(SmpError::BadRange) && r7 == Err(SmpError::BadRange), "非法击落范围未被拒绝");
+    check(
+        r3 == Err(SmpError::NoSuchCpu),
+        "向不存在的处理器投递调用未被拒绝",
+    );
+    check(
+        r4 == Err(SmpError::SelfTarget),
+        "向自己投递跨核调用未被拒绝",
+    );
+    check(
+        r5 == Err(SmpError::BadRange)
+            && r6 == Err(SmpError::BadRange)
+            && r7 == Err(SmpError::BadRange),
+        "非法击落范围未被拒绝",
+    );
     kprintln!(
         "[JSR-SMP] refuse no_such_cpu={} self={} call_no_such={} call_self={} bad_range={},{},{}",
         err_name(r1),
@@ -142,23 +253,42 @@ fn err_name(r: Result<(), SmpError>) -> &'static str {
 
 /// 各核各自计时：其他处理器的本地 tick 都在走；引导处理器关中断（自己的时钟停住）时它们照走。
 fn clocks(online: usize) {
-    let start: [u64; kernel_core::smp::MAX_CPUS] = core::array::from_fn(|c| percpu::get(c).map(|p| p.ticks()).unwrap_or(0));
-    let ok = spin_until(|| (1..online).all(|c| percpu::get(c).map(|p| p.ticks()).unwrap_or(0) >= start[c] + MIN_TICKS));
+    let start: [u64; kernel_core::smp::MAX_CPUS] =
+        core::array::from_fn(|c| percpu::get(c).map(|p| p.ticks()).unwrap_or(0));
+    let ok = spin_until(|| {
+        (1..online).all(|c| percpu::get(c).map(|p| p.ticks()).unwrap_or(0) >= start[c] + MIN_TICKS)
+    });
     check(ok, "有处理器的本地时钟没有走");
     for c in 1..online {
         let now = percpu::get(c).map(|p| p.ticks()).unwrap_or(0);
-        kprintln!("[JSR-SMP] clock cpu={} ticks_before={} ticks_after={} advanced={}", c, start[c], now, now - start[c]);
+        kprintln!(
+            "[JSR-SMP] clock cpu={} ticks_before={} ticks_after={} advanced={}",
+            c,
+            start[c],
+            now,
+            now - start[c]
+        );
     }
     // 引导处理器关中断：它的 tick 不再增长，其他处理器的 tick 继续增长 ⇒ 各自计时、互不依赖
     let advanced = arch::without_irq(|| {
         let bsp0 = percpu::get(0).map(|p| p.ticks()).unwrap_or(0);
-        let ap0: [u64; kernel_core::smp::MAX_CPUS] = core::array::from_fn(|c| percpu::get(c).map(|p| p.ticks()).unwrap_or(0));
-        let ok = spin_until(|| (1..online).all(|c| percpu::get(c).map(|p| p.ticks()).unwrap_or(0) >= ap0[c] + MIN_TICKS));
+        let ap0: [u64; kernel_core::smp::MAX_CPUS] =
+            core::array::from_fn(|c| percpu::get(c).map(|p| p.ticks()).unwrap_or(0));
+        let ok = spin_until(|| {
+            (1..online)
+                .all(|c| percpu::get(c).map(|p| p.ticks()).unwrap_or(0) >= ap0[c] + MIN_TICKS)
+        });
         let bsp1 = percpu::get(0).map(|p| p.ticks()).unwrap_or(0);
         ok && bsp1 == bsp0
     });
-    check(advanced, "引导处理器关中断期间其他处理器的时钟停了（或引导处理器的时钟仍在走）");
-    kprintln!("[JSR-SMP] clock independent bsp_frozen=1 others_advanced={}", advanced);
+    check(
+        advanced,
+        "引导处理器关中断期间其他处理器的时钟停了（或引导处理器的时钟仍在走）",
+    );
+    kprintln!(
+        "[JSR-SMP] clock independent bsp_frozen=1 others_advanced={}",
+        advanced
+    );
 }
 
 /// 「重新调度」核间中断：每个其他处理器各收到一次，并由其空闲执行流消化标志。
@@ -169,15 +299,23 @@ fn reschedule(online: usize) {
         let before = p.ipis(IpiKind::Reschedule);
         let wakes = p.idle_wakeups();
         let sent = super::reschedule(c);
-        let got = spin_until(|| p.ipis(IpiKind::Reschedule) == before + 1 && p.idle_wakeups() > wakes);
+        let got =
+            spin_until(|| p.ipis(IpiKind::Reschedule) == before + 1 && p.idle_wakeups() > wakes);
         // 标志在空闲执行流醒来后被取走
         let consumed = spin_until(|| !p.resched_pending());
-        check(sent.is_ok() && got && consumed, "重新调度核间中断未送达或未被消化");
+        check(
+            sent.is_ok() && got && consumed,
+            "重新调度核间中断未送达或未被消化",
+        );
         if sent.is_ok() && got && consumed {
             delivered += 1;
         }
     }
-    kprintln!("[JSR-SMP] ipi reschedule delivered={}/{}", delivered, online - 1);
+    kprintln!(
+        "[JSR-SMP] ipi reschedule delivered={}/{}",
+        delivered,
+        online - 1
+    );
 }
 
 /// 跨核调用：函数确实在目标处理器上执行；其他处理器的「当前任务」是空闲执行流。
@@ -186,12 +324,19 @@ fn calls(online: usize) {
     for c in 1..online {
         let r = super::call_on(c, whoami, 0);
         let idle = percpu::get(c).map(|p| p.current()) == Some(percpu::IDLE_SLOT);
-        check(r == Ok(c as u64) && idle, "跨核调用未在目标处理器上执行或当前任务不是空闲执行流");
+        check(
+            r == Ok(c as u64) && idle,
+            "跨核调用未在目标处理器上执行或当前任务不是空闲执行流",
+        );
         if r == Ok(c as u64) {
             ran += 1;
         }
     }
-    kprintln!("[JSR-SMP] call ran_on_target={}/{} current=idle", ran, online - 1);
+    kprintln!(
+        "[JSR-SMP] call ran_on_target={}/{} current=idle",
+        ran,
+        online - 1
+    );
 }
 
 /// TLB 击落：其他处理器先经旧映射读到 A；改映射到 B 后只在本处理器作废时其他处理器可能仍读到 A；
@@ -212,10 +357,15 @@ fn shootdown(online: usize) {
     // 先建一次映射再撤销：中间页表在此建立，之后的基线不含它们
     let warm = mm::map::map(page, fa, MapFlags::WRITE).is_ok() && mm::map::unmap(page).is_ok();
     let base = mm::frame::free_frames();
-    check(warm && mm::map::map(page, fa, MapFlags::WRITE).is_ok(), "击落演练映射失败");
+    check(
+        warm && mm::map::map(page, fa, MapFlags::WRITE).is_ok(),
+        "击落演练映射失败",
+    );
 
     let read_all = || -> u32 {
-        (1..online).filter(|&c| super::call_on(c, read_at, TLB_VA) == Ok(PATTERN_A)).count() as u32
+        (1..online)
+            .filter(|&c| super::call_on(c, read_at, TLB_VA) == Ok(PATTERN_A))
+            .count() as u32
     };
     let saw_a = read_all();
     check(saw_a as usize == online - 1, "其他处理器经旧映射没有读到 A");
@@ -227,10 +377,18 @@ fn shootdown(online: usize) {
 
     let r = super::tlb_shootdown(page.start(), 1);
     check(r.is_ok(), "击落失败");
-    let fresh = (1..online).filter(|&c| super::call_on(c, read_at, TLB_VA) == Ok(PATTERN_B)).count();
+    let fresh = (1..online)
+        .filter(|&c| super::call_on(c, read_at, TLB_VA) == Ok(PATTERN_B))
+        .count();
     check(fresh == online - 1, "击落之后仍有处理器读到旧映射");
-    let acks: u32 = (1..online).filter_map(percpu::get).map(|p| p.ipis(IpiKind::TlbShootdown)).sum();
-    check(acks as usize >= online - 1 && super::shootdown_idle(), "击落应答数不符或公告板未清空");
+    let acks: u32 = (1..online)
+        .filter_map(percpu::get)
+        .map(|p| p.ipis(IpiKind::TlbShootdown))
+        .sum();
+    check(
+        acks as usize >= online - 1 && super::shootdown_idle(),
+        "击落应答数不符或公告板未清空",
+    );
     // SAFETY：本处理器读自己刚改好的映射。
     let local = unsafe { (TLB_VA as *const u64).read_volatile() } == PATTERN_B;
     check(local, "本处理器读到的不是新映射");

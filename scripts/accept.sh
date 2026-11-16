@@ -1455,7 +1455,7 @@ check_smp1a() { # 多处理器第一阶段（x86_64）：4 与 8 个处理器都
   stale4=$(grep -oE 'stale_without_shootdown=[0-9]+/3' "$SERIAL_SMP4" | head -1 | cut -d= -f2)
   stale8=$(grep -oE 'stale_without_shootdown=[0-9]+/7' "$SERIAL_SMP8" | head -1 | cut -d= -f2)
   if [ -z "$miss" ] && [ "$bad" -eq 0 ]; then
-    record SMP-1a PASS "x86_64 -smp 4（QEMU=$QRC_SMP4）与 -smp 8（QEMU=$QRC_SMP8）：MADT 分别发现 4 / 8 个处理器全部报到；各核本地定时器各自计时（引导处理器关中断时其他核照走）；重新调度 / 跨核调用核间中断 4 核 3/3、8 核 7/7；改映射后仅本地作废时 4 核 $stale4 个、8 核 $stale8 个处理器读到旧映射，击落后分别 3/3、7/7 读到新映射、页帧回到基线；拒绝路径无中断无残留；$n 项 x86_64 检查在 4 处理器下全部复跑通过；单处理器 / 4 处理器 / 8 处理器均已覆盖；单处理器启动如实报告只有引导处理器"
+    record SMP-1a PASS "x86_64 -smp 4（QEMU=$QRC_SMP4）与 -smp 8（QEMU=$QRC_SMP8）：MADT 分别发现 4 / 8 个处理器全部报到；各核本地定时器各自计时（引导处理器关中断时其他核照走）；重新调度 / 跨核调用核间中断 4 核 3/3、8 核 7/7；改映射后仅本地作废时 4 核 $stale4 个、8 核 $stale8 个处理器读到旧映射，击落后分别 3/3、7/7 读到新映射、页帧回到基线；按发起 CPU 分片的 TLB 公告板在 4 / 8 核分别完成 3 / 7 个重叠请求且目标一次 IPI 可排空，请求均完成、公告板清空；拒绝路径无中断无残留；$n 项 x86_64 检查在 4 处理器下全部复跑通过；单处理器 / 4 处理器 / 8 处理器均已覆盖；单处理器启动如实报告只有引导处理器"
   else
     record SMP-1a FAIL "缺少/不符：$miss；4 处理器复跑 $n 项中 $bad 项失败（见 serial-smp4.log / serial-smp8.log）"
   fi
@@ -1478,6 +1478,8 @@ smp1a_verdict() {
   grep -qE "^\[JSR-SMP\] call ran_on_target=$ap/$ap current=idle" "$f"          || miss="$miss $name:跨核调用"
   grep -qE "^\[JSR-SMP\] tlb va=0x[0-9a-f]+ before=A:$ap/$ap stale_without_shootdown=[0-$ap]/$ap after_shootdown=B:$ap/$ap local=B:true acks=([$ap-9]|[1-9][0-9]+) frames_back=true" "$f" \
                                                                                 || miss="$miss $name:TLB击落"
+  grep -qE "^\[JSR-PEX6\] parallel initiators=$ap spawned=$ap completed=$ap request_failures=0 requests=$ap peak_inflight=$ap overlapping=true idle=true" "$f" \
+                                                                                || miss="$miss $name:并行TLB击落"
   grep -qE '^\[JSR-SMP\] refuse no_such_cpu=system\.cpu\.error\.no_such_cpu self=system\.cpu\.error\.self_target call_no_such=system\.cpu\.error\.no_such_cpu call_self=system\.cpu\.error\.self_target bad_range=system\.cpu\.error\.bad_range,system\.cpu\.error\.bad_range,system\.cpu\.error\.bad_range' "$f" \
                                                                                 || miss="$miss $name:拒绝路径"
   grep -qE "^\[JSR-SMP\] summary cpus=$n online=$n checks=[0-9]+ failed=0" "$f" || miss="$miss $name:汇总"

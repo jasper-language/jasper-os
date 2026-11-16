@@ -213,7 +213,12 @@ impl Topology {
     pub const fn boot_only(boot_hw_id: u32) -> Topology {
         let mut hw_ids = [0u32; MAX_CPUS];
         hw_ids[0] = boot_hw_id;
-        Topology { hw_ids, count: 1, dropped: 0, disabled: 0 }
+        Topology {
+            hw_ids,
+            count: 1,
+            dropped: 0,
+            disabled: 0,
+        }
     }
 
     /// 追加一个已启用的处理器；与引导处理器或已有项重复的标识被忽略，满了计入 `dropped`。
@@ -279,7 +284,11 @@ impl Topology {
         } else {
             1
         };
-        Topology { hw_ids, dropped, disabled: 0 }
+        Topology {
+            hw_ids,
+            dropped,
+            disabled: 0,
+        }
     }
 
     pub fn push(&mut self, hw_id: u32) {
@@ -413,6 +422,85 @@ pub struct ShootdownBoard {
     state: SpinLock<BoardState>,
 }
 
+/// A set of independent shootdown boards, normally one per initiating CPU.
+///
+/// Each board retains the single-request safety contract of [`ShootdownBoard`].
+/// Independent initiators therefore no longer reject one another with
+/// [`SmpError::Busy`]. A target services every board during the same IPI, and
+/// each initiator observes completion only for its own board/generation.
+#[derive(Clone, Copy)]
+pub struct ShootdownBoards<'a> {
+    boards: &'a [ShootdownBoard],
+}
+
+impl<'a> ShootdownBoards<'a> {
+    /// Build a view over the supplied boards.
+    pub const fn new(boards: &'a [ShootdownBoard]) -> Self {
+        Self { boards }
+    }
+
+    /// Number of installed initiator boards.
+    pub const fn len(&self) -> usize {
+        self.boards.len()
+    }
+
+    /// Whether no initiator board is installed.
+    pub const fn is_empty(&self) -> bool {
+        self.boards.is_empty()
+    }
+
+    /// Post a page-range invalidation through initiator `shard`.
+    pub fn begin(
+        &self,
+        shard: usize,
+        targets: CpuSet,
+        start: u64,
+        pages: u64,
+    ) -> Result<u32, SmpError> {
+        self.boards
+            .get(shard)
+            .ok_or(SmpError::NoSuchCpu)?
+            .begin(targets, start, pages)
+    }
+
+    /// Post a whole-table invalidation through initiator `shard`.
+    pub fn begin_all(&self, shard: usize, targets: CpuSet) -> Result<u32, SmpError> {
+        self.boards
+            .get(shard)
+            .ok_or(SmpError::NoSuchCpu)?
+            .begin_all(targets)
+    }
+
+    /// Observe completion of a request owned by `shard`.
+    pub fn is_complete(&self, shard: usize, generation: u32) -> bool {
+        self.boards
+            .get(shard)
+            .is_none_or(|board| board.is_complete(generation))
+    }
+
+    /// Abandon a request owned by `shard`.
+    pub fn abandon(&self, shard: usize, generation: u32) -> CpuSet {
+        self.boards
+            .get(shard)
+            .map_or(CpuSet::EMPTY, |board| board.abandon(generation))
+    }
+
+    /// Service every request addressed to `cpu`, invoking `flush` once per
+    /// request. Returns whether at least one request was serviced.
+    pub fn service(&self, cpu: usize, mut flush: impl FnMut(u64, u64)) -> bool {
+        let mut serviced = false;
+        for board in self.boards {
+            serviced |= board.service(cpu, &mut flush);
+        }
+        serviced
+    }
+
+    /// Whether every initiator board is idle.
+    pub fn is_idle(&self) -> bool {
+        self.boards.iter().all(ShootdownBoard::is_idle)
+    }
+}
+
 /// 公告板受锁保护的全部状态（一把锁，持锁期间不取其他锁）。
 struct BoardState {
     request: Option<Shootdown>,
@@ -423,7 +511,12 @@ impl ShootdownBoard {
     /// 新建（空闲）。
     /// New idle board.
     pub const fn new() -> Self {
-        ShootdownBoard { state: SpinLock::new(BoardState { request: None, next_generation: 1 }) }
+        ShootdownBoard {
+            state: SpinLock::new(BoardState {
+                request: None,
+                next_generation: 1,
+            }),
+        }
     }
 
     /// 登记一次击落：`start` 页对齐，`pages` 在 1..=[`MAX_SHOOTDOWN_PAGES`]，范围不溢出。
@@ -433,7 +526,11 @@ impl ShootdownBoard {
         if start % PAGE != 0 || pages == 0 || pages > MAX_SHOOTDOWN_PAGES {
             return Err(SmpError::BadRange);
         }
-        if pages.checked_mul(PAGE).and_then(|len| start.checked_add(len)).is_none() {
+        if pages
+            .checked_mul(PAGE)
+            .and_then(|len| start.checked_add(len))
+            .is_none()
+        {
             return Err(SmpError::BadRange);
         }
         self.begin_request(targets, start, pages)
@@ -456,7 +553,12 @@ impl ShootdownBoard {
         // 等待者只等自己那一次。回绕需要在一个等待者等待期间连续发生 2^32 次击落，结构上不可能，故允许回绕（跳过 0）。
         st.next_generation = generation.wrapping_add(1).max(1);
         if !targets.is_empty() {
-            st.request = Some(Shootdown { start, pages, pending: targets, generation });
+            st.request = Some(Shootdown {
+                start,
+                pages,
+                pending: targets,
+                generation,
+            });
         }
         Ok(generation)
     }
@@ -465,7 +567,9 @@ impl ShootdownBoard {
     /// Service a pending request addressed to `cpu`.
     pub fn service(&self, cpu: usize, flush: impl FnOnce(u64, u64)) -> bool {
         let mut st = self.state.lock();
-        let Some(req) = st.request.as_mut() else { return false };
+        let Some(req) = st.request.as_mut() else {
+            return false;
+        };
         if !req.pending.contains(cpu) {
             return false;
         }
@@ -519,7 +623,11 @@ pub type CallFn = fn(u64) -> u64;
 enum Call {
     Idle,
     /// 投递时分配的唯一令牌用于区分“同一次投递”和撤销后重新投递。
-    Posted { f: CallFn, arg: u64, token: u32 },
+    Posted {
+        f: CallFn,
+        arg: u64,
+        token: u32,
+    },
     Done(u64),
 }
 
@@ -534,7 +642,10 @@ impl CallSlot {
     /// 新建（空闲）。
     /// New idle slot.
     pub const fn new() -> Self {
-        CallSlot { state: SpinLock::new(Call::Idle), next_token: core::sync::atomic::AtomicU32::new(0) }
+        CallSlot {
+            state: SpinLock::new(Call::Idle),
+            next_token: core::sync::atomic::AtomicU32::new(0),
+        }
     }
 
     /// 投递一次调用；格子不空闲时返回 `Busy` 且不改动。
@@ -543,7 +654,10 @@ impl CallSlot {
         let mut st = self.state.lock();
         match *st {
             Call::Idle => {
-                let token = self.next_token.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+                let token = self
+                    .next_token
+                    .fetch_add(1, Ordering::Relaxed)
+                    .wrapping_add(1);
                 *st = Call::Posted { f, arg, token };
                 Ok(())
             }
@@ -561,7 +675,9 @@ impl CallSlot {
                 _ => None,
             }
         };
-        let Some((f, arg, token)) = posted else { return false };
+        let Some((f, arg, token)) = posted else {
+            return false;
+        };
         let value = f(arg);
         let mut st = self.state.lock();
         // 发起方可能已因超时撤销并重新投递：只有令牌仍是同一次投递时才写结果，
@@ -752,7 +868,10 @@ mod tests {
         let one = CpuSet::first(2).without(0);
         assert_eq!(b.begin(one, 0x1001, 1), Err(SmpError::BadRange));
         assert_eq!(b.begin(one, 0x1000, 0), Err(SmpError::BadRange));
-        assert_eq!(b.begin(one, 0x1000, MAX_SHOOTDOWN_PAGES + 1), Err(SmpError::BadRange));
+        assert_eq!(
+            b.begin(one, 0x1000, MAX_SHOOTDOWN_PAGES + 1),
+            Err(SmpError::BadRange)
+        );
         assert_eq!(b.begin(one, u64::MAX - 0xfff, 2), Err(SmpError::BadRange));
         assert!(b.is_idle());
         let g = b.begin(one, 0x1000, 1).unwrap();
@@ -818,6 +937,55 @@ mod tests {
     }
 
     #[test]
+    fn independent_initiators_progress_in_parallel_and_share_one_target_service() {
+        let boards = [ShootdownBoard::new(), ShootdownBoard::new()];
+        let set = ShootdownBoards::new(&boards);
+        let mut target = CpuSet::EMPTY;
+        assert!(target.insert(1));
+
+        let first = set.begin(0, target, 0x7000, 1).unwrap();
+        let second = set.begin(1, target, 0x9000, 2).unwrap();
+        assert!(!set.is_complete(0, first));
+        assert!(!set.is_complete(1, second));
+
+        let mut ranges = Vec::new();
+        assert!(set.service(1, |start, pages| ranges.push((start, pages))));
+        assert_eq!(ranges, vec![(0x7000, 1), (0x9000, 2)]);
+        assert!(set.is_complete(0, first));
+        assert!(set.is_complete(1, second));
+        assert!(set.is_idle());
+    }
+
+    #[test]
+    fn abandoning_one_initiator_does_not_cancel_another() {
+        let boards = [ShootdownBoard::new(), ShootdownBoard::new()];
+        let set = ShootdownBoards::new(&boards);
+        let target = CpuSet::first(2).without(0);
+        let first = set.begin(0, target, 0xa000, 1).unwrap();
+        let second = set.begin(1, target, 0xb000, 1).unwrap();
+
+        assert_eq!(set.abandon(0, first), target);
+        assert!(set.is_complete(0, first));
+        assert!(!set.is_complete(1, second));
+        assert!(set.service(1, |_, _| {}));
+        assert!(set.is_complete(1, second));
+        assert!(set.is_idle());
+    }
+
+    #[test]
+    fn invalid_initiator_is_rejected_without_touching_live_requests() {
+        let boards = [ShootdownBoard::new()];
+        let set = ShootdownBoards::new(&boards);
+        let target = CpuSet::first(2).without(0);
+        let live = set.begin(0, target, 0xc000, 1).unwrap();
+
+        assert_eq!(set.begin(1, target, 0xd000, 1), Err(SmpError::NoSuchCpu));
+        assert!(!set.is_complete(0, live));
+        assert!(set.service(1, |_, _| {}));
+        assert!(set.is_idle());
+    }
+
+    #[test]
     fn whole_table_shootdown_uses_one_request_and_finishes_after_acks() {
         let b = ShootdownBoard::new();
         let targets = CpuSet::first(3).without(0);
@@ -855,7 +1023,9 @@ mod tests {
     }
 
     static RACE_SLOT: CallSlot = CallSlot::new();
-    fn race_second(_: u64) -> u64 { 7 }
+    fn race_second(_: u64) -> u64 {
+        7
+    }
     fn race_first(_: u64) -> u64 {
         // Timeout plus a new post while the old call is still executing.
         RACE_SLOT.abandon();
@@ -953,7 +1123,12 @@ mod tests {
         });
         for k in IpiKind::ALL {
             // 每次「投递前不在待处理」的投递恰好对应一次被取走
-            assert_eq!(seen[k.index()].load(Ordering::Relaxed), posted[k.index()], "{:?}", k);
+            assert_eq!(
+                seen[k.index()].load(Ordering::Relaxed),
+                posted[k.index()],
+                "{:?}",
+                k
+            );
             assert!(posted[k.index()] >= 1);
         }
         assert!(m.is_empty());

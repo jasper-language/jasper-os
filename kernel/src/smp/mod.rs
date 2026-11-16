@@ -24,10 +24,13 @@ pub mod demo;
 pub mod percpu;
 pub mod shared_demo;
 
-use alloc::vec;
+use alloc::{vec, vec::Vec};
+use core::sync::atomic::{AtomicU32, Ordering};
 use kernel_core::frame::PhysFrame;
 use kernel_core::paging::{MapFlags, VirtPage};
-use kernel_core::smp::{CallFn, CpuSet, CpuState, IpiKind, ShootdownBoard, SmpError, Topology};
+use kernel_core::smp::{
+    CallFn, CpuSet, CpuState, IpiKind, ShootdownBoard, ShootdownBoards, SmpError, Topology,
+};
 use spin::Once;
 
 use crate::arch;
@@ -42,8 +45,79 @@ const IDLE_STACK_SIZE: usize = 16 * 1024;
 static TOPOLOGY: Once<Topology> = Once::new();
 /// 平台要求的低端启动帧（只预留一次，永久保留供以后再次启动处理器）。
 static START_FRAME: Once<Option<PhysFrame>> = Once::new();
-/// 全系统唯一的 TLB 击落公告板。
-static SHOOTDOWN: ShootdownBoard = ShootdownBoard::new();
+/// One board per initiating logical CPU. The vector is allocated after the
+/// platform CPU inventory is admitted and before any secondary CPU starts.
+static SHOOTDOWN_BOARDS: Once<Vec<ShootdownBoard>> = Once::new();
+/// Bootstrap-only board used by single-CPU boot code before firmware CPU
+/// discovery admits the runtime board set.
+static BOOT_SHOOTDOWN: ShootdownBoard = ShootdownBoard::new();
+static SHOOTDOWN_ACTIVE: AtomicU32 = AtomicU32::new(0);
+static SHOOTDOWN_PEAK: AtomicU32 = AtomicU32::new(0);
+static SHOOTDOWN_REQUESTS: AtomicU32 = AtomicU32::new(0);
+
+/// Observable concurrency of admitted TLB shootdown requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ShootdownStats {
+    /// Requests posted since the last reset.
+    pub requests: u32,
+    /// Highest number of simultaneously in-flight requests.
+    pub peak: u32,
+}
+
+/// Reset the concurrency observation window.
+pub fn reset_shootdown_stats() {
+    SHOOTDOWN_ACTIVE.store(0, Ordering::Release);
+    SHOOTDOWN_PEAK.store(0, Ordering::Release);
+    SHOOTDOWN_REQUESTS.store(0, Ordering::Release);
+}
+
+/// Read the current concurrency observation window.
+pub fn shootdown_stats() -> ShootdownStats {
+    ShootdownStats {
+        requests: SHOOTDOWN_REQUESTS.load(Ordering::Acquire),
+        peak: SHOOTDOWN_PEAK.load(Ordering::Acquire),
+    }
+}
+
+/// Account for one admitted request until it completes or is abandoned.
+struct ShootdownActivity;
+
+impl ShootdownActivity {
+    fn begin() -> Self {
+        SHOOTDOWN_REQUESTS.fetch_add(1, Ordering::AcqRel);
+        let active = SHOOTDOWN_ACTIVE.fetch_add(1, Ordering::AcqRel) + 1;
+        SHOOTDOWN_PEAK.fetch_max(active, Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for ShootdownActivity {
+    fn drop(&mut self) {
+        SHOOTDOWN_ACTIVE.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Admit the shootdown-board storage for the actual logical CPU count.
+fn initialize_shootdown_boards(count: usize) -> ShootdownBoards<'static> {
+    let boards = SHOOTDOWN_BOARDS.call_once(|| {
+        let mut boards = Vec::new();
+        if boards.try_reserve_exact(count.max(1)).is_err() {
+            crate::kprintln!("[JSR-SMP] reject=shootdown_board_capacity cpus={}", count);
+            arch::halt_forever();
+        }
+        for _ in 0..count.max(1) {
+            boards.push(ShootdownBoard::new());
+        }
+        boards
+    });
+    ShootdownBoards::new(boards.as_slice())
+}
+
+fn admitted_shootdown_boards() -> Option<ShootdownBoards<'static>> {
+    SHOOTDOWN_BOARDS
+        .get()
+        .map(|boards| ShootdownBoards::new(boards.as_slice()))
+}
 
 /// 启动结果汇总。
 /// Start-up summary.
@@ -68,7 +142,9 @@ pub struct StartReport {
 /// Reserve the platform's low start-up frame, if it needs one.
 pub fn reserve_start_frame() -> bool {
     START_FRAME
-        .call_once(|| arch::CPU_START_FRAME_LIMIT.and_then(|limit| mm::frame::allocate_below(limit).ok()))
+        .call_once(|| {
+            arch::CPU_START_FRAME_LIMIT.and_then(|limit| mm::frame::allocate_below(limit).ok())
+        })
         .is_some()
         || arch::CPU_START_FRAME_LIMIT.is_none()
 }
@@ -78,7 +154,15 @@ pub fn reserve_start_frame() -> bool {
 /// Discover and start the other processors one by one.
 pub fn start_secondaries(timer_hz: u32) -> StartReport {
     let Some(boot) = crate::boot::get() else {
-        return StartReport { present: 1, online: 1, failed: 0, source: "boot_only", dropped: 0, disabled: 0 };
+        let _ = initialize_shootdown_boards(1);
+        return StartReport {
+            present: 1,
+            online: 1,
+            failed: 0,
+            source: "boot_only",
+            dropped: 0,
+            disabled: 0,
+        };
     };
     let discovery = arch::cpu_init_boot(boot);
     let topo = TOPOLOGY.call_once(|| discovery.topology);
@@ -96,6 +180,15 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
             "[JSR-SMP] reject=cpu_runtime_capacity present={} capacity={}",
             topo.count(),
             kernel_core::smp::MAX_CPUS
+        );
+        arch::halt_forever();
+    }
+    let boards = initialize_shootdown_boards(topo.count());
+    if boards.len() != topo.count() {
+        crate::kprintln!(
+            "[JSR-SMP] reject=shootdown_board_capacity present={} boards={}",
+            topo.count(),
+            boards.len()
         );
         arch::halt_forever();
     }
@@ -127,7 +220,13 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
         // 栈永久属于该处理器（处理器不下线），泄漏为 'static。
         let stack: &'static mut [u8] = vec![0u8; IDLE_STACK_SIZE].leak();
         let stack_top = (stack.as_ptr() as u64 + IDLE_STACK_SIZE as u64) & !0xF;
-        let req = arch::CpuStart { index: cpu, hw_id, stack_top, space, timer_hz };
+        let req = arch::CpuStart {
+            index: cpu,
+            hw_id,
+            stack_top,
+            space,
+            timer_hz,
+        };
         // SAFETY：栈专属于该处理器；启动帧满足平台要求并已映射；处理器依次启动。
         let started = unsafe { arch::cpu_start(&req, frame) };
         let online = started.is_ok() && wait_until(|| pc.state.get() != CpuState::Starting);
@@ -167,7 +266,9 @@ fn wait_until(mut cond: impl FnMut() -> bool) -> bool {
 /// 其他处理器完成平台初始化后的入口（由 arch 调用，永不返回）：报到，然后运行空闲执行流。
 /// Entry of a secondary processor after platform initialisation.
 pub fn secondary_main(index: usize) -> ! {
-    let Some(me) = percpu::get(index) else { arch::halt_forever() };
+    let Some(me) = percpu::get(index) else {
+        arch::halt_forever()
+    };
     me.set_current(percpu::IDLE_SLOT);
     me.set_space(None);
     if me.state.mark_online().is_err() {
@@ -192,8 +293,10 @@ pub fn on_ipi(kind: IpiKind) {
     match kind {
         IpiKind::Reschedule => {
             me.request_resched();
-            if crate::hrtime::enabled(){let _=unsafe {arch::timer_arm_after_ns(1)};}
-        },
+            if crate::hrtime::enabled() {
+                let _ = unsafe { arch::timer_arm_after_ns(1) };
+            }
+        }
         IpiKind::TlbShootdown => {
             service_shootdown(arch::cpu_index());
         }
@@ -223,7 +326,9 @@ pub fn online_set() -> CpuSet {
 
 /// 目标是否可接收核间中断：存在、不是自己、在线。
 fn check_target(cpu: usize) -> Result<&'static percpu::PerCpu, SmpError> {
-    let pc = percpu::get(cpu).filter(|_| cpu < cpu_count()).ok_or(SmpError::NoSuchCpu)?;
+    let pc = percpu::get(cpu)
+        .filter(|_| cpu < cpu_count())
+        .ok_or(SmpError::NoSuchCpu)?;
     if cpu == arch::cpu_index() {
         return Err(SmpError::SelfTarget);
     }
@@ -267,6 +372,11 @@ pub fn collect_call(cpu: usize) -> Result<u64, SmpError> {
     let pc = check_target(cpu)?;
     let mut result = None;
     if wait_until(|| {
+        // A target may itself be waiting for a shootdown response while its
+        // cross-CPU call is being collected. Continue servicing this CPU's
+        // shootdown boards so the call and the shootdown cannot wait on each
+        // other.
+        service_shootdown(arch::cpu_index());
         result = pc.call.collect();
         result.is_some()
     }) {
@@ -293,7 +403,11 @@ pub fn tlb_shootdown_on(active: CpuSet, va: u64, pages: u64) -> Result<(), SmpEr
     if pages == 0 || va % 4096 != 0 {
         return Err(SmpError::BadRange);
     }
-    if pages.checked_mul(4096).and_then(|len| va.checked_add(len)).is_none() {
+    if pages
+        .checked_mul(4096)
+        .and_then(|len| va.checked_add(len))
+        .is_none()
+    {
         return Err(SmpError::BadRange);
     }
     let me = arch::cpu_index();
@@ -301,28 +415,34 @@ pub fn tlb_shootdown_on(active: CpuSet, va: u64, pages: u64) -> Result<(), SmpEr
     let whole = pages > kernel_core::smp::MAX_SHOOTDOWN_PAGES;
     let mut generation = None;
     // 别的处理器正在发起时：服务它发给我们的请求，直到公告板空出来
-    let posted = wait_until(|| match if whole {
-        SHOOTDOWN.begin_all(targets)
-    } else {
-        SHOOTDOWN.begin(targets, va, pages)
-    } {
-        Ok(g) => {
-            generation = Some(Ok(g));
-            true
-        }
-        Err(SmpError::Busy) => {
-            service_shootdown(me);
-            false
-        }
-        Err(e) => {
-            generation = Some(Err(e));
-            true
+    let posted = wait_until(|| {
+        let admitted = match admitted_shootdown_boards() {
+            Some(boards) if whole => boards.begin_all(me, targets),
+            Some(boards) => boards.begin(me, targets, va, pages),
+            None if me == 0 && whole => BOOT_SHOOTDOWN.begin_all(targets),
+            None if me == 0 => BOOT_SHOOTDOWN.begin(targets, va, pages),
+            None => Err(SmpError::NoSuchCpu),
+        };
+        match admitted {
+            Ok(g) => {
+                generation = Some(Ok(g));
+                true
+            }
+            Err(SmpError::Busy) => {
+                service_shootdown(me);
+                false
+            }
+            Err(e) => {
+                generation = Some(Err(e));
+                true
+            }
         }
     });
     let generation = match (posted, generation) {
         (true, Some(r)) => r?,
         _ => return Err(SmpError::Timeout),
     };
+    let _activity = ShootdownActivity::begin();
     if whole {
         arch::tlb_flush_all_local();
     } else {
@@ -330,38 +450,54 @@ pub fn tlb_shootdown_on(active: CpuSet, va: u64, pages: u64) -> Result<(), SmpEr
     }
     for cpu in targets.iter() {
         if let Err(e) = arch::send_ipi(cpu, IpiKind::TlbShootdown) {
-            SHOOTDOWN.abandon(generation);
+            abandon_shootdown(me, generation);
             return Err(e);
         }
     }
     #[cfg(feature = "fault-inject")]
     if crate::fault_inject::IPI_TIMEOUT.hit() {
-        SHOOTDOWN.abandon(generation);
+        abandon_shootdown(me, generation);
         return Err(SmpError::Timeout);
     }
     if wait_until(|| {
         service_shootdown(me);
-        SHOOTDOWN.is_complete(generation)
+        admitted_shootdown_boards().map_or_else(
+            || BOOT_SHOOTDOWN.is_complete(generation),
+            |boards| boards.is_complete(me, generation),
+        )
     }) {
         Ok(())
     } else {
-        SHOOTDOWN.abandon(generation);
+        abandon_shootdown(me, generation);
         Err(SmpError::Timeout)
     }
 }
 
+fn abandon_shootdown(cpu: usize, generation: u32) {
+    if let Some(boards) = admitted_shootdown_boards() {
+        boards.abandon(cpu, generation);
+    } else {
+        BOOT_SHOOTDOWN.abandon(generation);
+    }
+}
+
 fn service_shootdown(cpu: usize) {
-    SHOOTDOWN.service(cpu, |start, pages| {
+    let mut flush = |start, pages| {
         if pages == 0 {
             arch::tlb_flush_all_local();
         } else {
             arch::tlb_flush_local(start, pages);
         }
-    });
+    };
+    if let Some(boards) = admitted_shootdown_boards() {
+        boards.service(cpu, &mut flush);
+    } else if cpu == 0 {
+        BOOT_SHOOTDOWN.service(cpu, &mut flush);
+    }
 }
 
 /// 击落公告板是否空闲（演练检查「拒绝后无残留」用）。
 /// Whether the shootdown board is idle.
 pub fn shootdown_idle() -> bool {
-    SHOOTDOWN.is_idle()
+    BOOT_SHOOTDOWN.is_idle() && admitted_shootdown_boards().is_none_or(|boards| boards.is_idle())
 }
