@@ -288,6 +288,12 @@ pub enum PackageError {
         /// 阻止卸载的活动组件。Active component blocking removal.
         dependent: String,
     },
+    /// The active dependency graph contains a cycle.
+    /// 活动组件依赖图包含环。
+    DependencyCycle {
+        /// 环上的组件顺序，首尾相同。
+        chain: Vec<String>,
+    },
     /// 已保存的状态文件损坏或指向不存在的工件。
     CorruptState {
         /// 状态所属组件名。
@@ -336,6 +342,9 @@ impl std::fmt::Display for PackageError {
                 component,
                 dependent,
             } => write!(formatter, "组件 {component} 仍被 {dependent} 依赖"),
+            Self::DependencyCycle { chain } => {
+                write!(formatter, "组件依赖环：{}", chain.join(" -> "))
+            }
             Self::CorruptState { name, reason } => {
                 write!(formatter, "组件状态损坏：{name}：{reason}")
             }
@@ -482,15 +491,20 @@ impl ComponentInstaller {
         &self,
         manifest: &ComponentManifest,
     ) -> Result<(), PackageError> {
-        let mut pending: Vec<(String, DependencyRequirement)> = manifest
+        let mut pending: Vec<(String, Vec<String>, DependencyRequirement)> = manifest
             .requires
             .iter()
             .cloned()
-            .map(|required| (manifest.name.clone(), required))
+            .map(|required| (manifest.name.clone(), vec![manifest.name.clone()], required))
             .collect();
         let mut installed: BTreeMap<String, Installed> = BTreeMap::new();
         let mut expanded = BTreeSet::new();
-        while let Some((component, required)) = pending.pop() {
+        while let Some((component, path, required)) = pending.pop() {
+            if path.contains(&required.name) {
+                let mut chain = path;
+                chain.push(required.name);
+                return Err(PackageError::DependencyCycle { chain });
+            }
             let dependency = if let Some(dependency) = installed.get(&required.name) {
                 dependency.clone()
             } else {
@@ -520,11 +534,13 @@ impl ComponentInstaller {
             }
             let dependency_manifest =
                 self.installed_manifest(&dependency.name, &dependency.version)?;
+            let mut nested_path = path;
+            nested_path.push(required.name.clone());
             pending.extend(
                 dependency_manifest
                     .requires
                     .into_iter()
-                    .map(|nested| (required.name.clone(), nested)),
+                    .map(|nested| (required.name.clone(), nested_path.clone(), nested)),
             );
         }
         Ok(())
@@ -1382,6 +1398,41 @@ mod tests {
             }) if component == "linux-abi-1" && required == "base-1"
         ));
         assert_eq!(installer.current("wine").unwrap().version, "2.0");
+        assert!(transient_entries(&root).is_empty());
+    }
+
+    #[test]
+    fn dependency_cycles_fail_before_activation() {
+        let temp = TestDir::new("dependency-cycle");
+        let root = temp.path().join("root");
+        let installer = ComponentInstaller::new(&root);
+        let (a1_archive, a1_digest) = archive(temp.path(), "cycle-a1");
+        let a1 = component_manifest(temp.path(), "cycle-a", "1.0.0", &a1_digest, "");
+        let (b_archive, b_digest) = archive(temp.path(), "cycle-b");
+        let b = component_manifest(
+            temp.path(),
+            "cycle-b",
+            "1.0.0",
+            &b_digest,
+            "cycle-a@>=1.0.0,<2.0.0",
+        );
+        let (a2_archive, a2_digest) = archive(temp.path(), "cycle-a2");
+        let a2 = component_manifest(temp.path(), "cycle-a", "2.0.0", &a2_digest, "cycle-b");
+
+        installer.install(&a1, &a1_archive).unwrap();
+        installer.install(&b, &b_archive).unwrap();
+        assert!(matches!(
+            installer.install(&a2, &a2_archive),
+            Err(PackageError::DependencyCycle { chain })
+                if chain
+                    == vec![
+                        "cycle-a".to_string(),
+                        "cycle-b".to_string(),
+                        "cycle-a".to_string()
+                    ]
+        ));
+        assert_eq!(installer.current("cycle-a").unwrap().version, "1.0.0");
+        assert_eq!(installer.current("cycle-b").unwrap().version, "1.0.0");
         assert!(transient_entries(&root).is_empty());
     }
 
