@@ -180,7 +180,7 @@ fn conduit() -> Option<Conduit> {
 pub fn init_boot() -> CpuDiscovery {
     let boot = cpu::boot_affinity();
     gic::record_interface(0);
-    let (topology, source) = FIRMWARE.get().copied().unwrap_or((Topology::boot_only(boot), "boot_only"));
+    let (topology, source) = FIRMWARE.get().cloned().unwrap_or((Topology::boot_only(boot), "boot_only")); // JASPER-HARDCODE-REVIEW: issue=33 source=boot-handshake reason=boot-CPU-identity-is-architectural-fact-and-admission-fails-closed
     if topology.count() > 1 {
         let supported = conduit().is_some_and(|c| psci::version_supported(call(c, psci::FN_VERSION, 0, 0, 0)));
         if !supported {

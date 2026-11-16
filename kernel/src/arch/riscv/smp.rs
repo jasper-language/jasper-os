@@ -103,7 +103,7 @@ pub fn configure(fdt: &Fdt<'_>, boot_hart: u32) {
 /// 引导处理器：确认固件实现了 HSM 与 IPI 扩展、打开本处理器的软件中断，返回拓扑。缺少扩展时只报告引导处理器。
 pub fn init_boot(boot_hart: u32) -> CpuDiscovery {
     cpu::enable_sources(cpu::SIE_SSIE);
-    let (topology, source) = FIRMWARE.get().copied().unwrap_or((Topology::boot_only(boot_hart), "boot_only"));
+    let (topology, source) = FIRMWARE.get().cloned().unwrap_or((Topology::boot_only(boot_hart), "boot_only")); // JASPER-HARDCODE-REVIEW: issue=33 source=boot-handshake reason=boot-hart-identity-is-an-architectural-fact-and-admission-fails-closed
     if topology.count() > 1 {
         if !fw::has_extension(sbi::EID_HSM) {
             return CpuDiscovery { topology: Topology::boot_only(boot_hart), source: "system.firmware.sbi.error.no_hsm" };
@@ -180,7 +180,7 @@ pub fn cpu_index() -> usize {
 
 /// 向逻辑下标 `target` 发送核间中断：先在其信箱置位，该种类原本未待处理时再经 SBI 触发软件中断。
 pub fn send_ipi(target: usize, kind: IpiKind) -> Result<(), SmpError> {
-    let topology = FIRMWARE.get().map(|f| f.0);
+    let topology = FIRMWARE.get().map(|f| f.0.clone());
     let Some(hart) = topology.and_then(|t| t.hw_id(target)).filter(|_| target < MAX_CPUS) else {
         return Err(SmpError::NoSuchCpu);
     };

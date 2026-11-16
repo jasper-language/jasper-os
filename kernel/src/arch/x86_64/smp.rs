@@ -191,13 +191,15 @@ pub fn init_boot(boot: &BootSpec) -> CpuDiscovery {
         },
         None => (Topology::boot_only(boot_id), "boot_only"),
     };
-    for (i, &id) in topology.ids().iter().enumerate() {
-        HW_ID[i].store(id, Ordering::Relaxed);
-        if id < 256 {
-            INDEX_OF[id as usize].store(i as u8 + 1, Ordering::Release);
+    if topology.count() <= MAX_CPUS {
+        for (i, &id) in topology.ids().iter().enumerate() {
+            HW_ID[i].store(id, Ordering::Relaxed);
+            if id < 256 {
+                INDEX_OF[id as usize].store(i as u8 + 1, Ordering::Release);
+            }
         }
+        TOPOLOGY_READY.store(true, Ordering::Release);
     }
-    TOPOLOGY_READY.store(true, Ordering::Release);
     CpuDiscovery { topology, source }
 }
 

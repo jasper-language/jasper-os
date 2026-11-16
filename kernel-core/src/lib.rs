@@ -63,6 +63,7 @@
     feature = "display-dynamic",
     feature = "hwvirt-vcpu-dynamic",
     feature = "gpu-dynamic",
+    feature = "cpu-dynamic",
     feature = "ext4-view",
     feature = "persistent-install",
     feature = "runtime-registries"

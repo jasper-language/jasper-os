@@ -291,7 +291,7 @@ impl<'a> Fdt<'a> {
 
 /// 设备树处理器节点的枚举结果。
 /// Result of enumerating the CPU nodes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FdtCpus {
     /// 逻辑下标 ↔ 硬件标识（引导处理器在下标 0；其余按文档顺序）。
     pub topology: Topology,
@@ -1074,9 +1074,9 @@ mod tests {
 
     #[test]
     fn cpu_nodes_rejections_counted_not_lost() {
-        // 换算失败（标识超出平台范围）计入 dropped；引导处理器不在树中如实报告；超出容量计入 dropped
-        // 超出容量：给 MAX_CPUS+5 个可换算的节点，应当装满并丢弃 5 个（与 MAX_CPUS 取值无关）。
-        // 槽位 0 预留给引导处理器，因此树里能装的子处理器是 MAX_CPUS-1 个。
+        // 换算失败（标识超出平台范围）计入 dropped；引导处理器不在树中如实报告。
+        // CPU inventory is heap-backed, so the former 32-slot envelope must not
+        // discard valid firmware records.
         let capacity = crate::smp::MAX_CPUS as u32 - 1;
         let total = capacity + 5;
         let many: Vec<(u32, Option<&[u8]>)> = (1..=total).map(|i| (i, None)).collect();
@@ -1084,8 +1084,9 @@ mod tests {
         let fdt = Fdt::parse(&blob).unwrap();
         let cpus = fdt.cpu_topology(0, |r| Some(r as u32)).unwrap();
         assert!(!cpus.boot_listed, "引导处理器 0 不在树中");
-        assert_eq!(cpus.topology.count(), crate::smp::MAX_CPUS);
-        assert_eq!(cpus.topology.dropped, 5);
+        assert_eq!(cpus.topology.count(), total as usize + 1);
+        assert_eq!(cpus.topology.dropped, 0);
+        assert_eq!(cpus.topology.hw_id(total as usize), Some(total));
 
         // 换算失败单独验证：4 个节点里只有 1、2 可换算，3、4 计入 dropped。
         let few: Vec<(u32, Option<&[u8]>)> = (1..=4).map(|i| (i, None)).collect();
@@ -1094,9 +1095,9 @@ mod tests {
             .unwrap()
             .cpu_topology(0, |r| if r <= 2 { Some(r as u32) } else { None })
             .unwrap();
-        // 换算失败必须计入 dropped（具体装入数量取决于树里是否含引导节点，不写死）。
+        // 换算失败必须计入 dropped，合法条目全部保留。
         assert_eq!(cpus2.topology.dropped, 2);
-        assert!(cpus2.topology.count() <= crate::smp::MAX_CPUS);
+        assert_eq!(cpus2.topology.ids(), &[0, 1, 2]);
         // 结构损坏：返回错误而不是部分结果
         let mut bad = blob.clone();
         let so = u32::from_be_bytes(bad[8..12].try_into().unwrap()) as usize;

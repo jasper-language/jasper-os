@@ -879,8 +879,9 @@ mod tests {
         let entries: Vec<Vec<u8>> = (0..40u8).map(|i| lapic(i, 1)).collect();
         let m = image(0, &entries);
         let madt = parse_madt(&m, 0x100, 0).unwrap();
-        assert_eq!(madt.topology.count(), crate::smp::MAX_CPUS);
-        assert_eq!(madt.topology.dropped, 40 - crate::smp::MAX_CPUS);
+        assert_eq!(madt.topology.count(), 40);
+        assert_eq!(madt.topology.dropped, 0);
+        assert_eq!(madt.topology.hw_id(39), Some(39));
     }
     /// 在 `image` 的基础上把 MCFG 放在 @0x1000，并把它加进根表（XSDT 第三项）。
     fn image_with_mcfg(entries: &[(u64, u16, u8, u8)]) -> Mem {

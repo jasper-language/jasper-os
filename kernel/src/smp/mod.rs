@@ -81,13 +81,21 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
         return StartReport { present: 1, online: 1, failed: 0, source: "boot_only", dropped: 0, disabled: 0 };
     };
     let discovery = arch::cpu_init_boot(boot);
-    let topo = *TOPOLOGY.call_once(|| discovery.topology);
+    let topo = TOPOLOGY.call_once(|| discovery.topology);
     if topo.dropped > 0 {
         crate::kprintln!(
             "[JSR-SMP] reject=cpu_set_capacity present={} capacity={} dropped={}",
             topo.count(),
             kernel_core::smp::MAX_CPUS,
             topo.dropped
+        );
+        arch::halt_forever();
+    }
+    if topo.count() > kernel_core::smp::MAX_CPUS {
+        crate::kprintln!(
+            "[JSR-SMP] reject=cpu_runtime_capacity present={} capacity={}",
+            topo.count(),
+            kernel_core::smp::MAX_CPUS
         );
         arch::halt_forever();
     }

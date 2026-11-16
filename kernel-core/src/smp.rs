@@ -20,6 +20,8 @@
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use crate::sync::SpinLock;
+#[cfg(any(test, feature = "cpu-dynamic"))]
+use alloc::vec::Vec;
 
 /// 内核支持的逻辑处理器数上限（[`CpuSet`] 的位宽）。
 /// Maximum number of logical processors.
@@ -193,6 +195,7 @@ impl CpuSet {
 
 /// 处理器拓扑：逻辑下标 i ↔ 硬件标识 `hw_ids[i]`；引导处理器总在下标 0。
 /// Processor topology; the boot processor is always index 0.
+#[cfg(not(any(test, feature = "cpu-dynamic")))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Topology {
     hw_ids: [u32; MAX_CPUS],
@@ -203,6 +206,7 @@ pub struct Topology {
     pub disabled: usize,
 }
 
+#[cfg(not(any(test, feature = "cpu-dynamic")))]
 impl Topology {
     /// 只有引导处理器的拓扑。
     /// Topology with only the boot processor.
@@ -248,6 +252,61 @@ impl Topology {
     /// Logical index of hardware identifier `hw_id`.
     pub fn index_of(&self, hw_id: u32) -> Option<usize> {
         self.ids().iter().position(|&h| h == hw_id)
+    }
+}
+
+/// Heap-backed firmware CPU identity inventory.
+///
+/// The topology itself is not the scheduler's admitted CPU capacity; callers
+/// still apply their runtime affinity and per-CPU-table policy separately.
+#[cfg(any(test, feature = "cpu-dynamic"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Topology {
+    hw_ids: Vec<u32>,
+    /// Firmware entries that could not identify a usable hardware CPU.
+    pub dropped: usize,
+    /// Firmware-reported CPUs that are disabled.
+    pub disabled: usize,
+}
+
+#[cfg(any(test, feature = "cpu-dynamic"))]
+impl Topology {
+    pub fn boot_only(boot_hw_id: u32) -> Topology {
+        let mut hw_ids = Vec::new();
+        let dropped = if hw_ids.try_reserve_exact(1).is_ok() {
+            hw_ids.push(boot_hw_id);
+            0
+        } else {
+            1
+        };
+        Topology { hw_ids, dropped, disabled: 0 }
+    }
+
+    pub fn push(&mut self, hw_id: u32) {
+        if self.hw_ids.contains(&hw_id) {
+            return;
+        }
+        if self.hw_ids.try_reserve(1).is_err() {
+            self.dropped += 1;
+            return;
+        }
+        self.hw_ids.push(hw_id);
+    }
+
+    pub fn count(&self) -> usize {
+        self.hw_ids.len()
+    }
+
+    pub fn ids(&self) -> &[u32] {
+        &self.hw_ids
+    }
+
+    pub fn hw_id(&self, cpu: usize) -> Option<u32> {
+        self.hw_ids.get(cpu).copied()
+    }
+
+    pub fn index_of(&self, hw_id: u32) -> Option<usize> {
+        self.hw_ids.iter().position(|&id| id == hw_id)
     }
 }
 
@@ -621,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn topology_boot_first_dedup_and_overflow_counted() {
+    fn topology_boot_first_dedup_and_grows_past_former_bitmap() {
         let mut t = Topology::boot_only(7);
         t.push(7); // 重复：忽略
         t.push(1);
@@ -630,12 +689,21 @@ mod tests {
         assert_eq!(t.index_of(2), Some(2));
         assert_eq!(t.hw_id(0), Some(7));
         assert_eq!(t.hw_id(3), None);
-        // 推到容量之上 5 条：丢弃数应当恰好是 5，与 MAX_CPUS 的具体取值无关。
-        for i in 100..(100 + (MAX_CPUS as u32 + 2)) {
+        // A valid firmware inventory is not a scheduler affinity bitmap: every
+        // distinct CPU identity survives even when it exceeds the old 32 bits.
+        for i in 100..180 {
             t.push(i);
         }
-        assert_eq!(t.count(), MAX_CPUS);
-        assert_eq!(t.dropped, 5);
+        assert_eq!(t.count(), 83);
+        assert_eq!(t.dropped, 0);
+        let expected: Vec<_> = (0..83)
+            .map(|i| match i {
+                0 => 7,
+                1 | 2 => i as u32,
+                _ => 97 + i as u32,
+            })
+            .collect();
+        assert_eq!(t.ids(), expected);
     }
 
     #[test]

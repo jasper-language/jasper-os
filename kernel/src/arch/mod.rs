@@ -188,7 +188,7 @@ pub struct CpuStart<S> {
 
 /// 处理器发现结果。
 /// Result of processor discovery.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct CpuDiscovery {
     /// 逻辑下标 ↔ 硬件标识（引导处理器在下标 0）。
     pub topology: kernel_core::smp::Topology,
