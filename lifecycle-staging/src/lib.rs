@@ -469,6 +469,39 @@ impl UpdateCoordinator {
         self.machine = machine;
         Ok(())
     }
+
+    /// Confirm the previous known-good slot after a failed candidate trial.
+    pub fn finish_rollback(
+        &mut self,
+        control: &mut FileControlStore,
+        staging_root: &Path,
+    ) -> Result<Slot, CoordinatorError> {
+        if self.stage() != UpdateStage::Rollback {
+            return Err(CoordinatorError::InconsistentStage {
+                expected: UpdateStage::Rollback,
+                actual: self.stage(),
+            });
+        }
+        let mut next = control.current();
+        let slot = next.active_slot();
+        next.report_health(slot, true)
+            .map_err(CoordinatorError::Control)?;
+        let mut machine = self.machine;
+        machine
+            .apply(UpdateEvent::FinishRollback)
+            .map_err(CoordinatorError::Transition)?;
+        control
+            .commit_next(next)
+            .map_err(CoordinatorError::ControlStore)?;
+        let mut record =
+            load_transaction_record(staging_root).map_err(CoordinatorError::Staging)?;
+        record
+            .apply(UpdateEvent::FinishRollback)
+            .map_err(CoordinatorError::Transaction)?;
+        persist_transaction_record(staging_root, record).map_err(CoordinatorError::Staging)?;
+        self.machine = machine;
+        Ok(slot)
+    }
 }
 
 /// 暂存失败原因。
@@ -1601,6 +1634,57 @@ mod tests {
         assert_eq!(
             load_transaction_record(&staging_root).unwrap().stage(),
             UpdateStage::Complete
+        );
+
+        let rollback_manifest_bytes = b"signed-rollback-manifest";
+        let mut rollback_manifest = manifest(
+            rollback_manifest_bytes,
+            vec![artifact(ArtifactKind::Kernel, "kernel", bytes)],
+        );
+        rollback_manifest.manifest.release_sequence = 10;
+        let rollback_grant = LocalInstallGrant {
+            locally_authenticated: true,
+            purpose: 1,
+            manifest_sha256: rollback_manifest.manifest.manifest_sha256,
+            profile: rollback_manifest.manifest.target_profile,
+            expires_at: 10,
+        };
+        let rollback_root = temp.path().join("rollback-staging");
+        let mut rollback = UpdateCoordinator::idle();
+        let rollback_prepared = rollback
+            .prepare(
+                rollback_manifest,
+                rollback_manifest_bytes,
+                rollback_grant,
+                9,
+                &[],
+                &[ArtifactSource {
+                    name: "kernel",
+                    path: &source_path,
+                }],
+                &rollback_root,
+                4096,
+            )
+            .unwrap();
+        rollback
+            .commit_prepared(&rollback_prepared, &mut control, Slot::A, 3)
+            .unwrap();
+        rollback.begin_trial(&mut control, &rollback_root).unwrap();
+        rollback
+            .report_candidate_health(&mut control, &rollback_root, false)
+            .unwrap();
+        assert_eq!(rollback.stage(), UpdateStage::Rollback);
+        assert_eq!(control.current().active_slot(), Slot::B);
+        assert_eq!(
+            rollback
+                .finish_rollback(&mut control, &rollback_root)
+                .unwrap(),
+            Slot::B
+        );
+        assert_eq!(rollback.stage(), UpdateStage::RolledBack);
+        assert_eq!(
+            load_transaction_record(&rollback_root).unwrap().stage(),
+            UpdateStage::RolledBack
         );
     }
 
