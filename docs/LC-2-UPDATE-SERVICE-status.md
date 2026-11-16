@@ -46,7 +46,7 @@ manifest 或执行路径的参数。
 
 ```text
 cargo test --locked -p jasper-lifecycle-staging
-27 passed; 0 failed
+28 passed; 0 failed
 ```
 
 新增测试覆盖：
