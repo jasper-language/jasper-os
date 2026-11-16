@@ -590,7 +590,7 @@ pub(crate) fn try_deliver_in(t: &mut Table, target: &RecvTarget) -> Delivery {
             Delivery::Empty
         };
     };
-    let (n, nh) = (m.body.len(), m.handles.len());
+    let (n, nh, charged) = (m.body.len(), m.handles.len(), m.charged_bytes);
     // 先把身份取出来，避免与后面可变借用 `t` 冲突。
     let sender = m.sender.raw() as u32;
     let sender_app = m.sender_app;
@@ -610,7 +610,7 @@ pub(crate) fn try_deliver_in(t: &mut Table, target: &RecvTarget) -> Delivery {
     let Some(m) = e.queue.pop_front() else {
         return Delivery::Empty;
     };
-    e.queued_bytes -= n;
+    e.queued_bytes = e.queued_bytes.saturating_sub(charged);
     uncharge(t, &m);
     target.data.write_at(0, &m.body);
     let mut vals = Vec::with_capacity(nh);

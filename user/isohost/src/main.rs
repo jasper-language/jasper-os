@@ -420,16 +420,23 @@ fn rights_boundary(s: &mut Steps, t: &TrustPolicy<'_>) -> Result<(), u32> {
     let mutex = PriorityMutex::create().map_err(|_| s.0 + 1)?;
     s.check(mutex.try_lock() == Ok(true))?;
     s.check(mutex.try_lock() == Err(Error::INVALID_ARGUMENT))?;
-    let granted_mutex = mutex
+    let granted_mutex = match mutex
         .handle()
         .duplicate(Rights::WAIT.union(Rights::CONTROL).union(Rights::TRANSFER))
-        .map_err(|_| s.0 + 1)?;
-    // 宿主自己的句柄：多建几对通道，使其槽位号超出隔离进程句柄表已用的部分
+    {
+        Ok(handle) => handle,
+        Err(error) => {
+            println!("isohost: mutex_duplicate={:?}", error);
+            return Err(s.0 + 1);
+        }
+    };
+    // 宿主自己的句柄：建立与准入端点容量相符的通道对，使槽位号超出隔离进程
+    // 句柄表已用的部分。生产端点配额是运行时准入值，不能用固定 12 个端点。
     let mut keep = Vec::new();
-    for _ in 0..6 {
+    for _ in 0..3 {
         keep.push(channel::pair().map_err(|_| s.0 + 1)?);
     }
-    let host_raw = keep[5].0.handle().raw();
+    let host_raw = keep[2].0.handle().raw();
     let mut g = plain_grant(t, None);
     g.handles.push(("system.task.wait", granted));
     g.handles.push(("system.sync.mutex.try.acquire", granted_mutex));
@@ -465,11 +472,15 @@ fn rights_boundary(s: &mut Steps, t: &TrustPolicy<'_>) -> Result<(), u32> {
     let foreign = raw_call(&mut m, ids::SYSTEM_HANDLE_DUPLICATE, host_raw as u64, Rights::WAIT.bits() as u64, 0).map_err(|_| s.0 + 1)?;
     s.check(foreign == neg(Error::HANDLE_INVALID))?;
     // 宿主的句柄原样可用
-    let (h0, h1) = &keep[5];
+    let (h0, h1) = &keep[2];
     s.check(h0.send(b"still-mine").is_ok() && matches!(h1.recv_vec(), Ok((b, _)) if b == b"still-mine"))?;
     // 被拒的调用不影响会话；宿主线程照常结束
     s.check(sum_ok(&mut m))?;
-    s.check(worker.join() == Ok(7))?;
+    let joined = worker.join();
+    if joined != Ok(7) {
+        println!("isohost: worker_join={:?}", joined);
+    }
+    s.check(joined == Ok(7))?;
     println!("isohost: rights granted_call_ok=true denied=channel.create,process.spawn,time.wait foreign_handle=invalid host_handle_intact=true");
     println!(
         "isohost: high_id id={} child_inherited=true try_acquire=true busy_refused=true recursive_rejected=true unlock=true unregistered_denied=true",

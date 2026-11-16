@@ -26,7 +26,7 @@ use kernel_core::paging::MapFlags;
 use kernel_core::ring_abi::Sqe;
 
 use crate::kobj;
-use crate::mm::frame;
+use crate::mm::{frame, heap};
 use crate::proc::{self, ProcError, ProcState, ResourceQuota};
 use crate::ring;
 use crate::syscall::{err, table as abi, SyscallSet};
@@ -58,6 +58,11 @@ const STACK_PAGES: u64 = 4;
 
 /// 运行全部演练。
 pub fn run() {
+    // Runtime-sized process/ring metadata lives in the never-shrinking kernel
+    // heap. Reserve the first-growth cost before taking the frame baseline so
+    // this drill still measures per-case reclamation rather than one-time heap
+    // mapping growth induced by the first dynamically sized process.
+    let _ = heap::ensure_free(2 * 1024 * 1024);
     let free0 = frame::free_frames();
     let (live0, _, _) = kobj::stats();
     user_program();

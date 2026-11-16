@@ -298,8 +298,8 @@ pub extern "C" fn _start(mode:u64,target:u64) -> ! {
     shared_memory_contract();
     // 1. 创建
     let bad0 = create(0);
-    let bad65 = create(65);
-    check(bad0 == INVALID_ARGUMENT && bad65 == INVALID_ARGUMENT, 1);
+    let bad_overflow = create(u64::MAX);
+    check(bad0 == INVALID_ARGUMENT && bad_overflow == INVALID_ARGUMENT, 1);
     let h = create(4);
     check(h > 0, 1);
     say!("create capacity=4 handle_ok=true bad_capacity={}", bad0);

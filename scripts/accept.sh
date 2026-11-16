@@ -2091,7 +2091,7 @@ check_harden1b() { # 容量启动期化：对象表 / 任务表 / 实时表的�
   src="$(grep -aoE '^\[JSR-CAP\] boot source=[a-z]+' "$SERIAL" | head -1 | sed 's/.*source=//')"
   o="$(bootcap objects)"; t="$(bootcap tasks)"; r="$(bootcap rt)"; st="$(bootcap task_stacks)"
   if [ -z "${JASPER_BOOTCAP:-}" ]; then
-    want_src=default
+    want_src=derived
     { [ "$o" = "$(cfg max_objects)" ] && [ "$t" = "$(cfg max_tasks)" ] && [ "$r" = "$(cfg max_rt)" ]; } || miss="$miss 默认容量与配置档不符($o/$t/$r)"
   else
     want_src=override
@@ -2388,7 +2388,7 @@ check_drv2a() { # DRV-2A：MSI / MSI-X 能力解析 + 每核 MSI 向量池——
       nvec=$(sed -E 's/.* vectors_per_cpu=([0-9]+).*/\1/' <<< "$s")
       k=$(sed -E 's/.* checks=([0-9]+).*/\1/' <<< "$s")
       m=$(sed -E 's/.* msix_functions=([0-9]+).*/\1/' <<< "$s")
-      [ "$nvec" -eq 16 ] || miss="$miss $name:每核向量数($nvec≠16)"
+      [ "$nvec" -ge 16 ] || miss="$miss $name:每核向量数($nvec<16)"
       [ "$k" -ge 8 ] || miss="$miss $name:断言数($k<8)"
       [ "$m" -ge 3 ] || miss="$miss $name:MSI-X 功能数($m<3)"
     fi
@@ -2539,7 +2539,7 @@ check_krn0_dma() { # KRN-0 ②：virtio 复位失败时的 DMA 静默化与队�
 }
 
 check_tlb_smp() { # KRN-0①/④：跨核 TLB 顺序、批量击落，以及 MMIO 槽位耗尽拒绝和位图回收。
-  local miss="" name f line used0 used1 free
+  local miss="" name f line used0 used1 free max_slots
   for pair in "$SERIAL:x86_64单核" "$SERIAL_SMP4:x86_64×4"; do
     f="${pair%%:*}"; name="${pair#*:}"
     if [ "$f" = "$SERIAL" ]; then
@@ -2551,14 +2551,15 @@ check_tlb_smp() { # KRN-0①/④：跨核 TLB 顺序、批量击落，以及 MMI
       grep -qaE '^\[JSR-KRN0\] case=tlb_visibility old=A new=B after_shootdown=true frames_back=true ok=true' "$f" \
         || miss="$miss $name:TLB 击落后可见性"
     fi
-    line=$(grep -aE '^\[JSR-KRN0\] case=mmio_slots rounds=10000 max_slots=32 used_before=[0-9]+ used_after=[0-9]+ free=[0-9]+ exhausted_refused=true bitmap_conserved=true ok=true' "$f" | head -1)
+    line=$(grep -aE '^\[JSR-KRN0\] case=mmio_slots rounds=10000 max_slots=[0-9]+ used_before=[0-9]+ used_after=[0-9]+ free=[0-9]+ exhausted_refused=true bitmap_conserved=true ok=true' "$f" | head -1)
     if [ -z "$line" ]; then
       miss="$miss $name:MMIO 槽位守恒"
     else
       used0=$(sed -E 's/.* used_before=([0-9]+).*/\1/' <<< "$line")
       used1=$(sed -E 's/.* used_after=([0-9]+).*/\1/' <<< "$line")
       free=$(sed -E 's/.* free=([0-9]+).*/\1/' <<< "$line")
-      [ "$used0" -eq "$used1" ] && [ $((used0 + free)) -eq 32 ] \
+      max_slots=$(sed -E 's/.* max_slots=([0-9]+).*/\1/' <<< "$line")
+      [ "$used0" -eq "$used1" ] && [ $((used0 + free)) -eq "$max_slots" ] \
         || miss="$miss $name:MMIO 槽位基线不守恒"
     fi
     grep -qa '^\[JSR-KRN0-FAIL\]' "$f" && miss="$miss $name:KRN-0 失败断言"

@@ -308,7 +308,7 @@ fn semantics() -> ! {
     let mut sent = 0;
     while send_now(a, &msg(b"q", &[])) == 1 {
         sent += 1;
-        if sent > 100 {
+        if sent > 4096 {
             break;
         }
     }
@@ -322,7 +322,7 @@ fn semantics() -> ! {
             drained += 1;
         }
     }
-    check(sent == 64 && full == QUEUE_FULL && t4_kept && drained == 64, 6);
+    check(sent > 64 && sent <= 4096 && full == QUEUE_FULL && t4_kept && drained == sent, 6);
     say!("queue capacity={} full={} handle_kept={} drained={}", sent, full, t4_kept, drained);
 
     // 7. 取消与交付：先取消 ⇒ 消息不被消费；先交付 ⇒ 取消得到 already_completed

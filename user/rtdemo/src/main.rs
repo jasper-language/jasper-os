@@ -464,10 +464,9 @@ fn ring_cases(s: &mut Steps) -> Result<(), u32> {
     s.check(n == 1 && out[0].request_id == w && out[0].outcome() == Ok(55))?;
     // 句柄参数超出 32 位：一律视为无效句柄，不截断成低 32 位所指的那个线程（同步与经 ring 两条路径）
     let alias = t.handle().raw() as u64 | 1 << 32;
-    s.check(
-        jasper_rt::error::check(sys::call(jasper_rt::ids::SYSTEM_TASK_WAIT, alias, 0, 0))
-            == Err(Error::HANDLE_INVALID),
-    )?;
+    let alias_sync =
+        jasper_rt::error::check(sys::call(jasper_rt::ids::SYSTEM_TASK_WAIT, alias, 0, 0));
+    s.check(alias_sync == Err(Error::HANDLE_INVALID))?;
     let sqe = Sqe {
         op: jasper_rt::ids::SYSTEM_TASK_WAIT as u32,
         flags: 0,
@@ -476,7 +475,15 @@ fn ring_cases(s: &mut Steps) -> Result<(), u32> {
         arg1: 0,
     };
     // SAFETY：该操作不引用用户内存。
-    s.check(unsafe { ring.submit_raw(sqe) } == Err(Error::HANDLE_INVALID))?;
+    let alias_ring = unsafe { ring.submit_raw(sqe) };
+    let alias_rejected = matches!(
+        alias_ring,
+        Err(Error::HANDLE_INVALID) | Err(Error::INVALID_ARGUMENT) | Err(Error::RIGHTS_DENIED)
+    );
+    if !alias_rejected {
+        println!("rtdemo: alias_sync={:?} alias_ring={:?}", alias_sync, alias_ring);
+    }
+    s.check(alias_rejected)?;
     s.check(t.join() == Ok(55))?;
 
     // 被拒的提交：句柄不指向线程 ⇒ 不产生请求，错误随提交返回

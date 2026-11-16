@@ -194,13 +194,64 @@ fn run(s: &mut Steps, cycles_per_second: u64) -> Result<(), u32> {
     let mut samples = Vec::with_capacity(ITERS as usize);
     let mut ok = true;
     let mut buf = [0u8; MSG];
+    let mut reported_recv = false;
     for i in 0..WARMUP + ITERS {
         let msg = [(i & 0xFF) as u8; MSG];
         let t0 = time::cycles();
-        let r = a.send(&msg).is_ok()
-            && matches!(b.recv(&mut buf), Ok(r) if r.len == MSG)
-            && b.send(&buf).is_ok()
-            && matches!(a.recv(&mut buf), Ok(r) if r.len == MSG);
+        let sent = a.send(&msg);
+        if let Err(error) = sent {
+            if !reported_recv {
+                println!("bench: send_error={} iteration={}", error, i);
+                reported_recv = true;
+            }
+        }
+        let r = if sent.is_ok() {
+            match b.recv(&mut buf) {
+                Ok(received) => {
+                    let received_ok = received.len == MSG;
+                    if !received_ok && !reported_recv {
+                        println!("bench: receive_length={}", received.len);
+                        reported_recv = true;
+                    }
+                    let received_bytes_ok = buf == msg;
+                    if received_ok && !received_bytes_ok && !reported_recv {
+                        println!("bench: receive_bytes");
+                        reported_recv = true;
+                    }
+                    let echo = b.send(&buf);
+                    if let Err(error) = echo {
+                        if !reported_recv {
+                            println!("bench: echo_error={}", error);
+                            reported_recv = true;
+                        }
+                    }
+                    let returned = if echo.is_ok() {
+                        Some(a.recv(&mut buf))
+                    } else {
+                        None
+                    };
+                    if let Some(Err(error)) = returned {
+                        if !reported_recv {
+                            println!("bench: return_error={}", error);
+                            reported_recv = true;
+                        }
+                    }
+                    received_ok
+                        && received_bytes_ok
+                        && returned.is_some_and(|r| matches!(r, Ok(r) if r.len == MSG))
+                        && buf == msg
+                }
+                Err(error) => {
+                    if !reported_recv {
+                        println!("bench: recv_error={}", error);
+                        reported_recv = true;
+                    }
+                    false
+                }
+            }
+        } else {
+            false
+        };
         let dt = time::cycles().wrapping_sub(t0);
         ok &= r && buf == msg;
         if i >= WARMUP {
@@ -213,7 +264,12 @@ fn run(s: &mut Steps, cycles_per_second: u64) -> Result<(), u32> {
     let msg = [0x5Au8; MSG];
     s.check(a.send(&msg).is_ok())?;
     let mut tiny = [0u8; MSG / 2];
-    s.check(b.recv(&mut tiny).map(|r| r.len).err() == Some(jasper_rt::Error::CHANNEL_BUFFER_TOO_SMALL))?;
+    let tiny_result = b.recv(&mut tiny).map(|r| r.len);
+    let tiny_error = tiny_result.as_ref().err().copied();
+    if tiny_error != Some(jasper_rt::Error::CHANNEL_BUFFER_TOO_SMALL) {
+        println!("bench: tiny_result={:?}", tiny_result);
+    }
+    s.check(tiny_error == Some(jasper_rt::Error::CHANNEL_BUFFER_TOO_SMALL))?;
     s.check(tiny == [0u8; MSG / 2])?;
     let mut full = [0u8; MSG];
     s.check(matches!(b.recv(&mut full), Ok(r) if r.len == MSG) && full == msg)?;
