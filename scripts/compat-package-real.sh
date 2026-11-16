@@ -87,6 +87,17 @@ if find "$install_root" -maxdepth 1 \
     exit 1
 fi
 
-printf 'dxvk_version=%s\ndxvk_sha256=%s\ninstall=pass\nupgrade=pass\nrollback=pass\nuninstall=pass\n' \
+offline_archive="$WORK/dxvk-offline.tar.gz"
+cp "$ARCHIVE" "$offline_archive"
+offline_sha256=$(sha256sum "$offline_archive" | awk '{ print $1 }')
+[ "$offline_sha256" = "$DXVK_SHA256" ]
+offline_root="$WORK/offline-root"
+"$CLI" install "$offline_root" "$manifest1" "$offline_archive" |
+    tee "$OUT/offline-install.txt"
+"$CLI" current "$offline_root" dxvk | tee "$OUT/offline-current.txt" |
+    grep -q "dxvk ${DXVK_VERSION}-r1 "
+"$CLI" uninstall "$offline_root" dxvk | tee "$OUT/offline-uninstall.txt"
+
+printf 'dxvk_version=%s\ndxvk_sha256=%s\nonline_install=pass\nupgrade=pass\nrollback=pass\nuninstall=pass\noffline_install=pass\nsource_parity=true\n' \
     "$DXVK_VERSION" "$DXVK_SHA256" >"$OUT/summary.txt"
 echo "compat-package-real: PASS evidence=$OUT"
