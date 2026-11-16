@@ -27,6 +27,7 @@ pub(crate) fn usi_calls() -> SyscallSet {
         crate::syscall::table::SYSTEM_MODULE_LIFECYCLE_GET,
         crate::syscall::table::SYSTEM_EVENT_SOURCE_CREATE,
         crate::syscall::table::SYSTEM_EVENT_SUBSCRIPTION_CREATE,
+        crate::syscall::table::SYSTEM_DIAGNOSTIC_QUERY,
     ]))
 }
 
@@ -54,6 +55,7 @@ pub fn run() {
 
     run_mode("usi-cli", 0, usi_calls());
     run_mode("usi-json", 1, usi_calls());
+    run_mode("usi-diagnostic", 7, usi_calls());
     let denied = rt_calls().difference(SyscallSet::of(&[
         crate::syscall::table::SYSTEM_TIME_NOW,
         crate::syscall::table::SYSTEM_INFO_GET,
@@ -67,7 +69,7 @@ pub fn run() {
     let after = baseline();
     check(after == before, "USI-1 resource baseline");
     kprintln!(
-        "[JSR-USI] summary cli=true structured=true denied=true degraded=true restored=true failed={} reclaimed={}",
+        "[JSR-USI] summary cli=true structured=true denied=true degraded=true restored=true diagnostic=true failed={} reclaimed={}",
         FAILED.load(Ordering::Relaxed),
         after == before
     );

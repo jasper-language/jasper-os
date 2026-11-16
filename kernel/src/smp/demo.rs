@@ -134,7 +134,8 @@ fn parallel_shootdown_worker() {
     while PEX6_GO.load(Ordering::Acquire) == 0 {
         core::hint::spin_loop();
     }
-    if super::tlb_shootdown(TLB_VA, 1).is_err() {
+    let initiators = super::online_set().without(0);
+    if super::tlb_shootdown_on(initiators, TLB_VA, 1).is_err() {
         PEX6_FAILED.fetch_add(1, Ordering::AcqRel);
     }
     PEX6_DONE.fetch_add(1, Ordering::AcqRel);

@@ -11,6 +11,10 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use jasper_rt::sys;
 use jasper_rt::{entry, ids, println};
+use jasper_lifecycle_model::diagnostic_usi::{
+    Operation, QueryRequest, ResponseHeader, ResponseStatus, MAX_PAGE_EVENTS, RESPONSE_HEADER_BYTES,
+};
+use jasper_lifecycle_model::diagnostics::{PrivacyClass, Severity};
 use kernel_core::usi;
 
 entry!(main);
@@ -363,6 +367,59 @@ fn capability_source() -> i32 {
     0
 }
 
+fn diagnostic_query() -> i32 {
+    let request_id = request_id();
+    let request = QueryRequest {
+        request_id,
+        expected_generation: 0,
+        deadline_ns: 0,
+        after_id: 0,
+        operation: Operation::Query,
+        kind: None,
+        minimum_severity: Severity::Info,
+        privacy_ceiling: PrivacyClass::Internal,
+        limit: MAX_PAGE_EVENTS as u16,
+        cancelable: false,
+    };
+    let Ok(request) = request.encode() else {
+        return 11;
+    };
+    let mut output = vec![0u8; 4096];
+    // SAFETY: both pointers refer to caller-owned bounded buffers.
+    let result = unsafe {
+        sys::call3(
+            ids::SYSTEM_DIAGNOSTIC_QUERY,
+            request.as_ptr() as u64,
+            output.as_mut_ptr() as u64,
+            output.len() as u64,
+        )
+    };
+    if result < RESPONSE_HEADER_BYTES as i64 || result as usize > output.len() {
+        println!("usi: mode=diagnostic error={}", result);
+        return 12;
+    }
+    let mut raw = [0u8; RESPONSE_HEADER_BYTES];
+    raw.copy_from_slice(&output[..RESPONSE_HEADER_BYTES]);
+    let Some(header) = ResponseHeader::decode(&raw).ok() else {
+        return 13;
+    };
+    let ok = header.status == ResponseStatus::Ok
+        && header.request_id == request_id
+        && header.operation == Operation::Query
+        && header.records >= 1
+        && header.accepted >= header.records as u64;
+    println!(
+        "usi: mode=diagnostic status={} records={} accepted={} sequence={} generation={} ok={}",
+        header.status as u16,
+        header.records,
+        header.accepted,
+        header.sequence,
+        header.generation,
+        ok
+    );
+    if ok { 0 } else { 14 }
+}
+
 fn main(mode: u64, _: u64) -> i32 {
     match mode {
         0 => match snapshot() {
@@ -408,6 +465,7 @@ fn main(mode: u64, _: u64) -> i32 {
         },
         5 => idempotent_requests(),
         6 => capability_source(),
+        7 => diagnostic_query(),
         _ => 7,
     }
 }

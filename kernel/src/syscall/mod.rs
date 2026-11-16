@@ -800,6 +800,20 @@ syscall_dispatch! {
     SYSTEM_MODULE_LIFECYCLE_GET => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
         crate::usi::module_lifecycle(a.args[0], a.args[1], a.args[2])
     },
+    SYSTEM_DIAGNOSTIC_QUERY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        let Some(pid) = crate::proc::current_process() else {
+            return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+        };
+        #[cfg(feature = "user-programs")]
+        {
+            crate::diagnostic_usi_service::query(pid.raw(), a.args[0], a.args[1], a.args[2])
+        }
+        #[cfg(not(feature = "user-programs"))]
+        {
+            let _ = (pid, a);
+            err(SYSTEM_ERROR_UNSUPPORTED)
+        }
+    },
     SYSTEM_WORKLOAD_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
         workload_create(a.args[0])
     },

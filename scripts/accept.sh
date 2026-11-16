@@ -2848,10 +2848,10 @@ check_usi1() {
      && has 'usi: mode=denied all_denied=true' \
      && has 'usi: mode=degraded devices_available=false' \
      && has 'usi: mode=restored devices_available=true' \
-     && has '\[JSR-USI\] summary cli=true structured=true denied=true degraded=true restored=true failed=0 reclaimed=true' \
+     && has '\[JSR-USI\] summary cli=true structured=true denied=true degraded=true restored=true diagnostic=true failed=0 reclaimed=true' \
      && ! has 'usi: .*error=' \
      && ! has '^\[JSR-USI-FAIL\]'; then
-    record USI-1 PASS "同一 USI v1 Schema 经人类 CLI 与结构化客户端查询；五个服务可解码；缺权限调用由 SyscallSet/ServiceGate 拒绝；设备服务健康撤回后 available=false，恢复后 available=true；资源回基线"
+    record USI-1 PASS "同一 USI v1 Schema 经人类 CLI、结构化客户端和独立诊断查询进程使用；诊断 capability 操作返回真实持久模型页；缺权限调用由 SyscallSet/ServiceGate 拒绝；设备服务健康撤回后 available=false，恢复后 available=true；资源回基线"
   else
     record USI-1 FAIL "缺少双客户端、五个服务、权限拒绝、服务撤回恢复或资源基线证据"
   fi

@@ -176,6 +176,7 @@
 106	op	system.install.handle.create	1	write	安装·创建登记句柄	Create installation handle
 107	op	system.install.handle.query	1	read	安装·经句柄查询登记	Query installation by handle
 108	op	system.sandbox.launch.start	1	write	沙箱启动计划·启动受限子进程	Start bounded sandbox child
+109	op	system.diagnostic.query	1	read	诊断·有界查询与状态	Query bounded diagnostics and status
 4151	error	system.sandbox.error.in_use	1	none	沙箱仍持有镜像或卷	Sandbox storage still in use
 4152	error	system.sandbox.image.error.not_found	1	none	沙箱镜像不存在或无权查看	Sandbox image not found
 4153	error	system.sandbox.image.error.layer	1	none	沙箱镜像层非法	Sandbox image layer invalid

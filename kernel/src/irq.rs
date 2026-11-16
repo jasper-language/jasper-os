@@ -698,13 +698,18 @@ pub mod device {
     /// 已启用的线集合（位图）。
     /// Enabled lines, as a bit map.
     pub fn enabled_lines() -> Vec<usize> {
-        ROUTING
-            .lock()
-            .enabled
-            .iter()
-            .enumerate()
-            .filter_map(|(line, enabled)| enabled.then_some(line))
-            .collect()
+        let n = line_count();
+        let mut out = Vec::new();
+        if out.try_reserve_exact(n).is_err() {
+            return out;
+        }
+        let routing = ROUTING.lock();
+        for (line, enabled) in routing.enabled.iter().enumerate() {
+            if *enabled {
+                out.push(line);
+            }
+        }
+        out
     }
 
     /// 打开 / 关闭设备的持续自触发（中断风暴演练用）；线必须已启用。
@@ -919,14 +924,20 @@ pub mod device {
     pub fn rebalance() -> Result<u32, IrqError> {
         let n = line_count();
         let online = sched::online_cpus();
-        let mut r = ROUTING.lock();
-        let Some(policy) = r.policy else {
+        let policy = ROUTING.lock().policy;
+        let Some(policy) = policy else {
             return Ok(0);
         };
+        // Allocate before taking the routing lock: heap allocation is a lower
+        // rank and must not occur while IRQ routing is held.
         let mut lines = Vec::new();
         let mut idx = Vec::new();
         lines.try_reserve_exact(n).map_err(|_| IrqError::NoLine)?;
         idx.try_reserve_exact(n).map_err(|_| IrqError::NoLine)?;
+        let mut out = Vec::new();
+        out.try_reserve_exact(n).map_err(|_| IrqError::NoLine)?;
+        out.resize(n, 0);
+        let mut r = ROUTING.lock();
         for line in 0..n {
             if r.enabled[line] {
                 let storage = LINES
@@ -941,10 +952,7 @@ pub mod device {
                 idx.push(line);
             }
         }
-        let mut out = Vec::new();
-        out.try_reserve_exact(lines.len())
-            .map_err(|_| IrqError::NoLine)?;
-        out.resize(lines.len(), 0);
+        out.truncate(lines.len());
         policy.assign(&lines, online, &[0; MAX_CPUS], &mut out)?;
         let mut moved = 0;
         for i in 0..lines.len() {

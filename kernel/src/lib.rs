@@ -183,6 +183,8 @@ pub(crate) mod native_install_handle;
 pub mod lifecycle_diagnostic_block;
 #[cfg(feature = "lifecycle-diagnostic-sources")]
 pub mod diagnostic_sources;
+#[cfg(feature = "user-programs")]
+pub mod diagnostic_usi_service;
 #[cfg(all(target_arch = "x86_64", feature = "fs1-ext4-verify"))]
 pub mod fs1_demo;
 #[cfg(any(feature = "pex0-verify", feature = "pex2-verify"))]

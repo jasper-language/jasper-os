@@ -2056,6 +2056,7 @@ dependencies = [
 name = "user-usi"
 version = "0.1.0"
 dependencies = [
+ "jasper-lifecycle-model",
  "jasper-rt",
  "kernel-core",
 ]
