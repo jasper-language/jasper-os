@@ -2982,6 +2982,23 @@ check_issue33assembly() {
   fi
 }
 
+check_issue33registries() {
+  local workload sandbox storage images layers volumes
+  workload=$(grep -aoE '^\[JSR-WORKLOAD\] capacity .*dynamic=true' "$SERIAL" 2>/dev/null | head -1)
+  sandbox=$(grep -aoE '^\[JSR-SANDBOX\] capacity .*dynamic=true' "$SERIAL" 2>/dev/null | head -1)
+  storage=$(grep -aoE '^\[JSR-SANDBOX-STORAGE\] capacity .*dynamic=true' "$SERIAL" 2>/dev/null | head -1)
+  images=$(printf '%s\n' "$storage" | sed -nE 's/.*images=([0-9]+).*/\1/p')
+  layers=$(printf '%s\n' "$storage" | sed -nE 's/.*layers=([0-9]+).*/\1/p')
+  volumes=$(printf '%s\n' "$storage" | sed -nE 's/.*volumes=([0-9]+).*/\1/p')
+  if [ -n "$workload" ] && [ -n "$sandbox" ] && [ -n "$storage" ] \
+     && [ -n "$images" ] && [ -n "$layers" ] && [ -n "$volumes" ] \
+     && [ "$images" -gt 32 ] && [ "$layers" -gt 256 ] && [ "$volumes" -gt 64 ]; then
+    record ISSUE33-REGISTRIES PASS "Workload/成员、Sandbox、镜像/层/卷注册表均由实施堆后备集合承载；默认拓扑已实际超过旧 32/256/64 存储包络，运行时容量日志 dynamic=true"
+  else
+    record ISSUE33-REGISTRIES FAIL "缺少动态注册表或未突破旧存储包络：workload=${workload:-缺} sandbox=${sandbox:-缺} storage=${storage:-缺}"
+  fi
+}
+
 check_compatelfbackend() {
   if has '^\[JSR-COMPAT-ELF\] backend=true map=true relocate=true stack=true ring3=true exit=true resources=true failed=0' \
      && ! has '^\[JSR-COMPAT-ELF-FAIL\]'; then
@@ -3090,11 +3107,11 @@ if [ "$SPOT" -eq 1 ]; then
   done
 elif [ "$SCHED_POLICY" = "rr" ]; then
   check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_nativeecosystem; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_asm1; check_mod1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_drv3; check_blk1; check_sec1; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_issue33capability; check_issue33assembly; check_hwv0; check_hwv1; check_hwv2; check_hwv3; check_hwv4
+  check_pol1; check_pol2; check_asm1; check_mod1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_drv3; check_blk1; check_sec1; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_issue33capability; check_issue33assembly; check_issue33registries; check_hwv0; check_hwv1; check_hwv2; check_hwv3; check_hwv4
   check_sched1; check_sched2; check_sched3
 else
   check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_nativeecosystem; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
-  check_pol1; check_pol2; check_asm1; check_mod1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_drv3; check_blk1; check_sec1; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_issue33capability; check_issue33assembly; check_hwv0; check_hwv1; check_hwv2; check_hwv3; check_hwv4
+  check_pol1; check_pol2; check_asm1; check_mod1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_drv3; check_blk1; check_sec1; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_issue33capability; check_issue33assembly; check_issue33registries; check_hwv0; check_hwv1; check_hwv2; check_hwv3; check_hwv4
 fi
 
 check_jaso1_multi
