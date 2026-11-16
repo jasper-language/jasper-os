@@ -16,61 +16,42 @@
 //! keeps both registry locks across the kernel Workload destructor so CPU
 //! groups are released before the Sandbox identity becomes observable as gone.
 
-use kernel_core::sandbox::{SandboxError, SandboxKey, SandboxSnapshot, SandboxTable};
-use kernel_core::sandbox_image::{
-    plan_sandbox_registry, SandboxRegistryCost, SandboxRegistryPlan,
+use kernel_core::sandbox::{
+    plan_sandbox_registry, SandboxError, SandboxKey, SandboxRegistryPlan, SandboxSnapshot,
+    SandboxTable,
 };
 use kernel_core::security_domain::DomainKey;
 use kernel_core::workload::{ResourceLimits, WorkloadKey, WorkloadSnapshot, WorkloadTable};
-use spin::Once;
 
 use crate::sync::IrqSpinLock;
-use crate::workload::{MAX_WORKLOADS, WORKLOADS};
-use crate::kprintln;
+use crate::workload::WORKLOADS;
+use spin::Once;
 
-pub const MAX_SANDBOXES: usize = 64;
-
-pub(crate) static SANDBOXES: IrqSpinLock<SandboxTable<MAX_SANDBOXES>> =
+pub(crate) static SANDBOXES: IrqSpinLock<SandboxTable> =
     IrqSpinLock::ranked(crate::lockorder::SANDBOX, SandboxTable::new());
 static REGISTRY_PLAN: Once<SandboxRegistryPlan> = Once::new();
 
-/// Admit Sandbox/storage counts from heap and Workload registry capacity.
-pub fn init_registry() -> bool {
+/// Admit Sandbox identity metadata from runtime Workload and heap capacity.
+pub fn init_registry(workload_slots: usize) -> bool {
     let memory_budget = crate::mm::heap::limit();
-    let workloads = crate::workload::registry_capacity();
-    let Some(plan) = plan_sandbox_registry(
-        memory_budget,
-        workloads,
-        SandboxRegistryCost::current(),
-    ) else {
-        kprintln!(
-            "[JSR-SANDBOX] reject=registry_capacity workloads={} budget={}",
-            workloads,
-            memory_budget
+    let Some(plan) = plan_sandbox_registry(memory_budget, workload_slots) else {
+        crate::kprintln!(
+            "[JSR-SANDBOX] reject=registry_capacity workloads={workload_slots} budget={memory_budget}"
         );
         return false;
     };
-    let plan = SandboxRegistryPlan {
-        sandboxes: plan.sandboxes.min(MAX_SANDBOXES), // JASPER-HARDCODE-REVIEW: issue=33 source=runtime budget and fixed storage envelope reason=runtime admission only shrinks the current table and logs dynamic=false
-        images: plan.images.min(crate::sandbox_storage::MAX_IMAGES), // JASPER-HARDCODE-REVIEW: issue=33 source=runtime budget and fixed storage envelope reason=runtime admission only shrinks the current table and logs dynamic=false
-        layers: plan.layers.min(crate::sandbox_storage::MAX_LAYERS), // JASPER-HARDCODE-REVIEW: issue=33 source=runtime budget and fixed storage envelope reason=runtime admission only shrinks the current table and logs dynamic=false
-        volumes: plan.volumes.min(crate::sandbox_storage::MAX_VOLUMES), // JASPER-HARDCODE-REVIEW: issue=33 source=runtime budget and fixed storage envelope reason=runtime admission only shrinks the current table and logs dynamic=false
-    };
-    kprintln!(
-        "[JSR-SANDBOX] capacity sandboxes={} images={} layers={} volumes={} workloads={} budget={} fixed=64/32/256/64 dynamic=false",
+    crate::kprintln!(
+        "[JSR-SANDBOX] capacity sandboxes={} workloads={} budget={} dynamic=true",
         plan.sandboxes,
-        plan.images,
-        plan.layers,
-        plan.volumes,
-        workloads,
+        workload_slots,
         memory_budget
     );
     REGISTRY_PLAN.call_once(|| plan);
     true
 }
 
-pub(crate) fn registry_plan() -> Option<SandboxRegistryPlan> {
-    REGISTRY_PLAN.get().copied()
+pub(crate) fn capacity_limit() -> Option<usize> {
+    REGISTRY_PLAN.get().map(|plan| plan.sandboxes)
 }
 
 /// Atomically create a root Workload and its stable Sandbox identity.
@@ -82,11 +63,10 @@ pub fn create_sandbox(
 ) -> Result<SandboxKey, SandboxError> {
     let key = {
         let mut sandboxes = SANDBOXES.lock();
-        let mut workloads = WORKLOADS.lock();
-        let plan = registry_plan().ok_or(SandboxError::Capacity)?;
-        if sandboxes.len() >= plan.sandboxes {
+        if sandboxes.len() >= capacity_limit().ok_or(SandboxError::Capacity)? {
             return Err(SandboxError::Capacity);
         }
+        let mut workloads = WORKLOADS.lock();
         crate::workload::admit_workload(&workloads).map_err(|_| SandboxError::Capacity)?;
         sandboxes.create(&mut workloads, domain, limits)?
     };
@@ -214,8 +194,8 @@ pub fn count() -> usize {
 }
 
 fn checked_root(
-    sandboxes: &SandboxTable<MAX_SANDBOXES>,
-    workloads: &WorkloadTable<MAX_WORKLOADS>,
+    sandboxes: &SandboxTable,
+    workloads: &WorkloadTable,
     domain: DomainKey,
     key: SandboxKey,
 ) -> Result<WorkloadKey, SandboxError> {

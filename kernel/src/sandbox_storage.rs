@@ -6,29 +6,52 @@
 
 use kernel_core::sandbox::{SandboxKey, SandboxTable};
 use kernel_core::sandbox_image::{
-    ImageKey, ImageLayerSpec, ImageSnapshot, ImageSpec, LayerSnapshot, SandboxStorageError,
-    SandboxStorageTable, VolumeKey, VolumeSnapshot,
+    plan_sandbox_storage_registry, ImageKey, ImageLayerSpec, ImageSnapshot, ImageSpec,
+    LayerSnapshot, SandboxStorageError, SandboxStorageRegistryPlan, SandboxStorageTable, VolumeKey,
+    VolumeSnapshot,
 };
 use kernel_core::security_domain::DomainKey;
+use spin::Once;
 
-use crate::sandbox::{registry_plan, MAX_SANDBOXES, SANDBOXES};
+use crate::sandbox::SANDBOXES;
 use crate::sync::IrqSpinLock;
-use crate::workload::{MAX_WORKLOADS, WORKLOADS};
-
-pub const MAX_IMAGES: usize = 32;
-pub const MAX_LAYERS: usize = 256;
-pub const MAX_VOLUMES: usize = 64;
+use crate::workload::WORKLOADS;
 
 /// Lock order: `SANDBOX -> SANDBOX_STORAGE -> WORKLOADS`.
-pub(crate) static STORAGE: IrqSpinLock<SandboxStorageTable<MAX_IMAGES, MAX_LAYERS, MAX_VOLUMES>> =
-    IrqSpinLock::ranked(
-        crate::lockorder::SANDBOX_STORAGE,
-        SandboxStorageTable::new(),
+pub(crate) static STORAGE: IrqSpinLock<SandboxStorageTable> = IrqSpinLock::ranked(
+    crate::lockorder::SANDBOX_STORAGE,
+    SandboxStorageTable::new(),
+);
+static REGISTRY_PLAN: Once<SandboxStorageRegistryPlan> = Once::new();
+
+/// Admit storage metadata from runtime Sandbox capacity and the heap budget.
+pub fn init_registry(sandbox_slots: usize) -> bool {
+    let memory_budget = crate::mm::heap::limit();
+    let Some(plan) = plan_sandbox_storage_registry(memory_budget, sandbox_slots) else {
+        crate::kprintln!(
+            "[JSR-SANDBOX-STORAGE] reject=registry_capacity sandboxes={sandbox_slots} budget={memory_budget}"
+        );
+        return false;
+    };
+    crate::kprintln!(
+        "[JSR-SANDBOX-STORAGE] capacity images={} layers={} volumes={} sandboxes={} budget={} dynamic=true",
+        plan.images,
+        plan.layers,
+        plan.volumes,
+        sandbox_slots,
+        memory_budget
     );
+    REGISTRY_PLAN.call_once(|| plan);
+    true
+}
+
+fn registry_plan() -> Option<SandboxStorageRegistryPlan> {
+    REGISTRY_PLAN.get().copied()
+}
 
 fn sandbox_exists(
-    sandboxes: &SandboxTable<MAX_SANDBOXES>,
-    workloads: &kernel_core::workload::WorkloadTable<MAX_WORKLOADS>,
+    sandboxes: &SandboxTable,
+    workloads: &kernel_core::workload::WorkloadTable,
     domain: DomainKey,
     sandbox: SandboxKey,
     require_running: bool,
@@ -54,7 +77,10 @@ pub fn add_image(
     }
     let plan = registry_plan().ok_or(SandboxStorageError::Capacity)?;
     if storage.image_count() >= plan.images
-        || layers.len() > plan.layers.saturating_sub(storage.layer_count())
+        || storage
+            .layer_count()
+            .checked_add(layers.len())
+            .is_none_or(|layers| layers > plan.layers)
     {
         return Err(SandboxStorageError::Capacity);
     }
@@ -116,8 +142,11 @@ pub fn create_volume(
     if !sandbox_exists(&sandboxes, &workloads, domain, sandbox, true) {
         return Err(SandboxStorageError::InvalidVolume);
     }
-    let plan = registry_plan().ok_or(SandboxStorageError::Capacity)?;
-    if storage.volume_count() >= plan.volumes {
+    if storage.volume_count()
+        >= registry_plan()
+            .ok_or(SandboxStorageError::Capacity)?
+            .volumes
+    {
         return Err(SandboxStorageError::Capacity);
     }
     storage.create_volume(domain, sandbox, image, capacity_bytes)
@@ -135,8 +164,11 @@ pub fn clone_volume(
     if !sandbox_exists(&sandboxes, &workloads, domain, sandbox, true) {
         return Err(SandboxStorageError::InvalidVolume);
     }
-    let plan = registry_plan().ok_or(SandboxStorageError::Capacity)?;
-    if storage.volume_count() >= plan.volumes {
+    if storage.volume_count()
+        >= registry_plan()
+            .ok_or(SandboxStorageError::Capacity)?
+            .volumes
+    {
         return Err(SandboxStorageError::Capacity);
     }
     storage.clone_volume(domain, sandbox, parent, capacity_bytes)

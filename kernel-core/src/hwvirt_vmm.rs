@@ -13,8 +13,6 @@ pub const VMM_ABI_VERSION: u16 = 1;
 pub const VMM_ABI_BYTES: usize = 48;
 /// Fixed byte length of [`VmExitRecord`].
 pub const VM_EXIT_RECORD_BYTES: usize = 40;
-/// A service may expose at most this many vCPUs in ABI version 1.
-pub const MAX_SERVICE_VCPUS: u16 = 64;
 /// User-visible control-page magic shared by acceptance and the service.
 pub const VMM_CONTROL_MAGIC: u64 = 0x4857_5635_564d_4d31;
 /// A fixed-size exit mailbox has eight slots in ABI version 1.
@@ -87,7 +85,7 @@ const _: () = assert!(core::mem::size_of::<VmmAbi>() == VMM_ABI_BYTES);
 
 impl VmmAbi {
     /// Construct the version-1 descriptor. `generation` must be non-zero and
-    /// vCPU capacity must be in `1..=MAX_SERVICE_VCPUS`.
+    /// vCPU capacity is the service's admitted runtime inventory.
     pub fn new(
         backend: Backend,
         generation: u32,
@@ -95,12 +93,7 @@ impl VmmAbi {
         max_vcpus: u16,
         max_guest_pages: u32,
     ) -> Option<Self> {
-        if generation == 0
-            || max_vms == 0
-            || max_vcpus == 0
-            || max_vcpus > MAX_SERVICE_VCPUS
-            || max_guest_pages == 0
-        {
+        if generation == 0 || max_vms == 0 || max_vcpus == 0 || max_guest_pages == 0 {
             return None;
         }
         Some(Self {
@@ -181,7 +174,6 @@ impl VmmAbi {
                 .is_some_and(|features| features.contains(VmmFeatures::V1))
             && self.max_vms != 0
             && self.max_vcpus != 0
-            && self.max_vcpus <= MAX_SERVICE_VCPUS
             && self.max_guest_pages != 0
             && self.exit_record_bytes as usize == VM_EXIT_RECORD_BYTES
             && self.exit_slots as usize == VMM_EXIT_SLOTS
@@ -236,7 +228,10 @@ pub struct ServiceLifecycle {
 impl ServiceLifecycle {
     /// First generation of a new service.
     pub const fn new() -> Self {
-        Self { generation: 1, state: ServiceState::Detached }
+        Self {
+            generation: 1,
+            state: ServiceState::Detached,
+        }
     }
 
     pub const fn generation(self) -> u32 {
@@ -502,6 +497,14 @@ mod tests {
         let mut reserved = raw;
         reserved[47] = 1;
         assert!(VmmAbi::decode(&reserved).is_none());
+    }
+
+    #[test]
+    fn service_vcpu_inventory_is_not_capped_at_sixty_four() {
+        let abi = VmmAbi::new(Backend::Vmx, 1, 1, 4096, 1 << 20).unwrap();
+        let max_vcpus = abi.max_vcpus;
+        assert_eq!(max_vcpus, 4096);
+        assert_eq!(VmmAbi::decode(&abi.encode()), Some(abi));
     }
 
     #[test]

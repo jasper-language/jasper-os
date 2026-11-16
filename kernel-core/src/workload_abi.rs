@@ -38,10 +38,7 @@ impl CreateArgs {
     }
 
     pub fn decode(raw: &[u8]) -> Option<Self> {
-        if read_u32(raw, 0)? != MAGIC
-            || read_u16(raw, 6)? != 0
-            || read_u32(raw, 36)? != 0
-        {
+        if read_u32(raw, 0)? != MAGIC || read_u16(raw, 6)? != 0 || read_u32(raw, 36)? != 0 {
             return None;
         }
         let version = read_u16(raw, 4)?;
@@ -197,7 +194,7 @@ mod tests {
 
     #[test]
     fn create_descriptor_round_trip_is_strict() {
-        let mut table = WorkloadTable::<2>::new();
+        let mut table = WorkloadTable::new();
         let parent = table
             .create(
                 DomainKey {
@@ -235,7 +232,7 @@ mod tests {
         assert_eq!(decoded.limits.io_bytes, LEGACY_UNLIMITED_IO);
         assert_eq!(decoded.limits.io_ops, LEGACY_UNLIMITED_IO);
 
-        let mut table = WorkloadTable::<1>::new();
+        let mut table = WorkloadTable::new();
         let key = table
             .create(
                 DomainKey {
@@ -253,7 +250,7 @@ mod tests {
 
     #[test]
     fn query_record_is_stable_and_contains_no_domain() {
-        let mut table = WorkloadTable::<1>::new();
+        let mut table = WorkloadTable::new();
         let key = table
             .create(
                 DomainKey {

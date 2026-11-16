@@ -17,7 +17,7 @@ fn child_ring_entries_are_bounded_by_the_whole_ancestor_chain() {
         io_bytes: 64 * 1024,
         io_ops: 32,
     };
-    let mut table = WorkloadTable::<2>::new();
+    let mut table = WorkloadTable::new();
     let parent = table.create(domain, limits).unwrap();
     table.transition(parent, WorkloadState::Ready).unwrap();
     table.transition(parent, WorkloadState::Running).unwrap();

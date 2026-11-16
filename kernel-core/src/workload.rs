@@ -7,6 +7,8 @@
 //! cgroup、路径和 UID；Workload 具有安全域身份、显式资源上限和单一终态。
 
 use crate::security_domain::DomainKey;
+#[cfg(any(test, feature = "runtime-registries"))]
+use alloc::vec::Vec;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkloadKey {
@@ -184,7 +186,8 @@ pub struct IoRateSnapshot {
     pub window_active: bool,
 }
 
-/// Runtime admission for the fixed implementation envelopes.
+/// Runtime admission for Workload and member registry metadata.
+#[cfg(any(test, feature = "runtime-registries"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkloadRegistryPlan {
     pub workloads: usize,
@@ -195,8 +198,9 @@ pub struct WorkloadRegistryPlan {
 ///
 /// Issue #33 HC-21 policy: Workload metadata and member metadata each receive
 /// half of a 1/1024 memory share; the smaller of policy demand and admitted
-/// task capacity wins. The caller's fixed storage remains an implementation
-/// envelope until backing allocation is made fully dynamic.
+/// task capacity wins. The kernel table allocates backing metadata on demand
+/// and fails closed if that allocation cannot be admitted.
+#[cfg(any(test, feature = "runtime-registries"))]
 pub fn plan_workload_registry(
     memory_budget: u64,
     workload_slots: usize,
@@ -290,6 +294,7 @@ impl WorkloadError {
 }
 
 #[derive(Clone, Copy)]
+#[cfg(any(test, feature = "runtime-registries"))]
 struct Record {
     key: WorkloadKey,
     parent: Option<WorkloadKey>,
@@ -305,19 +310,21 @@ struct Record {
     child_cpu_permille: u32,
 }
 
-/// Fixed-capacity table. Every rejection leaves all records unchanged.
+/// Heap-backed workload table. Every rejection leaves all records unchanged.
 ///
-/// 固定容量表；任何拒绝都不改变已有记录。
-pub struct WorkloadTable<const N: usize> {
-    slots: [Option<Record>; N],
-    generations: [u32; N],
+/// 堆后备 Workload 表；任何拒绝都不改变已有记录。
+#[cfg(any(test, feature = "runtime-registries"))]
+pub struct WorkloadTable {
+    slots: Vec<Option<Record>>,
+    generations: Vec<u32>,
 }
 
-impl<const N: usize> WorkloadTable<N> {
+#[cfg(any(test, feature = "runtime-registries"))]
+impl WorkloadTable {
     pub const fn new() -> Self {
         Self {
-            slots: [None; N],
-            generations: [0; N],
+            slots: Vec::new(),
+            generations: Vec::new(),
         }
     }
 
@@ -377,7 +384,11 @@ impl<const N: usize> WorkloadTable<N> {
             .slots
             .iter()
             .position(Option::is_none)
-            .ok_or(WorkloadError::Capacity)?;
+            .unwrap_or(self.slots.len());
+        if slot > u16::MAX as usize {
+            return Err(WorkloadError::Capacity);
+        }
+        self.grow_to(slot)?;
         let generation = self.generations[slot]
             .checked_add(1)
             .ok_or(WorkloadError::IdExhausted)?;
@@ -435,11 +446,11 @@ impl<const N: usize> WorkloadTable<N> {
     }
 
     pub fn charge(&mut self, key: WorkloadKey, delta: ResourceUsage) -> Result<(), WorkloadError> {
-        let (path, len) = self.path(key)?;
+        let path = self.path(key)?;
         if self.record(key)?.state != WorkloadState::Running {
             return Err(WorkloadError::InvalidState);
         }
-        for current in path.iter().take(len) {
+        for current in &path {
             let record = self.record(*current)?;
             let next = record
                 .usage
@@ -449,7 +460,7 @@ impl<const N: usize> WorkloadTable<N> {
                 return Err(WorkloadError::Quota);
             }
         }
-        for current in path.iter().take(len) {
+        for current in &path {
             let record = self.record_mut(*current)?;
             record.usage = record
                 .usage
@@ -460,21 +471,21 @@ impl<const N: usize> WorkloadTable<N> {
     }
 
     pub fn release(&mut self, key: WorkloadKey, delta: ResourceUsage) -> Result<(), WorkloadError> {
-        let (path, len) = self.path(key)?;
+        let path = self.path(key)?;
         if matches!(
             self.record(key)?.state,
             WorkloadState::Created | WorkloadState::Ready
         ) {
             return Err(WorkloadError::InvalidState);
         }
-        for current in path.iter().take(len) {
+        for current in &path {
             let record = self.record(*current)?;
             record
                 .usage
                 .checked_sub(delta)
                 .ok_or(WorkloadError::Quota)?;
         }
-        for current in path.iter().take(len) {
+        for current in &path {
             let record = self.record_mut(*current)?;
             record.usage = record
                 .usage
@@ -533,11 +544,11 @@ impl<const N: usize> WorkloadTable<N> {
         delta: IoUsage,
         now_ns: Option<u64>,
     ) -> Result<(), WorkloadError> {
-        let (path, len) = self.path(key)?;
+        let path = self.path(key)?;
         if self.record(key)?.state != WorkloadState::Running {
             return Err(WorkloadError::InvalidState);
         }
-        for current in path.iter().take(len) {
+        for current in &path {
             let record = self.record(*current)?;
             if now_ns.is_none() && record.io_rate_limits.is_some() {
                 return Err(WorkloadError::InvalidState);
@@ -573,7 +584,7 @@ impl<const N: usize> WorkloadTable<N> {
                 }
             }
         }
-        for current in path.iter().take(len) {
+        for current in &path {
             let record = self.record_mut(*current)?;
             record.io_usage = record
                 .io_usage
@@ -611,18 +622,18 @@ impl<const N: usize> WorkloadTable<N> {
     /// 撤销未产生外部效果的累计消耗；本接口没有时间戳，因此不会重新开放
     /// 固定窗口容量。
     pub fn refund_io(&mut self, key: WorkloadKey, delta: IoUsage) -> Result<(), WorkloadError> {
-        let (path, len) = self.path(key)?;
+        let path = self.path(key)?;
         if self.record(key)?.state == WorkloadState::Created {
             return Err(WorkloadError::InvalidState);
         }
-        for current in path.iter().take(len) {
+        for current in &path {
             let record = self.record(*current)?;
             record
                 .io_usage
                 .checked_sub(delta)
                 .ok_or(WorkloadError::Quota)?;
         }
-        for current in path.iter().take(len) {
+        for current in &path {
             let record = self.record_mut(*current)?;
             record.io_usage = record
                 .io_usage
@@ -642,11 +653,11 @@ impl<const N: usize> WorkloadTable<N> {
         delta: IoUsage,
         now_ns: u64,
     ) -> Result<(), WorkloadError> {
-        let (path, len) = self.path(key)?;
+        let path = self.path(key)?;
         if self.record(key)?.state == WorkloadState::Created {
             return Err(WorkloadError::InvalidState);
         }
-        for current in path.iter().take(len) {
+        for current in &path {
             let record = self.record(*current)?;
             record
                 .io_usage
@@ -669,7 +680,7 @@ impl<const N: usize> WorkloadTable<N> {
                 }
             }
         }
-        for current in path.iter().take(len) {
+        for current in &path {
             let record = self.record_mut(*current)?;
             record.io_usage = record
                 .io_usage
@@ -778,23 +789,41 @@ impl<const N: usize> WorkloadTable<N> {
             .ok_or(WorkloadError::InvalidKey)
     }
 
-    fn path(&self, key: WorkloadKey) -> Result<([WorkloadKey; N], usize), WorkloadError> {
-        let mut path = [key; N];
-        let mut len = 0usize;
+    fn path(&self, key: WorkloadKey) -> Result<Vec<WorkloadKey>, WorkloadError> {
+        let mut path = Vec::new();
+        path.try_reserve(self.slots.len().max(1))
+            .map_err(|_| WorkloadError::Capacity)?;
         let mut current = Some(key);
         while let Some(key) = current {
-            if len == N {
+            if path.len() >= self.slots.len() {
                 return Err(WorkloadError::InvalidState);
             }
             let record = self.record(key)?;
-            path[len] = key;
-            len += 1;
+            path.push(key);
             current = record.parent;
         }
-        Ok((path, len))
+        Ok(path)
+    }
+
+    fn grow_to(&mut self, slot: usize) -> Result<(), WorkloadError> {
+        self.slots
+            .try_reserve(slot.saturating_add(1).saturating_sub(self.slots.len()))
+            .map_err(|_| WorkloadError::Capacity)?;
+        self.generations
+            .try_reserve(
+                slot.saturating_add(1)
+                    .saturating_sub(self.generations.len()),
+            )
+            .map_err(|_| WorkloadError::Capacity)?;
+        while self.slots.len() <= slot {
+            self.slots.push(None);
+            self.generations.push(0);
+        }
+        Ok(())
     }
 }
 
+#[cfg(any(test, feature = "runtime-registries"))]
 fn window_elapsed(usage: IoRateUsage, window_ns: u64, now_ns: u64) -> bool {
     // A clock regression must fail closed: it cannot reset or enlarge a window.
     now_ns >= usage.window_start_ns && now_ns.saturating_sub(usage.window_start_ns) >= window_ns
@@ -830,21 +859,23 @@ impl MembershipError {
     }
 }
 
-/// Fixed-capacity member mapping. One member has at most one workload.
+/// Heap-backed member mapping. One member has at most one workload.
 ///
-/// 固定容量成员映射；一个成员最多属于一个 Workload。
-pub struct WorkloadMembers<const N: usize> {
-    slots: [Option<WorkloadMember>; N],
+/// 堆后备成员映射；一个成员最多属于一个 Workload。
+#[cfg(any(test, feature = "runtime-registries"))]
+pub struct WorkloadMembers {
+    slots: Vec<Option<WorkloadMember>>,
 }
 
-impl<const N: usize> WorkloadMembers<N> {
+#[cfg(any(test, feature = "runtime-registries"))]
+impl WorkloadMembers {
     pub const fn new() -> Self {
-        Self { slots: [None; N] }
+        Self { slots: Vec::new() }
     }
 
-    pub fn attach<const W: usize>(
+    pub fn attach(
         &mut self,
-        table: &WorkloadTable<W>,
+        table: &WorkloadTable,
         workload: WorkloadKey,
         member: u64,
     ) -> Result<(), MembershipError> {
@@ -862,15 +893,20 @@ impl<const N: usize> WorkloadMembers<N> {
         {
             return Err(MembershipError::NotRunning);
         }
-        let slot = self
-            .slots
-            .iter()
-            .position(Option::is_none)
-            .ok_or(MembershipError::Capacity)?;
-        self.slots[slot] = Some(WorkloadMember {
-            id: member,
-            workload,
-        });
+        if let Some(slot) = self.slots.iter().position(Option::is_none) {
+            self.slots[slot] = Some(WorkloadMember {
+                id: member,
+                workload,
+            });
+        } else {
+            self.slots
+                .try_reserve(1)
+                .map_err(|_| MembershipError::Capacity)?;
+            self.slots.push(Some(WorkloadMember {
+                id: member,
+                workload,
+            }));
+        }
         Ok(())
     }
 
@@ -889,9 +925,9 @@ impl<const N: usize> WorkloadMembers<N> {
     /// Explicitly moves a member after validating the destination is Running.
     ///
     /// 目标 Workload 处于 Running 时显式迁移成员；失败不改动原绑定。
-    pub fn reassign<const W: usize>(
+    pub fn reassign(
         &mut self,
-        table: &WorkloadTable<W>,
+        table: &WorkloadTable,
         member: u64,
         destination: WorkloadKey,
     ) -> Result<(), MembershipError> {
@@ -953,13 +989,15 @@ impl<const N: usize> WorkloadMembers<N> {
     }
 }
 
-impl<const N: usize> Default for WorkloadMembers<N> {
+#[cfg(any(test, feature = "runtime-registries"))]
+impl Default for WorkloadMembers {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const N: usize> Default for WorkloadTable<N> {
+#[cfg(any(test, feature = "runtime-registries"))]
+impl Default for WorkloadTable {
     fn default() -> Self {
         Self::new()
     }
@@ -984,7 +1022,7 @@ mod tests {
 
     #[test]
     fn identity_and_limits_fail_closed_without_partial_creation() {
-        let mut table = WorkloadTable::<4>::new();
+        let mut table = WorkloadTable::new();
         assert_eq!(
             table.create(DomainKey::NONE, LIMITS),
             Err(WorkloadError::InvalidDomain)
@@ -1010,7 +1048,7 @@ mod tests {
 
     #[test]
     fn lifecycle_has_one_terminal_transition() {
-        let mut table = WorkloadTable::<4>::new();
+        let mut table = WorkloadTable::new();
         let key = table.create(DOMAIN, LIMITS).unwrap();
         assert_eq!(
             table.transition(key, WorkloadState::Running),
@@ -1028,7 +1066,7 @@ mod tests {
 
     #[test]
     fn quota_admission_is_exact_and_failure_atomic() {
-        let mut table = WorkloadTable::<4>::new();
+        let mut table = WorkloadTable::new();
         let key = table.create(DOMAIN, LIMITS).unwrap();
         table.transition(key, WorkloadState::Ready).unwrap();
         table.transition(key, WorkloadState::Running).unwrap();
@@ -1066,7 +1104,7 @@ mod tests {
 
     #[test]
     fn io_budget_rolls_up_and_rejection_or_refund_is_atomic() {
-        let mut table = WorkloadTable::<2>::new();
+        let mut table = WorkloadTable::new();
         let limits = ResourceLimits {
             io_bytes: 10,
             io_ops: 2,
@@ -1095,15 +1133,12 @@ mod tests {
         table.refund_io(child, first).unwrap();
         assert_eq!(table.snapshot(child).unwrap().io_usage, IoUsage::default());
         assert_eq!(table.snapshot(parent).unwrap().io_usage, IoUsage::default());
-        assert_eq!(
-            table.refund_io(child, first),
-            Err(WorkloadError::Quota)
-        );
+        assert_eq!(table.refund_io(child, first), Err(WorkloadError::Quota));
     }
 
     #[test]
     fn io_limits_must_validate_and_cannot_expand_parent_authority() {
-        let mut table = WorkloadTable::<2>::new();
+        let mut table = WorkloadTable::new();
         assert_eq!(
             table.create(
                 DOMAIN,
@@ -1132,7 +1167,7 @@ mod tests {
 
     #[test]
     fn stale_generation_cannot_alias_reused_slot() {
-        let mut table = WorkloadTable::<1>::new();
+        let mut table = WorkloadTable::new();
         let old = table.create(DOMAIN, LIMITS).unwrap();
         table.transition(old, WorkloadState::Failed).unwrap();
         table.destroy(old).unwrap();
@@ -1145,7 +1180,7 @@ mod tests {
 
     #[test]
     fn workloads_have_independent_resource_accounts() {
-        let mut table = WorkloadTable::<2>::new();
+        let mut table = WorkloadTable::new();
         let a = table.create(DOMAIN, LIMITS).unwrap();
         let b = table.create(DOMAIN, LIMITS).unwrap();
         for key in [a, b] {
@@ -1167,7 +1202,7 @@ mod tests {
 
     #[test]
     fn child_resources_roll_up_and_require_ordered_destruction() {
-        let mut table = WorkloadTable::<4>::new();
+        let mut table = WorkloadTable::new();
         let parent = table.create(DOMAIN, LIMITS).unwrap();
         table.transition(parent, WorkloadState::Ready).unwrap();
         table.transition(parent, WorkloadState::Running).unwrap();
@@ -1213,7 +1248,7 @@ mod tests {
 
     #[test]
     fn child_cannot_expand_parent_limits_or_cross_domain() {
-        let mut table = WorkloadTable::<2>::new();
+        let mut table = WorkloadTable::new();
         let parent = table.create(DOMAIN, LIMITS).unwrap();
         assert_eq!(
             table.create_child(parent, LIMITS),
@@ -1237,7 +1272,7 @@ mod tests {
 
     #[test]
     fn child_cpu_limits_are_admitted_across_direct_siblings() {
-        let mut table = WorkloadTable::<4>::new();
+        let mut table = WorkloadTable::new();
         let parent = table
             .create(
                 DOMAIN,
@@ -1290,10 +1325,10 @@ mod tests {
 
     #[test]
     fn member_assignment_is_exclusive_and_requires_running_workloads() {
-        let mut table = WorkloadTable::<2>::new();
+        let mut table = WorkloadTable::new();
         let first = table.create(DOMAIN, LIMITS).unwrap();
         let second = table.create(DOMAIN, LIMITS).unwrap();
-        let mut members = WorkloadMembers::<2>::new();
+        let mut members = WorkloadMembers::new();
         assert_eq!(
             members.attach(&table, first, 41),
             Err(MembershipError::NotRunning)
@@ -1320,12 +1355,12 @@ mod tests {
 
     #[test]
     fn failed_member_reassignment_keeps_the_original_binding() {
-        let mut table = WorkloadTable::<2>::new();
+        let mut table = WorkloadTable::new();
         let running = table.create(DOMAIN, LIMITS).unwrap();
         let created = table.create(DOMAIN, LIMITS).unwrap();
         table.transition(running, WorkloadState::Ready).unwrap();
         table.transition(running, WorkloadState::Running).unwrap();
-        let mut members = WorkloadMembers::<1>::new();
+        let mut members = WorkloadMembers::new();
         members.attach(&table, running, 99).unwrap();
         assert_eq!(
             members.reassign(&table, 99, created),
@@ -1336,7 +1371,7 @@ mod tests {
 
     #[test]
     fn failed_workload_can_release_resources_before_destroy() {
-        let mut table = WorkloadTable::<1>::new();
+        let mut table = WorkloadTable::new();
         let key = table.create(DOMAIN, LIMITS).unwrap();
         table.transition(key, WorkloadState::Ready).unwrap();
         table.transition(key, WorkloadState::Running).unwrap();
@@ -1355,7 +1390,7 @@ mod tests {
 
     #[test]
     fn stopped_requires_resources_and_children_to_be_gone() {
-        let mut table = WorkloadTable::<2>::new();
+        let mut table = WorkloadTable::new();
         let parent = table.create(DOMAIN, LIMITS).unwrap();
         table.transition(parent, WorkloadState::Ready).unwrap();
         table.transition(parent, WorkloadState::Running).unwrap();
@@ -1397,14 +1432,14 @@ mod tests {
 
     #[test]
     fn member_counts_are_scoped_per_workload() {
-        let mut table = WorkloadTable::<2>::new();
+        let mut table = WorkloadTable::new();
         let first = table.create(DOMAIN, LIMITS).unwrap();
         let second = table.create(DOMAIN, LIMITS).unwrap();
         for key in [first, second] {
             table.transition(key, WorkloadState::Ready).unwrap();
             table.transition(key, WorkloadState::Running).unwrap();
         }
-        let mut members = WorkloadMembers::<3>::new();
+        let mut members = WorkloadMembers::new();
         members.attach(&table, first, 1).unwrap();
         members.attach(&table, first, 2).unwrap();
         members.attach(&table, second, 3).unwrap();
@@ -1420,7 +1455,7 @@ mod tests {
 
     #[test]
     fn shared_mapping_aliases_consume_independent_admitted_bytes() {
-        let mut table = WorkloadTable::<1>::new();
+        let mut table = WorkloadTable::new();
         let key = table
             .create(
                 DOMAIN,
@@ -1458,5 +1493,24 @@ mod tests {
         assert!(standard.members <= 256);
         assert_eq!(plan_workload_registry(0, 64), None);
         assert_eq!(plan_workload_registry(1024 * 1024, 0), None);
+    }
+
+    #[test]
+    fn heap_backed_registries_grow_past_previous_fixed_envelopes() {
+        let mut table = WorkloadTable::new();
+        let first = table.create(DOMAIN, LIMITS).unwrap();
+        for _ in 1..80 {
+            table.create(DOMAIN, LIMITS).unwrap();
+        }
+        assert_eq!(table.len(), 80);
+
+        table.transition(first, WorkloadState::Ready).unwrap();
+        table.transition(first, WorkloadState::Running).unwrap();
+        let mut members = WorkloadMembers::new();
+        for id in 1..=300 {
+            members.attach(&table, first, id).unwrap();
+        }
+        assert_eq!(members.len(), 300);
+        assert_eq!(members.count_for(first), 300);
     }
 }

@@ -1,7 +1,5 @@
 use kernel_core::security_domain::DomainKey;
-use kernel_core::workload::{
-    IoUsage, ResourceLimits, WorkloadError, WorkloadState, WorkloadTable,
-};
+use kernel_core::workload::{IoUsage, ResourceLimits, WorkloadError, WorkloadState, WorkloadTable};
 
 #[test]
 fn nested_io_budgets_are_consumed_once_per_ancestor_and_reject_atomically() {
@@ -13,7 +11,7 @@ fn nested_io_budgets_are_consumed_once_per_ancestor_and_reject_atomically() {
         io_bytes: 8,
         io_ops: 3,
     };
-    let mut table = WorkloadTable::<3>::new();
+    let mut table = WorkloadTable::new();
     let root = table
         .create(
             DomainKey {

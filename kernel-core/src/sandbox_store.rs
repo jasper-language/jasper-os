@@ -87,7 +87,7 @@ pub struct SandboxBlockStore<
     occupied: [bool; U],
     images: [Option<ImageExtent>; I],
     volumes: [Option<VolumeData<W>>; V],
-    storage: SandboxStorageTable<I, L, V>,
+    storage: SandboxStorageTable,
 }
 
 impl<
@@ -607,8 +607,8 @@ mod tests {
     }
 
     fn sandbox(domain: DomainKey) -> SandboxKey {
-        let mut workloads = WorkloadTable::<2>::new();
-        let mut sandboxes = SandboxTable::<2>::new();
+        let mut workloads = WorkloadTable::new();
+        let mut sandboxes = SandboxTable::new();
         let key = sandboxes.create(&mut workloads, domain, LIMITS).unwrap();
         core::mem::forget(sandboxes);
         core::mem::forget(workloads);

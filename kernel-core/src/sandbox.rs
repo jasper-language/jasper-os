@@ -8,9 +8,13 @@
 //! 子级仍是 Workload 的唯一事实。本模块只保存稳定的 Sandbox 世代和 root 绑定。
 
 use crate::security_domain::DomainKey;
-use crate::workload::{
-    ResourceLimits, WorkloadError, WorkloadKey, WorkloadSnapshot, WorkloadState, WorkloadTable,
-};
+#[cfg(any(test, feature = "runtime-registries"))]
+use crate::workload::ResourceLimits;
+use crate::workload::{WorkloadError, WorkloadKey, WorkloadState};
+#[cfg(any(test, feature = "runtime-registries"))]
+use crate::workload::{WorkloadSnapshot, WorkloadTable};
+#[cfg(any(test, feature = "runtime-registries"))]
+use alloc::vec::Vec;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SandboxKey {
@@ -91,6 +95,31 @@ pub struct SandboxSnapshot {
     pub state: WorkloadState,
 }
 
+/// Runtime-admitted Sandbox identity capacity.
+#[cfg(any(test, feature = "runtime-registries"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SandboxRegistryPlan {
+    pub sandboxes: usize,
+}
+
+/// Derive Sandbox identity capacity from Workload admission and heap budget.
+#[cfg(any(test, feature = "runtime-registries"))]
+pub fn plan_sandbox_registry(
+    memory_budget: u64,
+    workload_slots: usize,
+) -> Option<SandboxRegistryPlan> {
+    if workload_slots == 0 {
+        return None;
+    }
+    let metadata_budget = usize::try_from(memory_budget / 4096).ok()?;
+    let record_bytes = core::mem::size_of::<Record>();
+    if record_bytes == 0 {
+        return None;
+    }
+    let sandboxes = workload_slots.min(metadata_budget / record_bytes);
+    (sandboxes != 0).then_some(SandboxRegistryPlan { sandboxes })
+}
+
 impl SandboxSnapshot {
     /// Terminal state is exclusively the root Workload's terminal state.
     ///
@@ -101,35 +130,33 @@ impl SandboxSnapshot {
 }
 
 #[derive(Clone, Copy)]
+#[cfg(any(test, feature = "runtime-registries"))]
 struct Record {
     key: SandboxKey,
     root: WorkloadKey,
 }
 
-/// Size of one Sandbox identity record for runtime budget planning.
-pub const fn record_bytes() -> usize {
-    core::mem::size_of::<Record>()
-}
-
-/// Fixed-capacity sandbox identity table.
+/// Heap-backed sandbox identity table.
 ///
 /// A sandbox is created in `Created` and follows the root Workload's
 /// `Created -> Ready -> Running -> Stopping -> Stopped/Failed` states. There
 /// is no second state field. A terminal root cannot transition again, and
 /// `Stopped` is admitted by Workload only after usage and children reach zero.
 ///
-/// 固定容量的 Sandbox 身份表。Sandbox 不复制状态字段，而是完全委托 root
+/// 堆后备的 Sandbox 身份表。Sandbox 不复制状态字段，而是完全委托 root
 /// Workload；`Stopping` 时新资源和新子级均被 Workload 拒绝。
-pub struct SandboxTable<const N: usize> {
-    slots: [Option<Record>; N],
-    generations: [u32; N],
+#[cfg(any(test, feature = "runtime-registries"))]
+pub struct SandboxTable {
+    slots: Vec<Option<Record>>,
+    generations: Vec<u32>,
 }
 
-impl<const N: usize> SandboxTable<N> {
+#[cfg(any(test, feature = "runtime-registries"))]
+impl SandboxTable {
     pub const fn new() -> Self {
         Self {
-            slots: [None; N],
-            generations: [0; N],
+            slots: Vec::new(),
+            generations: Vec::new(),
         }
     }
 
@@ -137,9 +164,9 @@ impl<const N: usize> SandboxTable<N> {
     ///
     /// 原子创建 root Workload 与稳定 Sandbox 身份；容量不足时不会留下
     /// 未登记或无主 Workload。
-    pub fn create<const W: usize>(
+    pub fn create(
         &mut self,
-        workloads: &mut WorkloadTable<W>,
+        workloads: &mut WorkloadTable,
         domain: DomainKey,
         limits: ResourceLimits,
     ) -> Result<SandboxKey, SandboxError> {
@@ -158,9 +185,9 @@ impl<const N: usize> SandboxTable<N> {
     ///
     /// 将一个现有的 `Created` root Workload 绑定到新 Sandbox 身份。非根
     /// Workload、已终止 Workload 或已被 Sandbox 拥有的 root 均拒绝。
-    pub fn adopt<const W: usize>(
+    pub fn adopt(
         &mut self,
-        workloads: &WorkloadTable<W>,
+        workloads: &WorkloadTable,
         root: WorkloadKey,
     ) -> Result<SandboxKey, SandboxError> {
         let snapshot = workloads.snapshot(root)?;
@@ -181,9 +208,9 @@ impl<const N: usize> SandboxTable<N> {
     }
 
     /// Query identity and lifecycle without duplicating resource facts.
-    pub fn snapshot<const W: usize>(
+    pub fn snapshot(
         &self,
-        workloads: &WorkloadTable<W>,
+        workloads: &WorkloadTable,
         key: SandboxKey,
     ) -> Result<SandboxSnapshot, SandboxError> {
         let record = self.record(key)?;
@@ -199,9 +226,9 @@ impl<const N: usize> SandboxTable<N> {
     /// Query a sandbox only through its authoritative security domain.
     ///
     /// 仅通过 Sandbox 的权威安全域查询；其他域与不存在的标识不可区分。
-    pub fn snapshot_in_domain<const W: usize>(
+    pub fn snapshot_in_domain(
         &self,
-        workloads: &WorkloadTable<W>,
+        workloads: &WorkloadTable,
         domain: DomainKey,
         key: SandboxKey,
     ) -> Result<SandboxSnapshot, SandboxError> {
@@ -213,9 +240,9 @@ impl<const N: usize> SandboxTable<N> {
     }
 
     /// Return the complete authoritative root Workload record.
-    pub fn root_snapshot<const W: usize>(
+    pub fn root_snapshot(
         &self,
-        workloads: &WorkloadTable<W>,
+        workloads: &WorkloadTable,
         key: SandboxKey,
     ) -> Result<WorkloadSnapshot, SandboxError> {
         let record = self.record(key)?;
@@ -223,18 +250,18 @@ impl<const N: usize> SandboxTable<N> {
     }
 
     /// Advance `Created -> Ready`.
-    pub fn mark_ready<const W: usize>(
+    pub fn mark_ready(
         &self,
-        workloads: &mut WorkloadTable<W>,
+        workloads: &mut WorkloadTable,
         key: SandboxKey,
     ) -> Result<(), SandboxError> {
         self.transition(workloads, key, WorkloadState::Ready)
     }
 
     /// Advance `Ready -> Running`.
-    pub fn start<const W: usize>(
+    pub fn start(
         &self,
-        workloads: &mut WorkloadTable<W>,
+        workloads: &mut WorkloadTable,
         key: SandboxKey,
     ) -> Result<(), SandboxError> {
         self.transition(workloads, key, WorkloadState::Running)
@@ -244,9 +271,9 @@ impl<const N: usize> SandboxTable<N> {
     /// resources, child Workloads and newly started members.
     ///
     /// 开始关闭；成功后 Workload 准入门面拒绝新资源、新子级和新成员启动。
-    pub fn request_stop<const W: usize>(
+    pub fn request_stop(
         &self,
-        workloads: &mut WorkloadTable<W>,
+        workloads: &mut WorkloadTable,
         key: SandboxKey,
     ) -> Result<(), SandboxError> {
         self.transition(workloads, key, WorkloadState::Stopping)
@@ -255,9 +282,9 @@ impl<const N: usize> SandboxTable<N> {
     /// Complete shutdown only after Workload usage and children are zero.
     ///
     /// 仅当 Workload 使用量与子级均归零后才完成关闭。
-    pub fn complete_stop<const W: usize>(
+    pub fn complete_stop(
         &self,
-        workloads: &mut WorkloadTable<W>,
+        workloads: &mut WorkloadTable,
         key: SandboxKey,
     ) -> Result<(), SandboxError> {
         self.transition(workloads, key, WorkloadState::Stopped)
@@ -266,11 +293,7 @@ impl<const N: usize> SandboxTable<N> {
     /// Enter the single failure terminal from any non-terminal state.
     ///
     /// 从任意非终态进入唯一失败终态。
-    pub fn fail<const W: usize>(
-        &self,
-        workloads: &mut WorkloadTable<W>,
-        key: SandboxKey,
-    ) -> Result<(), SandboxError> {
+    pub fn fail(&self, workloads: &mut WorkloadTable, key: SandboxKey) -> Result<(), SandboxError> {
         self.transition(workloads, key, WorkloadState::Failed)
     }
 
@@ -278,9 +301,9 @@ impl<const N: usize> SandboxTable<N> {
     ///
     /// 仅当 Sandbox root 处于 `Running` 时准入子 Workload；`Stopping` 后
     /// 不再允许新启动。
-    pub fn launch_child<const W: usize>(
+    pub fn launch_child(
         &self,
-        workloads: &mut WorkloadTable<W>,
+        workloads: &mut WorkloadTable,
         key: SandboxKey,
         limits: ResourceLimits,
     ) -> Result<WorkloadKey, SandboxError> {
@@ -296,9 +319,9 @@ impl<const N: usize> SandboxTable<N> {
     ///
     /// Workload 必须已处于终态且资源与子级归零；成功后 Sandbox 槽位可复用，
     /// 但旧身份因世代递增而永久失效。
-    pub fn destroy<const W: usize>(
+    pub fn destroy(
         &mut self,
-        workloads: &mut WorkloadTable<W>,
+        workloads: &mut WorkloadTable,
         key: SandboxKey,
     ) -> Result<(), SandboxError> {
         self.destroy_with(workloads, key, |workloads, root| {
@@ -312,14 +335,14 @@ impl<const N: usize> SandboxTable<N> {
     ///
     /// 通过调用方提供的权威 root 销毁逻辑删除 Sandbox；只有销毁成功后才
     /// 移除映射，内核因此可以复用成员与 CPU group 回收检查。
-    pub fn destroy_with<const W: usize, F>(
+    pub fn destroy_with<F>(
         &mut self,
-        workloads: &mut WorkloadTable<W>,
+        workloads: &mut WorkloadTable,
         key: SandboxKey,
         destroy_root: F,
     ) -> Result<(), SandboxError>
     where
-        F: FnOnce(&mut WorkloadTable<W>, WorkloadKey) -> Result<(), WorkloadError>,
+        F: FnOnce(&mut WorkloadTable, WorkloadKey) -> Result<(), WorkloadError>,
     {
         let slot = key.slot as usize;
         let record = self.record(key)?;
@@ -336,9 +359,9 @@ impl<const N: usize> SandboxTable<N> {
         self.len() == 0
     }
 
-    fn transition<const W: usize>(
+    fn transition(
         &self,
-        workloads: &mut WorkloadTable<W>,
+        workloads: &mut WorkloadTable,
         key: SandboxKey,
         next: WorkloadState,
     ) -> Result<(), SandboxError> {
@@ -361,12 +384,25 @@ impl<const N: usize> SandboxTable<N> {
             .any(|record| record.root == root)
     }
 
-    fn vacant(&self) -> Result<(usize, u32), SandboxError> {
+    fn vacant(&mut self) -> Result<(usize, u32), SandboxError> {
         let slot = self
             .slots
             .iter()
             .position(Option::is_none)
-            .ok_or(SandboxError::Capacity)?;
+            .unwrap_or(self.slots.len());
+        if slot > u16::MAX as usize {
+            return Err(SandboxError::Capacity);
+        }
+        if slot == self.slots.len() {
+            self.slots
+                .try_reserve(1)
+                .map_err(|_| SandboxError::Capacity)?;
+            self.generations
+                .try_reserve(1)
+                .map_err(|_| SandboxError::Capacity)?;
+            self.slots.push(None);
+            self.generations.push(0);
+        }
         let generation = self.generations[slot]
             .checked_add(1)
             .ok_or(SandboxError::IdExhausted)?;
@@ -374,7 +410,8 @@ impl<const N: usize> SandboxTable<N> {
     }
 }
 
-impl<const N: usize> Default for SandboxTable<N> {
+#[cfg(any(test, feature = "runtime-registries"))]
+impl Default for SandboxTable {
     fn default() -> Self {
         Self::new()
     }

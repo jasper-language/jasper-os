@@ -4,14 +4,14 @@
 //! attenuation and external authority facts under the registered lock order.
 //! Logical paths are never stored or consulted.
 
+use kernel_core::object::Rights;
+use kernel_core::objtable::ObjId;
+use kernel_core::sandbox::SandboxKey;
+use kernel_core::sandbox_image::{ContentDigest, ImageKey, VolumeKey};
 use kernel_core::sandbox_launch::{
     CapabilitySet, DataScopeGrant, DeviceGrant, LaunchAuthority, LaunchError, LaunchPlanKey,
     LaunchPlanSnapshot, LaunchSpec, NetworkPolicyRef, SandboxLaunchTable,
 };
-use kernel_core::sandbox::SandboxKey;
-use kernel_core::sandbox_image::{ContentDigest, ImageKey, VolumeKey};
-use kernel_core::object::Rights;
-use kernel_core::objtable::ObjId;
 use kernel_core::security_domain::DomainKey;
 use kernel_core::spawn_abi::{CPU_UNLIMITED, MAX_IMAGE_BYTES};
 use kernel_core::workload::{ResourceUsage, WorkloadKey, WorkloadState};
@@ -19,16 +19,14 @@ use sha2::{Digest as _, Sha256};
 
 use crate::kprintln;
 use crate::proc::{self, DeviceAuthorityTicket};
-use crate::sandbox::{MAX_SANDBOXES, SANDBOXES};
-use crate::sandbox_storage::{MAX_IMAGES, MAX_LAYERS, MAX_VOLUMES, STORAGE};
+use crate::sandbox::SANDBOXES;
+use crate::sandbox_storage::STORAGE;
 use crate::sync::IrqSpinLock;
 use crate::syscall::{table as abi, SyscallSet};
-use crate::workload::{MAX_WORKLOADS, WORKLOADS};
-
-pub const MAX_LAUNCH_PLANS: usize = 32;
+use crate::workload::WORKLOADS;
 
 /// Lock order: `SANDBOX -> SANDBOX_STORAGE -> WORKLOADS -> SANDBOX_LAUNCH`.
-static LAUNCH: IrqSpinLock<SandboxLaunchTable<MAX_LAUNCH_PLANS>> =
+static LAUNCH: IrqSpinLock<SandboxLaunchTable> =
     IrqSpinLock::ranked(crate::lockorder::SANDBOX_LAUNCH, SandboxLaunchTable::new());
 
 const DEVICE_RIGHTS: Rights = Rights::READ
@@ -67,8 +65,9 @@ impl KernelLaunchAuthority {
         data: &[DataScopeGrant],
         network_policy: Option<NetworkPolicyRef>,
     ) -> Self {
-        let mut intrinsic =
-            CapabilitySet::EXECUTE.union(CapabilitySet::DATA_READ).union(CapabilitySet::DATA_WRITE);
+        let mut intrinsic = CapabilitySet::EXECUTE
+            .union(CapabilitySet::DATA_READ)
+            .union(CapabilitySet::DATA_WRITE);
         if network_policy.is_some_and(|policy| crate::net_policy::live(domain, sandbox, policy)) {
             intrinsic = intrinsic.union(CapabilitySet::NETWORK);
         }
@@ -76,8 +75,7 @@ impl KernelLaunchAuthority {
         if root_ticket.is_some() {
             intrinsic = intrinsic.union(CapabilitySet::DEVICE);
         }
-        let mut device_tickets =
-            [None; kernel_core::sandbox_launch::MAX_DEVICE_GRANTS];
+        let mut device_tickets = [None; kernel_core::sandbox_launch::MAX_DEVICE_GRANTS];
         for (index, grant) in devices
             .iter()
             .copied()
@@ -102,14 +100,8 @@ impl KernelLaunchAuthority {
             }
             device_tickets[index] = proc::device_authority_ticket(domain, Some(object), rights);
         }
-        let mut data_tickets =
-            [None; kernel_core::sandbox_launch::MAX_DATA_SCOPES];
-        for (index, grant) in data
-            .iter()
-            .copied()
-            .take(data_tickets.len())
-            .enumerate()
-        {
+        let mut data_tickets = [None; kernel_core::sandbox_launch::MAX_DATA_SCOPES];
+        for (index, grant) in data.iter().copied().take(data_tickets.len()).enumerate() {
             if grant.owner != domain || grant.grantee != domain {
                 continue;
             }
@@ -144,9 +136,9 @@ impl KernelLaunchAuthority {
 
     fn revalidate(&self) -> Result<(), LaunchError> {
         if self.root_capabilities.contains(CapabilitySet::DEVICE)
-            && !self.root_ticket.is_some_and(|ticket| {
-                proc::device_authority_ticket_live(self.domain, ticket)
-            })
+            && !self
+                .root_ticket
+                .is_some_and(|ticket| proc::device_authority_ticket_live(self.domain, ticket))
         {
             return Err(LaunchError::Capability);
         }
@@ -159,16 +151,11 @@ impl KernelLaunchAuthority {
             return Err(LaunchError::InvalidDevice);
         }
         let storage = STORAGE.lock();
-        if self
-            .data_tickets
-            .iter()
-            .flatten()
-            .any(|ticket| {
-                !storage
-                    .volume(self.domain, self.sandbox, ticket.volume)
-                    .is_ok_and(|snapshot| snapshot.image == ticket.image)
-            })
-        {
+        if self.data_tickets.iter().flatten().any(|ticket| {
+            !storage
+                .volume(self.domain, self.sandbox, ticket.volume)
+                .is_ok_and(|snapshot| snapshot.image == ticket.image)
+        }) {
             return Err(LaunchError::InvalidData);
         }
         if self
@@ -198,19 +185,12 @@ impl LaunchAuthority for KernelLaunchAuthority {
         grant: DeviceGrant,
     ) -> bool {
         domain == self.domain
-            && self
-                .device_tickets
-                .iter()
-                .flatten()
-                .any(|ticket| {
-                    ObjId::from_raw(grant.object).is_some_and(|object| {
-                        object.generation() == grant.generation
-                            && ticket.matches(
-                                object,
-                                Rights::from_bits_truncate(grant.rights),
-                            )
-                    })
+            && self.device_tickets.iter().flatten().any(|ticket| {
+                ObjId::from_raw(grant.object).is_some_and(|object| {
+                    object.generation() == grant.generation
+                        && ticket.matches(object, Rights::from_bits_truncate(grant.rights))
                 })
+            })
     }
 
     fn data_scope_live(
@@ -223,13 +203,9 @@ impl LaunchAuthority for KernelLaunchAuthority {
             && sandbox == self.sandbox
             && grant.owner == domain
             && grant.grantee == domain
-            && self
-                .data_tickets
-                .iter()
-                .flatten()
-                .any(|ticket| {
-                    ticket.volume.to_raw() == grant.object && ticket.writable == grant.writable
-                })
+            && self.data_tickets.iter().flatten().any(|ticket| {
+                ticket.volume.to_raw() == grant.object && ticket.writable == grant.writable
+            })
     }
 
     fn network_policy_live(
@@ -258,14 +234,7 @@ pub fn create(domain: DomainKey, spec: LaunchSpec<'_>) -> Result<LaunchPlanKey, 
     let storage = STORAGE.lock();
     let workloads = WORKLOADS.lock();
     let mut plans = LAUNCH.lock();
-    let key = plans.create_live(
-        domain,
-        &workloads,
-        &sandboxes,
-        &storage,
-        &authority,
-        spec,
-    )?;
+    let key = plans.create_live(domain, &workloads, &sandboxes, &storage, &authority, spec)?;
     drop(plans);
     drop(workloads);
     drop(storage);
@@ -284,14 +253,7 @@ pub fn query(domain: DomainKey, key: LaunchPlanKey) -> Result<LaunchPlanSnapshot
     let storage = STORAGE.lock();
     let workloads = WORKLOADS.lock();
     let plans = LAUNCH.lock();
-    let result = plans.plan_live(
-        domain,
-        &workloads,
-        &sandboxes,
-        &storage,
-        &authority,
-        key,
-    );
+    let result = plans.plan_live(domain, &workloads, &sandboxes, &storage, &authority, key);
     drop(plans);
     drop(workloads);
     drop(storage);
@@ -335,7 +297,10 @@ fn plan_authority(
         owner: DomainKey::NONE,
         grantee: DomainKey::NONE,
     }; kernel_core::sandbox_launch::MAX_DEVICE_GRANTS];
-    for (target, source) in device_grants.iter_mut().zip(devices[..device_count].iter().flatten()) {
+    for (target, source) in device_grants
+        .iter_mut()
+        .zip(devices[..device_count].iter().flatten())
+    {
         *target = *source;
     }
     let mut data_grants = [DataScopeGrant {
@@ -546,9 +511,3 @@ fn discard_child_workload(domain: DomainKey, child: WorkloadKey) {
 pub fn count() -> usize {
     LAUNCH.lock().count()
 }
-
-const _: () = assert!(MAX_SANDBOXES > 0);
-const _: () = assert!(MAX_WORKLOADS > 0);
-const _: () = assert!(MAX_IMAGES > 0);
-const _: () = assert!(MAX_LAYERS > 0);
-const _: () = assert!(MAX_VOLUMES > 0);

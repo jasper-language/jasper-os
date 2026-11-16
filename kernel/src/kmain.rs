@@ -11,8 +11,8 @@ use crate::arch::{self, ExitStatus};
 use crate::boot::BootSpec;
 use crate::plan;
 use crate::{
-    assembly, bootcap, clock, config, irq, kprint, kprintln, mm, pci, proc, profile, sched, smp,
-    workload,
+    assembly, bootcap, clock, config, irq, kprint, kprintln, mm, pci, proc, profile, sandbox,
+    sandbox_storage, sched, smp, workload,
 };
 use kernel_core::boot_stage::{
     plan_check, PlanItem, PlanSummary, Stage, StageError, StageState, Tracker,
@@ -258,7 +258,13 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
             if !workload::init_registry(cap.tasks) {
                 return None;
             }
-            if !crate::sandbox::init_registry() {
+            if !sandbox::init_registry(cap.tasks) {
+                return None;
+            }
+            let Some(sandbox_capacity) = sandbox::capacity_limit() else {
+                return None;
+            };
+            if !sandbox_storage::init_registry(sandbox_capacity) {
                 return None;
             }
             ctx.capacity = Some(cap);

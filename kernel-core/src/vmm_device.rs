@@ -5,9 +5,11 @@
 //! backends provide those separately so reset, queue publication and interrupt
 //! acknowledgement remain one testable state machine.
 
+#[cfg(any(test, feature = "hwvirt-vcpu-dynamic"))]
+use alloc::vec::Vec;
+
 pub const MMIO_MAGIC: u32 = 0x7472_6976;
 pub const MMIO_VERSION: u32 = 2;
-pub const QUEUE_COUNT: usize = 4;
 pub const CONFIG_OFFSET: u64 = 0x100;
 
 pub const STATUS_ACKNOWLEDGE: u8 = 1 << 0;
@@ -16,8 +18,12 @@ pub const STATUS_DRIVER_OK: u8 = 1 << 2;
 pub const STATUS_FEATURES_OK: u8 = 1 << 3;
 pub const STATUS_NEEDS_RESET: u8 = 1 << 6;
 pub const STATUS_FAILED: u8 = 1 << 7;
-pub const STATUS_KNOWN: u8 =
-    STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_DRIVER_OK | STATUS_FEATURES_OK | STATUS_NEEDS_RESET | STATUS_FAILED;
+pub const STATUS_KNOWN: u8 = STATUS_ACKNOWLEDGE
+    | STATUS_DRIVER
+    | STATUS_DRIVER_OK
+    | STATUS_FEATURES_OK
+    | STATUS_NEEDS_RESET
+    | STATUS_FAILED;
 
 pub const FEATURE_NOTIFY_ON_EMPTY: u32 = 1 << 24;
 pub const FEATURE_RING_INDIRECT_DESC: u32 = 1 << 28;
@@ -56,6 +62,17 @@ impl VirtioDeviceType {
             VirtioDeviceType::Fs => "virtio-fs",
         }
     }
+
+    /// Virtio device-model queue count from the bound Virtio specification.
+    pub const fn protocol_queue_count(self) -> u16 {
+        match self {
+            VirtioDeviceType::Gpu
+            | VirtioDeviceType::Net
+            | VirtioDeviceType::Console
+            | VirtioDeviceType::Fs => 2,
+            VirtioDeviceType::Block | VirtioDeviceType::Rng => 1,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,6 +83,7 @@ pub enum MmioError {
     QueueOutOfRange,
     QueueSize,
     QueueNotReady,
+    Allocation,
 }
 
 impl MmioError {
@@ -77,6 +95,7 @@ impl MmioError {
             MmioError::QueueOutOfRange => "system.device.error.virtio_queue_index",
             MmioError::QueueSize => "system.device.error.virtio_bad_queue_size",
             MmioError::QueueNotReady => "system.device.error.virtio_queue_not_ready",
+            MmioError::Allocation => "system.device.error.capacity",
         }
     }
 }
@@ -90,7 +109,11 @@ pub struct QueueAddress {
 
 impl QueueAddress {
     pub const fn zero() -> Self {
-        Self { descriptor: 0, driver: 0, device: 0 }
+        Self {
+            descriptor: 0,
+            driver: 0,
+            device: 0,
+        }
     }
 
     pub const fn complete(self) -> bool {
@@ -108,7 +131,12 @@ pub struct QueueState {
 
 impl QueueState {
     pub const fn new(max_size: u16) -> Self {
-        Self { max_size, size: 0, ready: false, address: QueueAddress::zero() }
+        Self {
+            max_size,
+            size: 0,
+            ready: false,
+            address: QueueAddress::zero(),
+        }
     }
 
     fn reset(&mut self) {
@@ -125,9 +153,13 @@ pub struct MmioWrite {
 }
 
 impl MmioWrite {
-    const NONE: Self = Self { interrupt: false, queue_notified: None };
+    const NONE: Self = Self {
+        interrupt: false,
+        queue_notified: None,
+    };
 }
 
+#[cfg(any(test, feature = "hwvirt-vcpu-dynamic"))]
 pub struct VirtioMmio {
     device: VirtioDeviceType,
     status: u8,
@@ -137,14 +169,30 @@ pub struct VirtioMmio {
     driver_feature_select: u32,
     queue_select: u16,
     shm_select: u32,
-    queues: [QueueState; QUEUE_COUNT],
+    queues: Vec<QueueState>,
     interrupt_status: u32,
     config_generation: u32,
 }
 
+#[cfg(any(test, feature = "hwvirt-vcpu-dynamic"))]
 impl VirtioMmio {
-    pub const fn new(device: VirtioDeviceType, queue_size: u16, device_features: [u32; 2]) -> Self {
-        Self {
+    pub fn new(
+        device: VirtioDeviceType,
+        queue_count: u16,
+        queue_size: u16,
+        device_features: [u32; 2],
+    ) -> Result<Self, MmioError> {
+        if queue_count == 0 || queue_size == 0 {
+            return Err(MmioError::QueueSize);
+        }
+        let mut queues = Vec::new();
+        queues
+            .try_reserve_exact(queue_count as usize)
+            .map_err(|_| MmioError::Allocation)?;
+        for _ in 0..queue_count {
+            queues.push(QueueState::new(queue_size));
+        }
+        Ok(Self {
             device,
             status: 0,
             device_features,
@@ -153,15 +201,10 @@ impl VirtioMmio {
             driver_feature_select: 0,
             queue_select: 0,
             shm_select: 0,
-            queues: [
-                QueueState::new(queue_size),
-                QueueState::new(queue_size),
-                QueueState::new(queue_size),
-                QueueState::new(queue_size),
-            ],
+            queues,
             interrupt_status: 0,
             config_generation: 0,
-        }
+        })
     }
 
     pub const fn device(&self) -> VirtioDeviceType {
@@ -176,11 +219,12 @@ impl VirtioMmio {
         self.driver_features
     }
 
-    pub const fn queue(&self, index: u16) -> Option<QueueState> {
-        if index as usize >= QUEUE_COUNT {
-            return None;
-        }
-        Some(self.queues[index as usize])
+    pub fn queue(&self, index: u16) -> Option<QueueState> {
+        self.queues.get(index as usize).copied()
+    }
+
+    pub fn queue_count(&self) -> u16 {
+        self.queues.len() as u16
     }
 
     pub fn interrupt_status(&self) -> u32 {
@@ -235,7 +279,7 @@ impl VirtioMmio {
             0x024 => self.driver_feature_select = value as u32,
             0x020 => self.driver_features[self.driver_feature_select as usize & 1] = value as u32,
             0x030 => {
-                if value as usize >= QUEUE_COUNT {
+                if value as usize >= self.queues.len() {
                     return Err(MmioError::QueueOutOfRange);
                 }
                 self.queue_select = value as u16;
@@ -264,10 +308,17 @@ impl VirtioMmio {
             }
             0x050 => {
                 let queue = value as u16;
-                if queue as usize >= QUEUE_COUNT || !self.queues[queue as usize].ready {
+                if self
+                    .queues
+                    .get(queue as usize)
+                    .is_none_or(|state| !state.ready)
+                {
                     return Err(MmioError::QueueNotReady);
                 }
-                return Ok(MmioWrite { queue_notified: Some(queue), ..MmioWrite::NONE });
+                return Ok(MmioWrite {
+                    queue_notified: Some(queue),
+                    ..MmioWrite::NONE
+                });
             }
             0x0ac => self.shm_select = value as u32,
             0x064 => {
@@ -286,8 +337,7 @@ impl VirtioMmio {
             }
             0x084 => {
                 let queue = self.selected_queue_mut()?;
-                queue.address.descriptor =
-                    (queue.address.descriptor & 0xffff_ffff) | (value << 32);
+                queue.address.descriptor = (queue.address.descriptor & 0xffff_ffff) | (value << 32);
             }
             0x090 => {
                 let queue = self.selected_queue_mut()?;
@@ -323,11 +373,15 @@ impl VirtioMmio {
     }
 
     fn selected_queue(&self) -> Result<&QueueState, MmioError> {
-        self.queues.get(self.queue_select as usize).ok_or(MmioError::QueueOutOfRange)
+        self.queues
+            .get(self.queue_select as usize)
+            .ok_or(MmioError::QueueOutOfRange)
     }
 
     fn selected_queue_mut(&mut self) -> Result<&mut QueueState, MmioError> {
-        self.queues.get_mut(self.queue_select as usize).ok_or(MmioError::QueueOutOfRange)
+        self.queues
+            .get_mut(self.queue_select as usize)
+            .ok_or(MmioError::QueueOutOfRange)
     }
 }
 
@@ -342,7 +396,11 @@ fn check_access(offset: u64, width: u8) -> Result<(), MmioError> {
 }
 
 const fn width_mask(width: u8) -> u64 {
-    if width == 8 { u64::MAX } else { (1u64 << (width as u32 * 8)) - 1 }
+    if width == 8 {
+        u64::MAX
+    } else {
+        (1u64 << (width as u32 * 8)) - 1
+    }
 }
 
 #[cfg(test)]
@@ -352,9 +410,11 @@ mod tests {
     fn device() -> VirtioMmio {
         VirtioMmio::new(
             VirtioDeviceType::Fs,
+            4,
             8,
             [FEATURE_RING_INDIRECT_DESC, FEATURE_VERSION_1],
         )
+        .unwrap()
     }
 
     #[test]
@@ -363,14 +423,15 @@ mod tests {
         assert_eq!(d.read(0, 4), Ok(u64::from(MMIO_MAGIC)));
         assert_eq!(d.read(4, 4), Ok(u64::from(MMIO_VERSION)));
         assert_eq!(d.read(8, 4), Ok(26));
-        let mut gpu = VirtioMmio::new(VirtioDeviceType::Gpu, 16, [0, FEATURE_VERSION_1]);
+        let mut gpu =
+            VirtioMmio::new(VirtioDeviceType::Gpu, 4, 16, [0, FEATURE_VERSION_1]).unwrap();
         assert_eq!(gpu.read(8, 4), Ok(16));
         gpu.write(0x0ac, 4, 1).unwrap();
         assert_eq!(gpu.read(0x0ac, 4), Ok(1));
         assert_eq!(gpu.read(0x0b0, 4), Ok(u64::from(u32::MAX)));
         d.write(0x014, 4, 1).unwrap();
         assert_eq!(d.read(0x010, 4), Ok(u64::from(FEATURE_VERSION_1)));
-        d.write(0x030, 4, QUEUE_COUNT as u64).unwrap_err();
+        d.write(0x030, 4, u64::from(d.queue_count())).unwrap_err();
         d.write(0x030, 4, 0).unwrap();
         d.write(0x038, 4, 3).unwrap_err();
         assert_eq!(d.queue(0).unwrap().size, 0);
@@ -390,7 +451,11 @@ mod tests {
         d.write(0x044, 4, 1).unwrap();
         assert_eq!(
             d.queue(0).unwrap().address,
-            QueueAddress { descriptor: 0x1000, driver: 0x2000, device: 0x3000 }
+            QueueAddress {
+                descriptor: 0x1000,
+                driver: 0x2000,
+                device: 0x3000
+            }
         );
         let write = d.write(0x050, 4, 0).unwrap();
         assert_eq!(write.queue_notified, Some(0));
@@ -404,7 +469,8 @@ mod tests {
         d.raise_interrupt(3);
         d.write(0x064, 4, 1).unwrap();
         assert_eq!(d.interrupt_status(), 2);
-        d.write(0x070, 1, u64::from(STATUS_ACKNOWLEDGE | STATUS_DRIVER)).unwrap();
+        d.write(0x070, 1, u64::from(STATUS_ACKNOWLEDGE | STATUS_DRIVER))
+            .unwrap();
         d.write(0x070, 1, 0).unwrap();
         assert_eq!(d.status(), 0);
         assert_eq!(d.queue(0).unwrap(), QueueState::new(8));
@@ -418,6 +484,17 @@ mod tests {
         d.write(0x044, 4, 1).unwrap();
         assert!(d.queue(0).unwrap().ready);
         assert_eq!(d.queue(0).unwrap().address, QueueAddress::zero());
+    }
+
+    #[test]
+    fn queue_inventory_follows_device_model_and_is_not_fixed_at_four() {
+        let mut device =
+            VirtioMmio::new(VirtioDeviceType::Net, 9, 16, [0, FEATURE_VERSION_1]).unwrap();
+        assert_eq!(device.queue_count(), 9);
+        assert!(device.queue(8).is_some());
+        device.write(0x030, 4, 8).unwrap();
+        device.write(0x038, 4, 16).unwrap();
+        assert_eq!(device.queue(8).unwrap().size, 16);
     }
 
     #[test]

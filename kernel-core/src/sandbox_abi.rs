@@ -69,8 +69,8 @@ mod tests {
 
     #[test]
     fn sandbox_info_contains_only_identity_and_live_state() {
-        let mut workloads = WorkloadTable::<2>::new();
-        let mut sandboxes = SandboxTable::<1>::new();
+        let mut workloads = WorkloadTable::new();
+        let mut sandboxes = SandboxTable::new();
         let domain = DomainKey {
             id: 41,
             generation: 3,

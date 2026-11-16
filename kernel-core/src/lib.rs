@@ -179,6 +179,7 @@ pub mod virtio_net;
 pub mod wait;
 pub mod workload;
 pub mod xsave;
+#[cfg(any(test, feature = "runtime-registries"))]
 pub mod workload_recovery;
 pub mod workload_abi;
 pub mod wireguard;
@@ -220,6 +221,7 @@ pub mod sandbox_abi;
 pub mod sandbox_storage_abi;
 pub mod sandbox_launch;
 pub mod sandbox_launch_abi;
+#[cfg(any(test, feature = "runtime-registries"))]
 pub mod sandbox_store;
 
 pub mod native_install;

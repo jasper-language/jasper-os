@@ -4,12 +4,14 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use alloc::vec::Vec;
+
 use kernel_core::objtable::ObjId;
 use kernel_core::security_domain::DomainKey;
 use kernel_core::workload::{
-    IoRateLimits, IoRateSnapshot, IoUsage, MembershipError, ResourceLimits, ResourceUsage,
-    WorkloadError, WorkloadKey, WorkloadMembers, WorkloadRegistryPlan, WorkloadSnapshot,
-    WorkloadState, WorkloadTable, plan_workload_registry,
+    plan_workload_registry, IoRateLimits, IoRateSnapshot, IoUsage, MembershipError, ResourceLimits,
+    ResourceUsage, WorkloadError, WorkloadKey, WorkloadMembers, WorkloadRegistryPlan,
+    WorkloadSnapshot, WorkloadState, WorkloadTable,
 };
 use spin::Once;
 
@@ -17,15 +19,10 @@ use crate::proc;
 use crate::sched::scheduler::CpuGroupId;
 use crate::sync::IrqSpinLock;
 
-pub const MAX_WORKLOADS: usize = 64;
-pub const MAX_WORKLOAD_MEMBERS: usize = 256;
-
-pub(crate) static WORKLOADS: IrqSpinLock<WorkloadTable<MAX_WORKLOADS>> =
-    IrqSpinLock::new(WorkloadTable::new());
-static MEMBERS: IrqSpinLock<WorkloadMembers<MAX_WORKLOAD_MEMBERS>> =
-    IrqSpinLock::new(WorkloadMembers::new());
-static CPU_GROUPS: IrqSpinLock<[Option<(WorkloadKey, CpuGroupId)>; MAX_WORKLOADS]> =
-    IrqSpinLock::new([None; MAX_WORKLOADS]);
+pub(crate) static WORKLOADS: IrqSpinLock<WorkloadTable> = IrqSpinLock::new(WorkloadTable::new());
+static MEMBERS: IrqSpinLock<WorkloadMembers> = IrqSpinLock::new(WorkloadMembers::new());
+static CPU_GROUPS: IrqSpinLock<Vec<Option<(WorkloadKey, CpuGroupId)>>> =
+    IrqSpinLock::new(Vec::new());
 static MEMORY_RELEASE_FAILURES: AtomicU32 = AtomicU32::new(0);
 static IO_ROLLBACK_FAILURES: AtomicU32 = AtomicU32::new(0);
 static REGISTRY_PLAN: Once<WorkloadRegistryPlan> = Once::new();
@@ -35,21 +32,17 @@ pub const WORKLOAD_TERMINATED_CODE: i64 = -3;
 pub fn init_registry(tasks: usize) -> bool {
     let memory_budget = crate::mm::heap::limit();
     let Some(plan) = plan_workload_registry(memory_budget, tasks) else {
-        crate::kprintln!("[JSR-WORKLOAD] reject=registry_capacity tasks={tasks} budget={memory_budget}");
+        crate::kprintln!(
+            "[JSR-WORKLOAD] reject=registry_capacity tasks={tasks} budget={memory_budget}"
+        );
         return false;
     };
-    let plan = WorkloadRegistryPlan {
-        workloads: plan.workloads.min(MAX_WORKLOADS), // JASPER-HARDCODE-REVIEW: issue=33 source=runtime budget and fixed storage envelope reason=runtime admission only shrinks the current table and logs dynamic=false
-        members: plan.members.min(MAX_WORKLOAD_MEMBERS), // JASPER-HARDCODE-REVIEW: issue=33 source=runtime budget and fixed storage envelope reason=runtime admission only shrinks the current table and logs dynamic=false
-    };
     crate::kprintln!(
-        "[JSR-WORKLOAD] capacity workloads={} members={} tasks={} budget={} fixed_workloads={} fixed_members={} dynamic=false",
+        "[JSR-WORKLOAD] capacity workloads={} members={} tasks={} budget={} dynamic=true",
         plan.workloads,
         plan.members,
         tasks,
-        memory_budget,
-        MAX_WORKLOADS,
-        MAX_WORKLOAD_MEMBERS
+        memory_budget
     );
     REGISTRY_PLAN.call_once(|| plan);
     true
@@ -78,7 +71,7 @@ pub fn create_child(
 }
 
 pub(crate) fn create_child_locked(
-    workloads: &mut WorkloadTable<MAX_WORKLOADS>,
+    workloads: &mut WorkloadTable,
     parent: WorkloadKey,
     limits: ResourceLimits,
 ) -> Result<WorkloadKey, WorkloadError> {
@@ -86,9 +79,7 @@ pub(crate) fn create_child_locked(
     workloads.create_child(parent, limits)
 }
 
-pub(crate) fn admit_workload(
-    workloads: &WorkloadTable<MAX_WORKLOADS>,
-) -> Result<(), WorkloadError> {
+pub(crate) fn admit_workload(workloads: &WorkloadTable) -> Result<(), WorkloadError> {
     let plan = registry_plan().ok_or(WorkloadError::Capacity)?;
     (workloads.len() < plan.workloads)
         .then_some(())
@@ -219,7 +210,7 @@ pub fn destroy(key: WorkloadKey) -> Result<(), WorkloadError> {
 ///
 /// 调用方已持有 Workload 表锁时，执行完整的成员、资源与 CPU group 回收。
 pub(crate) fn destroy_locked(
-    workloads: &mut WorkloadTable<MAX_WORKLOADS>,
+    workloads: &mut WorkloadTable,
     key: WorkloadKey,
 ) -> Result<(), WorkloadError> {
     let state = workloads.snapshot(key)?;
@@ -271,13 +262,20 @@ pub fn cpu_group(key: WorkloadKey) -> Result<CpuGroupId, WorkloadError> {
     let slot = groups
         .iter()
         .position(Option::is_none)
-        .ok_or(WorkloadError::Capacity)?;
+        .unwrap_or(groups.len());
+    if slot == groups.len() {
+        groups.try_reserve(1).map_err(|_| WorkloadError::Capacity)?;
+    }
     let group = match parent_group {
         Some(parent) => crate::sched::create_child_cpu_group(parent, limits.cpu_permille),
         None => crate::sched::create_cpu_group(limits.cpu_permille),
     }
     .map_err(|_| WorkloadError::Capacity)?;
-    groups[slot] = Some((key, group));
+    if slot == groups.len() {
+        groups.push(Some((key, group)));
+    } else {
+        groups[slot] = Some((key, group));
+    }
     Ok(group)
 }
 

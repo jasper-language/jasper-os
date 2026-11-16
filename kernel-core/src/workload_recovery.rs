@@ -103,8 +103,8 @@ impl<const N: usize> OomPlan<N> {
 /// 在一个 Workload 树内选择有序、有界 OOM 计划。返回前完成全部校验；
 /// 跨域、root、重复、非 Running、超额声明和 critical candidate 都不会产生
 /// 部分计划。排序依次为 score、可回收量、深度和 key。
-pub fn plan_oom<const W: usize, const N: usize>(
-    table: &WorkloadTable<W>,
+pub fn plan_oom<const N: usize>(
+    table: &WorkloadTable,
     root: WorkloadKey,
     required_bytes: u64,
     candidates: &[OomCandidate],
@@ -178,8 +178,8 @@ pub fn plan_oom<const W: usize, const N: usize>(
     Ok(plan)
 }
 
-fn select_next_oom<const W: usize, const N: usize>(
-    table: &WorkloadTable<W>,
+fn select_next_oom<const N: usize>(
+    table: &WorkloadTable,
     root: WorkloadKey,
     candidates: &[OomCandidate],
     plan: &OomPlan<N>,
@@ -237,9 +237,9 @@ pub struct ExitProgress {
 /// Detach one exited member and report, but do not publish, completion.
 ///
 /// 解除一个已退出成员的绑定并报告完成条件；不会在此处发布终态。
-pub fn note_member_exit<const W: usize, const M: usize>(
-    table: &WorkloadTable<W>,
-    members: &mut WorkloadMembers<M>,
+pub fn note_member_exit(
+    table: &WorkloadTable,
+    members: &mut WorkloadMembers,
     workload: WorkloadKey,
     member: u64,
 ) -> Result<ExitProgress, RecoveryError> {
@@ -256,9 +256,9 @@ pub fn note_member_exit<const W: usize, const M: usize>(
 /// Publish `Stopped` only after members, resources and child Workloads are gone.
 ///
 /// 只在成员、资源和子 Workload 全部归零后发布 `Stopped`。
-pub fn finish_stop<const W: usize, const M: usize>(
-    table: &mut WorkloadTable<W>,
-    members: &WorkloadMembers<M>,
+pub fn finish_stop(
+    table: &mut WorkloadTable,
+    members: &WorkloadMembers,
     workload: WorkloadKey,
 ) -> Result<ExitProgress, RecoveryError> {
     let progress = exit_progress(table, members, workload)?;
@@ -288,9 +288,9 @@ pub fn finish_stop<const W: usize, const M: usize>(
     })
 }
 
-fn exit_progress<const W: usize, const M: usize>(
-    table: &WorkloadTable<W>,
-    members: &WorkloadMembers<M>,
+fn exit_progress(
+    table: &WorkloadTable,
+    members: &WorkloadMembers,
     workload: WorkloadKey,
 ) -> Result<ExitProgress, RecoveryError> {
     let snapshot = table
@@ -333,9 +333,9 @@ impl<const N: usize> CrashPlan<N> {
 ///
 /// 在一组显式、有界的后代 key 上预检 root 崩溃；任何跨树、跨域或终态目标
 /// 都使整份计划失败。
-pub fn plan_root_crash<const W: usize, const M: usize, const N: usize>(
-    table: &WorkloadTable<W>,
-    members: &WorkloadMembers<M>,
+pub fn plan_root_crash<const N: usize>(
+    table: &WorkloadTable,
+    members: &WorkloadMembers,
     root: WorkloadKey,
     descendants: &[WorkloadKey],
 ) -> Result<CrashPlan<N>, RecoveryError> {
@@ -401,8 +401,8 @@ pub fn plan_root_crash<const W: usize, const M: usize, const N: usize>(
 /// Apply a preflighted crash plan after revalidating every target.
 ///
 /// 重新校验所有目标后应用已预检的崩溃计划；不会发布 `Stopped`。
-pub fn apply_root_crash<const W: usize, const N: usize>(
-    table: &mut WorkloadTable<W>,
+pub fn apply_root_crash<const N: usize>(
+    table: &mut WorkloadTable,
     plan: &CrashPlan<N>,
 ) -> Result<(), RecoveryError> {
     for index in 0..plan.len {
@@ -439,9 +439,9 @@ pub struct RecoverySnapshot {
 ///
 /// 不复制 Workload 状态地重新校验崩溃重启；replacement 必须同域、Running
 /// 且使用新 key，旧 root 必须 Failed 且成员、资源和子级全部排空。
-pub fn recovery_snapshot<const W: usize, const M: usize>(
-    table: &WorkloadTable<W>,
-    members: &WorkloadMembers<M>,
+pub fn recovery_snapshot(
+    table: &WorkloadTable,
+    members: &WorkloadMembers,
     failed_root: WorkloadKey,
     replacement: Option<WorkloadKey>,
 ) -> Result<RecoverySnapshot, RecoveryError> {
@@ -482,8 +482,8 @@ pub fn recovery_snapshot<const W: usize, const M: usize>(
     })
 }
 
-fn descends_from<const W: usize>(
-    table: &WorkloadTable<W>,
+fn descends_from(
+    table: &WorkloadTable,
     root: WorkloadKey,
     candidate: WorkloadKey,
 ) -> Result<bool, RecoveryError> {
@@ -494,7 +494,7 @@ fn descends_from<const W: usize>(
         .snapshot(candidate)
         .map_err(|_| RecoveryError::InvalidCandidate)?
         .parent;
-    for _ in 0..W {
+    for _ in 0..=table.len() {
         match current {
             Some(key) if key == root => return Ok(true),
             Some(key) => {
@@ -509,13 +509,10 @@ fn descends_from<const W: usize>(
     Err(RecoveryError::InvalidCandidate)
 }
 
-fn tree_depth<const W: usize>(
-    table: &WorkloadTable<W>,
-    workload: WorkloadKey,
-) -> Result<u16, RecoveryError> {
+fn tree_depth(table: &WorkloadTable, workload: WorkloadKey) -> Result<u16, RecoveryError> {
     let mut current = Some(workload);
     let mut depth = 0u16;
-    for _ in 0..W {
+    for _ in 0..=table.len() {
         let Some(key) = current else {
             return Ok(depth);
         };
@@ -546,7 +543,7 @@ mod tests {
         io_ops: 64,
     };
 
-    fn running(table: &mut WorkloadTable<8>, domain: DomainKey) -> WorkloadKey {
+    fn running(table: &mut WorkloadTable, domain: DomainKey) -> WorkloadKey {
         let key = table.create(domain, LIMITS).unwrap();
         table.transition(key, WorkloadState::Ready).unwrap();
         table.transition(key, WorkloadState::Running).unwrap();
@@ -555,7 +552,7 @@ mod tests {
 
     #[test]
     fn oom_plan_rejects_cross_domain_root_and_critical_candidates() {
-        let mut table = WorkloadTable::<8>::new();
+        let mut table = WorkloadTable::new();
         let root = running(&mut table, DOMAIN);
         let victim = table.create_child(root, LIMITS).unwrap();
         table.transition(victim, WorkloadState::Ready).unwrap();
@@ -579,7 +576,7 @@ mod tests {
         );
 
         assert_eq!(
-            plan_oom::<8, 4>(
+            plan_oom::<4>(
                 &table,
                 root,
                 1,
@@ -594,7 +591,7 @@ mod tests {
             RecoveryError::CrossDomain
         );
         assert_eq!(
-            plan_oom::<8, 4>(
+            plan_oom::<4>(
                 &table,
                 root,
                 1,
@@ -609,7 +606,7 @@ mod tests {
             RecoveryError::InvalidCandidate
         );
         assert_eq!(
-            plan_oom::<8, 4>(
+            plan_oom::<4>(
                 &table,
                 root,
                 1,
@@ -627,7 +624,7 @@ mod tests {
 
     #[test]
     fn oom_output_is_deterministic_depth_first_and_failure_atomic() {
-        let mut table = WorkloadTable::<8>::new();
+        let mut table = WorkloadTable::new();
         let root = running(&mut table, DOMAIN);
         let child = table
             .create_child(
@@ -696,7 +693,7 @@ mod tests {
                 critical: false,
             },
         ];
-        let plan = plan_oom::<8, 3>(&table, root, 3000, &candidates).unwrap();
+        let plan = plan_oom::<3>(&table, root, 3000, &candidates).unwrap();
         assert_eq!(plan.len(), 2);
         assert_eq!(plan.reclaimable_bytes(), 4096);
         assert_eq!(
@@ -706,7 +703,7 @@ mod tests {
         assert_eq!(plan.victim(1).unwrap().workload.to_raw(), child.to_raw());
 
         assert_eq!(
-            plan_oom::<8, 1>(&table, root, 3000, &candidates).unwrap_err(),
+            plan_oom::<1>(&table, root, 3000, &candidates).unwrap_err(),
             RecoveryError::Capacity
         );
         assert_eq!(
@@ -717,7 +714,7 @@ mod tests {
 
     #[test]
     fn member_exit_never_skips_resource_or_child_drain() {
-        let mut table = WorkloadTable::<8>::new();
+        let mut table = WorkloadTable::new();
         let root = running(&mut table, DOMAIN);
         let usage = ResourceUsage {
             memory_bytes: 4096,
@@ -726,15 +723,15 @@ mod tests {
         };
         table.charge(root, usage).unwrap();
         table.transition(root, WorkloadState::Stopping).unwrap();
-        let mut members = WorkloadMembers::<4>::new();
+        let mut members = WorkloadMembers::new();
         assert_eq!(
             members.attach(&table, root, 41),
             Err(crate::workload::MembershipError::NotRunning)
         );
 
-        let mut member_table = WorkloadTable::<8>::new();
+        let mut member_table = WorkloadTable::new();
         let member_root = running(&mut member_table, DOMAIN);
-        let mut members = WorkloadMembers::<4>::new();
+        let mut members = WorkloadMembers::new();
         members.attach(&member_table, member_root, 41).unwrap();
         members.attach(&member_table, member_root, 42).unwrap();
         member_table
@@ -786,7 +783,7 @@ mod tests {
 
     #[test]
     fn crash_plan_is_tree_local_ordered_and_keeps_resources_for_cleanup() {
-        let mut table = WorkloadTable::<8>::new();
+        let mut table = WorkloadTable::new();
         let root = running(&mut table, DOMAIN);
         let child = table.create_child(root, LIMITS).unwrap();
         table.transition(child, WorkloadState::Ready).unwrap();
@@ -796,7 +793,7 @@ mod tests {
         table
             .transition(grandchild, WorkloadState::Running)
             .unwrap();
-        let mut members = WorkloadMembers::<4>::new();
+        let mut members = WorkloadMembers::new();
         members.attach(&table, grandchild, 77).unwrap();
         table
             .charge(
@@ -809,8 +806,7 @@ mod tests {
             )
             .unwrap();
 
-        let plan =
-            plan_root_crash::<8, 4, 4>(&table, &members, root, &[child, grandchild]).unwrap();
+        let plan = plan_root_crash::<4>(&table, &members, root, &[child, grandchild]).unwrap();
         assert_eq!(plan.len(), 3);
         assert_eq!(
             plan.target(0).unwrap().workload.to_raw(),
@@ -829,9 +825,9 @@ mod tests {
 
     #[test]
     fn recovery_requires_same_domain_new_key_and_full_old_drain() {
-        let mut table = WorkloadTable::<8>::new();
+        let mut table = WorkloadTable::new();
         let root = running(&mut table, DOMAIN);
-        let mut members = WorkloadMembers::<4>::new();
+        let mut members = WorkloadMembers::new();
         members.attach(&table, root, 9).unwrap();
         table
             .charge(

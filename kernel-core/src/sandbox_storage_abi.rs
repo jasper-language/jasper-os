@@ -336,10 +336,10 @@ mod tests {
             id: 71,
             generation: 1,
         };
-        let mut workloads = WorkloadTable::<2>::new();
-        let mut sandboxes = SandboxTable::<1>::new();
+        let mut workloads = WorkloadTable::new();
+        let mut sandboxes = SandboxTable::new();
         let sandbox = sandboxes.create(&mut workloads, domain, LIMITS).unwrap();
-        let mut storage = SandboxStorageTable::<1, 2, 1>::new();
+        let mut storage = SandboxStorageTable::new();
         let spec = ImageSpec {
             image: SignedImage {
                 content: digest(1),

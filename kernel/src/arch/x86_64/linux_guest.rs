@@ -119,20 +119,52 @@ impl VirtioGuestBus {
         Some(Self {
             pid,
             vcpu,
-            rng: VirtioMmio::new(VirtioDeviceType::Rng, 16, [0, FEATURE_VERSION_1]),
-            console: VirtioMmio::new(VirtioDeviceType::Console, 16, [0, FEATURE_VERSION_1]),
-            block: VirtioMmio::new(VirtioDeviceType::Block, 16, [0, FEATURE_VERSION_1]),
+            rng: VirtioMmio::new(
+                VirtioDeviceType::Rng,
+                VirtioDeviceType::Rng.protocol_queue_count(),
+                16,
+                [0, FEATURE_VERSION_1],
+            )
+            .ok()?,
+            console: VirtioMmio::new(
+                VirtioDeviceType::Console,
+                VirtioDeviceType::Console.protocol_queue_count(),
+                16,
+                [0, FEATURE_VERSION_1],
+            )
+            .ok()?,
+            block: VirtioMmio::new(
+                VirtioDeviceType::Block,
+                VirtioDeviceType::Block.protocol_queue_count(),
+                16,
+                [0, FEATURE_VERSION_1],
+            )
+            .ok()?,
             net: VirtioMmio::new(
                 VirtioDeviceType::Net,
+                VirtioDeviceType::Net.protocol_queue_count(),
                 net_facts.queue_size,
                 [net_facts.features, FEATURE_VERSION_1],
-            ),
+            )
+            .ok()?,
             net_backend,
             net_lease: hwv5_policy::lease(Hwv5Surface::Net),
-            fs: VirtioMmio::new(VirtioDeviceType::Fs, 16, [0, FEATURE_VERSION_1]),
+            fs: VirtioMmio::new(
+                VirtioDeviceType::Fs,
+                VirtioDeviceType::Fs.protocol_queue_count(),
+                16,
+                [0, FEATURE_VERSION_1],
+            )
+            .ok()?,
             fs_backend: VirtioFsBackend::new(),
             fs_lease: hwv5_policy::lease(Hwv5Surface::Fs),
-            gpu: VirtioMmio::new(VirtioDeviceType::Gpu, 16, [0, FEATURE_VERSION_1]),
+            gpu: VirtioMmio::new(
+                VirtioDeviceType::Gpu,
+                VirtioDeviceType::Gpu.protocol_queue_count(),
+                16,
+                [0, FEATURE_VERSION_1],
+            )
+            .ok()?,
             gpu_backend: Self::gpu_backend(),
             last_avail: [0; 2],
             console_last_avail: [0; 2],

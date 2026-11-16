@@ -19,7 +19,7 @@ const LIMITS: ResourceLimits = ResourceLimits {
     io_ops: 64,
 };
 
-fn runnable<const N: usize>(table: &mut WorkloadTable<N>, key: kernel_core::workload::WorkloadKey) {
+fn runnable(table: &mut WorkloadTable, key: kernel_core::workload::WorkloadKey) {
     table.transition(key, WorkloadState::Ready).unwrap();
     table.transition(key, WorkloadState::Running).unwrap();
 }
@@ -31,7 +31,7 @@ fn rate_windows_charge_every_ancestor_and_reset_at_the_boundary() {
         ops_per_window: 2,
         window_ns: 100,
     };
-    let mut table = WorkloadTable::<3>::new();
+    let mut table = WorkloadTable::new();
     let root = table.create(DOMAIN, LIMITS).unwrap();
     table.configure_io_rate(root, rate).unwrap();
     runnable(&mut table, root);
@@ -96,7 +96,7 @@ fn ancestor_rate_rejection_is_atomic_and_independent_of_lifetime_budget() {
         ops_per_window: 4,
         window_ns: 50,
     };
-    let mut table = WorkloadTable::<3>::new();
+    let mut table = WorkloadTable::new();
     let root = table.create(DOMAIN, LIMITS).unwrap();
     table.configure_io_rate(root, root_rate).unwrap();
     runnable(&mut table, root);
@@ -139,7 +139,7 @@ fn clock_regression_and_expired_rollback_cannot_mint_window_capacity() {
         ops_per_window: 1,
         window_ns: 100,
     };
-    let mut table = WorkloadTable::<1>::new();
+    let mut table = WorkloadTable::new();
     let key = table.create(DOMAIN, LIMITS).unwrap();
     table.configure_io_rate(key, rate).unwrap();
     runnable(&mut table, key);
@@ -181,7 +181,7 @@ fn clock_regression_and_expired_rollback_cannot_mint_window_capacity() {
 
 #[test]
 fn rate_policy_is_validated_and_frozen_after_start() {
-    let mut table = WorkloadTable::<1>::new();
+    let mut table = WorkloadTable::new();
     let key = table.create(DOMAIN, LIMITS).unwrap();
     for invalid in [
         IoRateLimits {

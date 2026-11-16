@@ -1,4 +1,4 @@
-use kernel_core::sandbox::{SandboxError, SandboxKey, SandboxTable};
+use kernel_core::sandbox::{plan_sandbox_registry, SandboxError, SandboxKey, SandboxTable};
 use kernel_core::security_domain::DomainKey;
 use kernel_core::workload::{
     ResourceLimits, ResourceUsage, WorkloadError, WorkloadState, WorkloadTable,
@@ -17,8 +17,8 @@ const LIMITS: ResourceLimits = ResourceLimits {
     io_ops: 32,
 };
 
-type Workloads = WorkloadTable<8>;
-type Sandboxes = SandboxTable<4>;
+type Workloads = WorkloadTable;
+type Sandboxes = SandboxTable;
 
 fn running(workloads: &mut Workloads, sandboxes: &Sandboxes, key: SandboxKey) {
     sandboxes.mark_ready(workloads, key).unwrap();
@@ -258,4 +258,25 @@ fn adoption_requires_an_unbound_root_workload() {
         sandboxes.adopt(&workloads, child),
         Err(SandboxError::InvalidRoot)
     );
+}
+
+#[test]
+fn heap_backed_sandbox_identity_grows_past_previous_fixed_envelope() {
+    let mut workloads = Workloads::new();
+    let mut sandboxes = Sandboxes::new();
+    for _ in 0..80 {
+        sandboxes.create(&mut workloads, DOMAIN, LIMITS).unwrap();
+    }
+    assert_eq!(sandboxes.len(), 80);
+    assert_eq!(workloads.len(), 80);
+}
+
+#[test]
+fn sandbox_registry_plan_follows_workloads_and_heap_budget() {
+    let small = plan_sandbox_registry(1024 * 1024, 8).unwrap();
+    let large = plan_sandbox_registry(256 * 1024 * 1024, 128).unwrap();
+    assert!(large.sandboxes > small.sandboxes);
+    assert!(large.sandboxes <= 128);
+    assert_eq!(plan_sandbox_registry(0, 8), None);
+    assert_eq!(plan_sandbox_registry(1024 * 1024, 0), None);
 }

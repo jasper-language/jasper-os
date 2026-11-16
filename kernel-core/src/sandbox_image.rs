@@ -9,11 +9,16 @@
 //! 不解析镜像字节、不实现文件系统，也不把逻辑路径当作授权凭证。镜像实例
 //! 仅对所属安全域和 Sandbox 可见；卷的可写状态与镜像只读层完全分离。
 
+#[cfg(any(test, feature = "runtime-registries"))]
 use crate::sandbox::SandboxKey;
+#[cfg(any(test, feature = "runtime-registries"))]
 use crate::security_domain::DomainKey;
+#[cfg(any(test, feature = "runtime-registries"))]
+use alloc::vec::Vec;
 
 pub const DIGEST_BYTES: usize = 32;
-pub const MAX_IMAGE_LAYERS: usize = 16;
+/// Version-1 storage ABI width for an inline layer descriptor array.
+pub const MAX_IMAGE_LAYERS: usize = 16; // JASPER-HARDCODE-REVIEW: issue=33 source=storage-ABI-v1 reason=wire-array-width-not-registry-capacity
 
 /// A non-zero content digest. Verification is supplied by the caller before
 /// this value enters the registry; equality is identity comparison, not proof.
@@ -205,6 +210,7 @@ pub struct VolumeSnapshot {
 }
 
 #[derive(Clone, Copy)]
+#[cfg(any(test, feature = "runtime-registries"))]
 struct ImageRecord {
     key: ImageKey,
     domain: DomainKey,
@@ -216,11 +222,13 @@ struct ImageRecord {
 }
 
 #[derive(Clone, Copy)]
+#[cfg(any(test, feature = "runtime-registries"))]
 struct LayerRecord {
     spec: ImageLayerSpec,
 }
 
 #[derive(Clone, Copy)]
+#[cfg(any(test, feature = "runtime-registries"))]
 struct VolumeRecord {
     key: VolumeKey,
     domain: DomainKey,
@@ -231,89 +239,70 @@ struct VolumeRecord {
     used_bytes: u64,
 }
 
-/// Per-entry costs used to derive runtime registry admission.
+/// Runtime-admitted image, layer and volume metadata capacities.
+#[cfg(any(test, feature = "runtime-registries"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SandboxRegistryCost {
-    pub sandboxes: usize,
+pub struct SandboxStorageRegistryPlan {
     pub images: usize,
     pub layers: usize,
     pub volumes: usize,
 }
 
-impl SandboxRegistryCost {
-    pub const fn current() -> Self {
-        Self {
-            sandboxes: crate::sandbox::record_bytes(),
-            images: core::mem::size_of::<ImageRecord>(),
-            layers: core::mem::size_of::<LayerRecord>(),
-            volumes: core::mem::size_of::<VolumeRecord>(),
-        }
-    }
-}
-
-/// Runtime counts admitted inside the fixed implementation envelopes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SandboxRegistryPlan {
-    pub sandboxes: usize,
-    pub images: usize,
-    pub layers: usize,
-    pub volumes: usize,
-}
-
-/// Derive Sandbox/storage admission from heap and Workload capacity.
-///
-/// Issue #33 HC-20 policy: each of the four metadata registries receives one
-/// quarter of a 1/1024 memory share. Demand is tied to admitted Workloads and
-/// the result must be clamped by the caller's fixed storage envelope.
-pub fn plan_sandbox_registry(
+/// Derive storage metadata capacity from Sandbox admission and heap budget.
+#[cfg(any(test, feature = "runtime-registries"))]
+pub fn plan_sandbox_storage_registry(
     memory_budget: u64,
-    workload_capacity: usize,
-    cost: SandboxRegistryCost,
-) -> Option<SandboxRegistryPlan> {
-    if workload_capacity == 0
-        || cost.sandboxes == 0
-        || cost.images == 0
-        || cost.layers == 0
-        || cost.volumes == 0
-    {
+    sandbox_slots: usize,
+) -> Option<SandboxStorageRegistryPlan> {
+    if sandbox_slots == 0 {
         return None;
     }
     let metadata_budget = usize::try_from(memory_budget / 1024).ok()?;
-    let per_registry = metadata_budget / 4;
-    let image_demand = workload_capacity / 2;
-    let layer_demand = workload_capacity.checked_mul(4)?;
-    let plan = SandboxRegistryPlan {
-        sandboxes: workload_capacity.min(per_registry / cost.sandboxes),
-        images: image_demand.min(per_registry / cost.images),
-        layers: layer_demand.min(per_registry / cost.layers),
-        volumes: workload_capacity.min(per_registry / cost.volumes),
-    };
-    (plan.sandboxes != 0
-        && plan.images != 0
-        && plan.layers != 0
-        && plan.volumes != 0)
-        .then_some(plan)
+    let image_bytes = core::mem::size_of::<ImageRecord>();
+    let layer_bytes = core::mem::size_of::<LayerRecord>();
+    let volume_bytes = core::mem::size_of::<VolumeRecord>();
+    if image_bytes == 0 || layer_bytes == 0 || volume_bytes == 0 {
+        return None;
+    }
+
+    let image_policy = sandbox_slots.checked_mul(2)?;
+    let images = image_policy.min((metadata_budget / 4) / image_bytes);
+    let layer_policy = images.checked_mul(MAX_IMAGE_LAYERS)?;
+    let layers = layer_policy.min((metadata_budget / 2) / layer_bytes);
+    let volume_policy = images.checked_mul(4)?;
+    let volumes = volume_policy.min((metadata_budget / 4) / volume_bytes);
+    if images == 0 || layers < images || volumes == 0 {
+        None
+    } else {
+        Some(SandboxStorageRegistryPlan {
+            images,
+            layers,
+            volumes,
+        })
+    }
 }
 
-/// Fixed-capacity storage registry. Rejections perform no partial writes.
+/// Heap-backed storage registry. Rejections perform no partial writes.
 ///
-/// 固定容量存储注册表；任何拒绝都不产生部分写入。
-pub struct SandboxStorageTable<const I: usize, const L: usize, const V: usize> {
-    images: [Option<ImageRecord>; I],
-    image_generations: [u32; I],
-    layers: [Option<LayerRecord>; L],
-    volumes: [Option<VolumeRecord>; V],
-    volume_generations: [u32; V],
+/// 堆后备存储注册表；任何拒绝都不产生部分写入。
+#[cfg(any(test, feature = "runtime-registries"))]
+pub struct SandboxStorageTable {
+    images: Vec<Option<ImageRecord>>,
+    image_generations: Vec<u32>,
+    layers: Vec<Option<LayerRecord>>,
+    volumes: Vec<Option<VolumeRecord>>,
+    volume_generations: Vec<u32>,
 }
 
-impl<const I: usize, const L: usize, const V: usize> SandboxStorageTable<I, L, V> {
+#[cfg(any(test, feature = "runtime-registries"))]
+impl SandboxStorageTable {
     pub const fn new() -> Self {
         Self {
-            images: [None; I],
-            image_generations: [0; I],
-            layers: [None; L],
-            volumes: [None; V],
-            volume_generations: [0; V],
+            images: Vec::new(),
+            image_generations: Vec::new(),
+            layers: Vec::new(),
+            volumes: Vec::new(),
+            volume_generations: Vec::new(),
         }
     }
 
@@ -346,15 +335,27 @@ impl<const I: usize, const L: usize, const V: usize> SandboxStorageTable<I, L, V
             return Err(SandboxStorageError::InvalidLayer);
         }
 
-        let (slot, generation) = self.vacant_image()?;
         let layer_count = u16::try_from(layers.len()).map_err(|_| SandboxStorageError::Capacity)?;
-        let start = self
+        let start = match self
             .layers
             .windows(layers.len())
             .position(|window| window.iter().all(Option::is_none))
-            .ok_or(SandboxStorageError::Capacity)?;
+        {
+            Some(start) => start,
+            None => {
+                let start = self.layers.len();
+                self.layers
+                    .try_reserve(layers.len())
+                    .map_err(|_| SandboxStorageError::Capacity)?;
+                start
+            }
+        };
         if start > u16::MAX as usize {
             return Err(SandboxStorageError::Capacity);
+        }
+        let (slot, generation) = self.vacant_image()?;
+        while self.layers.len() < start + layers.len() {
+            self.layers.push(None);
         }
 
         for (offset, layer) in layers.iter().copied().enumerate() {
@@ -494,7 +495,7 @@ impl<const I: usize, const L: usize, const V: usize> SandboxStorageTable<I, L, V
         parent: Option<VolumeKey>,
     ) -> Result<VolumeKey, SandboxStorageError> {
         let image_slot = self.image_slot(domain, sandbox, image)?;
-        let image_record = self.images[image_slot]
+        let image_record = *self.images[image_slot]
             .as_ref()
             .ok_or(SandboxStorageError::InvalidImage)?;
         if capacity_bytes == 0 || capacity_bytes > image_record.spec.writable_bytes {
@@ -639,12 +640,12 @@ impl<const I: usize, const L: usize, const V: usize> SandboxStorageTable<I, L, V
         self.images.iter().flatten().count()
     }
 
-    pub fn layer_count(&self) -> usize {
-        self.layers.iter().flatten().count()
-    }
-
     pub fn volume_count(&self) -> usize {
         self.volumes.iter().flatten().count()
+    }
+
+    pub fn layer_count(&self) -> usize {
+        self.layers.iter().flatten().count()
     }
 
     /// True when destroying this Sandbox identity would orphan storage.
@@ -712,14 +713,24 @@ impl<const I: usize, const L: usize, const V: usize> SandboxStorageTable<I, L, V
             .ok_or(SandboxStorageError::InvalidVolume)
     }
 
-    fn vacant_image(&self) -> Result<(usize, u32), SandboxStorageError> {
+    fn vacant_image(&mut self) -> Result<(usize, u32), SandboxStorageError> {
         let slot = self
             .images
             .iter()
             .position(Option::is_none)
-            .ok_or(SandboxStorageError::Capacity)?;
+            .unwrap_or(self.images.len());
         if slot > u16::MAX as usize {
             return Err(SandboxStorageError::Capacity);
+        }
+        if slot == self.images.len() {
+            self.images
+                .try_reserve(1)
+                .map_err(|_| SandboxStorageError::Capacity)?;
+            self.image_generations
+                .try_reserve(1)
+                .map_err(|_| SandboxStorageError::Capacity)?;
+            self.images.push(None);
+            self.image_generations.push(0);
         }
         let generation = self.image_generations[slot]
             .checked_add(1)
@@ -727,14 +738,24 @@ impl<const I: usize, const L: usize, const V: usize> SandboxStorageTable<I, L, V
         Ok((slot, generation))
     }
 
-    fn vacant_volume(&self) -> Result<(usize, u32), SandboxStorageError> {
+    fn vacant_volume(&mut self) -> Result<(usize, u32), SandboxStorageError> {
         let slot = self
             .volumes
             .iter()
             .position(Option::is_none)
-            .ok_or(SandboxStorageError::Capacity)?;
+            .unwrap_or(self.volumes.len());
         if slot > u16::MAX as usize {
             return Err(SandboxStorageError::Capacity);
+        }
+        if slot == self.volumes.len() {
+            self.volumes
+                .try_reserve(1)
+                .map_err(|_| SandboxStorageError::Capacity)?;
+            self.volume_generations
+                .try_reserve(1)
+                .map_err(|_| SandboxStorageError::Capacity)?;
+            self.volumes.push(None);
+            self.volume_generations.push(0);
         }
         let generation = self.volume_generations[slot]
             .checked_add(1)
@@ -743,7 +764,8 @@ impl<const I: usize, const L: usize, const V: usize> SandboxStorageTable<I, L, V
     }
 }
 
-impl<const I: usize, const L: usize, const V: usize> Default for SandboxStorageTable<I, L, V> {
+#[cfg(any(test, feature = "runtime-registries"))]
+impl Default for SandboxStorageTable {
     fn default() -> Self {
         Self::new()
     }
@@ -768,8 +790,8 @@ mod tests {
         DomainKey { id, generation: 1 }
     }
 
-    fn sandbox(domain: DomainKey, workloads: &mut WorkloadTable<2>) -> SandboxKey {
-        let mut sandboxes = SandboxTable::<2>::new();
+    fn sandbox(domain: DomainKey, workloads: &mut WorkloadTable) -> SandboxKey {
+        let mut sandboxes = SandboxTable::new();
         let key = sandboxes.create(workloads, domain, LIMITS).unwrap();
         // Leak only the table in the test harness by returning its stable key.
         core::mem::forget(sandboxes);
@@ -814,9 +836,9 @@ mod tests {
     #[test]
     fn image_creation_is_validated_and_failure_atomic() {
         let domain = domain(1);
-        let mut workloads = WorkloadTable::<2>::new();
+        let mut workloads = WorkloadTable::new();
         let sandbox = sandbox(domain, &mut workloads);
-        let mut storage = SandboxStorageTable::<1, 2, 1>::new();
+        let mut storage = SandboxStorageTable::new();
         assert_eq!(
             storage.add_image(
                 domain,
@@ -857,10 +879,10 @@ mod tests {
     fn wrong_domain_or_sandbox_is_indistinguishable_from_missing() {
         let owner_domain = domain(1);
         let other_domain = domain(2);
-        let mut workloads = WorkloadTable::<2>::new();
+        let mut workloads = WorkloadTable::new();
         let owner_sandbox = sandbox(owner_domain, &mut workloads);
         let other_sandbox = sandbox(other_domain, &mut workloads);
-        let mut storage = SandboxStorageTable::<1, 2, 1>::new();
+        let mut storage = SandboxStorageTable::new();
         let image = storage
             .add_image(owner_domain, owner_sandbox, spec(1), &layers())
             .unwrap();
@@ -885,9 +907,9 @@ mod tests {
     #[test]
     fn cow_clone_has_independent_upper_state_and_parent_lifetime() {
         let domain = domain(1);
-        let mut workloads = WorkloadTable::<2>::new();
+        let mut workloads = WorkloadTable::new();
         let sandbox = sandbox(domain, &mut workloads);
-        let mut storage = SandboxStorageTable::<1, 2, 2>::new();
+        let mut storage = SandboxStorageTable::new();
         let image = storage
             .add_image(domain, sandbox, spec(2), &layers())
             .unwrap();
@@ -918,9 +940,9 @@ mod tests {
     #[test]
     fn quota_and_capacity_rejections_do_not_mutate_usage() {
         let domain = domain(1);
-        let mut workloads = WorkloadTable::<2>::new();
+        let mut workloads = WorkloadTable::new();
         let sandbox = sandbox(domain, &mut workloads);
-        let mut storage = SandboxStorageTable::<1, 2, 1>::new();
+        let mut storage = SandboxStorageTable::new();
         let image = storage
             .add_image(domain, sandbox, spec(1), &layers())
             .unwrap();
@@ -943,9 +965,9 @@ mod tests {
     #[test]
     fn destroyed_volume_generation_never_revives() {
         let domain = domain(1);
-        let mut workloads = WorkloadTable::<2>::new();
+        let mut workloads = WorkloadTable::new();
         let sandbox = sandbox(domain, &mut workloads);
-        let mut storage = SandboxStorageTable::<1, 2, 1>::new();
+        let mut storage = SandboxStorageTable::new();
         let image = storage
             .add_image(domain, sandbox, spec(2), &layers())
             .unwrap();
@@ -960,11 +982,11 @@ mod tests {
     }
 
     #[test]
-    fn layer_and_image_capacity_fail_without_partial_registration() {
+    fn layer_abi_width_rejects_without_partial_registration() {
         let domain = domain(1);
-        let mut workloads = WorkloadTable::<2>::new();
+        let mut workloads = WorkloadTable::new();
         let sandbox = sandbox(domain, &mut workloads);
-        let mut storage = SandboxStorageTable::<1, 17, 1>::new();
+        let mut storage = SandboxStorageTable::new();
         let mut many = [ImageLayerSpec {
             content: digest(5),
             bytes: 1,
@@ -985,20 +1007,63 @@ mod tests {
         let image = storage
             .add_image(domain, sandbox, spec(1), &layers())
             .unwrap();
-        assert_eq!(
-            storage.add_image(domain, sandbox, spec(1), &layers()),
-            Err(SandboxStorageError::Capacity)
-        );
-        assert_eq!(storage.image_count(), 1);
+        let second = storage
+            .add_image(domain, sandbox, spec(1), &layers())
+            .unwrap();
+        assert_ne!(image, second);
+        assert_eq!(storage.image_count(), 2);
         assert_eq!(storage.image(domain, sandbox, image).unwrap().layers, 2);
+    }
+
+    #[test]
+    fn heap_backed_storage_registry_grows_past_previous_fixed_envelopes() {
+        let domain = domain(1);
+        let mut storage = SandboxStorageTable::new();
+        let mut layers = [ImageLayerSpec {
+            content: ContentDigest::default(),
+            bytes: 1,
+        }; 7];
+        for (index, layer) in layers.iter_mut().enumerate() {
+            layer.content = digest(index as u8 + 20);
+        }
+        let mut first_image = None;
+        for index in 0..40u64 {
+            let sandbox = SandboxKey::from_raw((1u64 << 16) | (index + 1)).unwrap();
+            let spec = ImageSpec {
+                rootfs_bytes: layers.len() as u64,
+                max_volumes: 80,
+                ..spec(index as u16 + 1)
+            };
+            let image = storage.add_image(domain, sandbox, spec, &layers).unwrap();
+            first_image.get_or_insert((sandbox, image));
+        }
+        assert_eq!(storage.image_count(), 40);
+
+        let (sandbox, image) = first_image.unwrap();
+        for _ in 0..70 {
+            storage.create_volume(domain, sandbox, image, 1).unwrap();
+        }
+        assert_eq!(storage.volume_count(), 70);
+        assert_eq!(storage.image(domain, sandbox, image).unwrap().volumes, 70);
+    }
+
+    #[test]
+    fn storage_registry_plan_follows_sandbox_and_heap_capacity() {
+        let small = plan_sandbox_storage_registry(1024 * 1024, 4).unwrap();
+        let large = plan_sandbox_storage_registry(256 * 1024 * 1024, 64).unwrap();
+        assert!(large.images > small.images);
+        assert!(large.layers >= large.images);
+        assert!(large.volumes > small.volumes);
+        assert_eq!(plan_sandbox_storage_registry(0, 4), None);
+        assert_eq!(plan_sandbox_storage_registry(1024 * 1024, 0), None);
     }
 
     #[test]
     fn image_destroy_requires_volume_drain_and_reclaims_layers() {
         let domain = domain(1);
-        let mut workloads = WorkloadTable::<2>::new();
+        let mut workloads = WorkloadTable::new();
         let sandbox = sandbox(domain, &mut workloads);
-        let mut storage = SandboxStorageTable::<2, 4, 1>::new();
+        let mut storage = SandboxStorageTable::new();
         let image = storage
             .add_image(domain, sandbox, spec(1), &layers())
             .unwrap();
@@ -1023,20 +1088,5 @@ mod tests {
             storage.image(domain, sandbox, replacement).unwrap().layers,
             2
         );
-    }
-
-    #[test]
-    fn sandbox_registry_plan_follows_memory_and_workload_capacity() {
-        let cost = SandboxRegistryCost::current();
-        let small = plan_sandbox_registry(1024 * 1024, 8, cost).unwrap();
-        let standard = plan_sandbox_registry(256 * 1024 * 1024, 64, cost).unwrap();
-        assert!(small.sandboxes <= 8);
-        assert!(standard.sandboxes > small.sandboxes);
-        assert!(standard.sandboxes <= 64);
-        assert!(standard.images <= 32);
-        assert!(standard.layers <= 256);
-        assert!(standard.volumes <= 64);
-        assert_eq!(plan_sandbox_registry(0, 64, cost), None);
-        assert_eq!(plan_sandbox_registry(1024 * 1024, 0, cost), None);
     }
 }
