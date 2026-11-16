@@ -683,6 +683,7 @@ const HIGHRES: &[Step] = &[st(Stage::HighRes)];
 /// 全量验收在 `smp` 之后的用例。
 #[cfg(not(any(
     feature = "rt1-verify", feature = "rt2-verify", feature = "rt3-verify", feature = "budget-window-verify",
+    feature = "runtime-registry-topology-verify",
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
     feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "hwv5-prod-verify", feature = "hwv6-verify", feature = "hwv7-gpu-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "native-install-block-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec5-verify", feature = "net2-verify", feature = "net3-verify", feature = "net4-runtime-verify", feature = "compat-elf-backend-verify", feature = "compat-syscall-verify", feature = "compat-dynamic-libc-verify", feature = "lifecycle-health-fail-verify", feature = "pex1-verify", feature = "pex2-verify", feature = "pex3-verify", feature = "pex4-verify", feature = "pex5-verify", feature = "pex7-verify", feature = "sec6-verify",
@@ -768,6 +769,7 @@ const FULL: &[Step] = &[
 
 #[cfg(not(any(
     feature = "rt1-verify", feature = "rt2-verify", feature = "rt3-verify", feature = "budget-window-verify",
+    feature = "runtime-registry-topology-verify",
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
     feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "hwv5-prod-verify", feature = "hwv6-verify", feature = "hwv7-gpu-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "native-install-block-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec5-verify", feature = "net2-verify", feature = "net3-verify", feature = "net4-runtime-verify", feature = "compat-elf-backend-verify", feature = "compat-syscall-verify", feature = "compat-dynamic-libc-verify", feature = "lifecycle-health-fail-verify", feature = "pex1-verify", feature = "pex2-verify", feature = "pex3-verify", feature = "pex4-verify", feature = "pex5-verify", feature = "pex7-verify", feature = "sec6-verify",
@@ -778,6 +780,7 @@ pub use full_selected::{NAME, PLAN};
 
 #[cfg(not(any(
     feature = "rt1-verify", feature = "rt2-verify", feature = "rt3-verify", feature = "budget-window-verify",
+    feature = "runtime-registry-topology-verify",
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
     feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "hwv5-prod-verify", feature = "hwv6-verify", feature = "hwv7-gpu-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "native-install-block-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec5-verify", feature = "net2-verify", feature = "net3-verify", feature = "net4-runtime-verify", feature = "compat-elf-backend-verify", feature = "compat-syscall-verify", feature = "compat-dynamic-libc-verify", feature = "lifecycle-health-fail-verify", feature = "pex1-verify", feature = "pex2-verify", feature = "pex3-verify", feature = "pex4-verify", feature = "pex5-verify", feature = "pex7-verify", feature = "sec6-verify",
@@ -797,6 +800,7 @@ const DEDICATED_SELECTED: usize = cfg!(feature = "rt1-verify") as usize
     + cfg!(feature = "rt2-verify") as usize
     + cfg!(feature = "rt3-verify") as usize
     + cfg!(feature = "budget-window-verify") as usize
+    + cfg!(feature = "runtime-registry-topology-verify") as usize
     + cfg!(feature = "krn3-fast-tick-verify") as usize
     + cfg!(feature = "krn3-postsplit-verify") as usize
     + cfg!(feature = "krn3-p999-verify") as usize
@@ -942,6 +946,30 @@ mod dedicated {
         exit_on(u64::from(balance_demo::failed()));
     }
     pub const PLAN: &[&[Step]] = &[PREFIX, SMP_UP, &[PlanItem::Finish(finish)]];
+}
+
+#[cfg(feature = "runtime-registry-topology-verify")]
+mod dedicated {
+    use super::*;
+
+    pub const NAME: &str = "runtime-registry-topology";
+
+    fn finish(_: &mut BootCtx) {
+        kprintln!("[JSR-EXIT] success");
+        exit_on(0);
+    }
+
+    /// Stop immediately after production runtime-registry admission. No
+    /// user-space or hardware drill is needed to establish these facts.
+    pub const PLAN: &[&[Step]] = &[&[
+        st(Stage::Console),
+        st(Stage::Platform),
+        st(Stage::Frames),
+        st(Stage::KernelMap),
+        st(Stage::Heap),
+        st(Stage::Capacity),
+        PlanItem::Finish(finish),
+    ]];
 }
 
 #[cfg(feature = "krn3-fast-tick-verify")]
@@ -1928,6 +1956,7 @@ mod dedicated {
 
 #[cfg(any(
     feature = "rt1-verify", feature = "rt2-verify", feature = "rt3-verify", feature = "budget-window-verify",
+    feature = "runtime-registry-topology-verify",
     feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
     feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
     feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "hwv5-prod-verify", feature = "hwv6-verify", feature = "hwv7-gpu-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "native-install-block-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec5-verify", feature = "net2-verify", feature = "net3-verify", feature = "net4-runtime-verify", feature = "compat-elf-backend-verify", feature = "compat-syscall-verify", feature = "compat-dynamic-libc-verify", feature = "lifecycle-health-fail-verify", feature = "pex1-verify", feature = "pex2-verify", feature = "pex3-verify", feature = "pex4-verify", feature = "pex5-verify", feature = "pex7-verify", feature = "sec6-verify",

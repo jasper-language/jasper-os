@@ -36,6 +36,10 @@ rt1-verify = ["user-programs"]
 rt2-verify = ["user-programs"]
 rt1-no-realtime = ["rt1-verify"]
 budget-window-verify = []
+# Initialize through the runtime registry admission stage, then exit. This
+# lets one image exercise HC-20/HC-21 on memory-constrained topologies without
+# running unrelated user-space and hardware drills.
+runtime-registry-topology-verify = []
 # Dedicated KRN-3 AP tick ownership/accounting guest; default unchanged.
 krn3-fast-tick-verify = []
 # Dedicated post-split scheduler ledger: initialize SMP, then run only the

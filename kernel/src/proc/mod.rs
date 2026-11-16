@@ -34,7 +34,8 @@ use kernel_core::capability::{CapabilityId, CapabilityLink};
 use kernel_core::frame::{PhysFrame, FRAME_SIZE};
 use kernel_core::kobj_type::{check_grant, GrantCheck, Kind};
 use kernel_core::memory_capability::{
-    BackingIdentity, MemoryCapabilityTable, MemoryKind, MemoryRights,
+    plan_memory_capability_capacity, BackingIdentity, DynamicMemoryCapabilityTable, MemoryKind,
+    MemoryRights,
 };
 use kernel_core::object::{
     HandleError, HandleId, HandleTable, ObjectId, ObjectRef, ObjectType, Rights,
@@ -781,7 +782,7 @@ pub struct Process {
     shared_maps: Vec<SharedMapping>,
     /// SEC-6 software capabilities bound to this address space.  This is a
     /// provenance mirror, not a second page table.
-    memory_caps: MemoryCapabilityTable<{ kernel_core::memory_capability::MAX_MEMORY_CAPABILITIES }>,
+    memory_caps: DynamicMemoryCapabilityTable,
     memory_account: Arc<crate::mm::memory_quota::Account>,
     /// Optional hard limits for the ordinary process account (`u64::MAX` = no fixed cap).
     memory_owned_limit: u64,
@@ -885,7 +886,7 @@ pub(crate) struct ExecAddressSpace {
     space: VmSpace,
     frames: Vec<Arc<crate::mm::memory_object::Page>>,
     shared_maps: Vec<SharedMapping>,
-    memory_caps: MemoryCapabilityTable<{ kernel_core::memory_capability::MAX_MEMORY_CAPABILITIES }>,
+    memory_caps: DynamicMemoryCapabilityTable,
     memory_account: Arc<crate::mm::memory_quota::Account>,
     device_maps: Vec<DeviceMapping>,
 }
@@ -6807,6 +6808,17 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
 /// 为 exec 将单线程 Linux 进程切换到新的空地址空间，并返回可回滚的旧状态。
 #[cfg(feature = "linux-abi")]
 pub(crate) fn begin_exec_address_space(pid: ObjId) -> Result<ExecAddressSpace, ProcError> {
+    let capability_capacity = kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p))
+            if p.state == ProcState::Running && p.threads_live == 1 && p.linux.is_some() =>
+        {
+            Ok(p.memory_caps.capacity())
+        }
+        Ok(KObject::Process(_)) => Err(ProcError::Exited),
+        _ => Err(ProcError::NoSuchProcess),
+    })?;
+    let empty_caps =
+        DynamicMemoryCapabilityTable::new(capability_capacity).ok_or(ProcError::OutOfFrames)?;
     let space = VmSpace::new().map_err(ProcError::Map)?;
     let memory_account = crate::mm::memory_quota::Account::new().ok_or(ProcError::OutOfFrames)?;
     crate::mm::space::activate_kernel();
@@ -6858,7 +6870,7 @@ pub(crate) fn begin_exec_address_space(pid: ObjId) -> Result<ExecAddressSpace, P
                 space: core::mem::replace(&mut p.space, space),
                 frames: core::mem::take(&mut p.frames),
                 shared_maps: core::mem::take(&mut p.shared_maps),
-                memory_caps: core::mem::replace(&mut p.memory_caps, MemoryCapabilityTable::new()),
+                memory_caps: core::mem::replace(&mut p.memory_caps, empty_caps),
                 memory_account: core::mem::replace(&mut p.memory_account, memory_account),
                 device_maps: core::mem::take(&mut p.device_maps),
             })
@@ -6910,6 +6922,21 @@ fn create_process(
     syscalls: SyscallSet,
     initialize: impl FnOnce(&mut Process),
 ) -> Result<ObjId, ProcError> {
+    let memory_budget = crate::mm::heap::limit();
+    let process_slots = sched::slots();
+    let Some(capability_plan) =
+        plan_memory_capability_capacity(memory_budget, process_slots)
+    else {
+        kprintln!(
+            "[JSR-PROC] reject=memory_capability_capacity budget={} process_slots={}",
+            memory_budget,
+            process_slots
+        );
+        return Err(ProcError::MemoryQuota);
+    };
+    let memory_caps =
+        DynamicMemoryCapabilityTable::new(capability_plan.per_process)
+            .ok_or(ProcError::OutOfFrames)?;
     let space = VmSpace::new().map_err(ProcError::Map)?;
     let memory_account = crate::mm::memory_quota::Account::new().ok_or(ProcError::OutOfFrames)?;
     let vm_guest_account = crate::mm::memory_quota::Account::new().ok_or(ProcError::OutOfFrames)?;
@@ -6931,7 +6958,7 @@ fn create_process(
         handles: HandleTable::new(),
         frames: Vec::new(),
         shared_maps: Vec::new(),
-        memory_caps: MemoryCapabilityTable::new(),
+        memory_caps,
         memory_account,
         memory_owned_limit: MAX_PROCESS_FRAMES as u64,
         memory_pin_limit: MAX_PROCESS_FRAMES as u64,
@@ -6971,9 +6998,12 @@ fn create_process(
         }
     };
     kprintln!(
-        "[JSR-PROC] event=system.process.created id={:#x} name={}",
+        "[JSR-PROC] event=system.process.created id={:#x} name={} memory_cap_capacity={} memory_cap_budget={} process_slots={} dynamic=true",
         id.raw(),
-        name
+        name,
+        capability_plan.per_process,
+        capability_plan.metadata_budget,
+        process_slots
     );
     Ok(id)
 }
