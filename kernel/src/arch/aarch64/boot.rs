@@ -77,7 +77,7 @@ pub(super) fn pixel6a_reset_after(seconds: u64, fdt: Option<&Fdt<'_>>) -> ! {
     feature = "pixel6a-full-probe", // JASPER-HARDCODE-REVIEW: issue=33 source=physical-runtime-plan reason=reset-action-is-only-compiled-for-pixel6a-verification
     feature = "pixel6a-runtime-verify" // JASPER-HARDCODE-REVIEW: issue=33 source=physical-runtime-plan reason=success-action-is-only-compiled-for-pixel6a-verification
 ))]
-pub(super) fn pixel6a_reset_now() -> ! {
+pub(crate) fn pixel6a_reset_now() -> ! {
     // Prefer PSCI SYSTEM_RESET2(arch warm), then fall back to SYSTEM_RESET.
     unsafe {
         core::arch::asm!(
