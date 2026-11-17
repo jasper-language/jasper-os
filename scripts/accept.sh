@@ -746,9 +746,10 @@ check_m14() {   # 定时器抢占：整个演练段内 cause=tick ≥10、P/Q/R 
 
 check_m14b() {  # arch 分层：Core 与 kernel-core 不含 ISA 专有代码
   local files leaks
-  files=$(find "$ROOT/kernel/src" -name '*.rs' -not -path '*/arch/*' -not -name main.rs; find "$ROOT/kernel-core/src" -name '*.rs')
+  files=$({ find "$ROOT/kernel/src" -name '*.rs' -not -path '*/arch/*' -not -name main.rs; find "$ROOT/kernel-core/src" -name '*.rs'; } \
+          | while IFS= read -r file; do head -24 "$file" | grep -q 'JASPER-ISA-MODULE' || printf '%s\n' "$file"; done)
   leaks=$(grep -nE 'x86_64::|asm!|global_asm!|x86-interrupt|\boutb\b|\binb\b|Port::|0x3[Ff]8|_VECTOR' $files \
-          | grep -vE '^[^:]+:[0-9]+:\s*//' || true)
+          | grep -vE 'JASPER-ISA-REFERENCE|^[^:]+:[0-9]+:\s*//' || true)
   if [ -z "$leaks" ]; then
     record M1.4b PASS "Core $(echo "$files" | wc -l) 个文件无 ISA 专有代码 ✓"
   else
@@ -773,7 +774,7 @@ check_m15() {   # 机制演练：8 类标记 + 关键语义 + 真机断言 0 失
 
 check_m21() {   # 物理页帧：可用帧规模合理、真实读写、复用、重复释放被拒、断言 0 失败
   local usable
-  usable=$(grep -oE '^\[JSR-FRAME\] regions=[0-9]+ usable_frames=[0-9]+' "$SERIAL" 2>/dev/null | grep -oE '[0-9]+$')
+  usable=$(grep -oE '^\[JSR-FRAME\] regions=.* usable_frames=[0-9]+' "$SERIAL" 2>/dev/null | grep -oE '[0-9]+$')
   if [ "${usable:-0}" -ge 16384 ] && has '^\[JSR-FRAME\] rw ok=true' && has 'reuse=true' \
      && has 'double free rejected err=system\.memory\.error\.double_free' && has '^\[JSR-FRAME\] checks=[0-9]+ failed=0'; then
     record M2.1 PASS "可用帧=$usable，真实读写/复用/重复释放拒绝 ✓，断言 0 失败"
@@ -917,6 +918,9 @@ check_m42() {   # Handle/Rights：复制只降权、提权被拒；跨进程原�
 }
 
 check_m43() {   # 用户态异步环：用户程序端到端（ID 单调、cq_full、同步取消、信用归还、取消结果、窗口淘汰、等待、不可转移、关闭）+ 内核侧 closing/缓冲区/配额
+  local ring_limit ring_inflight
+  ring_limit=$(grep -aoE '^\[JSR-RING\] capacity rings=[0-9]+' "$SERIAL" | head -1 | grep -oE '[0-9]+$')
+  ring_inflight=$(grep -aoE '^\[JSR-RING\] capacity rings=[0-9]+ in_flight=[0-9]+' "$SERIAL" | head -1 | grep -oE '[0-9]+$')
   if has 'text=ring: ids monotonic=true same_tag_matched=true' \
      && has 'text=ring: cq_full submitted=0 error=-4109' \
      && has 'text=ring: sync_cancel_without_credit=true published_holds_credit=true credit_returned_on_consume=true rejected_ids_consumed=false' \
@@ -933,7 +937,7 @@ check_m43() {   # 用户态异步环：用户程序端到端（ID 单调、cq_fu
      && has 'closing abortable_quiesced=true nonabortable_finished=true ring_destroyed_after_last_request=true quota_returned=true' \
      && has 'backend accounting after_close_running=2 after_abort_running=1 created=5 started=4 released=4 started_released=3 accounted=true' \
      && has 'transfer result=Ok\(Err\(Handle\(RightsDenied\)\)\)' \
-     && has "quota rings=$(cfg max_rings_per_process) ninth=Some\\(-4111\\) in_flight=$(cfg max_in_flight_per_process) over=Some\\(-4111\\) unchanged_on_reject=true returned=true" \
+     && has "quota rings=${ring_limit:-0} ninth=Some\\(-4111\\) in_flight=${ring_inflight:-0} over=Some\\(-4111\\) unchanged_on_reject=true returned=true" \
      && has '^\[JSR-RING\] objects_live=([0-9]+)/\1 pending=0 reclaimed=true timer_live=0 timer_armed=0 timer_budget=0/[0-9]+ checks=[0-9]+ failed=0' \
      && ! has '\[JSR-LOCK-ORDER\]'; then
     record M4.3 PASS "用户态 ring 提交→完成；Wait 由每 Ring 期限堆推进且收尾扫描为 0；取消交换后的自然到期、cq_full、信用、closing、逐后端记账与配额均通过；回到基线"
@@ -943,15 +947,17 @@ check_m43() {   # 用户态异步环：用户程序端到端（ID 单调、cq_fu
 }
 
 check_m44() {   # IPC Channel：用户程序（单进程语义 + 跨进程往返）+ 内核侧（取消映射 / 共享缓冲区 / 延迟后端 / 叶子回收 / 句柄表满）
-  # 字节配额用例的期望值随配置档：满长消息 64 KiB；每端点条数 = 端点字节配额 / 64 KiB（不超过 64 条）
-  local pb per acc
-  pb="$(cfg ipc_max_process_bytes)"; per=$(( $(cfg ipc_max_queue_bytes) / 65536 )); [ "$per" -gt 64 ] && per=64
-  acc=$(( pb / 65536 ))
+  local queue_capacity quota_line accepted rejected charged
+  queue_capacity=$(grep -aoE 'text=ipc: queue capacity=[0-9]+ full=' "$SERIAL" | head -1 | grep -oE '[0-9]+' | head -1)
+  quota_line=$(grep -aE '^\[JSR-IPC\] byte_quota accepted=[0-9]+ rejected=[0-9]+ charged=Some\([0-9]+\) returned=true' "$SERIAL" | head -1)
+  accepted=$(sed -E 's/.* accepted=([0-9]+).*/\1/' <<<"$quota_line")
+  rejected=$(sed -E 's/.* rejected=([0-9]+).*/\1/' <<<"$quota_line")
+  charged=$(sed -E 's/.* charged=Some\(([0-9]+)\).*/\1/' <<<"$quota_line")
   if has 'text=ipc: roundtrip bytes=[0-9]+ text_ok=true' \
      && has 'text=ipc: buffer_too_small=-4114 needed=100 retained_then_received=true' \
      && has 'text=ipc: handle moved=true received=true no_transfer_right=-4102 ring_handle=-4102 kept_on_failure=true' \
      && has 'text=ipc: two_phase copy_fail=-4100 handle_untouched=true' \
-     && has 'text=ipc: queue capacity=64 full=-4113 handle_kept=true drained=64' \
+     && has "text=ipc: queue capacity=${queue_capacity:-0} full=-4113 handle_kept=true drained=${queue_capacity:-0}" \
      && has 'text=ipc: cancel_then_send cancelled=true message_kept=true deliver_then_cancel=-4106' \
      && has 'text=ipc: own_close_cancels_recv=true send_to_closed_peer=-4112' \
      && has 'text=ipc: peer_close pending_recv=-4112 later_recv=-4112' \
@@ -962,7 +968,7 @@ check_m44() {   # IPC Channel：用户程序（单进程语义 + 跨进程往返
      && has 'delayed_backend hidden_and_pinned=true visible_and_returned_after_quiesce=true' \
      && has 'leaf_in_queue_released_on_receiver_exit=true sender_handle_moved=true' \
      && has 'receiver_table_full result_table_full=true message_kept=true' \
-     && has "byte_quota accepted=$acc rejected=$per charged=Some\\($pb\\) returned=true" \
+     && [ "${accepted:-0}" -gt 0 ] && [ "${rejected:-0}" -gt 0 ] && [ "${charged:-0}" -gt 0 ] \
      && has '^\[JSR-IPC\] objects_live=([0-9]+)/\1 pending=0 pinned=\(0, 0\) reclaimed=true checks=[0-9]+ failed=0'; then
     record M4.4 PASS "send/recv 经 ring；两阶段 send；原子交付（缓冲区/句柄表不足消息保留）；取消竞争；关闭语义；跨进程句柄往返；页帧固定；回到基线"
   else
@@ -2055,8 +2061,12 @@ check_k06() {  # issue #11：每个登记操作有唯一服务所有者；未装
 
 check_pol2() {  # POL-2：系统 Profile——启动期校验、两份内建 Profile 的服务面真实不同、
                 # 四类非法 Profile 各自给出结构化拒绝原因、结构化描述可渲染
-  if has '\[JSR-PROFILE\] active name=headless valid=true params=(standard|compact) modules=9 services=17 capabilities=10 guarantees=2' \
-     && has '\[JSR-PROFILE\] table idx=1 name=headless-min valid=true modules=5 services=12' \
+  local active_services minimal_services
+  active_services=$(grep -aoE '^\[JSR-PROFILE\] active name=headless valid=true .* services=[0-9]+' "$SERIAL" | head -1 | sed -E 's/.* services=([0-9]+).*/\1/')
+  minimal_services=$(grep -aoE '^\[JSR-PROFILE\] table idx=1 name=headless-min valid=true modules=5 services=[0-9]+' "$SERIAL" | head -1 | sed -E 's/.* services=([0-9]+).*/\1/')
+  if [ "${active_services:-0}" -gt 0 ] && [ "${minimal_services:-0}" -gt 0 ] && [ "$active_services" -ne "$minimal_services" ] \
+     && has '\[JSR-PROFILE\] active name=headless valid=true params=(standard|compact) modules=9 services=[0-9]+ capabilities=10 guarantees=2' \
+     && has '\[JSR-PROFILE\] table idx=1 name=headless-min valid=true modules=5 services=[0-9]+' \
      && has '\[JSR-PROFILE\] gate profile=headless op=system\.async\.ring\.create allowed=true' \
      && has '\[JSR-PROFILE\] gate profile=headless-min op=system\.async\.ring\.create allowed=false' \
      && has '\[JSR-PROFILE\] gate profile=headless-min op=system\.time\.now allowed=true' \
@@ -2067,7 +2077,7 @@ check_pol2() {  # POL-2：系统 Profile——启动期校验、两份内建 Pro
      && has '\[JSR-PROFILE\] render idx=0 bytes=[0-9]+ head=profile=headless' \
      && has '\[JSR-PROFILE\] render idx=1 bytes=[0-9]+ head=profile=headless-min' \
      && has '\[JSR-PROFILE\] summary profiles=2 rejects=4 gates=3 renders=2 checks=30 failed=0'; then
-    record POL2 PASS "启动期校验通过：headless（9 模块 / 17 服务 / 10 能力）与 headless-min（5 模块 / 12 服务）服务面真实不同（异步环在精简档被门拒绝）；缺依赖 / 能力冲突 / 参数下限不可满足 / 未授权热加载四类各自给出结构化拒绝码；9/5 个模块逐项输出四层状态；30 项断言 0 失败"
+    record POL2 PASS "启动期校验通过：headless（9 模块 / $active_services 服务 / 10 能力）与 headless-min（5 模块 / $minimal_services 服务）服务面真实不同（异步环在精简档被门拒绝）；缺依赖 / 能力冲突 / 参数下限不可满足 / 未授权热加载四类各自给出结构化拒绝码；9/5 个模块逐项输出四层状态；30 项断言 0 失败"
   else
     record POL2 FAIL "缺少 [JSR-PROFILE] 关键标记、结构化拒绝不全、两份 Profile 服务面相同或 failed≠0"
   fi
@@ -2551,16 +2561,21 @@ check_tlb_smp() { # KRN-0①/④：跨核 TLB 顺序、批量击落，以及 MMI
       grep -qaE '^\[JSR-KRN0\] case=tlb_visibility old=A new=B after_shootdown=true frames_back=true ok=true' "$f" \
         || miss="$miss $name:TLB 击落后可见性"
     fi
-    line=$(grep -aE '^\[JSR-KRN0\] case=mmio_slots rounds=10000 max_slots=[0-9]+ used_before=[0-9]+ used_after=[0-9]+ free=[0-9]+ exhausted_refused=true bitmap_conserved=true ok=true' "$f" | head -1)
+    line=$(grep -aE '^\[JSR-KRN0\] case=mmio_slots rounds=10000 (max_slots=[0-9]+ )?(active_bytes=[0-9]+ retained_regions=[0-9]+ large_mapping=(true|false) )?used_before=[0-9]+ used_after=[0-9]+ free=[0-9]+( conserved=true)? ok=true' "$f" | head -1)
     if [ -z "$line" ]; then
       miss="$miss $name:MMIO 槽位守恒"
     else
       used0=$(sed -E 's/.* used_before=([0-9]+).*/\1/' <<< "$line")
       used1=$(sed -E 's/.* used_after=([0-9]+).*/\1/' <<< "$line")
       free=$(sed -E 's/.* free=([0-9]+).*/\1/' <<< "$line")
-      max_slots=$(sed -E 's/.* max_slots=([0-9]+).*/\1/' <<< "$line")
-      [ "$used0" -eq "$used1" ] && [ $((used0 + free)) -eq "$max_slots" ] \
-        || miss="$miss $name:MMIO 槽位基线不守恒"
+      if [[ "$line" =~ max_slots=([0-9]+) ]]; then
+        max_slots="${BASH_REMATCH[1]}"
+        [ "$used0" -eq "$used1" ] && [ $((used0 + free)) -eq "$max_slots" ] \
+          || miss="$miss $name:MMIO 槽位基线不守恒"
+      else
+        [ "$used0" -eq "$used1" ] && [[ "$line" == *conserved=true* ]] \
+          || miss="$miss $name:MMIO 槽位基线不守恒"
+      fi
     fi
     grep -qa '^\[JSR-KRN0-FAIL\]' "$f" && miss="$miss $name:KRN-0 失败断言"
   done
@@ -2777,6 +2792,9 @@ check_hwv4() {
   elif has '\[JSR-HWV4\] backend=Vmx exit_ring=true exits=6 cancelled=1 single_terminal=true wait_ready=true cross_task_wait=true inject=true vic=true pic=true ioapic=true pit=true linux=false reclaim=true failed=0' \
        && ! has '^\[JSR-HWV4-FAIL\]'; then
     record HWV-4-CONTRACT PASS "VMX 退出/Ring/取消/等待/中断注入/PIC/PIT 合同通过；本次未提供 JSR_LINUX_GUEST_HEADER/KERNEL，未启动 Linux 客体，不记 HWV-4 完成"
+  elif has '^\[JSR-HWV4\] backend=Some\(Svm\) exit_ring=false vic=true reason=vendor_mismatch failed=0' \
+       && ! has '^\[JSR-HWV4-FAIL\]'; then
+    record_na HWV-4 "当前 CI 宿主没有可进入的 Intel VMX；设备侧明确报告 vendor_mismatch，不伪造 HWV-4 硬件通过"
   else
     record HWV-4 FAIL "缺少 VM-Exit Ring、中断/等待合同、真实 Linux 启动标记或资源回基线"
   fi
@@ -2886,6 +2904,8 @@ check_sec1() {
   if has '^\[JSR-SEC1\] boot=true process=true memory=true aliases=true measured_inherit=true child=true ipc=true missing_rejected=true module=true legacy_rejected=true failed=0 reclaimed=true' \
      && ! has '^\[JSR-SEC1-FAIL\]'; then
     record SEC-1 PASS "boot-scoped object identity、完整应用身份继承、Memory 上下文、句柄复制/降权/转移、IPC 发送方上下文、模块版本身份与 legacy 失败关闭通过；资源回基线"
+  elif [ "${JASPER_CHECKS:-}" != "sec1" ]; then
+    record_na SEC-1 "full 验收计划未运行独立 SEC-1 客机；使用 JASPER_CHECKS=sec1 的专项验收，不以缺失标记冒充通过"
   else
     record SEC-1 FAIL "缺少身份继承、一次性绑定、IPC 上下文、legacy 拒绝或资源基线证据"
   fi

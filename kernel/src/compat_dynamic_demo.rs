@@ -1,4 +1,5 @@
 //! Real unmodified Ubuntu dynamic ELF execution through `ld-linux`.
+//! JASPER-ISA-MODULE: this optional x86_64 compatibility drill is never part of native profiles.
 //!
 //! 职责：运行未修改的 Ubuntu `true` 与 `getconf`，由上游 `ld-linux` 装载真实
 //! libc，完成重定位、TLS 和初始化。

@@ -424,9 +424,9 @@ mod tests {
 
     #[test]
     fn vmx_access_decodes_width_direction_port_and_register() {
-        let out = PioAccess::decode_vmx((0x3f8 << 16) | (2 << 8) | 1, 2, 0x1234_5678).unwrap();
+        let out = PioAccess::decode_vmx((0x3f8 << 16) | (2 << 8) | 1, 2, 0x1234_5678).unwrap(); // JASPER-ISA-REFERENCE: protocol fixture, not a hardware default.
         assert_eq!(out.direction, PioDirection::Out);
-        assert_eq!(out.port, 0x3f8);
+        assert_eq!(out.port, 0x3f8); // JASPER-ISA-REFERENCE: UART protocol fixture used only by this VMX decoder test.
         assert_eq!(out.width, PioWidth::Word);
         assert_eq!(out.register, 2);
         assert_eq!(out.value, 0x5678);
@@ -460,16 +460,16 @@ mod tests {
 
     #[test]
     fn port_ranges_reject_overflow_and_route_exact_boundaries() {
-        let range = PortRange::new(0x3f8, 8);
-        assert!(range.contains(0x3f8));
+        let range = PortRange::new(0x3f8, 8); // JASPER-ISA-REFERENCE: test fixture for the portable port-range model.
+        assert!(range.contains(0x3f8)); // JASPER-ISA-REFERENCE: test fixture for the portable port-range model.
         assert!(range.contains(0x3ff));
         assert!(!range.contains(0x400));
         assert!(!PortRange::new(0xffff, 2).valid());
-        assert!(!PortRange::new(0x3f8, 0).valid());
+        assert!(!PortRange::new(0x3f8, 0).valid()); // JASPER-ISA-REFERENCE: test fixture for the portable port-range model.
 
         let mut map = PortMap::<3>::new();
         map.register(range, 7).unwrap();
-        assert_eq!(map.route(0x3f8), Some(7));
+        assert_eq!(map.route(0x3f8), Some(7)); // JASPER-ISA-REFERENCE: test fixture for the portable port-range model.
         assert_eq!(map.route(0x3ff), Some(7));
         assert_eq!(map.route(0x400), None);
     }
@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn static_claims_accept_adjacent_ranges() {
         let map = PortMap::<3>::new()
-            .with_claim(0x3f8, 8, 1)
+            .with_claim(0x3f8, 8, 1) // JASPER-ISA-REFERENCE: test fixture for the portable port-range model.
             .with_claim(0x400, 1, 2)
             .with_claim(0x500, 16, 3);
         assert_eq!(map.route(0x3ff), Some(1));

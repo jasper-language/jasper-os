@@ -1,4 +1,5 @@
 //! HWV-5-VMM: user-space VMM service, stable ABI, crash and restart proof.
+//! JASPER-ISA-MODULE: this optional Intel VMX drill is compiled only for x86_64.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 

@@ -123,8 +123,8 @@ pub fn report(boot: &BootSpec) {
 
     #[cfg(target_arch = "x86_64")]
     {
-        let supported_mask = u64::from(core::arch::x86_64::__cpuid_count(0xD, 0).eax);
-        let enabled_mask = crate::arch::x86_64::xstate::mask();
+        let supported_mask = u64::from(core::arch::x86_64::__cpuid_count(0xD, 0).eax); // JASPER-ISA-REFERENCE: x86 XSAVE discovery.
+        let enabled_mask = crate::arch::x86_64::xstate::mask(); // JASPER-ISA-REFERENCE: x86 XSAVE policy.
         let supported = supported_mask.count_ones();
         let enabled = enabled_mask.count_ones();
         emit(

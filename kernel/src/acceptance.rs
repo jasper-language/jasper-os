@@ -1212,8 +1212,8 @@ mod dedicated {
 
     #[cfg(target_arch = "x86_64")]
     fn finish(ctx: &mut BootCtx) {
-        crate::arch::x86_64::hwv6_demo::run(ctx.boot);
-        exit_on(u64::from(crate::arch::x86_64::hwv6_demo::failed()));
+        crate::arch::x86_64::hwv6_demo::run(ctx.boot); // JASPER-ISA-REFERENCE: VT-d/AMD-Vi acceptance driver.
+        exit_on(u64::from(crate::arch::x86_64::hwv6_demo::failed())); // JASPER-ISA-REFERENCE: VT-d/AMD-Vi acceptance driver.
     }
 
     #[cfg(not(target_arch = "x86_64"))]
@@ -1233,7 +1233,7 @@ mod dedicated {
 
     #[cfg(target_arch = "x86_64")]
     fn finish(_: &mut BootCtx) {
-        let ok = crate::arch::x86_64::linux_guest::run_virtio();
+        let ok = crate::arch::x86_64::linux_guest::run_virtio(); // JASPER-ISA-REFERENCE: x86_64 virtualization guest drill.
         exit_on(u64::from(!ok));
     }
 

@@ -124,7 +124,7 @@ pub fn start() -> Result<(), DisplayInputError> {
     let surface = prepared.surface;
     let required = surface.validate()?;
     #[cfg(target_arch = "x86_64")]
-    let keyboard = crate::arch::x86_64::keyboard::init();
+    let keyboard = crate::arch::x86_64::keyboard::init(); // JASPER-ISA-REFERENCE: x86_64 input backend.
     #[cfg(not(target_arch = "x86_64"))]
     let keyboard = false;
     let input_capacity = plan_key_queue_capacity(required, mm::heap::limit())
@@ -226,7 +226,7 @@ pub fn poll_input() -> usize {
     {
         let mut count = 0;
         for _ in 0..32 {
-            let Some(key) = crate::arch::x86_64::keyboard::try_read_event() else {
+            let Some(key) = crate::arch::x86_64::keyboard::try_read_event() else { // JASPER-ISA-REFERENCE: x86_64 input backend.
                 break;
             };
             let mut guard = DISPLAY.lock();

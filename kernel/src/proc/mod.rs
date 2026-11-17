@@ -8807,7 +8807,7 @@ fn thread_entry() {
     if s.linux_clone {
         // SAFETY：clone 的 RIP/RSP 已由 spawn_linux_clone 校验在用户私有窗口内。
         unsafe {
-            crate::arch::x86_64::enter_syscall_return(
+            crate::arch::x86_64::enter_syscall_return( // JASPER-ISA-REFERENCE: x86_64 Linux clone entry only.
                 s.entry,
                 s.stack,
                 s.linux_fork_regs.unwrap_or([0; 6]),

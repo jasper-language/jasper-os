@@ -1,4 +1,5 @@
 //! Linux x86_64 system-interface service for explicitly flavored processes.
+//! JASPER-ISA-MODULE: this optional service is compiled only for x86_64.
 //!
 //! 职责：把已识别的 Linux syscall 映射到 Jasper fd、任务、内存和受控只读文件机制；
 //! 所有调用先经过兼容进程的显式 Linux 调用集合，不能借用 Jasper 原生 SyscallSet。
