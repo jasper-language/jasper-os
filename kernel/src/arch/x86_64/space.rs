@@ -25,9 +25,14 @@ pub const USER_LAST: usize = 64;
 /// 私有窗口对应的虚拟地址区间 `[start, end)`。
 pub const USER_WINDOW: (u64, u64) = ((USER_FIRST as u64) << 39, (USER_LAST as u64) << 39);
 /// Dedicated below-2 GiB private window for Linux `MAP_32BIT` users.
-/// PML4 entry zero's PDPT entry one covers `[1 GiB, 2 GiB)`.
-pub const LOW_USER_WINDOW: (u64, u64) = (1 << 30, 2 << 30);
-const LOW_USER_PDPT_INDEX: usize = 1;
+///
+/// AOSP ART reserves its RegionSpace at low addresses such as 236–812 MiB.
+/// The lower 128 MiB remain the kernel's shared low mappings; user-space page
+/// directories above that boundary are private.
+pub const LOW_USER_WINDOW: (u64, u64) = (128 << 20, 2 << 30); // JASPER-HARDCODE-REVIEW: issue=32 source=AOSP-ART-RegionSpace reason=ART-requires-preferred-and-fallback-maps-below-one-GiB
+const LOW_USER_PDPT_FIRST: usize = 0;
+const LOW_USER_PDPT_LAST: usize = 2;
+const LOW_KERNEL_PD_ENTRIES: usize = (LOW_USER_WINDOW.0 as usize) >> 21;
 // 用户态运行时与用户程序的链接地址按同一数值布局：两边必须一致。
 const _: () = assert!(USER_WINDOW.0 == kernel_core::user_layout::WINDOW_BASE_X86_64);
 
@@ -56,11 +61,28 @@ pub unsafe fn create(template: SpaceRoot, phys_offset: u64, frames: &mut dyn Fra
     if (USER_FIRST..USER_LAST).any(|i| !cur[i].is_unused()) {
         return Err(MapError::InvalidAddress);
     }
+    if !cur[0].is_unused() {
+        let template_low = table_at(phys_offset, cur[0].addr().as_u64());
+        if template_low[LOW_USER_PDPT_FIRST]
+            .flags()
+            .contains(PageTableFlags::HUGE_PAGE)
+        {
+            return Err(MapError::InvalidAddress);
+        }
+    }
     let low_frame = frames.allocate().map_err(|_| MapError::OutOfFrames)?;
+    let low_pd_frame = match frames.allocate() {
+        Ok(frame) => frame,
+        Err(_) => {
+            let _ = frames.deallocate(low_frame);
+            return Err(MapError::OutOfFrames);
+        }
+    };
     let f = match frames.allocate() {
         Ok(frame) => frame,
         Err(_) => {
             let _ = frames.deallocate(low_frame);
+            let _ = frames.deallocate(low_pd_frame);
             return Err(MapError::OutOfFrames);
         }
     };
@@ -68,14 +90,39 @@ pub unsafe fn create(template: SpaceRoot, phys_offset: u64, frames: &mut dyn Fra
     new.zero();
     let low = table_at(phys_offset, low_frame.start());
     low.zero();
+    let low_pd = table_at(phys_offset, low_pd_frame.start());
+    low_pd.zero();
     if !cur[0].is_unused() {
         let template_low = table_at(phys_offset, cur[0].addr().as_u64());
         for i in 0..512 {
-            if i != LOW_USER_PDPT_INDEX {
+            if !(LOW_USER_PDPT_FIRST..LOW_USER_PDPT_LAST).contains(&i) {
                 low[i] = template_low[i].clone();
             }
         }
+        if !template_low[LOW_USER_PDPT_FIRST].is_unused()
+            && !template_low[LOW_USER_PDPT_FIRST]
+                .flags()
+                .contains(PageTableFlags::HUGE_PAGE)
+        {
+            let template_pd = table_at(
+                phys_offset,
+                template_low[LOW_USER_PDPT_FIRST].addr().as_u64(),
+            );
+            for (destination, source) in low_pd
+                .iter_mut()
+                .take(LOW_KERNEL_PD_ENTRIES)
+                .zip(template_pd.iter().take(LOW_KERNEL_PD_ENTRIES))
+            {
+                *destination = source.clone();
+            }
+        }
     }
+    low[LOW_USER_PDPT_FIRST].set_addr(
+        PhysAddr::new(low_pd_frame.start()),
+        PageTableFlags::PRESENT
+            | PageTableFlags::WRITABLE
+            | PageTableFlags::USER_ACCESSIBLE,
+    );
     new[0].set_addr(
         PhysAddr::new(low_frame.start()),
         PageTableFlags::PRESENT
@@ -174,8 +221,23 @@ pub unsafe fn destroy(root: SpaceRoot, phys_offset: u64, frames: &mut dyn FrameA
     if !pml4[0].is_unused() {
         let low_phys = pml4[0].addr().as_u64();
         let low = table_at(phys_offset, low_phys);
+        if !low[LOW_USER_PDPT_FIRST].is_unused()
+            && !low[LOW_USER_PDPT_FIRST]
+                .flags()
+                .contains(PageTableFlags::HUGE_PAGE)
+        {
+            let pd_phys = low[LOW_USER_PDPT_FIRST].addr().as_u64();
+            let pd = table_at(phys_offset, pd_phys);
+            for entry in pd.iter_mut().skip(LOW_KERNEL_PD_ENTRIES) {
+                free_subtree(entry, 1, phys_offset, frames);
+            }
+            if let Ok(frame) = PhysFrame::from_start(pd_phys) {
+                let _ = frames.deallocate(frame);
+            }
+            low[LOW_USER_PDPT_FIRST].set_unused();
+        }
         free_subtree(
-            &mut low[LOW_USER_PDPT_INDEX],
+            &mut low[LOW_USER_PDPT_FIRST + 1],
             2,
             phys_offset,
             frames,
