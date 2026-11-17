@@ -726,6 +726,57 @@ pub enum CommitError {
     Readback,
 }
 
+/// Failure while reconciling two boot-control copies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepairError {
+    /// Neither copy can produce one unambiguous authoritative record.
+    Recovery(BootControlError),
+    /// Writing a mismatched copy failed.
+    Write,
+    /// Flushing repaired copies failed.
+    Flush,
+    /// Readback did not equal the repaired bytes.
+    Readback,
+}
+
+/// Reconcile two control copies to the highest valid generation.
+///
+/// If one copy is corrupt or older, the recovered record is written to every
+/// non-matching copy, flushed, and read back before success is reported. Equal
+/// generation/conflicting content still fails closed and performs no write.
+pub fn repair_copies<IO: ControlIo>(
+    first: &[u8; CONTROL_RECORD_BYTES],
+    second: &[u8; CONTROL_RECORD_BYTES],
+    io: &mut IO,
+) -> Result<ControlBlock, RepairError> {
+    let current = recover(Some(first), Some(second)).map_err(RepairError::Recovery)?;
+    let first_current = ControlBlock::decode(first).ok() == Some(current);
+    let second_current = ControlBlock::decode(second).ok() == Some(current);
+    if first_current && second_current {
+        return Ok(current);
+    }
+    let bytes = current.encode();
+    if !first_current {
+        io.write_copy(0, &bytes).map_err(|_| RepairError::Write)?;
+    }
+    if !second_current {
+        io.write_copy(1, &bytes).map_err(|_| RepairError::Write)?;
+    }
+    io.flush().map_err(|_| RepairError::Flush)?;
+    let mut readback = [0u8; CONTROL_RECORD_BYTES];
+    io.read_copy(0, &mut readback)
+        .map_err(|_| RepairError::Readback)?;
+    if readback != bytes {
+        return Err(RepairError::Readback);
+    }
+    io.read_copy(1, &mut readback)
+        .map_err(|_| RepairError::Readback)?;
+    if readback != bytes {
+        return Err(RepairError::Readback);
+    }
+    Ok(current)
+}
+
 /// 把下一世代写入未选中的副本；成功后只更新本地镜像，不宣称设备已持久。
 /// Writes the next generation to the inactive copy; success updates only the local mirror, not a durability claim.
 pub fn commit<IO: ControlIo>(
@@ -774,6 +825,139 @@ mod tests {
 
     fn digest(byte: u8) -> [u8; 32] {
         [byte; 32]
+    }
+
+    struct MemoryIo {
+        copies: [[u8; CONTROL_RECORD_BYTES]; 2],
+        writes: [usize; 2],
+        flushes: usize,
+        fail_write: bool,
+        fail_flush: bool,
+        corrupt_readback: bool,
+    }
+
+    impl MemoryIo {
+        fn new(first: [u8; CONTROL_RECORD_BYTES], second: [u8; CONTROL_RECORD_BYTES]) -> Self {
+            Self {
+                copies: [first, second],
+                writes: [0; 2],
+                flushes: 0,
+                fail_write: false,
+                fail_flush: false,
+                corrupt_readback: false,
+            }
+        }
+    }
+
+    impl ControlIo for MemoryIo {
+        fn write_copy(
+            &mut self,
+            copy: usize,
+            bytes: &[u8; CONTROL_RECORD_BYTES],
+        ) -> Result<(), ControlIoError> {
+            if self.fail_write {
+                return Err(ControlIoError::Failed);
+            }
+            self.copies[copy] = *bytes;
+            self.writes[copy] += 1;
+            Ok(())
+        }
+
+        fn flush(&mut self) -> Result<(), ControlIoError> {
+            if self.fail_flush {
+                return Err(ControlIoError::Failed);
+            }
+            self.flushes += 1;
+            Ok(())
+        }
+
+        fn read_copy(
+            &mut self,
+            copy: usize,
+            out: &mut [u8; CONTROL_RECORD_BYTES],
+        ) -> Result<(), ControlIoError> {
+            *out = self.copies[copy];
+            if self.corrupt_readback {
+                out[20] ^= 1;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn repair_duplicates_the_highest_valid_generation() {
+        let first = ControlBlock::initialize(Slot::A, 2, digest(1), 1, 1, 1, 1)
+            .unwrap();
+        let mut second = first;
+        second.stage_candidate(
+            Slot::B,
+            Candidate {
+                release: 3,
+                digest: digest(2),
+                transaction_id: 2,
+                security_epoch: 1,
+                data_schema_min: 1,
+                data_schema_max: 1,
+            },
+        )
+        .unwrap();
+        let mut io = MemoryIo::new(first.encode(), second.encode());
+        let first_bytes = io.copies[0];
+        let second_bytes = io.copies[1];
+        assert_eq!(
+            repair_copies(&first_bytes, &second_bytes, &mut io),
+            Ok(second)
+        );
+        assert_eq!(io.copies, [second.encode(), second.encode()]);
+        assert_eq!(io.writes, [1, 0]);
+        assert_eq!(io.flushes, 1);
+    }
+
+    #[test]
+    fn repair_replaces_a_corrupt_copy_and_rejects_equal_generation_conflicts() {
+        let valid = ControlBlock::initialize(Slot::A, 2, digest(1), 1, 1, 1, 1)
+            .unwrap()
+            .encode();
+        let corrupt = [0u8; CONTROL_RECORD_BYTES];
+        let mut io = MemoryIo::new(valid, corrupt);
+        assert_eq!(repair_copies(&valid, &corrupt, &mut io), Ok(ControlBlock::decode(&valid).unwrap()));
+        assert_eq!(io.copies, [valid, valid]);
+
+        let other = ControlBlock::initialize(Slot::A, 2, digest(9), 1, 1, 1, 1)
+            .unwrap()
+            .encode();
+        let mut conflict = MemoryIo::new(valid, other);
+        assert_eq!(
+            repair_copies(&valid, &other, &mut conflict),
+            Err(RepairError::Recovery(
+                BootControlError::EqualGenerationMismatch
+            ))
+        );
+        assert_eq!(conflict.writes, [0, 0]);
+        assert_eq!(conflict.flushes, 0);
+    }
+
+    #[test]
+    fn repair_reports_write_flush_and_readback_failures() {
+        let valid = ControlBlock::initialize(Slot::A, 2, digest(1), 1, 1, 1, 1)
+            .unwrap()
+            .encode();
+        let corrupt = [0u8; CONTROL_RECORD_BYTES];
+        let cases = [
+            ("write", RepairError::Write),
+            ("flush", RepairError::Flush),
+            ("readback", RepairError::Readback),
+        ];
+        for (case, expected) in cases {
+            let mut io = MemoryIo::new(valid, corrupt);
+            match case {
+                "write" => io.fail_write = true,
+                "flush" => io.fail_flush = true,
+                "readback" => io.corrupt_readback = true,
+                _ => unreachable!(),
+            }
+            assert_eq!(repair_copies(&valid, &corrupt, &mut io), Err(expected));
+        }
     }
 
     #[test]

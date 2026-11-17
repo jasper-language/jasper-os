@@ -1119,33 +1119,15 @@ pub fn recover_control_block(repair_durable_copies: bool) -> Result<ControlBlock
         .map_err(|_| HealthError::Block)?;
     io.read_copy(1, &mut second)
         .map_err(|_| HealthError::Block)?;
-    let current = recover(Some(&first), Some(&second)).map_err(HealthError::Recovery)?;
     if !repair_durable_copies {
-        return Ok(current);
+        return recover(Some(&first), Some(&second)).map_err(HealthError::Recovery);
     }
-    let first_current = ControlBlock::decode(&first).ok() == Some(current);
-    let second_current = ControlBlock::decode(&second).ok() == Some(current);
-    if first_current && second_current {
-        return Ok(current);
-    }
-    let bytes = current.encode();
-    if !first_current {
-        io.write_copy(0, &bytes)
-            .map_err(|_| HealthError::Block)?;
-    }
-    if !second_current {
-        io.write_copy(1, &bytes)
-            .map_err(|_| HealthError::Block)?;
-    }
-    io.flush().map_err(|_| HealthError::Block)?;
-    io.read_copy(0, &mut first)
-        .map_err(|_| HealthError::Block)?;
-    io.read_copy(1, &mut second)
-        .map_err(|_| HealthError::Block)?;
-    if first != bytes || second != bytes {
-        return Err(HealthError::Block);
-    }
-    Ok(current)
+    jasper_lifecycle_boot::repair_copies(&first, &second, &mut io).map_err(|error| match error {
+        jasper_lifecycle_boot::RepairError::Recovery(error) => HealthError::Recovery(error),
+        jasper_lifecycle_boot::RepairError::Write
+        | jasper_lifecycle_boot::RepairError::Flush
+        | jasper_lifecycle_boot::RepairError::Readback => HealthError::Block,
+    })
 }
 
 /// 确认当前 A/B 槽的最小健康集合并持久提交。
