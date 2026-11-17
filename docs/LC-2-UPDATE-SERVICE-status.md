@@ -173,6 +173,14 @@ jasper-update-recovery cleanup <control-root> <staging-root> <manifest-sha256-he
 `system update status --json` 返回可由标准 JSON 解析器读取的同一状态；
 首程序查询前后资源断言为 `reclaimed=true`。
 
+所有 update status/recover/archive/audit 入口现在先经过
+`kernel-core::authz` 的统一决策投影。该投影引用现有 active
+`SecurityContext`、进程 SyscallSet、租户/domain 和 MAC policy epoch，不维护
+第二份权限表；身份、scope、操作/effect、能力、policy 代际、时间和委托深度
+任一不满足都失败关闭。全系统撤销代际源尚未接入，因此记录明确为
+`None`/`revocation_unavailable`，不会把对象 generation 冒充撤销代际，也不据此
+宣称 Issue #39 已完成。
+
 这仍不是 Issue #34 的整体完成：tenant A/B 可见性和 4 个隔离 Agent 进程的
 并发 status/list 请求已经通过，但更大规模并发、完整重放/断电矩阵和 Pixel
 安装矩阵尚未交付。因此 LC-2 继续保持 `core-passed`。

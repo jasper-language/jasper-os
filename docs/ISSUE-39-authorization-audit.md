@@ -6,6 +6,11 @@
 系统基础设施层；本文件只核对当前代码中已经存在的事实源、执行点和缺口，不新增
 `system.auth.*` ABI，也不替代 LC、PEP、Handle/Rights 或租户域机制。
 
+已落地的第一类 adapter 是 `kernel-core::authz`：它把 active
+`SecurityContext`、进程 SyscallSet、租户/domain、MAC policy epoch、资源 scope
+与请求条件投影为固定决策记录，当前已接入 update status/recover/archive/audit。
+它不拥有权限状态，也不会在缺少完整撤销源时用对象 generation 冒充全局撤销代际。
+
 来源：<https://github.com/DarkMagier/jasper-os/issues/39>
 
 ## 现有事实源
@@ -65,7 +70,8 @@
 1. **缺少单一跨域决策对象**：上述模块使用不同 Rights 位集、decision/error 词汇
    和审计字段，尚无一个统一投影完整表达 identity、decision maker、executor、
    resource、operation、scope、expiry、delegation depth、conditions、
-   policy version 和 revocation generation。
+   policy version 和 revocation generation。`authz` 已提供基础投影并接入 update
+   子系统，但尚未成为所有资源域的共同执行入口。
 2. **PEP 覆盖不均**：HWV-5 设备/VMM 面已有统一 PEP；进程、文件、IPC、网络、
    UI/媒体、服务和虚拟化尚未全部经过同一语义的决策入口。
 3. **决策者与执行主体未统一分离**：原生安装有 owner/update authority/runtime
