@@ -39,6 +39,12 @@ pub const P0_ARCHIVE_A_LBA: u64 = P0_CONTROL_A_LBA + 8;
 /// P0 Control B 分区内归档收据副本的固定绝对 LBA。
 /// Fixed absolute LBA of the archive-receipt copy inside P0 Control B.
 pub const P0_ARCHIVE_B_LBA: u64 = P0_CONTROL_B_LBA + 8;
+/// P0 Control A 中为原生安装状态保留的固定偏移。
+/// Fixed offset reserved for native installation state inside P0 Control A.
+pub const P0_INSTALL_STORE_LBA: u64 = P0_CONTROL_A_LBA + 16; // JASPER-HARDCODE-REVIEW: issue=33 source=lifecycle-storage-region reason=follows-control-and-archive-fixed-pages
+/// 原生安装状态保留区扇区数（16 MiB）。
+/// Sector count reserved for native installation state (16 MiB).
+pub const P0_INSTALL_STORE_SECTORS: u64 = 32_768; // JASPER-HARDCODE-REVIEW: issue=33 source=lifecycle-storage-region reason=bounded-store-region-under-64-mib-control-partition
 /// P0 Control B 的分区类型 GUID 原始字节。
 /// Raw partition-type GUID bytes for P0 Control B.
 pub const P0_CONTROL_B_TYPE_GUID: [u8; 16] = [
@@ -1149,6 +1155,8 @@ mod tests {
         assert_eq!(P0_CONTROL_B_LBA, control_a + CONTROL_SECTORS);
         assert_eq!(P0_ARCHIVE_A_LBA, control_a + 8);
         assert_eq!(P0_ARCHIVE_B_LBA, P0_CONTROL_B_LBA + 8);
+        assert_eq!(P0_INSTALL_STORE_LBA, control_a + 16);
+        assert!(P0_INSTALL_STORE_LBA + P0_INSTALL_STORE_SECTORS <= P0_CONTROL_B_LBA);
         assert!(P0_ARCHIVE_A_LBA < P0_CONTROL_B_LBA);
         assert!(P0_ARCHIVE_B_LBA < control_a + 2 * CONTROL_SECTORS);
     }

@@ -83,6 +83,7 @@ pub struct BlockDevice {
     device_handle: HandleId,
     mapping_handle: HandleId,
     data_pages: u64,
+    data_frames: Vec<PhysFrame>,
     features: Features,
     geometry: Geometry,
 }
@@ -132,8 +133,9 @@ impl BlockDevice {
             .negotiate_features(selected)
             .map_err(|e| BlkError::Virtio(e.name()))?;
 
-        let capacity_sectors =
-            virtio.read_device_config64(0).ok_or(BlkError::Virtio("system.block.error.config"))?;
+        let capacity_sectors = virtio
+            .read_device_config64(0)
+            .ok_or(BlkError::Virtio("system.block.error.config"))?;
         let logical_block_size = if selected & FEATURE_BLOCK_SIZE != 0 {
             virtio.read_device_config32(20)
         } else {
@@ -161,8 +163,9 @@ impl BlockDevice {
         };
 
         let mut queue = Queue::new().map_err(|e| BlkError::Virtio(e.name()))?;
-        let notify_off =
-            virtio.setup_queue(&mut queue, 0).map_err(|e| BlkError::Virtio(e.name()))?;
+        let notify_off = virtio
+            .setup_queue(&mut queue, 0)
+            .map_err(|e| BlkError::Virtio(e.name()))?;
 
         let pid = proc::create("blk1", SyscallSet::EMPTY).map_err(|_| BlkError::Process)?;
         let memory_handle = match proc::create_memory(pid, data_pages) {
@@ -198,6 +201,13 @@ impl BlockDevice {
                 return Err(BlkError::Dma);
             }
         };
+        let data_frames = match dma::physical_range(pid, mapping_handle, 0, data_pages) {
+            Ok(frames) => frames,
+            Err(_) => {
+                discard_process(pid);
+                return Err(BlkError::Dma);
+            }
+        };
         let bus_master_was_on = match pci::set_bus_master(device.bdf, true) {
             Ok(was_on) => was_on,
             Err(_) => {
@@ -216,6 +226,7 @@ impl BlockDevice {
             device_handle,
             mapping_handle,
             data_pages,
+            data_frames,
             features,
             geometry,
         })
@@ -225,13 +236,12 @@ impl BlockDevice {
         self.geometry
     }
 
-    fn frames(&self) -> Result<Vec<PhysFrame>, BlkError> {
-        dma::physical_range(self.pid, self.mapping_handle, 0, self.data_pages)
-            .map_err(|_| BlkError::Dma)
+    fn frames(&self) -> &[PhysFrame] {
+        &self.data_frames
     }
 
     pub fn fill_pattern(&self, seed: u8, prefix: &[u8]) -> Result<(), BlkError> {
-        for (page_index, frame) in self.frames()?.into_iter().enumerate() {
+        for (page_index, frame) in self.frames().iter().copied().enumerate() {
             let Some(ptr) = mm::phys_to_virt(frame.start()) else {
                 return Err(BlkError::Dma);
             };
@@ -247,9 +257,8 @@ impl BlockDevice {
         if prefix.len() > self.data_pages as usize * FRAME_SIZE as usize {
             return Err(BlkError::Dma);
         }
-        let frames = self.frames()?;
         let mut copied = 0usize;
-        for frame in frames {
+        for frame in self.frames().iter().copied() {
             if copied == prefix.len() {
                 break;
             }
@@ -267,15 +276,16 @@ impl BlockDevice {
     }
 
     pub fn data_equals(&self, seed: u8, prefix: &[u8]) -> Result<bool, BlkError> {
-        for (page_index, frame) in self.frames()?.into_iter().enumerate() {
+        for (page_index, frame) in self.frames().iter().copied().enumerate() {
             let Some(ptr) = mm::phys_to_virt(frame.start()) else {
                 return Err(BlkError::Dma);
             };
             for offset in 0..FRAME_SIZE as usize {
                 let absolute = page_index * FRAME_SIZE as usize + offset;
-                let expected = prefix.get(absolute).copied().unwrap_or_else(|| {
-                    seed.wrapping_add(absolute as u8)
-                });
+                let expected = prefix
+                    .get(absolute)
+                    .copied()
+                    .unwrap_or_else(|| seed.wrapping_add(absolute as u8));
                 // SAFETY: this is the exclusively mapped DMA backing frame.
                 let actual = unsafe { ptr.add(offset).read_volatile() };
                 if actual != expected {
@@ -287,9 +297,8 @@ impl BlockDevice {
     }
 
     pub fn copy_prefix(&self, out: &mut [u8]) -> Result<(), BlkError> {
-        let frames = self.frames()?;
         let mut copied = 0usize;
-        for frame in frames {
+        for frame in self.frames().iter().copied() {
             if copied == out.len() {
                 break;
             }
@@ -351,10 +360,10 @@ impl BlockDevice {
                 } else {
                     0
                 };
-                for frame in self
-                    .frames()?
-                    .into_iter()
-                    .take(usize::try_from(request.pages).map_err(|_| BlkError::Queue)?)
+                for frame in self.data_frames
+                    [..usize::try_from(request.pages).map_err(|_| BlkError::Queue)?]
+                    .iter()
+                    .copied()
                 {
                     self.queue
                         .set_descriptor(
@@ -369,7 +378,10 @@ impl BlockDevice {
                 }
             }
             RequestKind::Discard => {
-                if !self.queue.write_buffer(DISCARD_OFFSET, &request.discard_range()) {
+                if !self
+                    .queue
+                    .write_buffer(DISCARD_OFFSET, &request.discard_range())
+                {
                     return Err(BlkError::Queue);
                 }
                 let buffer_phys = self.queue.buffer_phys();
@@ -410,7 +422,9 @@ impl BlockDevice {
         let mut lifecycle = block::Lifecycle::new();
         lifecycle.submit().map_err(|_| BlkError::Queue)?;
         self.queue.submit(0).map_err(|_| BlkError::Queue)?;
-        self.virtio.notify(self.notify_off).map_err(|e| BlkError::Virtio(e.name()))?;
+        self.virtio
+            .notify(self.notify_off)
+            .map_err(|e| BlkError::Virtio(e.name()))?;
         if cancel_after_submit {
             lifecycle.cancel().map_err(|_| BlkError::Queue)?;
         }
@@ -421,10 +435,8 @@ impl BlockDevice {
         let start = arch::clock_counter();
         let timeout_counts = hrtime::tick_counts().saturating_mul(WAIT_TICKS);
         #[cfg(feature = "lifecycle-block-timeout-verify")]
-        let inject_completion_loss = DROP_NEXT_COMPLETION.swap(
-            false,
-            core::sync::atomic::Ordering::SeqCst,
-        );
+        let inject_completion_loss =
+            DROP_NEXT_COMPLETION.swap(false, core::sync::atomic::Ordering::SeqCst);
         #[cfg(not(feature = "lifecycle-block-timeout-verify"))]
         let inject_completion_loss = false;
         let (completion, _) = loop {
@@ -451,9 +463,7 @@ impl BlockDevice {
         if !self.queue.read_buffer(STATUS_OFFSET, &mut status) {
             return Err(BlkError::Queue);
         }
-        let terminal = lifecycle
-            .complete(status[0])
-            .map_err(|_| BlkError::Queue)?;
+        let terminal = lifecycle.complete(status[0]).map_err(|_| BlkError::Queue)?;
         Ok(terminal)
     }
 }

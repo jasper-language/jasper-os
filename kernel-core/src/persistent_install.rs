@@ -86,6 +86,46 @@ pub struct PersistentInstallStore<D: SectorIo> {
 }
 
 impl<D: SectorIo> PersistentInstallStore<D> {
+    /// Open an initialized store, or format a completely empty reserved region.
+    ///
+    /// Any non-zero data without a valid store header is rejected rather than
+    /// overwritten. This lets first boot initialize the bounded region while a
+    /// corrupt or foreign filesystem still fails closed.
+    pub fn mount(device: D) -> Result<Self, PersistentInstallError> {
+        Self::mount_with_status(device).map(|(store, _)| store)
+    }
+
+    /// Mount and report whether a fresh empty store had to be formatted.
+    pub fn mount_with_status(mut device: D) -> Result<(Self, bool), PersistentInstallError> {
+        let required = (TOTAL_UNITS as u64)
+            .checked_mul(SECTORS_PER_STORAGE_UNIT)
+            .ok_or(PersistentInstallError::Capacity)?;
+        if device.capacity_sectors() < required {
+            return Err(PersistentInstallError::Capacity);
+        }
+        let mut empty = true;
+        let mut page = [0u8; STORAGE_UNIT_BYTES];
+        for unit in 0..TOTAL_UNITS {
+            device
+                .read_unit(
+                    (unit as u64)
+                        .checked_mul(SECTORS_PER_STORAGE_UNIT)
+                        .ok_or(PersistentInstallError::Capacity)?,
+                    &mut page,
+                )
+                .map_err(|_| PersistentInstallError::Io)?;
+            if page.iter().any(|byte| *byte != 0) {
+                empty = false;
+                break;
+            }
+        }
+        if empty {
+            Self::format(device).map(|store| (store, true))
+        } else {
+            Self::open(device).map(|store| (store, false))
+        }
+    }
+
     #[inline(never)]
     pub fn format(device: D) -> Result<Self, PersistentInstallError> {
         if device.capacity_sectors()
@@ -141,7 +181,10 @@ impl<D: SectorIo> PersistentInstallStore<D> {
         let mut selected: Option<(u64, Box<State>)> = None;
         for slot in 0..2 {
             if let Some((sequence, state)) = read_slot(&mut device, slot)? {
-                if selected.as_ref().is_none_or(|(current, _)| sequence > *current) {
+                if selected
+                    .as_ref()
+                    .is_none_or(|(current, _)| sequence > *current)
+                {
                     selected = Some((sequence, state));
                 }
             }
@@ -1320,6 +1363,27 @@ mod tests {
         assert_eq!(reopened.installation(first).unwrap().package, package);
         assert_eq!(reopened.installation(second).unwrap().package, package);
         assert_eq!(reopened.installation_count_for(package), 2);
+    }
+
+    #[test]
+    fn mount_formats_only_a_fully_empty_region_and_reopens_the_store() {
+        let (mut store, initialized) =
+            PersistentInstallStore::mount_with_status(MemoryDisk::new(TOTAL_UNITS)).unwrap();
+        assert!(initialized);
+        let package = store
+            .install_package(package_spec(0x42), b"mounted-package")
+            .unwrap();
+        let (reopened, initialized) =
+            PersistentInstallStore::mount_with_status(store.into_device()).unwrap();
+        assert!(!initialized);
+        assert_eq!(reopened.package(package).unwrap().spec, package_spec(0x42));
+
+        let mut foreign = MemoryDisk::new(TOTAL_UNITS);
+        foreign.bytes[0] = 1;
+        assert_eq!(
+            PersistentInstallStore::mount(foreign).err(),
+            Some(PersistentInstallError::InvalidFormat)
+        );
     }
 
     #[test]

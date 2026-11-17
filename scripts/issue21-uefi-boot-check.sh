@@ -96,9 +96,11 @@ cleanup() {
   if [ -n "$SERIAL_READER" ]; then
     kill "$SERIAL_READER" 2>/dev/null || true
   fi
-  rm -f -- "$IMAGE" "$ESP_IMAGE" "$UEFI_ESP" "$OVMF_VARS" \
-    "$TARGET/system-A.img" "$TARGET/system-B.img" \
-    "$OUT/serial.in" "$OUT/serial.out"
+  if [ "${ISSUE21_KEEP_DERIVED:-0}" != 1 ]; then
+    rm -f -- "$IMAGE" "$ESP_IMAGE" "$UEFI_ESP" "$OVMF_VARS" \
+      "$TARGET/system-A.img" "$TARGET/system-B.img"
+  fi
+  rm -f -- "$OUT/serial.in" "$OUT/serial.out"
 }
 on_exit() {
   status=$?
@@ -147,7 +149,9 @@ fi
 
 # 仅清理本脚本固定命名的派生产物；证据目录必须独占，防止陈旧日志混入。
 # Remove only this script's fixed derived files; evidence output must be fresh.
-rm -f -- "$IMAGE" "$ESP_IMAGE" "$UEFI_ESP" "$OVMF_VARS"
+if [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
+  rm -f -- "$IMAGE" "$ESP_IMAGE" "$UEFI_ESP" "$OVMF_VARS"
+fi
 
 case "$MODE" in
   root-exec) KERNEL_FEATURES=lifecycle-root-exec-verify ;;
@@ -200,18 +204,20 @@ run_lifecycle() {
   fi
 }
 
-run_lifecycle jasper-gpt-image \
-  "$IMAGE" 38654705664 >"$OUT/gpt.log" 2>&1
-run_lifecycle jasper-esp-format \
-  "$IMAGE" 38654705664 >"$OUT/esp-format.log" 2>&1
-"$CARGO_TARGET/release/xtask" uefi-managed-esp \
-  "$KERNEL" "$KERNEL" \
-  "$BOOT_MANAGER" \
-  "$UEFI_ESP" >"$OUT/uefi-esp.log" 2>&1
-run_lifecycle jasper-esp-install \
-  "$IMAGE" 38654705664 "$UEFI_ESP" >"$OUT/esp-install.log" 2>&1
-run_lifecycle jasper-ext4-provision \
-  "$IMAGE" 38654705664 >"$OUT/ext4-provision.log" 2>&1
+if [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
+  run_lifecycle jasper-gpt-image \
+    "$IMAGE" 38654705664 >"$OUT/gpt.log" 2>&1
+  run_lifecycle jasper-esp-format \
+    "$IMAGE" 38654705664 >"$OUT/esp-format.log" 2>&1
+  "$CARGO_TARGET/release/xtask" uefi-managed-esp \
+    "$KERNEL" "$KERNEL" \
+    "$BOOT_MANAGER" \
+    "$UEFI_ESP" >"$OUT/uefi-esp.log" 2>&1
+  run_lifecycle jasper-esp-install \
+    "$IMAGE" 38654705664 "$UEFI_ESP" >"$OUT/esp-install.log" 2>&1
+  run_lifecycle jasper-ext4-provision \
+    "$IMAGE" 38654705664 >"$OUT/ext4-provision.log" 2>&1
+fi
 ROOT_EXEC_PROBE=""
 ROOT_FULL_USERLAND=0
 ROOT_SIGNAL_FIXTURE=""
@@ -258,14 +264,16 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native
     ROOT_ANDROID_LINKER_CONFIG="$PWD/verification/fixtures/android/ld.config.txt"
   fi
 fi
-bash scripts/issue21-system-root-fixture.sh \
-  "$IMAGE" "$TARGET" 1050624 A 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" "$ROOT_PPID_FIXTURE" "$ROOT_ANDROID_TOYBOX" "$ROOT_AOSP_BINDER_TEST" "$ROOT_ANDROID_TREE" "$ROOT_ANDROID_LINKER_CONFIG" >"$OUT/system-root-a.log" 2>&1
-bash scripts/issue21-system-root-fixture.sh \
-  "$IMAGE" "$TARGET" 17827840 B 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" "$ROOT_PPID_FIXTURE" "$ROOT_ANDROID_TOYBOX" "$ROOT_AOSP_BINDER_TEST" "$ROOT_ANDROID_TREE" "$ROOT_ANDROID_LINKER_CONFIG" >"$OUT/system-root-b.log" 2>&1
-run_lifecycle jasper-control-init \
-  "$IMAGE" 38654705664 "$KERNEL" 1 1 1 1 1 >"$OUT/control-init.log" 2>&1
-run_lifecycle jasper-control-inspect \
-  "$IMAGE" 38654705664 >"$OUT/control-inspect.log" 2>&1
+if [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
+  bash scripts/issue21-system-root-fixture.sh \
+    "$IMAGE" "$TARGET" 1050624 A 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" "$ROOT_PPID_FIXTURE" "$ROOT_ANDROID_TOYBOX" "$ROOT_AOSP_BINDER_TEST" "$ROOT_ANDROID_TREE" "$ROOT_ANDROID_LINKER_CONFIG" >"$OUT/system-root-a.log" 2>&1
+  bash scripts/issue21-system-root-fixture.sh \
+    "$IMAGE" "$TARGET" 17827840 B 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" "$ROOT_PPID_FIXTURE" "$ROOT_ANDROID_TOYBOX" "$ROOT_AOSP_BINDER_TEST" "$ROOT_ANDROID_TREE" "$ROOT_ANDROID_LINKER_CONFIG" >"$OUT/system-root-b.log" 2>&1
+  run_lifecycle jasper-control-init \
+    "$IMAGE" 38654705664 "$KERNEL" 1 1 1 1 1 >"$OUT/control-init.log" 2>&1
+  run_lifecycle jasper-control-inspect \
+    "$IMAGE" 38654705664 >"$OUT/control-inspect.log" 2>&1
+fi
 
 if [ "$MODE" = both-controls-corrupt ]; then
   CORRUPT="$TARGET/control-unrecoverable.bin"
@@ -283,7 +291,9 @@ fsck.fat -n -v -l "$ESP_IMAGE" >"$OUT/fsck-fat.log" 2>&1
 sgdisk -v "$IMAGE" >"$OUT/sgdisk.log" 2>&1
 grep -q 'No problems found' "$OUT/sgdisk.log"
 
-cp /usr/share/OVMF/OVMF_VARS_4M.fd "$OVMF_VARS"
+if [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
+  cp /usr/share/OVMF/OVMF_VARS_4M.fd "$OVMF_VARS"
+fi
 QEMU_EXTRA=(-monitor none)
 if [ -n "${ISSUE21_MONITOR_SOCKET:-}" ]; then
   QEMU_EXTRA=(-monitor "unix:$ISSUE21_MONITOR_SOCKET,server=on,wait=off")
@@ -442,6 +452,20 @@ fi
 if [ "$MODE" = native-install-abi ]; then
   grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
   grep -aqE $'^(\\[JSR-USERTEXT\\].*text=)?native-install-abi: ok package=true idempotent=true register=true grant=true query=true updates=true update_short=true handle=true rights=true close=true denied_short=true\r?$' "$OUT/serial.log"
+  case "${ISSUE21_NATIVE_INSTALL_EXPECT:-}" in
+    initialized)
+      grep -aq '^\[JSR-NATIVE-INSTALL-STORE\] mounted=true initialized=true ' "$OUT/serial.log"
+      ;;
+    reopened)
+      grep -aq '^\[JSR-NATIVE-INSTALL-STORE\] mounted=true initialized=false ' "$OUT/serial.log"
+      ;;
+    "")
+      ;;
+    *)
+      echo "issue21-uefi-boot: invalid ISSUE21_NATIVE_INSTALL_EXPECT" >&2
+      exit 64
+      ;;
+  esac
   ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
   echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
   exit 0

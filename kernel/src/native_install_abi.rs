@@ -1,11 +1,10 @@
 //! Kernel backend for the versioned native installation ABI.
 //!
-//! This verification backend is a fixed RAM `SectorIo`; it proves ABI,
-//! authorization and transactional store semantics without claiming reboot
-//! persistence. The separately verified virtio-blk service remains the
-//! persistence authority and must be mounted before this ABI is production
-//! complete.
+//! The backend uses the same validated P0 virtio-blk device as lifecycle
+//! services, but addresses only the explicitly reserved installation region.
 
+use alloc::sync::Arc;
+use kernel_core::block::{self, Request, Terminal};
 use kernel_core::fs::journal::{JournalError, SectorIo, STORAGE_UNIT_BYTES};
 use kernel_core::native_install::{
     GrantKey, InstallationKey, InstallationSnapshot, PackageKey, PackageSpec, Subject,
@@ -14,44 +13,35 @@ use kernel_core::native_install_abi::{GrantArgs, RegisterArgs, MAX_VISIBLE_UPDAT
 use kernel_core::native_install_service::{
     InstallServiceCaller, InstallServiceError, NativeInstallService, VisibleUpdate,
 };
-use kernel_core::persistent_install::PersistentInstallStore;
+use kernel_core::persistent_install::{PersistentInstallError, PersistentInstallStore};
 use kernel_core::security::SecurityDomain;
 
-use core::cell::UnsafeCell;
-
+use crate::blk::BlockDevice;
 use crate::sync::IrqSpinLock;
 use crate::{proc, security};
 
-const RAM_UNITS: usize = 64;
-const RAM_BYTES: usize = RAM_UNITS * STORAGE_UNIT_BYTES;
+#[derive(Clone)]
+struct ReservedVirtioSectorIo {
+    device: Arc<IrqSpinLock<BlockDevice>>,
+    base_sector: u64,
+    sectors: u64,
+}
 
-struct SharedRamStorage(UnsafeCell<[u8; RAM_BYTES]>);
-
-unsafe impl Sync for SharedRamStorage {}
-
-static RAM_STORAGE: SharedRamStorage = SharedRamStorage(UnsafeCell::new([0; RAM_BYTES]));
-
-/// Zero-sized SectorIo handle over the locked verification RAM.
-///
-/// The enclosing `BACKEND` lock is held for every SectorIo call, so this is the
-/// sole temporary mutable access to `RAM_STORAGE`. Keeping the 256 KiB backing
-/// array out of the value avoids constructing a large object on the kernel stack.
-#[derive(Clone, Copy)]
-struct RamDisk;
-
-impl RamDisk {
-    fn offset(sector: u64) -> Result<usize, JournalError> {
-        usize::try_from(sector)
-            .ok()
-            .and_then(|sector| sector.checked_mul(512))
-            .filter(|offset| offset.saturating_add(STORAGE_UNIT_BYTES) <= RAM_BYTES)
+impl ReservedVirtioSectorIo {
+    fn absolute(&self, sector: u64) -> Result<u64, JournalError> {
+        sector
+            .checked_add(block::SECTORS_PER_IO_UNIT)
+            .filter(|end| *end <= self.sectors)
+            .ok_or(JournalError::Storage)?;
+        self.base_sector
+            .checked_add(sector)
             .ok_or(JournalError::Storage)
     }
 }
 
-impl SectorIo for RamDisk {
+impl SectorIo for ReservedVirtioSectorIo {
     fn capacity_sectors(&self) -> u64 {
-        (RAM_BYTES / 512) as u64
+        self.sectors
     }
 
     fn read_unit(
@@ -59,10 +49,21 @@ impl SectorIo for RamDisk {
         sector: u64,
         out: &mut [u8; STORAGE_UNIT_BYTES],
     ) -> Result<(), JournalError> {
-        let offset = Self::offset(sector)?;
-        let bytes = unsafe { &mut *RAM_STORAGE.0.get() };
-        out.copy_from_slice(&bytes[offset..offset + STORAGE_UNIT_BYTES]);
-        Ok(())
+        let sector = self.absolute(sector)?;
+        let mut device = self.device.lock();
+        match device.execute(Request::read(sector, 1), false) {
+            Ok(Terminal::Completed) => {}
+            Ok(_) => return Err(JournalError::Storage),
+            Err(error) => {
+                crate::kprintln!(
+                    "[JSR-NATIVE-INSTALL-IO] op=read sector={} error={}",
+                    sector,
+                    error.name()
+                );
+                return Err(JournalError::Storage);
+            }
+        }
+        device.copy_prefix(out).map_err(|_| JournalError::Storage)
     }
 
     fn write_unit(
@@ -70,25 +71,67 @@ impl SectorIo for RamDisk {
         sector: u64,
         bytes: &[u8; STORAGE_UNIT_BYTES],
     ) -> Result<(), JournalError> {
-        let offset = Self::offset(sector)?;
-        let storage = unsafe { &mut *RAM_STORAGE.0.get() };
-        storage[offset..offset + STORAGE_UNIT_BYTES].copy_from_slice(bytes);
-        Ok(())
+        let sector = self.absolute(sector)?;
+        let mut device = self.device.lock();
+        if let Err(error) = device.fill_pattern(0, bytes) {
+            crate::kprintln!(
+                "[JSR-NATIVE-INSTALL-IO] op=fill sector={} error={}",
+                sector,
+                error.name()
+            );
+            return Err(JournalError::Storage);
+        }
+        match device.execute(Request::write(sector, 1, false), false) {
+            Ok(Terminal::Completed) => Ok(()),
+            Ok(_) => Err(JournalError::Storage),
+            Err(error) => {
+                crate::kprintln!(
+                    "[JSR-NATIVE-INSTALL-IO] op=write sector={} error={}",
+                    sector,
+                    error.name()
+                );
+                Err(JournalError::Storage)
+            }
+        }
     }
 
     fn flush(&mut self) -> Result<(), JournalError> {
-        Ok(())
+        match self.device.lock().execute(Request::flush(), false) {
+            Ok(Terminal::Completed) => Ok(()),
+            Ok(_) => Err(JournalError::Storage),
+            Err(error) => {
+                crate::kprintln!("[JSR-NATIVE-INSTALL-IO] op=flush error={}", error.name());
+                Err(JournalError::Storage)
+            }
+        }
     }
 }
 
-static BACKEND: IrqSpinLock<Option<NativeInstallService<RamDisk>>> =
+static BACKEND: IrqSpinLock<Option<NativeInstallService<ReservedVirtioSectorIo>>> =
     IrqSpinLock::ranked(crate::lockorder::NATIVE_INSTALL, None);
 
-fn ensure_backend(
-    backend: &mut Option<NativeInstallService<RamDisk>>,
-) -> Result<(), InstallServiceError> {
+fn ensure_initialized() -> Result<(), InstallServiceError> {
+    if BACKEND.lock().is_some() {
+        return Ok(());
+    }
+    let device = crate::lifecycle_health::persistent_p0_device().map_err(|error| {
+        crate::kprintln!("[JSR-NATIVE-INSTALL-IO] op=mount-p0 error={}", error.name());
+        InstallServiceError::Store(PersistentInstallError::Io)
+    })?;
+    let (store, initialized) = PersistentInstallStore::mount_with_status(ReservedVirtioSectorIo {
+        device,
+        base_sector: jasper_lifecycle_boot::P0_INSTALL_STORE_LBA,
+        sectors: jasper_lifecycle_boot::P0_INSTALL_STORE_SECTORS,
+    })
+    .map_err(InstallServiceError::Store)?;
+    crate::kprintln!(
+        "[JSR-NATIVE-INSTALL-STORE] mounted=true initialized={} base={} sectors={}",
+        initialized,
+        jasper_lifecycle_boot::P0_INSTALL_STORE_LBA,
+        jasper_lifecycle_boot::P0_INSTALL_STORE_SECTORS
+    );
+    let mut backend = BACKEND.lock();
     if backend.is_none() {
-        let store = PersistentInstallStore::format(RamDisk).map_err(InstallServiceError::Store)?;
         *backend = Some(NativeInstallService::new(store));
     }
     Ok(())
@@ -96,8 +139,7 @@ fn ensure_backend(
 
 /// Initialize the persistent installation service before user-process baselines.
 pub fn warmup() -> Result<(), InstallServiceError> {
-    let mut backend = BACKEND.lock();
-    ensure_backend(&mut backend)
+    ensure_initialized()
 }
 
 fn current_caller() -> Result<InstallServiceCaller, InstallServiceError> {
@@ -115,8 +157,8 @@ fn current_caller() -> Result<InstallServiceCaller, InstallServiceError> {
 
 pub fn package_put(spec: PackageSpec, bytes: &[u8]) -> Result<PackageKey, InstallServiceError> {
     let caller = current_caller()?;
+    ensure_initialized()?;
     let mut backend = BACKEND.lock();
-    ensure_backend(&mut backend)?;
     backend
         .as_mut()
         .ok_or(InstallServiceError::InvalidCaller)?
@@ -125,8 +167,8 @@ pub fn package_put(spec: PackageSpec, bytes: &[u8]) -> Result<PackageKey, Instal
 
 pub fn register(args: RegisterArgs) -> Result<InstallationKey, InstallServiceError> {
     let caller = current_caller()?;
+    ensure_initialized()?;
     let mut backend = BACKEND.lock();
-    ensure_backend(&mut backend)?;
     backend
         .as_mut()
         .ok_or(InstallServiceError::InvalidCaller)?
@@ -141,8 +183,8 @@ pub fn register(args: RegisterArgs) -> Result<InstallationKey, InstallServiceErr
 
 pub fn grant(args: GrantArgs) -> Result<GrantKey, InstallServiceError> {
     let caller = current_caller()?;
+    ensure_initialized()?;
     let mut backend = BACKEND.lock();
-    ensure_backend(&mut backend)?;
     backend
         .as_mut()
         .ok_or(InstallServiceError::InvalidCaller)?
@@ -160,8 +202,8 @@ pub fn query(
     now: u64,
 ) -> Result<InstallationSnapshot, InstallServiceError> {
     let caller = current_caller()?;
-    let mut backend = BACKEND.lock();
-    ensure_backend(&mut backend)?;
+    ensure_initialized()?;
+    let backend = BACKEND.lock();
     backend
         .as_ref()
         .ok_or(InstallServiceError::InvalidCaller)?
@@ -171,8 +213,8 @@ pub fn query(
 pub fn visible_updates(
 ) -> Result<([Option<VisibleUpdate>; MAX_VISIBLE_UPDATES], usize), InstallServiceError> {
     let caller = current_caller()?;
-    let mut backend = BACKEND.lock();
-    ensure_backend(&mut backend)?;
+    ensure_initialized()?;
+    let backend = BACKEND.lock();
     let mut output = [None; MAX_VISIBLE_UPDATES];
     let written = backend
         .as_ref()

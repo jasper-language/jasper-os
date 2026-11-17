@@ -1655,7 +1655,18 @@ mod dedicated {
         exit_on(u64::from(!ok));
     }
 
-    pub const PLAN: &[&[Step]] = &[PREFIX, SMP_UP, &[PlanItem::Finish(finish)]];
+    // The native-install ABI now mounts its persistent store from the P0 GPT.
+    // BLK-1 intentionally discards GPT entry sectors, so it must not run before
+    // this profile validates and mounts the real installation region.
+    const STAGES: &[Step] = &[
+        st(Stage::Space),
+        case("mm-space", Stage::Space, "mm", mm_space),
+        st(Stage::Smp),
+        case("smp-checks", Stage::Smp, "smp", smp_checks),
+        #[cfg(target_arch = "x86_64")]
+        case("drv3-dma", Stage::Smp, "drv3", drv3_dma),
+    ];
+    pub const PLAN: &[&[Step]] = &[PREFIX, STAGES, &[PlanItem::Finish(finish)]];
 }
 
 #[cfg(feature = "fs1-ext4-verify")]

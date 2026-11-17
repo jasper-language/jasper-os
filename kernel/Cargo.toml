@@ -160,6 +160,7 @@ native-install-abi-verify = [
     "kernel-core/persistent-install",
     "user-programs",
     "kernel-core/sec1-verify",
+    "lifecycle-ab-health",
 ]
 # Native CLI discovery for the tenant-scoped update list ABI.
 native-install-list-cli-verify = [

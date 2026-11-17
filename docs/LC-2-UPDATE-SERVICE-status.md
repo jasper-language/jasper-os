@@ -4,7 +4,7 @@
 
 状态：**core service implemented; LC-2 remains core-passed**。`UpdateService` 已成为
 一个持有单一 `UpdateCoordinator` 和 `FileControlStore` 的有状态服务门面；
-正式系统授权、租户作用域、跨重启审计查询和 Pixel 验收仍未完成。
+Issue #39 的全系统统一授权、跨重启审计查询、完整故障矩阵和 Pixel 验收仍未完成。
 
 ## 服务状态机
 
@@ -56,6 +56,21 @@ record width、尾随字节和短输出校验；人类输出与 JSON 消费同�
 中复用同一 `UpdateListClient`。该传输只桥接固定协议，不注入 tenant、subject、
 scope 或路径；真机/UEFI 证据见
 `evidence/issue21-uefi-boot-20261117-214003/README.md`。
+
+### 生产持久后端
+
+原生安装/list ABI 已从验证 RAM 盘切换到真实 P0 virtio-blk 保留区：
+
+- store 固定在 Control A 分区内 `P0_INSTALL_STORE_LBA` 起 16 MiB 区域，不覆盖
+  control record、archive receipt、ESP、System A/B 或 Data；
+- `PersistentInstallStore::mount` 只对完整零区首启格式化；存在非零数据但无有效
+  store header、损坏快照或 I/O 错误均失败关闭，不覆盖未知数据；
+- 安装服务复用 lifecycle 已验证的同一 P0 BlockDevice，不创建第二份设备授权；
+- BlockDevice 创建时缓存 DMA 物理页，热路径不再重新查询对象表，避免
+  `NATIVE_INSTALL -> OBJECT_TABLE` 反向锁序；
+- 同一 P0 镜像第一次 UEFI 启动记录 `initialized=true`；第二次复用相同
+  Control/OVMF/Data 状态启动记录 `initialized=false`，并再次通过
+  package、register、grant、query、update list 和资源回收。
 
 受信救援环境可以携带底层路径运行独立的 `jasper-update-recovery` 维护工具：
 
@@ -200,9 +215,6 @@ cargo test --locked -p kernel-core update_client::tests
 cargo test --locked -p kernel-core update_agent::tests
 4 passed; 0 failed
 
-cargo test --locked -p kernel-core update_agent::tests
-4 passed; 0 failed
-
 cargo test --locked -p kernel-core update_agent_ipc::tests
 6 passed; 0 failed
 
@@ -211,6 +223,9 @@ cargo test --locked -p kernel-core update_list_agent::tests
 
 cargo test --locked -p kernel-core native_install_service::tests
 3 passed; 0 failed
+
+cargo test --locked -p kernel-core persistent_install::tests
+7 passed; 0 failed
 
 cargo check --locked -p user-updateagentd --target x86_64-unknown-none
 PASS
@@ -242,6 +257,18 @@ PASS mode=update-agent qemu_rc=33
 
 ISSUE21_UEFI_MODE=update-list bash scripts/issue21-uefi-boot-check.sh
 PASS mode=update-list qemu_rc=33
+
+ISSUE21_UEFI_MODE=native-install-abi \
+ISSUE21_NATIVE_INSTALL_EXPECT=initialized \
+ISSUE21_KEEP_DERIVED=1 bash scripts/issue21-uefi-boot-check.sh
+PASS mode=native-install-abi initialized=true qemu_rc=33
+
+ISSUE21_UEFI_MODE=native-install-abi \
+ISSUE21_UEFI_PREBUILT=1 \
+ISSUE21_REUSE_P0=1 \
+ISSUE21_NATIVE_INSTALL_EXPECT=reopened \
+bash scripts/issue21-uefi-boot-check.sh
+PASS mode=native-install-abi initialized=false qemu_rc=33
 
 bash scripts/abi-contract.sh check
 PASS (3.20.0)
@@ -282,7 +309,6 @@ PASS (3.20.0)
 
 ## 仍未完成
 
-- 租户更新集合的生产持久后端；原生 ABI、CLI 与外部 Agent list 已具备；
 - 信任根轮换、2-of-3 门限和签名撤销快照持久化；
 - 断点续传、生产发布源高可用和跨重启审计查询；
 - 系统级在线/离线发布演练和 Pixel 6a 安装/回滚/断电矩阵。

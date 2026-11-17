@@ -452,6 +452,14 @@ fn control_device() -> Result<Arc<IrqSpinLock<BlockDevice>>, HealthError> {
         .ok_or(HealthError::Block)
 }
 
+/// Borrow the single validated P0 disk backend used by lifecycle services.
+///
+/// Consumers must address only explicitly reserved GPT regions; this handle
+/// never grants raw device paths to user space.
+pub(crate) fn persistent_p0_device() -> Result<Arc<IrqSpinLock<BlockDevice>>, HealthError> {
+    control_device()
+}
+
 struct PartitionExt4Source {
     device: Arc<IrqSpinLock<BlockDevice>>,
     start_lba: u64,
