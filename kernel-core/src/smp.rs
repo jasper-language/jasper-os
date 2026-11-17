@@ -27,6 +27,24 @@ use alloc::vec::Vec;
 /// Maximum number of logical processors.
 pub const MAX_CPUS: usize = 32;
 
+/// Count inventory records that were discovered but not admitted.
+///
+/// Platform adapters may copy a larger firmware inventory into a bounded
+/// per-CPU table. They must preserve both conversion failures and capacity
+/// overflow so the unified SMP gate can reject the incomplete topology.
+///
+/// 统计已发现但未准入的库存记录。平台适配器把较大的固件库存复制到有界每核表时，
+/// 必须同时保留转换失败与容量溢出，让统一 SMP 门禁拒绝不完整拓扑。
+pub const fn unadmitted_inventory(
+    discovered: usize,
+    admitted: usize,
+    conversion_failures: usize,
+) -> usize {
+    discovered
+        .saturating_sub(admitted)
+        .saturating_add(conversion_failures)
+}
+
 /// 一次击落允许的最大页数（超过时调用者应改为整体作废）。
 /// Maximum pages in a single shootdown request.
 pub const MAX_SHOOTDOWN_PAGES: u64 = 512;
@@ -828,6 +846,14 @@ mod tests {
             })
             .collect();
         assert_eq!(t.ids(), expected);
+    }
+
+    #[test]
+    fn bounded_inventory_preserves_capacity_and_conversion_failures() {
+        assert_eq!(unadmitted_inventory(32, 32, 0), 0);
+        assert_eq!(unadmitted_inventory(33, 32, 0), 1);
+        assert_eq!(unadmitted_inventory(40, 32, 3), 11);
+        assert_eq!(unadmitted_inventory(0, 0, 3), 3);
     }
 
     #[test]

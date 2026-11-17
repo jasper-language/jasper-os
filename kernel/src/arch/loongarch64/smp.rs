@@ -26,6 +26,7 @@ const ECFG_IPI: u64 = 1 << 12;
 const ESTAT_IPI: u64 = 1 << 12;
 
 static CPU_COUNT: AtomicU32 = AtomicU32::new(1);
+static CPU_DROPPED: AtomicU32 = AtomicU32::new(0);
 static TIMER_HZ: AtomicU32 = AtomicU32::new(100);
 static HW_IDS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 
@@ -137,8 +138,19 @@ pub fn discover_fdt(efi_boot: bool, system_table: u64) -> Result<FirmwareFdt, &'
         return Err("qemu-fdt-boot-cpu-missing");
     }
     let topology = cpus.topology;
-    CPU_COUNT.store(topology.count().min(MAX_CPUS) as u32, Ordering::Release);
-    for index in 0..topology.count().min(MAX_CPUS) {
+    let discovered = topology.count();
+    let admitted = discovered.min(MAX_CPUS);
+    // Preserve the firmware inventory overflow for the unified SMP gate.
+    // Rebuilding from the fixed hardware-ID table must not make an unsupported
+    // larger machine look like a complete smaller machine.
+    // 保留固件原始库存溢出；从固定硬件 ID 表重建时，不能把超限机器伪装成
+    // 完整但更小的机器。
+    CPU_DROPPED.store(
+        kernel_core::smp::unadmitted_inventory(discovered, admitted, topology.dropped) as u32,
+        Ordering::Release,
+    );
+    CPU_COUNT.store(admitted as u32, Ordering::Release);
+    for index in 0..admitted {
         HW_IDS[index].store(topology.hw_id(index).unwrap_or(0), Ordering::Release);
     }
     Ok(FirmwareFdt {
@@ -216,6 +228,9 @@ fn topology() -> Topology {
     for index in 1..CPU_COUNT.load(Ordering::Acquire) as usize {
         topology.push(HW_IDS[index].load(Ordering::Acquire));
     }
+    topology.dropped = topology
+        .dropped
+        .saturating_add(CPU_DROPPED.load(Ordering::Acquire) as usize);
     topology
 }
 
@@ -226,7 +241,7 @@ fn cpu_hw_id() -> u32 {
 pub fn cpu_index() -> usize {
     let hw = cpu_hw_id();
     let mut registered = None;
-    for index in 0..CPU_COUNT.load(Ordering::Acquire).min(MAX_CPUS as u32) as usize {
+    for index in 0..CPU_COUNT.load(Ordering::Acquire) as usize {
         if HW_IDS[index].load(Ordering::Acquire) == hw {
             registered = Some(index);
             break;
