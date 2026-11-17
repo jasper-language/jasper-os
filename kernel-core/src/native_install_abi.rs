@@ -21,7 +21,7 @@ pub const UPDATE_LIST_REQUEST_BYTES: usize = 32;
 pub const UPDATE_LIST_HEADER_BYTES: usize = 32;
 pub const UPDATE_LIST_RECORD_BYTES: usize = 96;
 pub const MAX_VISIBLE_UPDATES: usize = 32; // JASPER-HARDCODE-REVIEW: issue=33 source=storage-ABI-v1 reason=bounded-native-install-snapshot-capacity
-pub const MAX_UPDATE_LIST_BYTES: usize =
+pub const MAX_UPDATE_LIST_BYTES: usize = // JASPER-HARDCODE-REVIEW: issue=33 source=storage-ABI-v1 reason=bounded-native-install-snapshot-wire-size
     UPDATE_LIST_HEADER_BYTES + MAX_VISIBLE_UPDATES * UPDATE_LIST_RECORD_BYTES;
 
 /// Request for the authenticated caller's update-visible installation set.
