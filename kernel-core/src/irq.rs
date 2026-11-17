@@ -175,6 +175,9 @@ impl SlotSet {
 pub struct Released {
     /// 被节流的 MSI 向量槽位。
     pub msi: SlotSet,
+    /// The preallocated released-line buffer could not represent every throttled
+    /// line. Callers must fail closed and must not clear the remaining mask bits.
+    pub line_overflow: bool,
 }
 
 /// 判定「被拉长的 tick」的门槛：间隔超过平滑 tick 长度的 3/2 即视为停表或补发，不计入长度测量。
@@ -396,8 +399,19 @@ impl CoreQuota {
         self.used_cycles = 0;
         self.used_count = 0;
         self.released_lines.clear();
-        for (word_index, word) in self.throttled.iter_mut().enumerate() {
-            let mut pending = core::mem::take(word);
+        let mut line_overflow = false;
+        for word_index in 0..self.throttled.len() {
+            let mut pending = self.throttled[word_index];
+            if self
+                .released_lines
+                .len()
+                .checked_add(pending.count_ones() as usize)
+                .is_none_or(|required| required > self.released_lines.capacity())
+            {
+                line_overflow = true;
+                continue;
+            }
+            self.throttled[word_index] = 0;
             while pending != 0 {
                 let bit = pending.trailing_zeros() as usize;
                 self.released_lines.push(word_index * 64 + bit);
@@ -406,6 +420,7 @@ impl CoreQuota {
         }
         Released {
             msi: core::mem::take(&mut self.msi_throttled),
+            line_overflow,
         }
     }
 
@@ -419,17 +434,9 @@ impl CoreQuota {
         &self.released_lines
     }
 
-    /// Move the released-line list out so callbacks can run after the quota
-    /// guard is dropped without allocating in an interrupt-context lock nest.
-    pub fn take_released_lines(&mut self) -> Vec<usize> {
-        core::mem::take(&mut self.released_lines)
-    }
-
-    /// Return emptied storage to the quota after all callbacks completed.
-    pub fn restore_released_lines(&mut self, mut lines: Vec<usize>) {
-        debug_assert!(lines.is_empty());
-        lines.clear();
-        self.released_lines = lines;
+    /// Clear the fixed-capacity release list after callbacks completed.
+    pub fn clear_released_lines(&mut self) {
+        self.released_lines.clear();
     }
 
     /// 当前被节流的 MSI 槽位集合。
@@ -713,6 +720,29 @@ mod tests {
         b.on_tick(12_000);
         assert_eq!(b.released_lines(), [5]);
         assert_eq!(b.charge(5, 10), Charge::Within);
+    }
+
+    #[test]
+    fn release_overflow_fails_closed_without_allocating_or_clearing_masks() {
+        let mut q = CoreQuota::new(QuotaParams {
+            permille: 250,
+            max_per_tick: 4,
+        });
+        // Two words contain three throttled lines, but the caller supplied room
+        // for only one release. The first word must remain untouched.
+        q.adopt_lines(vec![(1 << 1) | (1 << 2), 1], Vec::with_capacity(1))
+            .unwrap();
+        q.throttled[0] = (1 << 1) | (1 << 2);
+        q.throttled[1] = 1;
+
+        let released = q.on_tick(1000);
+
+        assert!(released.line_overflow);
+        assert!(q.is_line_throttled(1));
+        assert!(q.is_line_throttled(2));
+        assert!(!q.is_line_throttled(64));
+        assert_eq!(q.released_lines(), [64]);
+        assert!(q.needs_tick());
     }
 
     #[test]

@@ -27,7 +27,6 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use alloc::vec::Vec;
 use kernel_core::irq::{
     plan_runtime_lines, AffinityPolicy, Charge, CoreQuota, IrqError, LineLoad, QuotaParams,
-    Released,
 };
 use kernel_core::msi::MsiError;
 use kernel_core::smp::{CpuSet, MAX_CPUS};
@@ -886,29 +885,38 @@ pub mod device {
     /// 并对被节流的 MSI 槽位调用其解除屏蔽动作（槽位已解除登记的跳过）。
     pub(super) fn on_cpu_tick() {
         let cpu = arch::cpu_index();
-        let (msi, mut released_lines) = {
+        let (released, released_count) = {
             let mut quota = QUOTAS[cpu].lock();
-            let Released { msi } = quota.on_tick(arch::cycles());
-            (msi, quota.take_released_lines())
+            let released = quota.on_tick(arch::cycles());
+            (released, quota.released_lines().len())
         };
-        for slot in msi.iter() {
+        if released.line_overflow {
+            crate::kprintln!(
+                "[JSR-IRQ] reject=released_line_capacity cpu={} capacity={}",
+                cpu,
+                line_count()
+            );
+            arch::halt_forever();
+        }
+        for slot in released.msi.iter() {
             if let Some((ops, ctx)) = msi_mask_ops(cpu, slot) {
                 (ops.unmask)(cpu, slot as u8, ctx);
             }
         }
-        if !released_lines.is_empty() {
-            for &line in &released_lines {
-                // JASPER-HARDCODE-REVIEW: issue=33 source=released-request-runtime-state reason=line-missing-from-current-table-is-not-enabled
-                let enabled = ROUTING.lock().enabled.get(line).copied().unwrap_or(false);
-                if enabled {
-                    arch::device_irq_set_masked(line, false);
-                }
+        for index in 0..released_count {
+            let line = QUOTAS[cpu]
+                .lock()
+                .released_lines()
+                .get(index)
+                .copied()
+                .unwrap_or_else(|| arch::halt_forever());
+            // JASPER-HARDCODE-REVIEW: issue=33 source=released-request-runtime-state reason=line-missing-from-current-table-is-not-enabled
+            let enabled = ROUTING.lock().enabled.get(line).copied().unwrap_or(false);
+            if enabled {
+                arch::device_irq_set_masked(line, false);
             }
         }
-        released_lines.clear();
-        QUOTAS[cpu]
-            .lock()
-            .restore_released_lines(released_lines);
+        QUOTAS[cpu].lock().clear_released_lines();
     }
 
     /// 本处理器是否还需要周期 tick 来补充设备中断预算（本 tick 处理过设备中断或有被节流的线）。
