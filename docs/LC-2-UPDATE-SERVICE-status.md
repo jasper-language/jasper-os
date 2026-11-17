@@ -4,7 +4,7 @@
 
 状态：**core service implemented; LC-2 remains core-passed**。`UpdateService` 已成为
 一个持有单一 `UpdateCoordinator` 和 `FileControlStore` 的有状态服务门面；
-Issue #39 的全系统统一授权、跨重启审计查询、完整故障矩阵和 Pixel 验收仍未完成。
+Issue #39 的全系统统一授权、完整并发/断电故障矩阵和 Pixel 验收仍未完成。
 
 ## 服务状态机
 
@@ -159,8 +159,9 @@ jasper-update-recovery cleanup <control-root> <staging-root> <manifest-sha256-he
 `system update status --json` 返回可由标准 JSON 解析器读取的同一状态；
 首程序查询前后资源断言为 `reclaimed=true`。
 
-这仍不是 Issue #34 的整体完成：租户级更新过滤、
-完整并发/重放和 Pixel 安装矩阵尚未交付。因此 LC-2 继续保持 `core-passed`。
+这仍不是 Issue #34 的整体完成：tenant A/B 可见性和 4 个隔离 Agent 进程的
+并发 status/list 请求已经通过，但更大规模并发、完整重放/断电矩阵和 Pixel
+安装矩阵尚未交付。因此 LC-2 继续保持 `core-passed`。
 
 recovery 已具备 path-free 数据/授权契约、`UpdateService` managed execution、
 ABI syscall 和原生 Shell 消费。archive 已具备内核持久收据和正式 ABI；
@@ -328,6 +329,9 @@ PASS (3.21.0)
   缓存冲突、重复请求缓存、sender identity 固化、async deadline timeout、
   `system.async.cancel` 成功、completion 排空和 timeout 后继续服务均通过真实
   UEFI/virtio-blk。
+- 4 个独立 broker 进程并行执行 6 轮 status 和一次 list，进程隔离、协议身份、
+  request ID 及资源回收全部通过真实 UEFI/virtio-blk；这是并发起点而不是完整
+  压力矩阵。
 - tenant A/B 的可见更新集合互不串租户；系统主体不隐式获得租户更新权；输出缓冲
   过小时整体返回容量错误且不写入部分 record。
 - ABI 3.20 的 `system.install.update.list` 在真实 OVMF guest 中返回当前主体的
