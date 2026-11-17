@@ -81,9 +81,39 @@ release policy 的 `require_signed_revocation_snapshot`：
 本地双副本与审计日志可以发现普通文件回滚和副本分歧，但不具备 TPM/安全单调计数器
 的物理回滚保护；生产密钥托管、审计远端留存和硬件背书仍属于未完成的生产发布门。
 
+## 2-of-3 发布门限
+
+`jasper.release-artifact/v2` 将以下事实纳入同一签名消息：
+
+- stable/LTS 通道、源提交、ABI、目标架构；
+- payload 与 SBOM 的名称、大小和 SHA-256；
+- 三个互不相同的签名者指纹；
+- 门限值 2，以及每个指纹对应的签名文件名。
+
+验证端执行以下失败关闭规则：
+
+- 少于两个独立签名时拒绝；
+- 同一签名文件重复提交时拒绝；
+- 未声明文件、未知公钥或非 64 字节 Ed25519 签名时拒绝；
+- manifest 声明的任一签名者已撤销时拒绝；
+- manifest、payload、SBOM 或签名文件被篡改时拒绝。
+
+`scripts/release-supply-check.sh` 使用三个测试发布密钥完成正反例：3-of-3 和
+2-of-3 成功、1-of-3 拒绝、重复签名拒绝、撤销密钥拒绝、轮换到新的 B/C/D
+三密钥集合后 2-of-3 成功，并从两个认证 HTTPS 源和一个离线副本得到相同字节。
+
+```text
+release-policy: PASS channels=stable,lts sources>=2
+release-supply-check: PASS threshold=2 signers=3 revocation=true
+  revocation_snapshot_epoch=2 rotation=true https_sources=2
+  offline_sources=1 tamper_rejected=true
+```
+
 ## 仍未完成
 
-- 生产 release/LTS 通道密钥托管、签名审计与旧制品删除策略；
-- LC-2 action 执行/断电矩阵和 LC-4 真实设备矩阵。
-
-因此 LC-5 不升级状态。
+- 生产发布私钥只能由相互隔离的 HSM/离线签名环境持有，本仓库不保存生产私钥；
+- 反回滚仍需要 TPM 2.0 或等价的安全单调计数器，不能把本地双副本冒充硬件根；
+- 远端不可篡改审计留存、签名仪式与双人操作的现场证据尚未完成；
+- CVE 响应期限、补丁回移、实际 stable/LTS 发布和旧版本再次升级尚未形成真实
+  发行闭环；
+- LC-5 依赖 LC-2、LC-3、LC-4 的完整退出门，当前不能升级为 done。

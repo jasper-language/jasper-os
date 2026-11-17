@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Create and verify deterministic, Ed25519-signed LC-5 release manifests.
+"""Create and verify deterministic, threshold-signed LC-5 release manifests.
 
-The private key is used only by the ``create`` command. Verification accepts a
+创建并验证确定性的 LC-5 门限签名发布清单。
+
+Private keys are used only by the ``create`` command. Verification accepts a
 directory of trusted public keys and an optional revoked-fingerprint list. A
-release manifest binds release metadata, the exact kernel payload, and the exact
-SBOM without embedding host paths or timestamps.
+release manifest binds release metadata, the exact kernel payload, the exact
+SBOM, the declared signer set, and its threshold without embedding host paths or
+timestamps.
 """
 
 from __future__ import annotations
@@ -20,10 +23,12 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-SCHEMA = "jasper.release-artifact/v1"
+SCHEMA = "jasper.release-artifact/v2"
 DOMAIN = b"JASPER-RELEASE-V1\0"
 CHANNELS = {"stable", "lts"}
 MAX_MANIFEST_BYTES = 64 * 1024
+MAX_SIGNERS = 8
+MIN_THRESHOLD = 2
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 ABI_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
@@ -74,6 +79,10 @@ def signing_message(manifest: bytes) -> bytes:
     return DOMAIN + manifest
 
 
+def signature_name(release_name: str, signer: str) -> str:
+    return f"{release_name}.{signer}.manifest.sig"
+
+
 def data_file(value: str, option: str) -> Path:
     path = Path(value)
     if not path.is_file() or path.is_symlink():
@@ -84,7 +93,11 @@ def data_file(value: str, option: str) -> Path:
 def create(args: argparse.Namespace) -> None:
     payload = data_file(args.payload, "--payload")
     sbom = data_file(args.sbom, "--sbom")
-    key = data_file(args.private_key, "--private-key")
+    keys = [data_file(value, "--private-key") for value in args.private_key]
+    if not MIN_THRESHOLD <= args.threshold <= len(keys) <= MAX_SIGNERS:
+        fail(
+            f"threshold must satisfy {MIN_THRESHOLD} <= threshold <= signers <= {MAX_SIGNERS}"
+        )
     if args.channel not in CHANNELS:
         fail(f"unsupported channel: {args.channel}")
     if not COMMIT_RE.fullmatch(args.source_commit):
@@ -96,12 +109,20 @@ def create(args: argparse.Namespace) -> None:
 
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    # The public key is derived from the private key; callers cannot supply a
-    # misleading signer identity.
+    # Public identities are derived from private keys; callers cannot supply a
+    # misleading signer set. Fingerprints are sorted so manifest bytes do not
+    # depend on command-line key order.
+    # 公钥身份由私钥派生，签名者按指纹排序，避免伪造身份或依赖参数顺序。
+    signers: list[tuple[str, Path]] = []
     with tempfile.TemporaryDirectory(prefix="jasper-release-key-") as temporary:
-        public_key = Path(temporary) / "signer.pem"
-        openssl("pkey", "-in", str(key), "-pubout", "-out", str(public_key))
-        signer = public_fingerprint(public_key)
+        for index, key in enumerate(keys):
+            public_key = Path(temporary) / f"signer-{index}.pem"
+            openssl("pkey", "-in", str(key), "-pubout", "-out", str(public_key))
+            signers.append((public_fingerprint(public_key), key))
+    signers.sort()
+    fingerprints = [fingerprint for fingerprint, _ in signers]
+    if len(fingerprints) != len(set(fingerprints)):
+        fail("release signer keys must be distinct")
 
     payload_sha256, payload_size = digest(payload)
     sbom_sha256, sbom_size = digest(sbom)
@@ -123,35 +144,53 @@ def create(args: argparse.Namespace) -> None:
             "sha256": sbom_sha256,
             "size": sbom_size,
         },
-        "signer": signer,
+        "signing": {
+            "threshold": args.threshold,
+            "signers": [
+                {
+                    "fingerprint": fingerprint,
+                    "signature": signature_name(args.name, fingerprint),
+                }
+                for fingerprint in fingerprints
+            ],
+        },
     }
     manifest = canonical_json(manifest_value)
     if len(manifest) > MAX_MANIFEST_BYTES:
         fail("release manifest exceeds bounded size")
 
     manifest_path = output / f"{args.name}.manifest.json"
-    signature_path = output / f"{args.name}.manifest.sig"
-    if manifest_path.exists() or signature_path.exists():
+    signature_paths = {
+        fingerprint: output / signature_name(args.name, fingerprint)
+        for fingerprint in fingerprints
+    }
+    if manifest_path.exists() or any(path.exists() for path in signature_paths.values()):
         fail("refusing to overwrite an existing release manifest or signature")
-    manifest_path.write_bytes(manifest)
+
+    signed = []
     with tempfile.NamedTemporaryFile(prefix="jasper-release-message-") as message:
         message.write(signing_message(manifest))
         message.flush()
-        signature = openssl(
-            "pkeyutl",
-            "-sign",
-            "-rawin",
-            "-inkey",
-            str(key),
-            "-in",
-            message.name,
-        )
-    if len(signature) != 64:
-        fail(f"unexpected Ed25519 signature length: {len(signature)}")
-    signature_path.write_bytes(signature)
+        for fingerprint, key in signers:
+            signature = openssl(
+                "pkeyutl",
+                "-sign",
+                "-rawin",
+                "-inkey",
+                str(key),
+                "-in",
+                message.name,
+            )
+            if len(signature) != 64:
+                fail(f"unexpected Ed25519 signature length: {len(signature)}")
+            signed.append((fingerprint, signature))
+
+    manifest_path.write_bytes(manifest)
+    for fingerprint, signature in signed:
+        signature_paths[fingerprint].write_bytes(signature)
     print(
-        f"release-artifact: CREATED signer={signer} channel={args.channel} "
-        f"payload={payload_sha256} sbom={sbom_sha256}"
+        f"release-artifact: CREATED threshold={args.threshold} signers={len(signers)} "
+        f"channel={args.channel} payload={payload_sha256} sbom={sbom_sha256}"
     )
 
 
@@ -165,7 +204,7 @@ def load_manifest(path: Path) -> tuple[dict[str, Any], bytes]:
         fail(f"manifest is not valid UTF-8 JSON: {error}")
     if not isinstance(value, dict) or canonical_json(value) != raw:
         fail("manifest is not canonical JSON")
-    if set(value) != {"schema", "release", "payload", "sbom", "signer"}:
+    if set(value) != {"schema", "release", "payload", "sbom", "signing"}:
         fail("manifest field set is not recognized")
     if value["schema"] != SCHEMA:
         fail("manifest schema mismatch")
@@ -203,9 +242,44 @@ def load_manifest(path: Path) -> tuple[dict[str, Any], bytes]:
             fail(f"{field} SHA-256 is invalid")
         if not isinstance(item["size"], int) or item["size"] < 0:
             fail(f"{field} size is invalid")
-    signer = value["signer"]
-    if not isinstance(signer, str) or not SHA256_RE.fullmatch(signer):
-        fail("signer fingerprint is invalid")
+    signing = value["signing"]
+    if not isinstance(signing, dict) or set(signing) != {"threshold", "signers"}:
+        fail("signing descriptor is not recognized")
+    threshold = signing["threshold"]
+    signers = signing["signers"]
+    if (
+        not isinstance(threshold, int)
+        or not MIN_THRESHOLD <= threshold <= MAX_SIGNERS
+        or not isinstance(signers, list)
+        or not threshold <= len(signers) <= MAX_SIGNERS
+    ):
+        fail("release signing threshold or signer count is invalid")
+    fingerprints = []
+    signature_names = []
+    for signer in signers:
+        if not isinstance(signer, dict) or set(signer) != {
+            "fingerprint",
+            "signature",
+        }:
+            fail("release signer descriptor is not recognized")
+        fingerprint = signer["fingerprint"]
+        name = signer["signature"]
+        if not isinstance(fingerprint, str) or not SHA256_RE.fullmatch(fingerprint):
+            fail("signer fingerprint is invalid")
+        if (
+            not isinstance(name, str)
+            or Path(name).name != name
+            or not name.endswith(".manifest.sig")
+        ):
+            fail("signature name must be a bounded basename")
+        fingerprints.append(fingerprint)
+        signature_names.append(name)
+    if fingerprints != sorted(fingerprints) or len(set(fingerprints)) != len(
+        fingerprints
+    ):
+        fail("release signers must be unique and canonically ordered")
+    if len(set(signature_names)) != len(signature_names):
+        fail("release signature names must be unique")
     return value, raw
 
 
@@ -242,31 +316,60 @@ def revoked(revocation_list: Path | None, signer: str) -> bool:
 
 def verify(args: argparse.Namespace) -> None:
     manifest_path = data_file(args.manifest, "--manifest")
-    signature_path = data_file(args.signature, "--signature")
     payload = data_file(args.payload, "--payload")
     sbom = data_file(args.sbom, "--sbom")
     value, manifest = load_manifest(manifest_path)
-    signer = value["signer"]
-    if revoked(Path(args.revoked) if args.revoked else None, signer):
-        fail(f"signer is revoked: {signer}")
-    public_key = find_trusted_key(Path(args.trusted_dir), signer)
-    signature = signature_path.read_bytes()
-    if len(signature) != 64:
-        fail("signature is not exactly one Ed25519 signature")
+    signing = value["signing"]
+    expected = {
+        signer["signature"]: signer["fingerprint"] for signer in signing["signers"]
+    }
+    signatures = [data_file(value, "--signature") for value in args.signature]
+    provided: dict[str, Path] = {}
+    for path in signatures:
+        if path.name not in expected:
+            fail(f"unexpected signature file: {path.name}")
+        if path.name in provided:
+            fail(f"duplicate signature file: {path.name}")
+        provided[path.name] = path
+    if len(provided) < signing["threshold"]:
+        fail(
+            f"release threshold not met: provided={len(provided)} "
+            f"threshold={signing['threshold']}"
+        )
+    revocation_path = Path(args.revoked) if args.revoked else None
+    for signer in signing["signers"]:
+        if revoked(revocation_path, signer["fingerprint"]):
+            fail(f"signer is revoked: {signer['fingerprint']}")
+
+    valid_signers = []
     with tempfile.NamedTemporaryFile(prefix="jasper-release-message-") as message:
         message.write(signing_message(manifest))
         message.flush()
-        openssl(
-            "pkeyutl",
-            "-verify",
-            "-pubin",
-            "-inkey",
-            str(public_key),
-            "-rawin",
-            "-in",
-            message.name,
-            "-sigfile",
-            str(signature_path),
+        for name, path in provided.items():
+            fingerprint = expected[name]
+            signature = path.read_bytes()
+            if len(signature) != 64:
+                fail("signature is not exactly one Ed25519 signature")
+            public_key = find_trusted_key(Path(args.trusted_dir), fingerprint)
+            openssl(
+                "pkeyutl",
+                "-verify",
+                "-pubin",
+                "-inkey",
+                str(public_key),
+                "-rawin",
+                "-in",
+                message.name,
+                "-sigfile",
+                str(path),
+            )
+            valid_signers.append(fingerprint)
+    # A repeated file cannot satisfy another signer slot.
+    # 同一签名文件不能重复占用不同签名槽。
+    if len(valid_signers) < signing["threshold"]:
+        fail(
+            f"release threshold not met: valid={len(valid_signers)} "
+            f"threshold={signing['threshold']}"
         )
     for label, actual, descriptor in (
         ("payload", payload, value["payload"]),
@@ -280,7 +383,8 @@ def verify(args: argparse.Namespace) -> None:
         ):
             fail(f"{label} identity does not match the signed manifest")
     print(
-        f"release-artifact: PASS signer={signer} "
+        f"release-artifact: PASS valid_signers={len(valid_signers)} "
+        f"threshold={signing['threshold']} "
         f"channel={value['release']['channel']} payload={value['payload']['sha256']} "
         f"sbom={value['sbom']['sha256']}"
     )
@@ -298,7 +402,8 @@ def main() -> int:
     create_parser = commands.add_parser("create")
     create_parser.add_argument("--payload", required=True)
     create_parser.add_argument("--sbom", required=True)
-    create_parser.add_argument("--private-key", required=True)
+    create_parser.add_argument("--private-key", action="append", required=True)
+    create_parser.add_argument("--threshold", type=int, default=MIN_THRESHOLD)
     create_parser.add_argument("--output-dir", required=True)
     create_parser.add_argument("--name", required=True)
     create_parser.add_argument("--channel", required=True)
@@ -309,7 +414,7 @@ def main() -> int:
 
     verify_parser = commands.add_parser("verify")
     verify_parser.add_argument("--manifest", required=True)
-    verify_parser.add_argument("--signature", required=True)
+    verify_parser.add_argument("--signature", action="append", required=True)
     verify_parser.add_argument("--payload", required=True)
     verify_parser.add_argument("--sbom", required=True)
     verify_parser.add_argument("--trusted-dir", required=True)

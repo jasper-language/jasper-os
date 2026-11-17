@@ -37,6 +37,9 @@ def validate(policy: dict) -> None:
     assert policy["require_sbom"] is True
     assert policy["require_reproducible_build"] is True
     assert policy["require_signed_manifest"] is True
+    assert policy["release_signer_threshold"] == 2
+    assert policy["release_signer_count"] == 3
+    assert policy["release_signer_threshold"] < policy["release_signer_count"]
     assert policy["require_signed_revocation_snapshot"] is True
     assert policy["require_offline_source"] is True
     channels = policy["channel"]

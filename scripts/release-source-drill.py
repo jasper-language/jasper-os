@@ -20,7 +20,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-FILES = ("release.manifest.json", "release.manifest.sig", "jasper-kernel", "sbom.json")
+BASE_FILES = ("release.manifest.json", "jasper-kernel", "sbom.json")
+SIGNATURE_SUFFIX = ".manifest.sig"
 
 
 def run(*args: str) -> None:
@@ -64,7 +65,13 @@ def main() -> int:
     source = Path(args.bundle)
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
-    for name in FILES:
+    signatures = sorted(source.glob(f"*{SIGNATURE_SUFFIX}"))
+    if len(signatures) < 2 or len(signatures) > 8:
+        raise SystemExit(
+            "release-source-drill: bundle must contain between 2 and 8 threshold signatures"
+        )
+    files = tuple(BASE_FILES) + tuple(path.name for path in signatures)
+    for name in files:
         path = source / name
         if not path.is_file() or path.is_symlink():
             raise SystemExit(f"release-source-drill: missing regular bundle file: {path}")
@@ -162,7 +169,7 @@ def main() -> int:
         primary_base = f"https://127.0.0.1:{primary.server_port}/"
         mirror_base = f"https://127.0.0.1:{mirror.server_port}/"
 
-        for name in FILES:
+        for name in files:
             direct = []
             for base in (primary_base, mirror_base):
                 with urllib.request.urlopen(
