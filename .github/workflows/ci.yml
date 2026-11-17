@@ -71,6 +71,10 @@ jobs:
           python3 scripts/check-hardcode-gate.py --self-test
           python3 scripts/check-hardcode-gate.py --base "${HARDCODE_BASE:-}"
           python3 scripts/check-hardcode-gate.py --inventory
+      - name: Issue #36/#37 GPU 与 UI ABI 边界 / GPU-UI boundary
+        run: |
+          python3 scripts/check-gpu-abi-boundary.py --self-test
+          python3 scripts/check-gpu-abi-boundary.py
       - uses: actions/cache@v4
         with:
           path: |
