@@ -17,6 +17,18 @@ CycloneDX 1.5 SBOM：
 
 CI 使用 `--check` 连续生成两次并比较。
 
+新增 `scripts/release-repro-check.sh`：用固定工具链/lockfile、
+`SOURCE_DATE_EPOCH=0`、关闭 incremental、相同 RUSTFLAGS 和 CPU 亲和执行两个
+完全独立的 x86_64 no-default-features kernel release build，要求 ELF SHA-256
+一致。该检查不启动 VM。
+
+当前实测：
+
+```text
+release-repro: PASS target=x86_64-unknown-none
+sha256=66e6ad288b6fda73585f1799230a0d1d75d20f5a0e7ec099f6fd7008c4dc0661
+```
+
 ## 仍未完成
 
 - release/LTS 通道、补丁回源和删除策略；

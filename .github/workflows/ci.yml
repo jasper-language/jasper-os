@@ -78,6 +78,9 @@ jobs:
       - name: LC-5 可重复 SBOM / deterministic SBOM
         run: |
           python3 scripts/release-sbom.py --check --output target/jasper-os-sbom.cdx.json
+      - name: LC-5 可重复构建 / reproducible kernel build
+        run: |
+          JASPER_REPRO_JOBS=2 bash scripts/release-repro-check.sh
       - uses: actions/cache@v4
         with:
           path: |
