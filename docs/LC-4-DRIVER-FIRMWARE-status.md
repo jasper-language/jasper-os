@@ -41,6 +41,11 @@
 该组合仍使用内存中的 Host/控制器事实；真实 Driver Host 的持久 admission、
 vendor firmware 格式和设备矩阵仍未完成。
 
+Driver Host 的 registration/admission 回执现已接入同一 P0 virtio-blk 的独立
+32 KiB 保留区。空区首次启动格式化，非空但无效或损坏的区域失败关闭；第二次
+OVMF 启动复用同一 P0/OVMF 后得到 `initialized=false` 和相同 receipt sequence，
+且明确 `live_restored=false`，不会复活旧 host、pass、request 或 capability。
+
 ## Issue #39 授权与技术双门禁
 
 `evaluate_driver_admission` 把本地权限授权和设备技术准入拆成独立门禁：
@@ -74,6 +79,8 @@ cargo test -p kernel-core driver_host::tests
 ## 仍需完成
 
 - 将状态机接入真实 Driver Host 的 admission/reset/crash receipt；
+- 已完成持久 admission receipt 接 P0 磁盘；reset/crash/recovery 的真实设备
+  receipt 与硬件静默仍需接入；
 - 使用设备实际 vendor/device/class 能力和上游签名策略；
 - 在 Pixel 6a 与至少一种非 Pixel 设备/虚拟设备上完成驱动、固件、热插拔、
   降级、reset 和 recovery 矩阵；
