@@ -154,7 +154,7 @@ case "$MODE" in
   sandbox-launch) KERNEL_FEATURES=lifecycle-root-exec-verify,sandbox-launch-verify ;;
   native-install-abi) KERNEL_FEATURES=native-install-abi-verify ;;
   terminal-session) KERNEL_FEATURES=lifecycle-root-exec-verify,terminal-session-verify ;;
-  terminal-recovery) KERNEL_FEATURES=production,lifecycle-ab-health,terminal-session-verify ;;
+  terminal-recovery) KERNEL_FEATURES=user-programs,production,lifecycle-ab-health,terminal-session-verify ;;
   android-ecosystem) KERNEL_FEATURES=lifecycle-root-exec-verify,android-ecosystem-verify ;;
   android-art) KERNEL_FEATURES=lifecycle-root-exec-verify,android-art-verify ;;
   vulkan-metal2vulkan) KERNEL_FEATURES=lifecycle-root-exec-verify,vulkan-metal2vulkan-verify ;;
