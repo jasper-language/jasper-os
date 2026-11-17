@@ -236,6 +236,11 @@ pub fn query_v1(
 }
 
 fn principal_tenant(pid: ObjId) -> u64 {
+    if let Some(application) = crate::security::process_application(pid) {
+        if application.stable_id != 0 {
+            return application.stable_id;
+        }
+    }
     crate::proc::workload_domain(pid)
         .map(|domain| u64::from(domain.id) + 1)
         .unwrap_or(1)
