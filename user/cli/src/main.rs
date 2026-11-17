@@ -189,16 +189,34 @@ fn state_name(state: u8) -> &'static [u8] {
     }
 }
 
-fn dispatch_jucs(invocation: Invocation, request_id: u64) -> bool {
+fn take_request(next: &mut u64) -> u64 {
+    let request_id = *next;
+    *next = (*next).wrapping_add(1).max(1);
+    request_id
+}
+
+fn dispatch_jucs(invocation: Invocation, next_request: &mut u64) -> bool {
     match (invocation.command, invocation.form) {
         (Command::UpdateStatus, Form::Help) => write(jucs::UPDATE_STATUS_HELP.as_bytes()),
         (Command::UpdateStatus, Form::Schema) => write(jucs::UPDATE_STATUS_SCHEMA.as_bytes()),
-        (Command::UpdateStatus, Form::Invoke) => write_update_status(request_id, false),
-        (Command::UpdateStatus, Form::Json) => write_update_status(request_id, true),
+        (Command::UpdateStatus, Form::Invoke) => {
+            write_update_status(take_request(next_request), false)
+        }
+        (Command::UpdateStatus, Form::Json) => {
+            write_update_status(take_request(next_request), true)
+        }
         (Command::UpdateRecover, Form::Help) => write(jucs::UPDATE_RECOVER_HELP.as_bytes()),
         (Command::UpdateRecover, Form::Schema) => write(jucs::UPDATE_RECOVER_SCHEMA.as_bytes()),
-        (Command::UpdateRecover, Form::Invoke) => write_update_recovery(request_id, false),
-        (Command::UpdateRecover, Form::Json) => write_update_recovery(request_id, true),
+        (Command::UpdateRecover, Form::Invoke) => {
+            let status_request = take_request(next_request);
+            let action_request = take_request(next_request);
+            write_update_recovery(status_request, action_request, false)
+        }
+        (Command::UpdateRecover, Form::Json) => {
+            let status_request = take_request(next_request);
+            let action_request = take_request(next_request);
+            write_update_recovery(status_request, action_request, true)
+        }
     }
 }
 
@@ -327,9 +345,9 @@ fn write_update_status_json(status: UpdateStatus, tenant: u64, request_id: u64) 
     ok && write(line.as_bytes())
 }
 
-fn write_update_recovery(request_id: u64, json: bool) -> bool {
+fn write_update_recovery(status_request_id: u64, action_request_id: u64, json: bool) -> bool {
     let mut client = UpdateClient::new(NativeUpdateTransport);
-    let response = match client.recover(request_id) {
+    let response = match client.recover(status_request_id, action_request_id) {
         Ok(response) => response,
         Err(error) => return write_recovery_error(client_error_code(error), json),
     };
@@ -466,9 +484,7 @@ fn main(_: u64, _: u64) -> i32 {
         {
             match jucs::parse(command) {
                 Ok(invocation) => {
-                    let request_id = next_status_request;
-                    next_status_request = next_status_request.wrapping_add(1).max(1);
-                    if !dispatch_jucs(invocation, request_id) {
+                    if !dispatch_jucs(invocation, &mut next_status_request) {
                         return 3;
                     }
                 }

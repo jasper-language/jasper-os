@@ -76,15 +76,22 @@ impl<T: UpdateTransport> UpdateClient<T> {
     }
 
     /// Query status, derive its stable transaction binding and recover it.
-    pub fn recover(&mut self, request_id: u64) -> Result<TransactionActionStatus, ClientError> {
-        let status = self.status(request_id, 0)?;
+    pub fn recover(
+        &mut self,
+        status_request_id: u64,
+        action_request_id: u64,
+    ) -> Result<TransactionActionStatus, ClientError> {
+        if status_request_id == 0 || action_request_id == 0 || status_request_id == action_request_id {
+            return Err(ClientError::Protocol);
+        }
+        let status = self.status(status_request_id, 0)?;
         let manifest_sha256 = if status.status.candidate_slot != NO_SLOT {
             status.status.candidate_digest
         } else {
             status.status.active_digest
         };
         let request = TransactionActionRequest {
-            request_id,
+            request_id: action_request_id,
             expected_generation: status.status.service_generation,
             transaction_id: status.status.transaction_id,
             manifest_sha256,
@@ -97,7 +104,7 @@ impl<T: UpdateTransport> UpdateClient<T> {
             .recover(&request, &mut output)
             .map_err(ClientError::Transport)?;
         let response = TransactionActionStatus::decode(&output).ok_or(ClientError::Protocol)?;
-        if response.request_id != request_id {
+        if response.request_id != action_request_id {
             return Err(ClientError::RequestMismatch);
         }
         if response.transaction_id != status.status.transaction_id
@@ -221,9 +228,10 @@ mod tests {
         let mut client = UpdateClient::new(fake);
         let queried = client.status(21, 7).unwrap();
         assert_eq!(queried.authorization.request_id, 21);
-        let recovered = client.recover(22).unwrap();
+        let recovered = client.recover(22, 23).unwrap();
         assert_eq!(recovered.transaction_id, 9);
         assert_eq!(recovered.manifest_sha256, [0x55; 32]);
+        assert_eq!(recovered.request_id, 23);
         let fake = client.into_inner();
         assert_eq!(fake.status_calls, 2);
         assert_eq!(fake.recover_calls, 1);
@@ -254,7 +262,7 @@ mod tests {
         };
         fake.action.transaction_id = 9;
         let mut client = UpdateClient::new(fake);
-        assert_eq!(client.recover(1), Err(ClientError::BindingMismatch));
+        assert_eq!(client.recover(1, 2), Err(ClientError::BindingMismatch));
     }
 
     #[test]
@@ -272,10 +280,10 @@ mod tests {
             fail_status: None,
             corrupt_action: false,
         };
-        let recovered = UpdateClient::new(fake).recover(33).unwrap();
+        let recovered = UpdateClient::new(fake).recover(33, 34).unwrap();
         assert_eq!(recovered.manifest_sha256, [0x77; 32]);
         assert_eq!(recovered.transaction_id, 9);
         assert_eq!(recovered.generation, 7);
-        assert_eq!(recovered.request_id, 33);
+        assert_eq!(recovered.request_id, 34);
     }
 }
