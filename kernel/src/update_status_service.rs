@@ -7,6 +7,9 @@
 //! in authorization.
 
 use jasper_lifecycle_model::update::UpdateStage;
+use kernel_core::authz::{
+    self, AccessScope, CallerFacts, Effect, Operation, Request as AuthzRequest, KERNEL_PEP_ISSUER,
+};
 use kernel_core::objtable::ObjId;
 use kernel_core::update_audit::{
     AuditPrincipal, AuditRequest, AuditResponse, REQUEST_BYTES as AUDIT_REQUEST_BYTES,
@@ -22,11 +25,12 @@ use kernel_core::usi_request::Begin;
 
 use crate::mm::user::{copy_from_user, copy_to_user};
 use crate::syscall::table::{
-    SYSTEM_ERROR_INVALID_ARGUMENT, SYSTEM_ERROR_RIGHTS_DENIED,
+    SYSTEM_ERROR_INVALID_ARGUMENT, SYSTEM_ERROR_RIGHTS_DENIED, SYSTEM_UPDATE_ACTION_ARCHIVE,
+    SYSTEM_UPDATE_ACTION_RECOVER, SYSTEM_UPDATE_AUDIT_QUERY, SYSTEM_UPDATE_CONTROL_GET,
     SYSTEM_UPDATE_ERROR_BUFFER_TOO_SMALL, SYSTEM_UPDATE_ERROR_PROTOCOL,
     SYSTEM_UPDATE_ERROR_REQUEST_ID, SYSTEM_UPDATE_ERROR_STALE_GENERATION,
     SYSTEM_UPDATE_ERROR_TENANT_SCOPE, SYSTEM_UPDATE_ERROR_TRANSACTION_MISMATCH,
-    SYSTEM_UPDATE_ERROR_UNAUTHORIZED, SYSTEM_UPDATE_ERROR_UNAVAILABLE,
+    SYSTEM_UPDATE_ERROR_UNAUTHORIZED, SYSTEM_UPDATE_ERROR_UNAVAILABLE, SYSTEM_UPDATE_STATUS_QUERY,
 };
 use crate::syscall::{err, user_ptr_err};
 
@@ -45,6 +49,17 @@ pub fn query(pid: ObjId, output_ptr: u64, capacity: u64) -> i64 {
         Ok(context) => context,
         Err(_) => return err(SYSTEM_ERROR_RIGHTS_DENIED),
     };
+    if require_update_authority(
+        pid,
+        context,
+        Operation::SystemUpdateStatus,
+        SYSTEM_UPDATE_CONTROL_GET,
+        Effect::Read,
+    )
+    .is_err()
+    {
+        return err(SYSTEM_UPDATE_ERROR_UNAUTHORIZED);
+    }
     let Ok(capacity) = usize::try_from(capacity) else {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     };
@@ -101,6 +116,17 @@ pub fn query_v1(pid: ObjId, request_ptr: u64, output_ptr: u64, capacity: u64) ->
         Ok(context) => context,
         Err(_) => return err(SYSTEM_UPDATE_ERROR_UNAUTHORIZED),
     };
+    if require_update_authority(
+        pid,
+        context,
+        Operation::SystemUpdateStatus,
+        SYSTEM_UPDATE_STATUS_QUERY,
+        Effect::Read,
+    )
+    .is_err()
+    {
+        return err(SYSTEM_UPDATE_ERROR_UNAUTHORIZED);
+    }
     let Ok(capacity) = usize::try_from(capacity) else {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     };
@@ -221,6 +247,17 @@ pub fn recover_v1(pid: ObjId, request_ptr: u64, output_ptr: u64, capacity: u64) 
         Ok(context) => context,
         Err(_) => return err(SYSTEM_UPDATE_ERROR_UNAUTHORIZED),
     };
+    if require_update_authority(
+        pid,
+        context,
+        Operation::SystemUpdateRecover,
+        SYSTEM_UPDATE_ACTION_RECOVER,
+        Effect::Write,
+    )
+    .is_err()
+    {
+        return err(SYSTEM_UPDATE_ERROR_UNAUTHORIZED);
+    }
     let Ok(capacity) = usize::try_from(capacity) else {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     };
@@ -355,6 +392,17 @@ pub fn archive_v1(pid: ObjId, request_ptr: u64, output_ptr: u64, capacity: u64) 
         Ok(context) => context,
         Err(_) => return err(SYSTEM_UPDATE_ERROR_UNAUTHORIZED),
     };
+    if require_update_authority(
+        pid,
+        context,
+        Operation::SystemUpdateArchive,
+        SYSTEM_UPDATE_ACTION_ARCHIVE,
+        Effect::Write,
+    )
+    .is_err()
+    {
+        return err(SYSTEM_UPDATE_ERROR_UNAUTHORIZED);
+    }
     let Ok(capacity) = usize::try_from(capacity) else {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     };
@@ -501,6 +549,17 @@ pub fn audit_v1(pid: ObjId, request_ptr: u64, output_ptr: u64, capacity: u64) ->
         Ok(context) => context,
         Err(_) => return err(SYSTEM_UPDATE_ERROR_UNAUTHORIZED),
     };
+    if require_update_authority(
+        pid,
+        context,
+        Operation::SystemUpdateAudit,
+        SYSTEM_UPDATE_AUDIT_QUERY,
+        Effect::Read,
+    )
+    .is_err()
+    {
+        return err(SYSTEM_UPDATE_ERROR_UNAUTHORIZED);
+    }
     let Ok(capacity) = usize::try_from(capacity) else {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     };
@@ -589,6 +648,92 @@ fn transaction_digest(current: jasper_lifecycle_boot::ControlBlock) -> [u8; 32] 
     current
         .transaction_digest()
         .unwrap_or_else(|| current.slot(current.active_slot()).digest())
+}
+
+/// Project the caller's existing identity, tenant, domain and SyscallSet
+/// authority into the shared authorization decision record.
+///
+/// This adapter does not create a second permission table. The active process
+/// context and its admitted SyscallSet remain authoritative; policy facts are
+/// captured at the same decision point. A complete system-wide revocation
+/// source is not integrated yet, so the decision records that fact explicitly
+/// instead of aliasing an object generation. A denied or incomplete snapshot
+/// never reaches the lifecycle store.
+fn require_update_authority(
+    pid: ObjId,
+    context: kernel_core::security::SecurityContext,
+    operation: Operation,
+    required_syscall: u32,
+    effect: Effect,
+) -> Result<authz::Decision, ()> {
+    let syscalls =
+        crate::kobj::with(|table| crate::proc::syscalls_in(table, pid)).map_err(|_| ())?;
+    let policy_epoch = crate::security::policy_epoch();
+    let decision = authz::authorize(
+        CallerFacts {
+            context,
+            tenant: principal_tenant(pid),
+            scope: AccessScope::Platform,
+            syscalls,
+            policy_epoch,
+            // No complete system-wide revocation source is integrated yet.
+            // Keep that fact explicit instead of aliasing an object generation.
+            revocation_generation: None,
+            // The P0 profile has no trusted wall clock. No expiring update
+            // lease is accepted until that fact exists.
+            now: 0,
+            clock_trusted: false,
+        },
+        AuthzRequest {
+            issuer: KERNEL_PEP_ISSUER,
+            operation,
+            scope: AccessScope::Platform,
+            required_syscall,
+            effect,
+            not_before: 0,
+            expires_at: None,
+            delegation_depth: 0,
+            max_delegation_depth: authz::MAX_DELEGATION_DEPTH,
+            required_policy_epoch: policy_epoch,
+            required_revocation_generation: None,
+        },
+    );
+    let (
+        version,
+        issuer,
+        subject,
+        executor_generation,
+        tenant,
+        domain,
+        operation_name,
+        scope,
+        effect_name,
+        policy,
+        revocation,
+        allowed,
+        reason,
+    ) = authz::diagnostic_fields(decision);
+    crate::kprintln!(
+        "[JSR-AUTHZ] version={} issuer={} subject={} executor_generation={} tenant={} domain={} operation={} scope={} effect={} policy={} revocation={:?} decision={} reason={}",
+        version,
+        issuer,
+        subject,
+        executor_generation,
+        tenant,
+        domain,
+        operation_name,
+        scope,
+        effect_name,
+        policy,
+        revocation,
+        allowed,
+        reason
+    );
+    if decision.admitted() {
+        Ok(decision)
+    } else {
+        Err(())
+    }
 }
 
 fn action_error(error: kernel_core::update_service::ServiceError) -> u32 {
