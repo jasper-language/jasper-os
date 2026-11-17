@@ -10,6 +10,7 @@
 use crate::driver_host::{
     self, DeviceIdentity, DriverHostBroker, HostToken, Needs, PassToken, Policy, QuiesceProof,
 };
+use crate::native_install::{OwnerScope, Subject};
 
 /// Signed driver or firmware package identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +80,134 @@ pub struct LifecyclePolicy {
     pub release_floor: u64,
     pub security_epoch: u64,
     pub hotplug: bool,
+}
+
+/// Explicit operating mode for the authorization and technical dual gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OperatingMode {
+    /// Normal production activation.
+    Production,
+    /// Isolated development/maintenance experiment with visible risk.
+    Development,
+}
+
+/// Local decision-maker and executor binding for one driver/firmware action.
+///
+/// The signer proves package identity, while this grant proves that a local
+/// owner/administrator authorized the named executor for one device
+/// generation. These are independent facts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DriverAuthorization {
+    pub decision_maker: Subject,
+    pub executor: Subject,
+    pub scope: OwnerScope,
+    pub device_identity: u32,
+    pub device_generation: u32,
+    pub policy_epoch: u64,
+    pub revocation_generation: u32,
+    pub expires_at: Option<u64>,
+}
+
+/// Technical admission facts. They cannot be fabricated by authorization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TechnicalAdmission {
+    pub device_matches: bool,
+    pub abi_compatible: bool,
+    pub resource_scope_valid: bool,
+    pub isolation_required: bool,
+    pub isolation_verified: bool,
+    pub revocable: bool,
+    pub quiescence_verified: bool,
+    pub recovery_verified: bool,
+}
+
+impl TechnicalAdmission {
+    /// Whether every applicable technical condition is proven.
+    pub const fn ready(self) -> bool {
+        self.device_matches
+            && self.abi_compatible
+            && self.resource_scope_valid
+            && (!self.isolation_required || self.isolation_verified)
+            && self.revocable
+            && self.quiescence_verified
+            && self.recovery_verified
+    }
+}
+
+/// Structured denial reason for the independent dual gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdmissionDeny {
+    Authorization,
+    ExecutorMismatch,
+    ScopeMismatch,
+    DeviceMismatch,
+    Expired,
+    Revoked,
+    PolicyEpoch,
+    Technical,
+}
+
+/// One admission result. `DevelopmentOnly` never permits production activation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdmissionDecision {
+    Allowed,
+    DevelopmentOnly,
+    Denied(AdmissionDeny),
+}
+
+/// Evaluate local authorization and technical safety as independent gates.
+pub fn evaluate_driver_admission(
+    authorization: DriverAuthorization,
+    executor: Subject,
+    now: u64,
+    current_policy_epoch: u64,
+    current_revocation_generation: u32,
+    device_identity: u32,
+    device_generation: u32,
+    technical: TechnicalAdmission,
+    mode: OperatingMode,
+) -> AdmissionDecision {
+    if !authorization.decision_maker.is_valid() || !authorization.executor.is_valid() {
+        return AdmissionDecision::Denied(AdmissionDeny::Authorization);
+    }
+    if executor != authorization.executor {
+        return AdmissionDecision::Denied(AdmissionDeny::ExecutorMismatch);
+    }
+    let scope_matches = match authorization.scope {
+        OwnerScope::System => true,
+        OwnerScope::Device(id) => id != 0 && id == u64::from(device_identity),
+        OwnerScope::User(_)
+        | OwnerScope::Group(_)
+        | OwnerScope::Tenant(_)
+        | OwnerScope::Workload(_) => false,
+    };
+    if !scope_matches {
+        return AdmissionDecision::Denied(AdmissionDeny::ScopeMismatch);
+    }
+    if authorization.device_identity != device_identity
+        || authorization.device_generation != device_generation
+    {
+        return AdmissionDecision::Denied(AdmissionDeny::DeviceMismatch);
+    }
+    if authorization
+        .expires_at
+        .is_some_and(|deadline| now >= deadline)
+    {
+        return AdmissionDecision::Denied(AdmissionDeny::Expired);
+    }
+    if current_revocation_generation != authorization.revocation_generation {
+        return AdmissionDecision::Denied(AdmissionDeny::Revoked);
+    }
+    if current_policy_epoch != authorization.policy_epoch {
+        return AdmissionDecision::Denied(AdmissionDeny::PolicyEpoch);
+    }
+    if technical.ready() {
+        AdmissionDecision::Allowed
+    } else if mode == OperatingMode::Development {
+        AdmissionDecision::DevelopmentOnly
+    } else {
+        AdmissionDecision::Denied(AdmissionDeny::Technical)
+    }
 }
 
 /// Lifecycle state. Only `Active` may own a device lease.
@@ -477,6 +606,144 @@ mod tests {
             security_epoch: 3,
             hotplug: true,
         }
+    }
+
+    fn authorization() -> DriverAuthorization {
+        DriverAuthorization {
+            decision_maker: Subject::Device(3),
+            executor: Subject::Service(7),
+            scope: OwnerScope::Device(11),
+            device_identity: 11,
+            device_generation: 9,
+            policy_epoch: 5,
+            revocation_generation: 2,
+            expires_at: Some(100),
+        }
+    }
+
+    fn technical() -> TechnicalAdmission {
+        TechnicalAdmission {
+            device_matches: true,
+            abi_compatible: true,
+            resource_scope_valid: true,
+            isolation_required: true,
+            isolation_verified: true,
+            revocable: true,
+            quiescence_verified: true,
+            recovery_verified: true,
+        }
+    }
+
+    #[test]
+    fn authorization_and_technical_admission_form_independent_dual_gates() {
+        assert_eq!(
+            evaluate_driver_admission(
+                authorization(),
+                Subject::Service(7),
+                10,
+                5,
+                2,
+                11,
+                9,
+                technical(),
+                OperatingMode::Production,
+            ),
+            AdmissionDecision::Allowed
+        );
+        assert_eq!(
+            evaluate_driver_admission(
+                authorization(),
+                Subject::Service(7),
+                10,
+                5,
+                2,
+                11,
+                9,
+                TechnicalAdmission {
+                    isolation_verified: false,
+                    ..technical()
+                },
+                OperatingMode::Production,
+            ),
+            AdmissionDecision::Denied(AdmissionDeny::Technical)
+        );
+        assert_eq!(
+            evaluate_driver_admission(
+                authorization(),
+                Subject::Service(7),
+                10,
+                5,
+                2,
+                11,
+                9,
+                TechnicalAdmission {
+                    isolation_verified: false,
+                    ..technical()
+                },
+                OperatingMode::Development,
+            ),
+            AdmissionDecision::DevelopmentOnly
+        );
+    }
+
+    #[test]
+    fn expired_revoked_and_wrong_principal_authorization_fail_before_technical_success() {
+        assert_eq!(
+            evaluate_driver_admission(
+                authorization(),
+                Subject::Service(8),
+                10,
+                5,
+                2,
+                11,
+                9,
+                technical(),
+                OperatingMode::Production,
+            ),
+            AdmissionDecision::Denied(AdmissionDeny::ExecutorMismatch)
+        );
+        assert_eq!(
+            evaluate_driver_admission(
+                authorization(),
+                Subject::Service(7),
+                100,
+                5,
+                2,
+                11,
+                9,
+                technical(),
+                OperatingMode::Development,
+            ),
+            AdmissionDecision::Denied(AdmissionDeny::Expired)
+        );
+        assert_eq!(
+            evaluate_driver_admission(
+                authorization(),
+                Subject::Service(7),
+                10,
+                5,
+                3,
+                11,
+                9,
+                technical(),
+                OperatingMode::Production,
+            ),
+            AdmissionDecision::Denied(AdmissionDeny::Revoked)
+        );
+        assert_eq!(
+            evaluate_driver_admission(
+                authorization(),
+                Subject::Service(7),
+                10,
+                5,
+                2,
+                12,
+                9,
+                technical(),
+                OperatingMode::Production,
+            ),
+            AdmissionDecision::Denied(AdmissionDeny::ScopeMismatch)
+        );
     }
 
     #[test]

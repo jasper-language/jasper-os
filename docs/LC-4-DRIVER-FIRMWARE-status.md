@@ -41,11 +41,27 @@
 该组合仍使用内存中的 Host/控制器事实；真实 Driver Host 的持久 admission、
 vendor firmware 格式和设备矩阵仍未完成。
 
+## Issue #39 授权与技术双门禁
+
+`evaluate_driver_admission` 把本地权限授权和设备技术准入拆成独立门禁：
+
+- 授权记录绑定决策者、执行主体、设备/系统 OwnerScope、设备身份与 generation、
+  policy epoch、revocation generation 和可选期限；
+- 技术事实分别记录设备匹配、ABI、资源作用域、隔离要求/证明、可撤销性、
+  DMA/IRQ 静默和 recovery 能力；
+- 授权失败无论技术结果如何都拒绝；技术失败在生产模式拒绝，只有显式
+  `Development` 模式可返回不具生产资格的 `DevelopmentOnly`；
+- 过期、撤销 generation 变化、policy epoch 变化、执行主体替换、错误设备或
+  作用域均在技术成功前失败关闭。
+
+该模型现在仍是策略组合层；真实签名包、Driver Host receipt 和设备事实尚未全部
+接入，因此不改变 core-passed 状态。
+
 ## 验证
 
 ```text
 cargo test -p kernel-core driver_lifecycle::tests
-5 passed; 0 failed
+7 passed; 0 failed
 
 cargo test -p kernel-core driver_host::tests
 7 passed; 0 failed
