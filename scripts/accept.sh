@@ -2851,14 +2851,18 @@ check_drv3() {
 }
 
 check_arch2() {
+  local abi_major abi_minor abi_patch
+  abi_major=$(awk -F= '$1 ~ /^[[:space:]]*major[[:space:]]*$/ {gsub(/[[:space:]]/, "", $2); print $2}' "$ROOT/abi/abi-version.txt")
+  abi_minor=$(awk -F= '$1 ~ /^[[:space:]]*minor[[:space:]]*$/ {gsub(/[[:space:]]/, "", $2); print $2}' "$ROOT/abi/abi-version.txt")
+  abi_patch=$(awk -F= '$1 ~ /^[[:space:]]*patch[[:space:]]*$/ {gsub(/[[:space:]]/, "", $2); print $2}' "$ROOT/abi/abi-version.txt")
   if has '^\[JSR-ARCH2\] driver=arch2-driver-a state=running .*maps=1 ring_quota=1' \
      && has 'usi: mode=restored devices_available=true' \
      && has '^\[JSR-ARCH2\] driver_exit .*old_handles=false old_mapping=false objects_reclaimed=true' \
      && has 'usi: mode=degraded devices_available=false' \
      && has '^\[JSR-ARCH2\] driver=arch2-driver-b state=running .*maps=1 ring_quota=1' \
-     && has '^\[JSR-ARCH2\] summary drivers=2 restarts=1 available=true unavailable=true old_handles=false old_mapping=false old_lease=false abi=3\.1\.0 unchanged=true resources=true failed=0' \
+     && has "^\\[JSR-ARCH2\\] summary drivers=2 restarts=1 available=true unavailable=true old_handles=false old_mapping=false old_lease=false abi=${abi_major}\\.${abi_minor}\\.${abi_patch} unchanged=true resources=true failed=0" \
      && ! has '^\[JSR-ARCH2-FAIL\]'; then
-    record ARCH-2 PASS "真实用户态驱动打开并映射 virtio-net、创建 Ring 后保持运行；USI 报告 available；进程死亡后 unavailable，旧 Device/Ring 句柄与 BAR 映射失效并回收；第二次启动恢复服务并再次通过死亡路径；资源回基线，ABI 3.1.0 不变"
+    record ARCH-2 PASS "真实用户态驱动打开并映射 virtio-net、创建 Ring 后保持运行；USI 报告 available；进程死亡后 unavailable，旧 Device/Ring 句柄与 BAR 映射失效并回收；第二次启动恢复服务并再次通过死亡路径；资源回基线，ABI ${abi_major}.${abi_minor}.${abi_patch} 不变"
   else
     record ARCH-2 FAIL "缺少真实用户态驱动、USI available/unavailable、死亡后句柄/映射失效、重启恢复、资源基线或 ABI 证据"
   fi

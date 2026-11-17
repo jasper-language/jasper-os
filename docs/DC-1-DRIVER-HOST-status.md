@@ -48,10 +48,18 @@ PASS
 
 cargo check --locked --target x86_64-unknown-none -p jasper-kernel --features arch2-verify
 PASS
+
+JASPER_CHECKS=arch2 JASPER_ACCEPT=spot bash scripts/accept.sh
+qemu_rc=33; ARCH-2 PASS; accept: SPOT PASS
 ```
 
 覆盖发现与准入分离、最小权限、设备独占、请求单终态、reset 失败原子与 token
 失效、崩溃 quarantine/recovery，以及容量失败不部分发布。
+
+真实 x86_64 KVM guest 中，同一未特权 Driver Host 进程实际完成
+Device/Memory/DMA/MSI-X/Ring 组合，IRQ 等待经关闭中断句柄得到唯一
+`InterruptClosed` 终态，全部句柄关闭后对象与页帧回基线。证据：
+`evidence/accept-20261117-131248/serial.log`。
 
 ## 未完成
 

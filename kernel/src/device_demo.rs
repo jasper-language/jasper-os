@@ -106,6 +106,7 @@ fn driver_host_calls() -> SyscallSet {
         abi::SYSTEM_DEVICE_CAPABILITY_LIST,
         abi::SYSTEM_DEVICE_MAP,
         abi::SYSTEM_DEVICE_INTERRUPT_CREATE,
+        abi::SYSTEM_DEVICE_INTERRUPT_WAIT,
         abi::SYSTEM_MEMORY_OBJECT_CREATE,
         abi::SYSTEM_MEMORY_OBJECT_MAP,
         abi::SYSTEM_MEMORY_OBJECT_UNMAP,

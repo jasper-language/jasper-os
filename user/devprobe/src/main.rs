@@ -886,7 +886,9 @@ fn probe_driver_host() -> ! {
         let mut raw = [0u8; RECORD_SIZE];
         raw.copy_from_slice(&list[index * RECORD_SIZE..(index + 1) * RECORD_SIZE]);
         let record = Record::decode(&raw);
-        if record.vendor == 0x1AF4 && matches!(record.device, 0x1004 | 0x1044) {
+        if record.vendor == 0x1AF4
+            && matches!(record.device, 0x1004 | 0x1005 | 0x1044)
+        {
             rng_bdf = record.bdf;
             break;
         }
@@ -1020,14 +1022,19 @@ fn probe_driver_host() -> ! {
         let reap = ring_enter(ring, &[], 1, &mut done);
         emit!(
             submit == 0
+                && first.args.submitted == 1
+                && first.args.first_error == 0
+                && first.args.reaped == 0
                 && closed == 0
                 && reap == 0
                 && done.args.reaped == 1
                 && done.cqes[0].user_tag == 0xdc1
                 && done.cqes[0].result
                     == -(ids::SYSTEM_DEVICE_ERROR_INTERRUPT_CLOSED as i64),
-            "dc1 case=ring_close submit={} reap={} result={}",
+            "dc1 case=ring_close submit={} queued={} first_error={} reap={} result={}",
             submit,
+            first.args.submitted,
+            first.args.first_error,
             reap,
             done.cqes[0].result
         );
