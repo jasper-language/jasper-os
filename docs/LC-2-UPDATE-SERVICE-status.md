@@ -68,9 +68,13 @@ jasper-update-recovery cleanup <control-root> <staging-root> <manifest-sha256-he
   request identity；
 - 已建立路径-free 的 recovery/archive action 契约：请求只携带 request ID、
   expected generation、transaction ID、manifest digest、动作与 platform scope；
-  响应固定回传内核盖章的 caller/tenant/domain、最终 reservation generation、
+  响应固定回传内核盖章的 caller/tenant/domain、最终 service generation、
   transaction、digest、recovery-required 和 archived 事实。动作权限、事务绑定、
   digest 与旧 generation 均在执行前失败关闭；
+- `UpdateService` 已增加 `TransactionBinding` 与 managed execution：调用者使用
+  generation、transaction ID、manifest digest 绑定当前事务；`recover_bound`
+  使用服务内部 staging root，`archive_bound` 使用运维启动时配置的 archive root，
+  普通 action 调用不再提交内部路径；
 - 服务先验证当前调用者身份/系统域，再读取并恢复同一组双副本 A/B 控制记录；
 - 返回 `service.update.status` v1 请求头与固定状态载荷，包含 generation、transaction、槽状态、
   release、回滚下限、安全纪元、Schema 范围以及调用者身份；
@@ -87,9 +91,9 @@ jasper-update-recovery cleanup <control-root> <staging-root> <manifest-sha256-he
 过滤、恢复/归档正式资源动作和完整负例矩阵尚未交付。因此 LC-2 继续保持
 `core-passed`，恢复工具也不能冒充正式命令。
 
-当前新增的 recovery/archive 是正式 ABI 的路径-free 数据/授权契约，尚未注册为
-内核 syscall，也尚未由原生 Shell 或 Agent 执行器消费。后续必须把它接到现有
-`UpdateService` 的事务与幂等语义上，完成真实 UEFI/断电负例后才能升级状态。
+当前新增的 recovery/archive 已具备路径-free 数据/授权契约和
+`UpdateService` managed execution，但尚未注册为内核 syscall，也尚未由原生
+Shell 或 Agent 执行器消费。后续必须完成真实 UEFI/断电负例后才能升级状态。
 
 ## 验证
 

@@ -1355,6 +1355,17 @@ pub struct ServiceStatus {
     pub recovery_required: bool,
 }
 
+/// Path-free identity of the service's currently active transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransactionBinding {
+    /// Service generation bound to the active transaction.
+    pub generation: u64,
+    /// Authoritative boot-control transaction identifier.
+    pub transaction_id: u64,
+    /// Verified manifest digest bound to the active transaction.
+    pub manifest_sha256: [u8; 32],
+}
+
 /// Service lifecycle error.
 #[derive(Debug)]
 pub enum ServiceError {
@@ -1380,6 +1391,8 @@ pub enum ServiceError {
     PreparedUnavailable,
     /// Recovery arguments do not match the active faulted transaction.
     RecoveryTargetMismatch,
+    /// No trusted archive root was configured for this service instance.
+    ArchiveRootUnavailable,
     /// Underlying coordinator operation failed.
     Coordinator(CoordinatorError),
     /// Terminal transaction archiving failed.
@@ -1400,6 +1413,9 @@ impl fmt::Display for ServiceError {
             Self::PreparedUnavailable => write!(formatter, "prepared transaction is unavailable"),
             Self::RecoveryTargetMismatch => {
                 write!(formatter, "recovery target does not match the active transaction")
+            }
+            Self::ArchiveRootUnavailable => {
+                write!(formatter, "no archive root is configured for this service")
             }
             Self::Coordinator(error) => write!(formatter, "{error}"),
             Self::Staging(error) => write!(formatter, "{error}"),
@@ -1425,6 +1441,7 @@ pub struct UpdateService {
     control: FileControlStore,
     active: Option<ServiceUpdate>,
     next_generation: u64,
+    archive_root: Option<PathBuf>,
 }
 
 impl UpdateService {
@@ -1437,6 +1454,7 @@ impl UpdateService {
             control,
             active: None,
             next_generation,
+            archive_root: None,
         })
     }
 
@@ -1452,7 +1470,19 @@ impl UpdateService {
             control,
             active: None,
             next_generation,
+            archive_root: None,
         })
+    }
+
+    /// Open a managed service whose archive destination is configured by the
+    /// trusted operator rather than by individual action callers.
+    pub fn open_managed(
+        control_root: impl Into<PathBuf>,
+        archive_root: impl Into<PathBuf>,
+    ) -> Result<Self, CoordinatorError> {
+        let mut service = Self::open(control_root)?;
+        service.archive_root = Some(archive_root.into());
+        Ok(service)
     }
 
     /// Return a stable snapshot of the active transaction and control state.
@@ -1481,6 +1511,16 @@ impl UpdateService {
                 recovery_required: false,
             },
         }
+    }
+
+    /// Return the active transaction identity without exposing internal paths.
+    pub fn binding(&self) -> Result<TransactionBinding, ServiceError> {
+        let active = self.active.as_ref().ok_or(ServiceError::NoActive)?;
+        Ok(TransactionBinding {
+            generation: active.generation,
+            transaction_id: self.control.current().transaction_id(),
+            manifest_sha256: active.manifest_sha256,
+        })
     }
 
     /// Authorize, preflight and stage a verified manifest through the service.
@@ -1669,6 +1709,22 @@ impl UpdateService {
         Ok(self.status())
     }
 
+    /// Recover the active transaction by stable identity without caller paths.
+    pub fn recover_bound(
+        &mut self,
+        binding: TransactionBinding,
+    ) -> Result<ServiceStatus, ServiceError> {
+        let active = self.active.as_ref().ok_or(ServiceError::NoActive)?;
+        if active.generation != binding.generation
+            || active.manifest_sha256 != binding.manifest_sha256
+            || self.control.current().transaction_id() != binding.transaction_id
+        {
+            return Err(ServiceError::RecoveryTargetMismatch);
+        }
+        let staging_root = active.staging_root.clone();
+        self.recover(&staging_root, binding.manifest_sha256)
+    }
+
     /// Archive and remove a Complete or RolledBack staging tree.
     pub fn archive_and_cleanup(
         &mut self,
@@ -1713,6 +1769,27 @@ impl UpdateService {
             .map_err(ServiceError::Staging)?;
         self.active = None;
         Ok(archive)
+    }
+
+    /// Archive the active terminal transaction through the operator-configured
+    /// destination and stable transaction identity.
+    pub fn archive_bound(
+        &mut self,
+        binding: TransactionBinding,
+    ) -> Result<ArchivedTransaction, ServiceError> {
+        let active = self.active.as_ref().ok_or(ServiceError::NoActive)?;
+        if active.generation != binding.generation
+            || active.manifest_sha256 != binding.manifest_sha256
+            || self.control.current().transaction_id() != binding.transaction_id
+        {
+            return Err(ServiceError::RecoveryTargetMismatch);
+        }
+        let archive_root = self
+            .archive_root
+            .as_ref()
+            .cloned()
+            .ok_or(ServiceError::ArchiveRootUnavailable)?;
+        self.archive_and_cleanup(binding.generation, &archive_root)
     }
 
     fn require_idle(&self) -> Result<(), ServiceError> {
@@ -2761,6 +2838,36 @@ mod tests {
     }
 
     #[test]
+    fn managed_binding_archives_without_caller_paths() {
+        let temp = TestDir::new("service-bound-archive");
+        let (mut service, generation, _) = prepared_service(&temp, "bound-archive");
+        service.commit(generation, Slot::B, 2).unwrap();
+        service.begin_trial(generation).unwrap();
+        service.report_health(generation, true).unwrap();
+        service.finalize_confirmed(generation).unwrap();
+
+        let binding = service.binding().unwrap();
+        assert_eq!(binding.generation, generation);
+        assert!(matches!(
+            service.archive_bound(TransactionBinding {
+                generation: generation + 1,
+                ..binding
+            }),
+            Err(ServiceError::RecoveryTargetMismatch)
+        ));
+        assert!(matches!(
+            service.archive_bound(binding),
+            Err(ServiceError::ArchiveRootUnavailable)
+        ));
+
+        service.archive_root = Some(temp.path().join("managed-archive"));
+        let archive = service.archive_bound(binding).unwrap();
+        assert_eq!(archive.manifest_sha256, binding.manifest_sha256);
+        assert_eq!(archive.record.stage(), UpdateStage::Complete);
+        assert_eq!(service.status().stage, None);
+    }
+
+    #[test]
     fn service_failed_health_is_the_only_path_to_rollback() {
         let temp = TestDir::new("service-rollback");
         let (mut service, generation, _) = prepared_service(&temp, "rollback");
@@ -2845,6 +2952,42 @@ mod tests {
             recovered.report_health(generation, true),
             Err(ServiceError::StaleGeneration { .. })
         ));
+    }
+
+    #[test]
+    fn active_recovery_uses_only_stable_binding_identity() {
+        let temp = TestDir::new("service-bound-recovery");
+        let (mut service, generation, staging_root) =
+            prepared_service(&temp, "bound-recovery");
+        let prepared_record = service
+            .active
+            .as_ref()
+            .and_then(|active| active.prepared.as_ref())
+            .map(|prepared| prepared.record)
+            .unwrap();
+        service.commit(generation, Slot::B, 2).unwrap();
+        persist_transaction_record(&staging_root, prepared_record).unwrap();
+        service.active.as_mut().unwrap().recovery_required = true;
+
+        let binding = service.binding().unwrap();
+        assert!(matches!(
+            service.recover_bound(TransactionBinding {
+                manifest_sha256: [0x44; 32],
+                ..binding
+            }),
+            Err(ServiceError::RecoveryTargetMismatch)
+        ));
+        assert!(matches!(
+            service.recover_bound(TransactionBinding {
+                transaction_id: binding.transaction_id + 1,
+                ..binding
+            }),
+            Err(ServiceError::RecoveryTargetMismatch)
+        ));
+        let recovered = service.recover_bound(binding).unwrap();
+        assert_eq!(recovered.stage, Some(UpdateStage::Committed));
+        assert!(recovered.generation > generation);
+        assert!(!recovered.recovery_required);
     }
 
     #[test]
