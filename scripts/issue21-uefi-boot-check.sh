@@ -330,7 +330,7 @@ rc=$?
 set -e
 exec 9>&-
 printf '%s\n' "$rc" >"$OUT/qemu.rc"
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = vulkan-metal2vulkan ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = vulkan-metal2vulkan ]; then
   [ "$rc" -eq 33 ]
 else
   [ "$rc" -eq 124 ]
