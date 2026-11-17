@@ -48,6 +48,7 @@ pub use relocation::{
 const MAX_PROGRAM_HEADERS: usize = 128;
 const MAX_LOAD_SEGMENTS: usize = 64;
 const MAX_RELOCATIONS: usize = 1_000_000;
+const MAX_ANDROID_RELOCATION_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_DYNAMIC_NAMES: usize = 256;
 const MAX_DYNAMIC_NAME_BYTES: usize = 4096;
 const MAX_TLS_BYTES: u64 = 16 * 1024 * 1024;
@@ -388,6 +389,7 @@ pub fn parse(bytes: &[u8]) -> Result<LoadPlan, LoaderError> {
 
     let mut relocations = Vec::new();
     collect_relocations(&elf, elf.dynrelas.iter(), &segments, &mut relocations)?;
+    collect_android_relocations(&elf, bytes, &segments, &mut relocations)?;
     collect_relocations(&elf, elf.pltrelocs.iter(), &segments, &mut relocations)?;
     if relocations.len() > MAX_RELOCATIONS {
         return Err(LoaderError::TooManyRelocations);
@@ -474,80 +476,295 @@ fn collect_relocations<'a>(
     output: &mut Vec<Relocation>,
 ) -> Result<(), LoaderError> {
     for relocation in iter {
-        if relocation.r_sym != 0 && relocation.r_sym >= elf.dynsyms.len() {
-            return Err(LoaderError::BadRelocation);
-        }
-        let kind = match relocation.r_type {
-            R_X86_64_NONE => RelocationKind::None,
-            R_X86_64_RELATIVE => RelocationKind::Relative,
-            R_X86_64_GLOB_DAT => RelocationKind::GlobDat,
-            R_X86_64_JUMP_SLOT => RelocationKind::JumpSlot,
-            R_X86_64_64 => RelocationKind::Absolute,
-            R_X86_64_PC32 => RelocationKind::PcRelative,
-            R_X86_64_COPY => RelocationKind::Copy,
-            R_X86_64_DTPMOD64 => RelocationKind::TlsModule,
-            R_X86_64_DTPOFF64 => RelocationKind::DtpOffset,
-            R_X86_64_TPOFF64 => RelocationKind::TpOffset,
-            R_X86_64_TLSDESC => RelocationKind::TlsDesc,
-            R_X86_64_IRELATIVE => RelocationKind::IRelative,
-            kind => return Err(LoaderError::UnsupportedRelocation(kind)),
-        };
-        let target_bytes = match kind {
-            RelocationKind::None => 0,
-            RelocationKind::PcRelative => size_of::<i32>() as u64,
-            RelocationKind::TlsDesc => 2 * size_of::<u64>() as u64,
-            _ => size_of::<u64>() as u64,
-        };
-        if kind != RelocationKind::None
-            && !writable_target(relocation.r_offset, target_bytes, segments)
-        {
-            return Err(LoaderError::BadRelocation);
-        }
-        let (symbol, symbol_value, symbol_size, symbol_defined, symbol_binding, symbol_is_ifunc) =
-            if relocation.r_sym == 0 {
-                (None, 0, 0, false, None, false)
-            } else {
-                let symbol = elf
-                    .dynsyms
-                    .get(relocation.r_sym)
-                    .ok_or(LoaderError::BadRelocation)?;
-                let name = Some(
-                    elf.dynstrtab
-                        .get_at(symbol.st_name)
-                        .ok_or(LoaderError::BadRelocation)?
-                        .to_string(),
-                );
-                let binding = match symbol.st_bind() {
-                    STB_LOCAL => SymbolBinding::Local,
-                    STB_GLOBAL => SymbolBinding::Global,
-                    STB_WEAK => SymbolBinding::Weak,
-                    _ => return Err(LoaderError::BadRelocation),
-                };
-                (
-                    name,
-                    symbol.st_value,
-                    symbol.st_size,
-                    symbol.st_shndx != 0,
-                    Some(binding),
-                    symbol.st_type() == 10,
-                )
-            };
-        if output.len() == MAX_RELOCATIONS {
-            return Err(LoaderError::TooManyRelocations);
-        }
-        output.push(Relocation {
-            offset: relocation.r_offset,
-            addend: relocation.r_addend.unwrap_or(0),
-            kind,
-            symbol,
-            symbol_value,
-            symbol_size,
-            symbol_defined,
-            symbol_binding,
-            symbol_is_ifunc,
-        });
+        push_relocation(
+            elf,
+            relocation.r_offset,
+            relocation.r_type,
+            relocation.r_sym,
+            relocation.r_addend.unwrap_or(0),
+            segments,
+            output,
+        )?;
     }
     Ok(())
+}
+
+fn push_relocation(
+    elf: &Elf<'_>,
+    offset: u64,
+    relocation_type: u32,
+    symbol_index: usize,
+    addend: i64,
+    segments: &[LoadSegment],
+    output: &mut Vec<Relocation>,
+) -> Result<(), LoaderError> {
+    if symbol_index != 0 && symbol_index >= elf.dynsyms.len() {
+        return Err(LoaderError::BadRelocation);
+    }
+    let kind = match relocation_type {
+        R_X86_64_NONE => RelocationKind::None,
+        R_X86_64_RELATIVE => RelocationKind::Relative,
+        R_X86_64_GLOB_DAT => RelocationKind::GlobDat,
+        R_X86_64_JUMP_SLOT => RelocationKind::JumpSlot,
+        R_X86_64_64 => RelocationKind::Absolute,
+        R_X86_64_PC32 => RelocationKind::PcRelative,
+        R_X86_64_COPY => RelocationKind::Copy,
+        R_X86_64_DTPMOD64 => RelocationKind::TlsModule,
+        R_X86_64_DTPOFF64 => RelocationKind::DtpOffset,
+        R_X86_64_TPOFF64 => RelocationKind::TpOffset,
+        R_X86_64_TLSDESC => RelocationKind::TlsDesc,
+        R_X86_64_IRELATIVE => RelocationKind::IRelative,
+        kind => return Err(LoaderError::UnsupportedRelocation(kind)),
+    };
+    let target_bytes = match kind {
+        RelocationKind::None => 0,
+        RelocationKind::PcRelative => size_of::<i32>() as u64,
+        RelocationKind::TlsDesc => 2 * size_of::<u64>() as u64,
+        _ => size_of::<u64>() as u64,
+    };
+    if kind != RelocationKind::None && !writable_target(offset, target_bytes, segments) {
+        return Err(LoaderError::BadRelocation);
+    }
+    let (symbol, symbol_value, symbol_size, symbol_defined, symbol_binding, symbol_is_ifunc) =
+        if symbol_index == 0 {
+            (None, 0, 0, false, None, false)
+        } else {
+            let symbol = elf
+                .dynsyms
+                .get(symbol_index)
+                .ok_or(LoaderError::BadRelocation)?;
+            let name = Some(
+                elf.dynstrtab
+                    .get_at(symbol.st_name)
+                    .ok_or(LoaderError::BadRelocation)?
+                    .to_string(),
+            );
+            let binding = match symbol.st_bind() {
+                STB_LOCAL => SymbolBinding::Local,
+                STB_GLOBAL => SymbolBinding::Global,
+                STB_WEAK => SymbolBinding::Weak,
+                _ => return Err(LoaderError::BadRelocation),
+            };
+            (
+                name,
+                symbol.st_value,
+                symbol.st_size,
+                symbol.st_shndx != 0,
+                Some(binding),
+                symbol.st_type() == 10,
+            )
+        };
+    if output.len() == MAX_RELOCATIONS {
+        return Err(LoaderError::TooManyRelocations);
+    }
+    output.push(Relocation {
+        offset,
+        addend,
+        kind,
+        symbol,
+        symbol_value,
+        symbol_size,
+        symbol_defined,
+        symbol_binding,
+        symbol_is_ifunc,
+    });
+    Ok(())
+}
+
+const DT_ANDROID_RELA: u64 = 0x6000_0011;
+const DT_ANDROID_RELASZ: u64 = 0x6000_0012;
+const SHT_ANDROID_RELA: u32 = 0x6000_0002;
+const APS2_HEADER: &[u8; 4] = b"APS2";
+const RELOCATION_GROUP_HAS_ADDEND: u64 = 1 << 3;
+const RELOCATION_GROUPED_BY_ADDEND: u64 = 1 << 2;
+const RELOCATION_GROUPED_BY_OFFSET_DELTA: u64 = 1 << 1;
+const RELOCATION_GROUPED_BY_INFO: u64 = 1;
+
+fn collect_android_relocations(
+    elf: &Elf<'_>,
+    bytes: &[u8],
+    segments: &[LoadSegment],
+    output: &mut Vec<Relocation>,
+) -> Result<(), LoaderError> {
+    let mut dynamic_address = None;
+    let mut dynamic_size = None;
+    if let Some(dynamic) = &elf.dynamic {
+        for entry in &dynamic.dyns {
+            match entry.d_tag {
+                DT_ANDROID_RELA if dynamic_address.replace(entry.d_val).is_some() => {
+                    return Err(LoaderError::BadRelocation);
+                }
+                DT_ANDROID_RELASZ if dynamic_size.replace(entry.d_val).is_some() => {
+                    return Err(LoaderError::BadRelocation);
+                }
+                _ => {}
+            }
+        }
+    }
+    if let (Some(address), Some(size)) = (dynamic_address, dynamic_size) {
+        let range = VirtualRange {
+            address,
+            bytes: size,
+        };
+        let data = virtual_range_bytes(bytes, range, segments)?;
+        return decode_android_relocations(elf, data, segments, output);
+    }
+    if dynamic_address.is_some() || dynamic_size.is_some() {
+        return Err(LoaderError::BadRelocation);
+    }
+
+    for section in &elf.section_headers {
+        if section.sh_type != SHT_ANDROID_RELA {
+            continue;
+        }
+        let start = usize::try_from(section.sh_offset).map_err(|_| LoaderError::BadRelocation)?;
+        let size = usize::try_from(section.sh_size).map_err(|_| LoaderError::BadRelocation)?;
+        let end = start.checked_add(size).ok_or(LoaderError::BadRelocation)?;
+        let data = bytes.get(start..end).ok_or(LoaderError::BadRelocation)?;
+        decode_android_relocations(elf, data, segments, output)?;
+    }
+    Ok(())
+}
+
+fn virtual_range_bytes<'a>(
+    bytes: &'a [u8],
+    range: VirtualRange,
+    segments: &[LoadSegment],
+) -> Result<&'a [u8], LoaderError> {
+    if range.bytes > MAX_ANDROID_RELOCATION_BYTES {
+        return Err(LoaderError::ImageTooLarge);
+    }
+    let end = range
+        .address
+        .checked_add(range.bytes)
+        .ok_or(LoaderError::BadRelocation)?;
+    let mut file_start = None;
+    for segment in segments {
+        let file_end = segment
+            .file_offset
+            .checked_add(segment.file_bytes)
+            .ok_or(LoaderError::BadSegment)?;
+        let virtual_file_end = segment
+            .virtual_address
+            .checked_add(segment.file_bytes)
+            .ok_or(LoaderError::BadSegment)?;
+        if segment.readable && range.address >= segment.virtual_address && end <= virtual_file_end {
+            let offset = segment
+                .file_offset
+                .checked_add(range.address - segment.virtual_address)
+                .ok_or(LoaderError::BadRelocation)?;
+            if offset
+                .checked_add(range.bytes)
+                .is_none_or(|end| end > file_end)
+            {
+                return Err(LoaderError::BadRelocation);
+            }
+            file_start = Some(offset);
+            break;
+        }
+    }
+    let start = usize::try_from(file_start.ok_or(LoaderError::BadRelocation)?)
+        .map_err(|_| LoaderError::BadRelocation)?;
+    let size = usize::try_from(range.bytes).map_err(|_| LoaderError::BadRelocation)?;
+    let end = start.checked_add(size).ok_or(LoaderError::BadRelocation)?;
+    bytes.get(start..end).ok_or(LoaderError::BadRelocation)
+}
+
+fn decode_android_relocations(
+    elf: &Elf<'_>,
+    data: &[u8],
+    segments: &[LoadSegment],
+    output: &mut Vec<Relocation>,
+) -> Result<(), LoaderError> {
+    if data.get(..APS2_HEADER.len()) != Some(APS2_HEADER) {
+        return Err(LoaderError::BadRelocation);
+    }
+    let mut cursor = APS2_HEADER.len();
+    let relocation_count = read_sleb128(data, &mut cursor)?;
+    let relocation_count =
+        usize::try_from(relocation_count).map_err(|_| LoaderError::BadRelocation)?;
+    if relocation_count > MAX_RELOCATIONS {
+        return Err(LoaderError::TooManyRelocations);
+    }
+    let mut offset = read_sleb128(data, &mut cursor)?;
+    let mut info = 0u64;
+    let mut addend = 0i64;
+    let mut emitted = 0usize;
+    while emitted < relocation_count {
+        let group_size = read_sleb128(data, &mut cursor)?;
+        let group_size = usize::try_from(group_size).map_err(|_| LoaderError::BadRelocation)?;
+        if group_size == 0 || group_size > relocation_count - emitted {
+            return Err(LoaderError::BadRelocation);
+        }
+        let group_flags = read_sleb128(data, &mut cursor)?;
+        let grouped_offset = group_flags & RELOCATION_GROUPED_BY_OFFSET_DELTA != 0;
+        let grouped_info = group_flags & RELOCATION_GROUPED_BY_INFO != 0;
+        let group_offset_delta = if grouped_offset {
+            read_sleb128(data, &mut cursor)?
+        } else {
+            0
+        };
+        if grouped_info {
+            info = read_sleb128(data, &mut cursor)?;
+        }
+        let addend_flags =
+            group_flags & (RELOCATION_GROUP_HAS_ADDEND | RELOCATION_GROUPED_BY_ADDEND);
+        if addend_flags == (RELOCATION_GROUP_HAS_ADDEND | RELOCATION_GROUPED_BY_ADDEND) {
+            addend = addend.wrapping_add(read_sleb128(data, &mut cursor)? as i64);
+        } else if addend_flags != RELOCATION_GROUP_HAS_ADDEND {
+            addend = 0;
+        }
+
+        for _ in 0..group_size {
+            offset = if grouped_offset {
+                offset.wrapping_add(group_offset_delta)
+            } else {
+                offset.wrapping_add(read_sleb128(data, &mut cursor)?)
+            };
+            if !grouped_info {
+                info = read_sleb128(data, &mut cursor)?;
+            }
+            if addend_flags == RELOCATION_GROUP_HAS_ADDEND {
+                addend = addend.wrapping_add(read_sleb128(data, &mut cursor)? as i64);
+            }
+            let symbol_index =
+                usize::try_from(info >> 32).map_err(|_| LoaderError::BadRelocation)?;
+            push_relocation(
+                elf,
+                offset,
+                info as u32,
+                symbol_index,
+                addend,
+                segments,
+                output,
+            )?;
+            emitted += 1;
+        }
+    }
+    if cursor != data.len() {
+        return Err(LoaderError::BadRelocation);
+    }
+    Ok(())
+}
+
+fn read_sleb128(data: &[u8], cursor: &mut usize) -> Result<u64, LoaderError> {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    loop {
+        let byte = *data.get(*cursor).ok_or(LoaderError::BadRelocation)?;
+        *cursor += 1;
+        if shift >= u64::BITS {
+            return Err(LoaderError::BadRelocation);
+        }
+        value |= u64::from(byte & 0x7f) << shift;
+        shift += 7;
+        if byte & 0x80 == 0 {
+            if shift < u64::BITS && byte & 0x40 != 0 {
+                value |= (!0u64) << shift;
+            }
+            return Ok(value);
+        }
+    }
 }
 
 fn validate_segments(segments: &mut [LoadSegment]) -> Result<(), LoaderError> {
@@ -604,10 +821,7 @@ fn range_in_writable_image(range: VirtualRange, segments: &[LoadSegment]) -> boo
         return false;
     };
     segments.iter().any(|segment| {
-        let Some(segment_end) = segment
-            .virtual_address
-            .checked_add(segment.memory_bytes)
-        else {
+        let Some(segment_end) = segment.virtual_address.checked_add(segment.memory_bytes) else {
             return false;
         };
         let align = segment.align.max(1);
@@ -775,6 +989,130 @@ const _: () = assert!(MAX_RELOCATIONS * size_of::<Relocation>() > 0);
 mod tests {
     use super::*;
     use std::fs;
+
+    fn encode_sleb128(mut value: i64, output: &mut Vec<u8>) {
+        loop {
+            let byte = (value as u8) & 0x7f;
+            value >>= 7;
+            let done = (value == 0 && byte & 0x40 == 0) || (value == -1 && byte & 0x40 != 0);
+            output.push(if done { byte } else { byte | 0x80 });
+            if done {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn signed_leb128_decoder_handles_positive_and_negative_values() {
+        for expected in [0, 1, 63, 64, 0x1000, -1, -64, -65, i64::MIN, i64::MAX] {
+            let mut encoded = Vec::new();
+            encode_sleb128(expected, &mut encoded);
+            let mut cursor = 0;
+            assert_eq!(
+                read_sleb128(&encoded, &mut cursor).unwrap() as i64,
+                expected
+            );
+            assert_eq!(cursor, encoded.len());
+        }
+    }
+
+    #[test]
+    fn android_packed_relocations_decode_grouped_records() {
+        let bytes = fs::read("/bin/bash").expect("/bin/bash fixture");
+        let elf = Elf::parse(&bytes).unwrap();
+        let segments = [LoadSegment {
+            file_offset: 0,
+            virtual_address: 0x1000,
+            file_bytes: 0x1000,
+            memory_bytes: 0x1000,
+            align: 0x1000,
+            readable: true,
+            writable: true,
+            executable: false,
+        }];
+        let mut packed = APS2_HEADER.to_vec();
+        encode_sleb128(2, &mut packed);
+        encode_sleb128(0x1000, &mut packed);
+        encode_sleb128(2, &mut packed);
+        encode_sleb128(RELOCATION_GROUPED_BY_OFFSET_DELTA as i64, &mut packed);
+        encode_sleb128(8, &mut packed);
+        for _ in 0..2 {
+            encode_sleb128(R_X86_64_NONE as i64, &mut packed);
+        }
+
+        let mut output = Vec::new();
+        decode_android_relocations(&elf, &packed, &segments, &mut output).unwrap();
+        assert_eq!(output.len(), 2);
+        assert!(output.iter().all(|relocation| {
+            relocation.kind == RelocationKind::None
+                && relocation.symbol.is_none()
+                && relocation.addend == 0
+        }));
+        assert_eq!(output[0].offset, 0x1008);
+        assert_eq!(output[1].offset, 0x1010);
+    }
+
+    #[test]
+    fn android_packed_relocations_fail_closed_on_malformed_groups() {
+        let bytes = fs::read("/bin/bash").expect("/bin/bash fixture");
+        let elf = Elf::parse(&bytes).unwrap();
+        let segments = [LoadSegment {
+            file_offset: 0,
+            virtual_address: 0x1000,
+            file_bytes: 0x1000,
+            memory_bytes: 0x1000,
+            align: 0x1000,
+            readable: true,
+            writable: true,
+            executable: false,
+        }];
+        let mut output = Vec::new();
+        assert_eq!(
+            decode_android_relocations(&elf, b"APS1", &segments, &mut output),
+            Err(LoaderError::BadRelocation)
+        );
+        assert_eq!(
+            decode_android_relocations(
+                &elf,
+                &[b'A', b'P', b'S', b'2', 2, 0, 0],
+                &segments,
+                &mut output
+            ),
+            Err(LoaderError::BadRelocation)
+        );
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn android_runtime_got_relocation_is_parsed_when_fixture_is_provided() {
+        let Ok(path) = std::env::var("JASPER_ANDROID_LIBOPENJDKJVM") else {
+            return;
+        };
+        let bytes = fs::read(path).unwrap();
+        let elf = Elf::parse(&bytes).unwrap();
+        let segments: Vec<_> = elf
+            .program_headers
+            .iter()
+            .filter(|program| program.p_type == PT_LOAD)
+            .map(|program| LoadSegment {
+                file_offset: program.p_offset,
+                virtual_address: program.p_vaddr,
+                file_bytes: program.p_filesz,
+                memory_bytes: program.p_memsz,
+                align: program.p_align,
+                readable: program.p_flags & PF_R != 0,
+                writable: program.p_flags & PF_W != 0,
+                executable: program.p_flags & PF_X != 0,
+            })
+            .collect();
+        let mut relocations = Vec::new();
+        collect_android_relocations(&elf, &bytes, &segments, &mut relocations).unwrap();
+        assert!(relocations.iter().any(|relocation| {
+            relocation.offset == 0x8e98
+                && relocation.kind == RelocationKind::GlobDat
+                && relocation.symbol.as_deref() == Some("_ZN3art7Runtime9instance_E")
+        }));
+    }
 
     #[test]
     fn real_dynamic_linux_binary_yields_bounded_load_plan() {
