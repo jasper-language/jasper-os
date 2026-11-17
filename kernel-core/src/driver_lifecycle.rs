@@ -50,6 +50,7 @@ impl Package {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LifecyclePolicy {
     pub trusted_signer: [u8; 32],
+    pub revoked_signers: [[u8; 32]; 4],
     pub release_floor: u64,
     pub security_epoch: u64,
     pub hotplug: bool,
@@ -73,6 +74,7 @@ pub enum Error {
     InvalidPackage,
     Signature,
     UntrustedSigner,
+    RevokedSigner,
     Downgrade,
     SecurityEpoch,
     WrongState,
@@ -104,6 +106,7 @@ impl Error {
             Self::InvalidPackage => "system.driver.error.invalid_package",
             Self::Signature => "system.driver.error.signature",
             Self::UntrustedSigner => "system.driver.error.untrusted_signer",
+            Self::RevokedSigner => "system.driver.error.revoked_signer",
             Self::Downgrade => "system.firmware.error.downgrade",
             Self::SecurityEpoch => "system.firmware.error.security_epoch",
             Self::WrongState => "system.driver.error.invalid_transition",
@@ -178,6 +181,9 @@ impl Controller {
         }
         if !package.signature_valid {
             return Err(Error::Signature);
+        }
+        if self.policy.revoked_signers.contains(&package.signer) {
+            return Err(Error::RevokedSigner);
         }
         if package.signer != self.policy.trusted_signer {
             return Err(Error::UntrustedSigner);
@@ -441,6 +447,7 @@ mod tests {
     fn policy() -> LifecyclePolicy {
         LifecyclePolicy {
             trusted_signer: [7; 32],
+            revoked_signers: [[0; 32]; 4],
             release_floor: 1,
             security_epoch: 3,
             hotplug: true,
@@ -464,6 +471,14 @@ mod tests {
             }),
             Err(Error::UntrustedSigner)
         );
+        let mut revoked = policy();
+        revoked.revoked_signers[0] = [7; 32];
+        let mut revoked_lifecycle = Controller::new(revoked, None);
+        assert_eq!(
+            revoked_lifecycle.stage(package(2)),
+            Err(Error::RevokedSigner)
+        );
+        assert_eq!(revoked_lifecycle.state(), State::Empty);
         assert_eq!(lifecycle.stage(package(1)), Err(Error::Downgrade));
         assert_eq!(
             lifecycle.stage(Package {

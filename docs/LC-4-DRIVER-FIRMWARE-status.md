@@ -12,6 +12,8 @@
 - 驱动/固件包使用独立 Ed25519 32 字节公钥身份，必须具有非零 digest、signer、
   release 和 security epoch；`Package::verified` 只允许承载已经由签名信任边界
   验证过的包事实，不能再把窄整数当作签名者；
+- 生命周期策略带固定容量撤销集合；已撤销 signer 即使仍是当前受信 signer 也
+  优先失败，避免轮换期间旧键重新进入准入；
 - 只有显式信任的签名者及有效签名事实可以进入 `Verified`；
 - release floor、安全纪元和已运行版本阻止未经批准的回滚/降级；
 - `Verified → Authorized → Active` 必须由 generation token 驱动；
