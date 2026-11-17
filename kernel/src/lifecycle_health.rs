@@ -864,6 +864,54 @@ fn execute_root_dynamic_programs(
         b"ANDROID_I18N_ROOT=/apex/com.android.i18n",
         b"ANDROID_TZDATA_ROOT=/system/etc",
     ];
+    let official_001_argv: [&[u8]; 6] = [
+        b"/system/bin/dalvikvm64",
+        b"-Xuse-stderr-logger",
+        b"-Xbootclasspath:/apex/com.android.art/javalib/core-oj.jar:/apex/com.android.art/javalib/core-libart.jar:/apex/com.android.i18n/javalib/core-icu4j.jar",
+        b"-cp",
+        b"/data/local/tmp/art-official-001.dex",
+        b"Main",
+    ];
+    run_root_android_program(
+        root,
+        "android-art-official-001",
+        "/system/bin/dalvikvm64",
+        "/system/bin/linker64",
+        &official_001_argv,
+        &art_envp,
+    )?;
+    let official_002_argv: [&[u8]; 6] = [
+        b"/system/bin/dalvikvm64",
+        b"-Xuse-stderr-logger",
+        b"-Xbootclasspath:/apex/com.android.art/javalib/core-oj.jar:/apex/com.android.art/javalib/core-libart.jar:/apex/com.android.i18n/javalib/core-icu4j.jar",
+        b"-cp",
+        b"/data/local/tmp/art-official-002.dex",
+        b"Main",
+    ];
+    run_root_android_program(
+        root,
+        "android-art-official-002",
+        "/system/bin/dalvikvm64",
+        "/system/bin/linker64",
+        &official_002_argv,
+        &art_envp,
+    )?;
+    let official_003_argv: [&[u8]; 6] = [
+        b"/system/bin/dalvikvm64",
+        b"-Xuse-stderr-logger",
+        b"-Xbootclasspath:/apex/com.android.art/javalib/core-oj.jar:/apex/com.android.art/javalib/core-libart.jar:/apex/com.android.i18n/javalib/core-icu4j.jar",
+        b"-cp",
+        b"/data/local/tmp/art-official-003.dex",
+        b"Main",
+    ];
+    run_root_android_program(
+        root,
+        "android-art-official-003",
+        "/system/bin/dalvikvm64",
+        "/system/bin/linker64",
+        &official_003_argv,
+        &art_envp,
+    )?;
     run_root_android_program(
         root,
         "system/bin/dalvikvm64",
