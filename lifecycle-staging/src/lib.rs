@@ -362,6 +362,25 @@ impl UpdateCoordinator {
             let record = current.slot(slot);
             record.digest() == manifest_sha256 && record.state() == SlotState::Failed
         });
+        let terminal = match current.terminal() {
+            jasper_lifecycle_model::boot::TransactionTerminal::None => None,
+            jasper_lifecycle_model::boot::TransactionTerminal::Complete => {
+                if current.transaction_digest() != Some(manifest_sha256) {
+                    return Err(CoordinatorError::Control(
+                        BootControlError::TerminalIdentityMismatch,
+                    ));
+                }
+                Some(UpdateStage::Complete)
+            }
+            jasper_lifecycle_model::boot::TransactionTerminal::RolledBack => {
+                if current.transaction_digest() != Some(manifest_sha256) {
+                    return Err(CoordinatorError::Control(
+                        BootControlError::TerminalIdentityMismatch,
+                    ));
+                }
+                Some(UpdateStage::RolledBack)
+            }
+        };
         let record_stage = record.stage();
         let mut target = record_stage;
         if failed && update_stage_rank(record_stage) < update_stage_rank(UpdateStage::Rollback) {
@@ -378,6 +397,15 @@ impl UpdateCoordinator {
             } else if update_stage_rank(record_stage) < update_stage_rank(UpdateStage::Committed) {
                 target = UpdateStage::Committed;
             }
+        }
+        if let Some(terminal) = terminal {
+            if update_stage_rank(target) > update_stage_rank(terminal) {
+                return Err(CoordinatorError::InconsistentStage {
+                    expected: terminal,
+                    actual: target,
+                });
+            }
+            target = terminal;
         }
         let mut machine = UpdateMachine::idle();
         advance_update_machine(&mut machine, record_stage).map_err(CoordinatorError::Transition)?;
@@ -527,7 +555,11 @@ impl UpdateCoordinator {
     }
 
     /// Finalize a health-confirmed update without deleting its audit journal.
-    pub fn finalize_confirmed(&mut self, staging_root: &Path) -> Result<(), CoordinatorError> {
+    pub fn finalize_confirmed(
+        &mut self,
+        control: &mut FileControlStore,
+        staging_root: &Path,
+    ) -> Result<(), CoordinatorError> {
         if self.stage() != UpdateStage::Confirmed {
             return Err(CoordinatorError::InconsistentStage {
                 expected: UpdateStage::Confirmed,
@@ -540,6 +572,16 @@ impl UpdateCoordinator {
             .map_err(CoordinatorError::Transition)?;
         let mut record =
             load_transaction_record(staging_root).map_err(CoordinatorError::Staging)?;
+        let mut next = control.current();
+        next.record_terminal(
+            jasper_lifecycle_model::boot::TransactionTerminal::Complete,
+            next.transaction_id(),
+            record.manifest_sha256(),
+        )
+        .map_err(CoordinatorError::Control)?;
+        control
+            .commit_next(next)
+            .map_err(CoordinatorError::ControlStore)?;
         record
             .apply(UpdateEvent::Finalize)
             .map_err(CoordinatorError::Transaction)?;
@@ -564,6 +606,15 @@ impl UpdateCoordinator {
         let slot = next.active_slot();
         next.report_health(slot, true)
             .map_err(CoordinatorError::Control)?;
+        let mut record =
+            load_transaction_record(staging_root).map_err(CoordinatorError::Staging)?;
+        next = next
+            .with_terminal(
+                jasper_lifecycle_model::boot::TransactionTerminal::RolledBack,
+                next.transaction_id(),
+                record.manifest_sha256(),
+            )
+            .map_err(CoordinatorError::Control)?;
         let mut machine = self.machine;
         machine
             .apply(UpdateEvent::FinishRollback)
@@ -571,8 +622,6 @@ impl UpdateCoordinator {
         control
             .commit_next(next)
             .map_err(CoordinatorError::ControlStore)?;
-        let mut record =
-            load_transaction_record(staging_root).map_err(CoordinatorError::Staging)?;
         record
             .apply(UpdateEvent::FinishRollback)
             .map_err(CoordinatorError::Transaction)?;
@@ -1698,7 +1747,10 @@ impl UpdateService {
     pub fn finalize_confirmed(&mut self, generation: u64) -> Result<ServiceStatus, ServiceError> {
         let active = Self::require_generation(&mut self.active, generation)?;
         Self::require_stage(active, UpdateStage::Confirmed)?;
-        if let Err(error) = active.coordinator.finalize_confirmed(&active.staging_root) {
+        if let Err(error) = active
+            .coordinator
+            .finalize_confirmed(&mut self.control, &active.staging_root)
+        {
             active.recovery_required = true;
             return Err(ServiceError::Coordinator(error));
         }
@@ -2646,12 +2698,33 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fully_repaired.stage(), UpdateStage::Confirmed);
-        let mut completed = fully_repaired;
-        completed.finalize_confirmed(&staging_root).unwrap();
+        let mut terminal = control.current();
+        terminal
+            .record_terminal(
+                jasper_lifecycle_model::boot::TransactionTerminal::Complete,
+                terminal.transaction_id(),
+                prepared.manifest.manifest.manifest_sha256,
+            )
+            .unwrap();
+        control.commit_next(terminal).unwrap();
+        assert_eq!(
+            load_transaction_record(&staging_root).unwrap().stage(),
+            UpdateStage::Confirmed
+        );
+        let completed = UpdateCoordinator::recover_with_control(
+            &staging_root,
+            prepared.manifest.manifest.manifest_sha256,
+            &control,
+        )
+        .unwrap();
         assert_eq!(completed.stage(), UpdateStage::Complete);
         assert_eq!(
             load_transaction_record(&staging_root).unwrap().stage(),
             UpdateStage::Complete
+        );
+        assert_eq!(
+            control.current().terminal(),
+            jasper_lifecycle_model::boot::TransactionTerminal::Complete
         );
         let archive_root = temp.path().join("audit-archive");
         let archive = archive_completed_transaction(&staging_root, &archive_root).unwrap();
@@ -2710,6 +2783,14 @@ mod tests {
         assert_eq!(
             load_transaction_record(&rollback_root).unwrap().stage(),
             UpdateStage::RolledBack
+        );
+        assert_eq!(
+            control.current().terminal(),
+            jasper_lifecycle_model::boot::TransactionTerminal::RolledBack
+        );
+        assert_eq!(
+            control.current().transaction_digest(),
+            Some(rollback_prepared.manifest.manifest.manifest_sha256)
         );
         let rollback_archive = archive_completed_transaction(
             &rollback_root,

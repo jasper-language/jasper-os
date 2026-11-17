@@ -196,6 +196,7 @@
 4166	error	system.update.error.protocol	1	none	更新·状态协议非法	Update status protocol invalid
 111	op	system.update.status.query	1	read	更新·版本化状态查询	Query versioned update status
 112	op	system.update.action.recover	1	write	更新·恢复双副本控制事务	Recover update control transaction
+113	op	system.update.action.archive	1	write	更新·归档已验证终态事务	Archive verified terminal update transaction
 4167	error	system.update.error.unauthorized	1	none	更新·调用者未授权	Update status caller unauthorized
 4168	error	system.update.error.stale_generation	1	none	更新·状态世代已过期	Update status generation stale
 4169	error	system.update.error.request_id	1	none	更新·请求标识冲突	Update status request identifier conflict

@@ -856,6 +856,20 @@ syscall_dispatch! {
             err(SYSTEM_UPDATE_ERROR_UNAVAILABLE)
         }
     },
+    SYSTEM_UPDATE_ACTION_ARCHIVE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        let Some(pid) = crate::proc::current_process() else {
+            return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+        };
+        #[cfg(feature = "lifecycle-ab-health")]
+        {
+            crate::update_status_service::archive_v1(pid, a.args[0], a.args[1], a.args[2])
+        }
+        #[cfg(not(feature = "lifecycle-ab-health"))]
+        {
+            let _ = (pid, a);
+            err(SYSTEM_UPDATE_ERROR_UNAVAILABLE)
+        }
+    },
     SYSTEM_WORKLOAD_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
         workload_create(a.args[0])
     },
@@ -1573,11 +1587,9 @@ fn sandbox_launch_create(desc_ptr: u64) -> i64 {
         let Some(rights) = rights_arg(u64::from(source.rights)) else {
             return err(SYSTEM_ERROR_INVALID_ARGUMENT);
         };
-        let Some((object, _)) = proc::device_authority_identity(
-            domain,
-            handle_arg(source.object),
-            rights,
-        ) else {
+        let Some((object, _)) =
+            proc::device_authority_identity(domain, handle_arg(source.object), rights)
+        else {
             return err(SYSTEM_ERROR_RIGHTS_DENIED);
         };
         if source.generation != 0 && source.generation != object.generation() {
@@ -1831,9 +1843,7 @@ fn install_handle_create(raw_key: u64) -> i64 {
         };
         // Discovery authority is checked before any object is created. The
         // handle does not turn a key into authority by itself.
-        if let Err(error) =
-            crate::native_install_abi::query(installation, crate::sched::now_ns())
-        {
+        if let Err(error) = crate::native_install_abi::query(installation, crate::sched::now_ns()) {
             return install_service_error(error);
         }
         let Some(pid) = proc::current_process() else {
@@ -1863,19 +1873,15 @@ fn install_handle_query(raw_handle: u64, ptr: u64, cap: u64) -> i64 {
         let Some(pid) = proc::current_process() else {
             return err(SYSTEM_ERROR_RIGHTS_DENIED);
         };
-        let installation = match crate::native_install_handle::key(
-            pid,
-            handle_arg(raw_handle),
-            Rights::READ,
-        ) {
-            Ok(installation) => installation,
-            Err(error) => return proc_err(error),
-        };
-        let info =
-            match crate::native_install_abi::query(installation, crate::sched::now_ns()) {
-                Ok(info) => info,
-                Err(error) => return install_service_error(error),
+        let installation =
+            match crate::native_install_handle::key(pid, handle_arg(raw_handle), Rights::READ) {
+                Ok(installation) => installation,
+                Err(error) => return proc_err(error),
             };
+        let info = match crate::native_install_abi::query(installation, crate::sched::now_ns()) {
+            Ok(info) => info,
+            Err(error) => return install_service_error(error),
+        };
         let encoded =
             kernel_core::native_install_abi::InstallationInfo::from_snapshot(info).encode();
         if let Err(error) = copy_to_user(ptr, &encoded, encoded.len()) {
@@ -1924,8 +1930,7 @@ fn sandbox_wait(raw_key: u64, timeout_ns: u64) -> i64 {
     let Some(key) = kernel_core::sandbox::SandboxKey::from_raw(raw_key) else {
         return err(SYSTEM_ERROR_INVALID_ARGUMENT);
     };
-    let deadline = (timeout_ns != u64::MAX)
-        .then(|| sched::now_ns().saturating_add(timeout_ns));
+    let deadline = (timeout_ns != u64::MAX).then(|| sched::now_ns().saturating_add(timeout_ns));
     loop {
         let snapshot = match crate::sandbox::snapshot(domain, key) {
             Ok(snapshot) => snapshot,

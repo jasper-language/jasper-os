@@ -331,6 +331,9 @@ impl BlockDevice {
         request
             .validate(self.features, self.geometry.capacity_sectors)
             .map_err(BlkError::Admission)?;
+        if request.pages > self.data_pages {
+            return Err(BlkError::Admission(block::Error::Range));
+        }
         if self.queue.take_used().is_some() {
             return Err(BlkError::StaleCompletion);
         }
@@ -348,7 +351,11 @@ impl BlockDevice {
                 } else {
                     0
                 };
-                for frame in self.frames()? {
+                for frame in self
+                    .frames()?
+                    .into_iter()
+                    .take(usize::try_from(request.pages).map_err(|_| BlkError::Queue)?)
+                {
                     self.queue
                         .set_descriptor(
                             descriptor,

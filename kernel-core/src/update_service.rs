@@ -431,6 +431,7 @@ mod tests {
             candidate_state: 0,
             active_attempts: 0,
             candidate_attempts: 0,
+            terminal_stage: 0,
             active_release: 2,
             candidate_release: 0,
             data_schema_min: 1,

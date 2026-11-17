@@ -73,10 +73,7 @@ pub(crate) fn image() -> &'static [u8] {
 /// 装载并运行生产首程序，要求退出码为 0 且页帧全部归还。
 /// Loads and runs the production first program; requires exit code zero and full frame reclamation.
 pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
-    #[cfg(all(
-        feature = "terminal-session-verify",
-        feature = "lifecycle-ab-health"
-    ))]
+    #[cfg(all(feature = "terminal-session-verify", feature = "lifecycle-ab-health"))]
     {
         let frames_before_backend = frame::free_frames();
         if crate::lifecycle_health::init_control_backend().is_err() {
@@ -89,8 +86,7 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         );
     }
     let free_before = frame::free_frames();
-    let (heap_total_before, heap_free_before, _, heap_mapped_before) =
-        crate::mm::heap::stats();
+    let (heap_total_before, heap_free_before, _, heap_mapped_before) = crate::mm::heap::stats();
     let heap_used_before = heap_total_before.saturating_sub(heap_free_before);
     #[cfg(feature = "native-install-abi-verify")]
     let allowed = SyscallSet::of(&[
@@ -145,6 +141,7 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         abi::SYSTEM_UPDATE_CONTROL_GET,
         abi::SYSTEM_UPDATE_STATUS_QUERY,
         abi::SYSTEM_UPDATE_ACTION_RECOVER,
+        abi::SYSTEM_UPDATE_ACTION_ARCHIVE,
     ]);
     #[cfg(not(any(
         feature = "terminal-session-verify",
@@ -207,12 +204,10 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
     // reap releases ownership only; the common cleanup phase destroys objects.
     kobj::run_cleanup(usize::MAX);
     let free_after = frame::free_frames();
-    let (heap_total_after, heap_free_after, _, heap_mapped_after) =
-        crate::mm::heap::stats();
+    let (heap_total_after, heap_free_after, _, heap_mapped_after) = crate::mm::heap::stats();
     let heap_used_after = heap_total_after.saturating_sub(heap_free_after);
     let heap_growth_frames = (heap_mapped_after.saturating_sub(heap_mapped_before)
-        / kernel_core::frame::FRAME_SIZE)
-        as usize;
+        / kernel_core::frame::FRAME_SIZE) as usize;
     let frames_reclaimed = free_after.saturating_add(heap_growth_frames) == free_before;
     let heap_reclaimed = heap_used_after <= heap_used_before;
     if !frames_reclaimed || !heap_reclaimed {

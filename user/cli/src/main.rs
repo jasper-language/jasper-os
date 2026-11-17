@@ -17,7 +17,7 @@ use kernel_core::update_status::UpdateStatus;
 
 const PROMPT: &[u8] = b"jasper> ";
 const HELP: &[u8] =
-    b"commands: help, echo <text>, system update status [--json], system update recover [--json], exit\n";
+    b"commands: help, echo <text>, system update status|recover|archive [--json], exit\n";
 
 struct NativeUpdateTransport;
 
@@ -46,6 +46,26 @@ impl UpdateTransport for NativeUpdateTransport {
         let result = unsafe {
             sys::call3(
                 ids::SYSTEM_UPDATE_ACTION_RECOVER,
+                request.as_ptr() as u64,
+                output.as_mut_ptr() as u64,
+                output.len() as u64,
+            )
+        };
+        if result == ACTION_RESPONSE_BYTES as i64 {
+            Ok(())
+        } else {
+            Err(if result < 0 { -result } else { result })
+        }
+    }
+
+    fn archive(
+        &mut self,
+        request: &[u8],
+        output: &mut [u8; ACTION_RESPONSE_BYTES],
+    ) -> Result<(), i64> {
+        let result = unsafe {
+            sys::call3(
+                ids::SYSTEM_UPDATE_ACTION_ARCHIVE,
                 request.as_ptr() as u64,
                 output.as_mut_ptr() as u64,
                 output.len() as u64,
@@ -180,6 +200,15 @@ fn state_name(state: u8) -> &'static [u8] {
     }
 }
 
+fn terminal_name(stage: u8) -> &'static [u8] {
+    match stage {
+        0 => b"none",
+        7 => b"complete",
+        10 => b"rolled_back",
+        _ => b"unknown",
+    }
+}
+
 fn take_request(next: &mut u64) -> u64 {
     let request_id = *next;
     *next = (*next).wrapping_add(1).max(1);
@@ -207,6 +236,18 @@ fn dispatch_jucs(invocation: Invocation, next_request: &mut u64) -> bool {
             let status_request = take_request(next_request);
             let action_request = take_request(next_request);
             write_update_recovery(status_request, action_request, true)
+        }
+        (Command::UpdateArchive, Form::Help) => write(jucs::UPDATE_ARCHIVE_HELP.as_bytes()),
+        (Command::UpdateArchive, Form::Schema) => write(jucs::UPDATE_ARCHIVE_SCHEMA.as_bytes()),
+        (Command::UpdateArchive, Form::Invoke) => {
+            let status_request = take_request(next_request);
+            let action_request = take_request(next_request);
+            write_update_archive(status_request, action_request, false)
+        }
+        (Command::UpdateArchive, Form::Json) => {
+            let status_request = take_request(next_request);
+            let action_request = take_request(next_request);
+            write_update_archive(status_request, action_request, true)
         }
     }
 }
@@ -245,6 +286,8 @@ fn write_update_status(request_id: u64, json: bool) -> bool {
         && line.push_u64(status.service_generation)
         && line.push(b" transaction=")
         && line.push_u64(status.transaction_id)
+        && line.push(b" terminal=")
+        && line.push(terminal_name(status.terminal_stage))
         && line.push(b" active=")
         && line.push(slot_name(status.active_slot))
         && line.push(b" state=")
@@ -323,6 +366,51 @@ fn write_recovery_error(code: i64, json: bool) -> bool {
             && output.push(b"}\n")
     } else {
         output.push(b"jucs-error command=system.update.recover code=")
+            && output.push_i64(code)
+            && output.push(b"\nsystem-update-failed\n")
+    };
+    ok && write(output.as_bytes())
+}
+
+fn write_update_archive(status_request_id: u64, action_request_id: u64, json: bool) -> bool {
+    if json {
+        let mut agent = UpdateAgent::new(NativeUpdateTransport);
+        let mut output = [0u8; ACTION_JSON_BYTES];
+        return match agent.archive_json(status_request_id, action_request_id, &mut output) {
+            Ok(length) => write(&output[..length]),
+            Err(error) => write_archive_error(agent_error_code(error), true),
+        };
+    }
+    let mut client = UpdateClient::new(NativeUpdateTransport);
+    let response = match client.archive(status_request_id, action_request_id) {
+        Ok(response) => response,
+        Err(error) => return write_archive_error(client_error_code(error), json),
+    };
+    let mut line = FixedText::new();
+    let ok = line
+        .push(b"system-update result=ok command=system.update.archive action=archive generation=")
+        && line.push_u64(response.generation)
+        && line.push(b" transaction=")
+        && line.push_u64(response.transaction_id)
+        && line.push(b" archived=")
+        && line.push(if response.archived { b"true" } else { b"false" })
+        && line.push(b" tenant=")
+        && line.push_u64(response.tenant)
+        && line.push(b" request=")
+        && line.push_u64(response.request_id)
+        && line.push(b"\nsystem-update-ok\n");
+    ok && write(line.as_bytes())
+}
+
+fn write_archive_error(code: i64, json: bool) -> bool {
+    let mut output = FixedText::new();
+    let ok = if json {
+        output.push(
+            b"{\"schema\":\"jucs.result/1\",\"command\":\"system.update.archive\",\"status\":\"error\",\"code\":",
+        ) && output.push_i64(code)
+            && output.push(b"}\n")
+    } else {
+        output.push(b"jucs-error command=system.update.archive code=")
             && output.push_i64(code)
             && output.push(b"\nsystem-update-failed\n")
     };

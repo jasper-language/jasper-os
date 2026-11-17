@@ -375,9 +375,8 @@ pub fn read_archive_receipt() -> Result<Option<ArchiveReceipt>, HealthError> {
 
 /// Commit the next terminal-archive receipt to the fixed dual-copy P0 pages.
 ///
-/// This is a kernel mechanism only. It intentionally has no path argument and
-/// is not yet exposed as an ABI action until the control record carries an
-/// unambiguous Complete/RolledBack terminal fact.
+/// This mechanism accepts no path argument. The versioned archive ABI derives
+/// the terminal outcome and transaction identity from the control record.
 pub fn commit_archive_receipt(
     transaction_id: u64,
     manifest_sha256: [u8; 32],

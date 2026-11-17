@@ -8,6 +8,7 @@ pub const VERSION: u16 = 1;
 pub const BYTES: usize = 160;
 pub const FLAG_CANDIDATE: u8 = 1 << 0;
 pub const FLAG_REDACTED: u8 = 1 << 1;
+pub const FLAG_TERMINAL: u8 = 1 << 2;
 pub const NO_SLOT: u8 = u8::MAX;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,6 +23,7 @@ pub struct UpdateStatus {
     pub candidate_state: u8,
     pub active_attempts: u8,
     pub candidate_attempts: u8,
+    pub terminal_stage: u8,
     pub active_release: u64,
     pub candidate_release: u64,
     pub data_schema_min: u32,
@@ -42,11 +44,18 @@ impl UpdateStatus {
         put_u32(&mut out, 0, MAGIC);
         put_u16(&mut out, 4, VERSION);
         put_u16(&mut out, 6, 1);
-        out[8] = if self.candidate_present() {
-            FLAG_CANDIDATE | FLAG_REDACTED
-        } else {
-            FLAG_REDACTED
-        };
+        out[8] = FLAG_REDACTED
+            | if self.candidate_present() {
+                FLAG_CANDIDATE
+            } else {
+                0
+            }
+            | if self.terminal_stage != 0 {
+                FLAG_TERMINAL
+            } else {
+                0
+            };
+        out[9] = self.terminal_stage;
         put_u32(&mut out, 12, BYTES as u32);
         put_u64(&mut out, 16, self.service_generation);
         put_u64(&mut out, 24, self.transaction_id);
@@ -78,12 +87,17 @@ impl UpdateStatus {
             || (bytes[73] > 1 && bytes[73] != NO_SLOT)
             || bytes[74] > 3
             || (bytes[73] != NO_SLOT && bytes[75] > 3)
+            || bytes[10..12] != [0, 0]
         {
             return None;
         }
         let flags = bytes[8];
-        if flags & !(FLAG_CANDIDATE | FLAG_REDACTED) != 0
+        let terminal_stage = bytes[9];
+        if flags & !(FLAG_CANDIDATE | FLAG_REDACTED | FLAG_TERMINAL) != 0
             || (flags & FLAG_CANDIDATE != 0) != (bytes[73] != NO_SLOT)
+            || (flags & FLAG_TERMINAL != 0) != matches!(terminal_stage, 7 | 10)
+            || !matches!(terminal_stage, 0 | 7 | 10)
+            || (terminal_stage != 0 && bytes[73] != NO_SLOT)
         {
             return None;
         }
@@ -96,7 +110,8 @@ impl UpdateStatus {
             && (candidate_release != 0
                 || bytes[75] != 0
                 || bytes[77] != 0
-                || candidate_digest.iter().any(|byte| *byte != 0))
+                || (terminal_stage == 0 && candidate_digest.iter().any(|byte| *byte != 0))
+                || (terminal_stage != 0 && candidate_digest.iter().all(|byte| *byte == 0)))
         {
             return None;
         }
@@ -116,6 +131,7 @@ impl UpdateStatus {
             candidate_state: bytes[75],
             active_attempts: bytes[76],
             candidate_attempts: bytes[77],
+            terminal_stage,
             active_release: get_u64(bytes, 48),
             candidate_release,
             data_schema_min: get_u32(bytes, 64),
@@ -168,6 +184,7 @@ mod tests {
             candidate_state: u8::from(candidate),
             active_attempts: 0,
             candidate_attempts: u8::from(candidate),
+            terminal_stage: 0,
             active_release: 3,
             candidate_release: u64::from(candidate) * 4,
             data_schema_min: 1,
@@ -208,6 +225,22 @@ mod tests {
         let mut bytes = record.encode();
         bytes[96 + 0] = 0;
         bytes[128 + 0] = 1;
+        assert_eq!(UpdateStatus::decode(&bytes), None);
+    }
+
+    #[test]
+    fn terminal_digest_requires_an_explicit_terminal_flag() {
+        let mut record = sample(false);
+        record.terminal_stage = 7;
+        record.candidate_digest = [0x44; 32];
+        assert_eq!(UpdateStatus::decode(&record.encode()), Some(record));
+
+        let mut bytes = record.encode();
+        bytes[8] &= !FLAG_TERMINAL;
+        assert_eq!(UpdateStatus::decode(&bytes), None);
+
+        let mut bytes = record.encode();
+        bytes[9] = 8;
         assert_eq!(UpdateStatus::decode(&bytes), None);
     }
 }

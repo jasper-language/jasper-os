@@ -110,14 +110,12 @@ jasper-update-recovery cleanup <control-root> <staging-root> <manifest-sha256-he
 `system update status --json` 返回可由标准 JSON 解析器读取的同一状态；
 首程序查询前后资源断言为 `reclaimed=true`。
 
-这仍不是 Issue #34 的整体完成：结构化 Agent 与 CLI 的同契约对照、租户级更新
-过滤、恢复/归档正式资源动作和完整负例矩阵尚未交付。因此 LC-2 继续保持
-`core-passed`，恢复工具也不能冒充正式命令。
+这仍不是 Issue #34 的整体完成：外部 Agent IPC transport、租户级更新过滤、
+完整并发/重放和 Pixel 安装矩阵尚未交付。因此 LC-2 继续保持 `core-passed`。
 
 recovery 已具备 path-free 数据/授权契约、`UpdateService` managed execution、
-ABI syscall 和原生 Shell 消费。archive 仍只有 host-side managed execution；
-内核现在已有固定终态归档收据机制，但尚未把正式 `system update archive`
-注册为可伪造成功的 ABI。
+ABI syscall 和原生 Shell 消费。archive 已具备内核持久收据和正式 ABI；
+调用者不能选择终态、事务或归档路径。
 
 ## 终态归档收据与持久后端
 
@@ -134,10 +132,23 @@ ABI syscall 和原生 Shell 消费。archive 仍只有 host-side managed executi
 - `kernel::lifecycle_health` 增加了 P0 Control A/B 分区内固定归档页的块设备适配器，
   可读写、修复并提交同一收据协议。
 
-不注册 `system update archive` 的原因是：当前控制记录还不能无歧义区分
-Complete 与 RolledBack 终态。若由 action 请求自行选择终态，会允许调用者伪造
-审计结论。下一步必须先让权威控制记录携带终态原因，再将该机制接到版本化 ABI。
-Agent external IPC transport、完整并发/重放和 Pixel 安装断电矩阵仍未完成。
+该阻塞已关闭：
+
+- 控制记录使用原有保留字节持久化 `None/Complete/RolledBack` 终态，并以唯一
+  transaction participant 槽绑定真实 manifest digest；新候选会原子清除上一终态；
+- `UpdateCoordinator::finalize_confirmed` 与 `finish_rollback` 先提交权威控制
+  终态，再推进 journal；崩溃后 `recover_with_control` 可从终态恢复 Complete 或
+  RolledBack，不能由调用者自行声明；
+- ABI 3.19 新增 `system.update.action.archive` ID 113 与
+  `system update archive [--help|--schema|--json]`。请求只含 request/generation/
+  transaction/digest，内核从控制记录派生终态和固定归档页；
+- 同时修复块层请求页数泄漏：BlockDevice 虽按容量申请多页 DMA，但现在每个请求
+  只向设备发布 `request.pages` 个描述符。此前单页控制写入会额外覆盖后续四页，
+  正是 Archive B 固定页出现伪数据的原因。
+
+真实 UEFI terminal-recovery 已在 OVMF/virtio-blk 上通过 human、JSON、schema、
+help 四条 archive 路径，receipt 写入/读回成功，重复 action 幂等，CLI 资源回收。
+Agent external IPC transport、完整并发/重放矩阵和 Pixel 安装断电矩阵仍未完成。
 
 ## 验证
 
@@ -152,7 +163,7 @@ cargo test --locked -p kernel-core update_service::tests
 6 passed; 0 failed
 
 cargo test --locked -p kernel-core update_client::tests
-4 passed; 0 failed
+5 passed; 0 failed
 
 cargo test --locked -p kernel-core update_agent::tests
 4 passed; 0 failed
@@ -167,11 +178,17 @@ cargo test --locked -p jasper-lifecycle-staging
 36 passed; 0 failed
 
 cargo test --locked -p jasper-lifecycle-boot
-20 passed; 0 failed
+22 passed; 0 failed
 
 cargo check --locked -p jasper-kernel --target x86_64-unknown-none \
   --no-default-features --features production,lifecycle-ab-health
 passed
+
+bash scripts/issue21-uefi-boot-check.sh
+PASS mode=terminal-recovery qemu_rc=124
+
+bash scripts/abi-contract.sh check
+PASS (3.19.0)
 ```
 
 新增测试覆盖：
@@ -194,11 +211,12 @@ passed
 - Agent 固定缓冲区过小时不发布半截 JSON；无候选槽的残留候选事实在解码阶段被拒绝。
 - 归档收据逐字节篡改、非终态、跳号、错误前序、单副本撕裂、同代冲突以及
   write/flush/readback 失败均失败关闭；真实文件后端重开和幂等提交通过。
+- 控制终态与 transaction participant 绑定正反例、Complete/RolledBack 崩溃恢复，
+  以及 ABI 3.19 的 archive human/JSON/schema/help 均通过。
 
 ## 仍未完成
 
 - 外部 Agent IPC/消息 transport、多租户更新集合与租户级可见性过滤；
-- 内核可写的 terminal transaction archive 后端与正式 `system update archive`；
 - 信任根轮换、2-of-3 门限和签名撤销快照持久化；
 - 断点续传、生产发布源高可用和跨重启审计查询；
 - 系统级在线/离线发布演练和 Pixel 6a 安装/回滚/断电矩阵。

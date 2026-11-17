@@ -36,6 +36,13 @@ pub trait UpdateTransport {
         request: &[u8],
         output: &mut [u8; ACTION_RESPONSE_BYTES],
     ) -> Result<(), i64>;
+
+    /// Invoke the path-free terminal archive action with encoded request bytes.
+    fn archive(
+        &mut self,
+        request: &[u8],
+        output: &mut [u8; ACTION_RESPONSE_BYTES],
+    ) -> Result<(), i64>;
 }
 
 /// One native update frontend over a shared transport.
@@ -132,6 +139,57 @@ impl<T: UpdateTransport> UpdateClient<T> {
         }
         Ok(response)
     }
+
+    /// Query authoritative terminal state and archive its exact transaction.
+    pub fn archive(
+        &mut self,
+        status_request_id: u64,
+        action_request_id: u64,
+    ) -> Result<TransactionActionStatus, ClientError> {
+        if status_request_id == 0
+            || action_request_id == 0
+            || status_request_id == action_request_id
+        {
+            return Err(ClientError::Protocol);
+        }
+        let status = self.status(status_request_id, 0)?;
+        if !matches!(status.status.terminal_stage, 7 | 10)
+            || status.status.candidate_digest == [0; 32]
+        {
+            return Err(ClientError::Protocol);
+        }
+        let request = TransactionActionRequest {
+            request_id: action_request_id,
+            expected_generation: status.status.service_generation,
+            transaction_id: status.status.transaction_id,
+            manifest_sha256: status.status.candidate_digest,
+            action: TransactionAction::Archive,
+            scope: SCOPE_PLATFORM,
+        }
+        .encode();
+        let mut output = [0u8; ACTION_RESPONSE_BYTES];
+        self.transport
+            .archive(&request, &mut output)
+            .map_err(ClientError::Transport)?;
+        let response = TransactionActionStatus::decode(&output).ok_or(ClientError::Protocol)?;
+        if response.request_id != action_request_id {
+            return Err(ClientError::RequestMismatch);
+        }
+        if response.tenant != status.authorization.tenant
+            || response.domain != status.authorization.domain
+            || response.scope != status.authorization.scope
+        {
+            return Err(ClientError::IdentityMismatch);
+        }
+        if response.transaction_id != status.status.transaction_id
+            || response.manifest_sha256 != status.status.candidate_digest
+            || response.generation != status.status.service_generation
+            || !response.archived
+        {
+            return Err(ClientError::BindingMismatch);
+        }
+        Ok(response)
+    }
 }
 
 #[cfg(test)]
@@ -201,6 +259,14 @@ mod tests {
             *output = response.encode();
             Ok(())
         }
+
+        fn archive(
+            &mut self,
+            request: &[u8],
+            output: &mut [u8; ACTION_RESPONSE_BYTES],
+        ) -> Result<(), i64> {
+            self.recover(request, output)
+        }
     }
 
     fn status(request_tenant: u64) -> StatusResponse {
@@ -222,6 +288,7 @@ mod tests {
                 candidate_state: 0,
                 active_attempts: 0,
                 candidate_attempts: 0,
+                terminal_stage: 0,
                 active_release: 4,
                 candidate_release: 0,
                 data_schema_min: 1,
@@ -414,6 +481,54 @@ mod tests {
         assert_eq!(
             UpdateClient::new(fake).status(45, 0),
             Err(ClientError::IdentityMismatch)
+        );
+    }
+
+    #[test]
+    fn archive_requires_authoritative_terminal_state_and_matching_receipt() {
+        let mut terminal = status(3);
+        terminal.status.terminal_stage = 7;
+        terminal.status.candidate_digest = [0x55; 32];
+        let fake = Fake {
+            status: terminal,
+            action: TransactionActionStatus {
+                archived: true,
+                ..action()
+            },
+            status_calls: 0,
+            recover_calls: 0,
+            fail_status: None,
+            corrupt_action: false,
+            action_tenant: None,
+            action_domain: None,
+            status_domain: None,
+            last_status_request: 0,
+            last_action_request: 0,
+        };
+        let archived = UpdateClient::new(fake).archive(61, 62).unwrap();
+        assert!(archived.archived);
+        assert_eq!(archived.manifest_sha256, [0x55; 32]);
+        assert_eq!(archived.request_id, 62);
+
+        let fake = Fake {
+            status: status(3),
+            action: TransactionActionStatus {
+                archived: true,
+                ..action()
+            },
+            status_calls: 0,
+            recover_calls: 0,
+            fail_status: None,
+            corrupt_action: false,
+            action_tenant: None,
+            action_domain: None,
+            status_domain: None,
+            last_status_request: 0,
+            last_action_request: 0,
+        };
+        assert_eq!(
+            UpdateClient::new(fake).archive(63, 64),
+            Err(ClientError::Protocol)
         );
     }
 }

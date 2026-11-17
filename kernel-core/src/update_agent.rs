@@ -64,6 +64,18 @@ impl<T: UpdateTransport> UpdateAgent<T> {
         let response = self.client.recover(status_request_id, action_request_id)?;
         encode_action_json(&response, output)
     }
+
+    /// Archive one authoritative terminal transaction as
+    /// `service.update.action/1`.
+    pub fn archive_json(
+        &mut self,
+        status_request_id: u64,
+        action_request_id: u64,
+        output: &mut [u8],
+    ) -> Result<usize, AgentError> {
+        let response = self.client.archive(status_request_id, action_request_id)?;
+        encode_archive_json(&response, output)
+    }
 }
 
 /// Render an already-validated status response.
@@ -83,6 +95,16 @@ pub fn encode_status_json(
     ok &= writer.push_u64(status.service_generation);
     ok &= writer.push(b",\"transaction\":");
     ok &= writer.push_u64(status.transaction_id);
+    ok &= writer.push(b",\"terminal\":\"");
+    ok &= writer.push(terminal_name(status.terminal_stage));
+    ok &= writer.push(b"\"");
+    ok &= writer.push(b",\"transaction_digest\":\"");
+    if status.candidate_digest == [0; 32] {
+        ok &= writer.push_hex(&status.active_digest);
+    } else {
+        ok &= writer.push_hex(&status.candidate_digest);
+    }
+    ok &= writer.push(b"\"");
     ok &= writer.push(b",\"active\":{\"slot\":\"");
     ok &= writer.push(slot_name(status.active_slot));
     ok &= writer.push(b"\",\"state\":\"");
@@ -139,11 +161,33 @@ pub fn encode_action_json(
     response: &TransactionActionStatus,
     output: &mut [u8],
 ) -> Result<usize, AgentError> {
+    encode_action_json_for(response, false, output)
+}
+
+/// Render an already-validated terminal archive response.
+pub fn encode_archive_json(
+    response: &TransactionActionStatus,
+    output: &mut [u8],
+) -> Result<usize, AgentError> {
+    encode_action_json_for(response, true, output)
+}
+
+fn encode_action_json_for(
+    response: &TransactionActionStatus,
+    archive: bool,
+    output: &mut [u8],
+) -> Result<usize, AgentError> {
     let mut scratch = [0u8; ACTION_JSON_BYTES];
     let mut writer = JsonWriter::new(&mut scratch);
-    let mut ok = writer.push(
-        b"{\"schema\":\"service.update.action/1\",\"command\":\"system.update.recover\",\"status\":\"ok\",\"action\":\"recover\",\"generation\":",
-    );
+    let mut ok = if archive {
+        writer.push(
+            b"{\"schema\":\"service.update.action/1\",\"command\":\"system.update.archive\",\"status\":\"ok\",\"action\":\"archive\",\"generation\":",
+        )
+    } else {
+        writer.push(
+            b"{\"schema\":\"service.update.action/1\",\"command\":\"system.update.recover\",\"status\":\"ok\",\"action\":\"recover\",\"generation\":",
+        )
+    };
     ok &= writer.push_u64(response.generation);
     ok &= writer.push(b",\"transaction\":");
     ok &= writer.push_u64(response.transaction_id);
@@ -194,6 +238,15 @@ fn state_name(state: u8) -> &'static [u8] {
         1 => b"candidate",
         2 => b"confirmed",
         3 => b"failed",
+        _ => b"unknown",
+    }
+}
+
+fn terminal_name(stage: u8) -> &'static [u8] {
+    match stage {
+        0 => b"none",
+        7 => b"complete",
+        10 => b"rolled_back",
         _ => b"unknown",
     }
 }
@@ -275,6 +328,14 @@ mod tests {
         ) -> Result<(), i64> {
             Err(2)
         }
+
+        fn archive(
+            &mut self,
+            _request: &[u8],
+            _output: &mut [u8; ACTION_RESPONSE_BYTES],
+        ) -> Result<(), i64> {
+            Err(2)
+        }
     }
 
     fn response() -> StatusResponse {
@@ -296,6 +357,7 @@ mod tests {
                 candidate_state: 0,
                 active_attempts: 0,
                 candidate_attempts: 0,
+                terminal_stage: 0,
                 active_release: 4,
                 candidate_release: 0,
                 data_schema_min: 1,
@@ -322,6 +384,8 @@ mod tests {
             "{\"schema\":\"service.update.status/1\",\"command\":\"system.update.status\",\"status\":\"ok\""
         ));
         assert!(text.contains("\"generation\":7"));
+        assert!(text.contains("\"terminal\":\"none\""));
+        assert!(text.contains("\"transaction_digest\":\""));
         assert!(text.contains("\"candidate\":null"));
         assert!(text.contains("\"tenant\":3"));
         assert!(text.contains("\"request\":41"));
@@ -377,5 +441,13 @@ mod tests {
         assert!(text.contains("\"recovery_required\":false"));
         assert!(text.contains("\"request\":51"));
         assert!(!text.as_bytes().windows(4).any(|window| window == b"/run"));
+
+        let mut archive = [0u8; ACTION_JSON_BYTES];
+        let length = encode_archive_json(&response, &mut archive).unwrap();
+        let text = core::str::from_utf8(&archive[..length]).unwrap();
+        assert!(text.starts_with(
+            "{\"schema\":\"service.update.action/1\",\"command\":\"system.update.archive\""
+        ));
+        assert!(text.contains("\"action\":\"archive\""));
     }
 }

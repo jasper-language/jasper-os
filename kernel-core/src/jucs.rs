@@ -11,11 +11,15 @@ pub const UPDATE_STATUS_ID: &str = "system.update.status";
 pub const UPDATE_STATUS_VERSION: u16 = 1;
 pub const UPDATE_RECOVER_ID: &str = "system.update.recover";
 pub const UPDATE_RECOVER_VERSION: u16 = 1;
+pub const UPDATE_ARCHIVE_ID: &str = "system.update.archive";
+pub const UPDATE_ARCHIVE_VERSION: u16 = 1;
 
 pub const UPDATE_STATUS_HELP: &str =
     "system update status [--help|--schema|--json]\nShow the authenticated system update and boot-slot status.\n";
 pub const UPDATE_RECOVER_HELP: &str =
     "system update recover [--help|--schema|--json]\nRecover the current dual-copy update control transaction.\n";
+pub const UPDATE_ARCHIVE_HELP: &str =
+    "system update archive [--help|--schema|--json]\nArchive the current verified terminal update transaction.\n";
 
 pub const UPDATE_STATUS_SCHEMA: &str = concat!(
     "{\"schema\":\"jucs.command/1\",\"id\":\"system.update.status\",",
@@ -31,6 +35,13 @@ pub const UPDATE_RECOVER_SCHEMA: &str = concat!(
     "\"service\":\"service.update.recover\",\"service_version\":1}\n"
 );
 
+pub const UPDATE_ARCHIVE_SCHEMA: &str = concat!(
+    "{\"schema\":\"jucs.command/1\",\"id\":\"system.update.archive\",",
+    "\"version\":1,\"effects\":\"write\",\"arguments\":[],",
+    "\"options\":[\"--help\",\"--schema\",\"--json\"],",
+    "\"service\":\"service.update.archive\",\"service_version\":1}\n"
+);
+
 /// A JUCS command whose identity has been frozen for this runtime generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -38,6 +49,8 @@ pub enum Command {
     UpdateStatus,
     /// Recover the current control transaction without caller paths.
     UpdateRecover,
+    /// Archive the current verified terminal transaction without caller paths.
+    UpdateArchive,
 }
 
 impl Command {
@@ -46,6 +59,7 @@ impl Command {
         match self {
             Self::UpdateStatus => UPDATE_STATUS_ID,
             Self::UpdateRecover => UPDATE_RECOVER_ID,
+            Self::UpdateArchive => UPDATE_ARCHIVE_ID,
         }
     }
 
@@ -54,6 +68,7 @@ impl Command {
         match self {
             Self::UpdateStatus => UPDATE_STATUS_VERSION,
             Self::UpdateRecover => UPDATE_RECOVER_VERSION,
+            Self::UpdateArchive => UPDATE_ARCHIVE_VERSION,
         }
     }
 }
@@ -119,6 +134,7 @@ pub fn parse(line: &[u8]) -> Result<Invocation, ParseError> {
     let command = match tokens.next() {
         Some(b"status") => Command::UpdateStatus,
         Some(b"recover") => Command::UpdateRecover,
+        Some(b"archive") => Command::UpdateArchive,
         Some(_) => return Err(ParseError::Unknown),
         None => return Err(ParseError::Unknown),
     };
@@ -129,10 +145,7 @@ pub fn parse(line: &[u8]) -> Result<Invocation, ParseError> {
         Some(b"--json") if tokens.next().is_none() => Form::Json,
         Some(_) => return Err(ParseError::InvalidOption),
     };
-    Ok(Invocation {
-        command,
-        form,
-    })
+    Ok(Invocation { command, form })
 }
 
 struct Tokens<'a> {
@@ -209,6 +222,25 @@ mod tests {
             parse(b"system update recover --json").unwrap().form,
             Form::Json
         );
+        assert_eq!(
+            parse(b"system update archive"),
+            Ok(Invocation {
+                command: Command::UpdateArchive,
+                form: Form::Invoke,
+            })
+        );
+        assert_eq!(
+            parse(b"system update archive --help").unwrap().form,
+            Form::Help
+        );
+        assert_eq!(
+            parse(b"system update archive --schema").unwrap().form,
+            Form::Schema
+        );
+        assert_eq!(
+            parse(b"system update archive --json").unwrap().form,
+            Form::Json
+        );
     }
 
     #[test]
@@ -222,7 +254,7 @@ mod tests {
             Err(ParseError::ToolPrefix)
         );
         assert_eq!(parse(b"system update"), Err(ParseError::Unknown));
-        assert_eq!(parse(b"system update archive"), Err(ParseError::Unknown));
+        assert_eq!(parse(b"system update verify"), Err(ParseError::Unknown));
         assert_eq!(
             parse(b"system update status /control"),
             Err(ParseError::InvalidOption)

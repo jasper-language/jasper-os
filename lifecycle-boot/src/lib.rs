@@ -98,6 +98,7 @@ pub struct SlotRecord {
     release: u64,
     digest: [u8; 32],
     attempts: u8,
+    transaction_participant: bool,
     data_schema_min: u32,
     data_schema_max: u32,
 }
@@ -109,6 +110,7 @@ impl SlotRecord {
         release: 0,
         digest: [0; 32],
         attempts: 0,
+        transaction_participant: false,
         data_schema_min: 0,
         data_schema_max: 0,
     };
@@ -218,6 +220,25 @@ pub enum BootControlError {
     /// 候选尚未持久消耗试启动预算，不能提交健康结果。
     /// The candidate has not durably consumed a trial attempt, so health cannot be reported.
     TrialNotPrepared,
+    /// 当前事务已经记录了不同的终态。
+    /// A different terminal outcome is already recorded for the current transaction.
+    TerminalAlreadyRecorded,
+    /// 终态提交与当前事务或活动槽身份不匹配。
+    /// The terminal transition does not match the current transaction or active slot.
+    TerminalIdentityMismatch,
+}
+
+/// 最近一次更新事务的权威终态。
+/// Authoritative terminal outcome of the most recent update transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TransactionTerminal {
+    /// 尚未记录终态。No terminal outcome has been recorded.
+    None = 0,
+    /// 新版本已确认并完成事务。The new release was confirmed and the transaction completed.
+    Complete = 7,
+    /// 新版本健康失败，旧槽已重新确认。The candidate failed health and the prior slot was reconfirmed.
+    RolledBack = 10,
 }
 
 const MAGIC: [u8; 8] = *b"JLC0CTL1";
@@ -237,6 +258,7 @@ pub struct ControlBlock {
     data_schema_min: u32,
     data_schema_max: u32,
     active_slot: Slot,
+    terminal: TransactionTerminal,
     slots: [SlotRecord; 2],
 }
 
@@ -264,6 +286,7 @@ impl ControlBlock {
         record.generation = 1;
         record.release = release;
         record.digest = digest;
+        record.transaction_participant = true;
         record.data_schema_min = data_schema_min;
         record.data_schema_max = data_schema_max;
         let mut slots = [SlotRecord::EMPTY; 2];
@@ -276,6 +299,7 @@ impl ControlBlock {
             data_schema_min,
             data_schema_max,
             active_slot: slot,
+            terminal: TransactionTerminal::Complete,
             slots,
         })
     }
@@ -303,6 +327,26 @@ impl ControlBlock {
     /// 当前活动槽。Current active slot.
     pub const fn active_slot(self) -> Slot {
         self.active_slot
+    }
+
+    /// 最近一次更新事务的权威终态。
+    /// Authoritative terminal outcome of the most recent update transaction.
+    pub const fn terminal(self) -> TransactionTerminal {
+        self.terminal
+    }
+
+    /// Manifest digest of the slot participating in the current transaction.
+    pub fn transaction_digest(self) -> Option<[u8; 32]> {
+        let mut found = None;
+        for record in self.slots {
+            if record.transaction_participant {
+                if found.is_some() || record.state == SlotState::Empty {
+                    return None;
+                }
+                found = Some(record.digest);
+            }
+        }
+        found
     }
 
     /// 数据 Schema 可读范围。Readable data-schema range.
@@ -367,8 +411,12 @@ impl ControlBlock {
             return Err(BootControlError::IncompatibleDataSchema);
         }
         let mut next = *self;
+        for record in &mut next.slots {
+            record.transaction_participant = false;
+        }
         let record = &mut next.slots[slot.index()];
         record.state = SlotState::Candidate;
+        record.transaction_participant = true;
         record.generation = record
             .generation
             .checked_add(1)
@@ -380,9 +428,84 @@ impl ControlBlock {
         record.data_schema_max = candidate.data_schema_max;
         next.transaction_id = candidate.transaction_id;
         next.security_epoch = candidate.security_epoch;
+        next.terminal = TransactionTerminal::None;
         next.bump_generation()?;
         *self = next;
         Ok(())
+    }
+
+    /// Record one terminal outcome for the current transaction and active slot.
+    ///
+    /// The operation is idempotent only for the exact same transaction digest and
+    /// outcome. A new candidate clears the previous terminal fact before commit.
+    pub fn record_terminal(
+        &mut self,
+        terminal: TransactionTerminal,
+        transaction_id: u64,
+        digest: [u8; 32],
+    ) -> Result<(), BootControlError> {
+        let next = self.with_terminal(terminal, transaction_id, digest)?;
+        if next == *self {
+            return Ok(());
+        }
+        *self = next;
+        self.bump_generation()?;
+        Ok(())
+    }
+
+    /// Apply a validated terminal fact to an already-mutating control snapshot.
+    ///
+    /// Callers that combine terminal recording with another semantic transition
+    /// use this method so the combined snapshot still advances exactly one
+    /// durable generation.
+    pub fn with_terminal(
+        mut self,
+        terminal: TransactionTerminal,
+        transaction_id: u64,
+        digest: [u8; 32],
+    ) -> Result<Self, BootControlError> {
+        if terminal == TransactionTerminal::None {
+            return Err(BootControlError::InvalidRecord);
+        }
+        let mut participant_slot = None;
+        let mut participant = SlotRecord::EMPTY;
+        for (index, record) in self.slots.iter().copied().enumerate() {
+            if record.transaction_participant {
+                if participant_slot.is_some() {
+                    return Err(BootControlError::TerminalIdentityMismatch);
+                }
+                participant_slot = Some(if index == 0 { Slot::A } else { Slot::B });
+                participant = record;
+            }
+        }
+        let participant_slot =
+            participant_slot.ok_or(BootControlError::TerminalIdentityMismatch)?;
+        if transaction_id != self.transaction_id
+            || transaction_id == 0
+            || digest == [0; 32]
+            || digest != participant.digest()
+            || self.candidate().is_some()
+        {
+            return Err(BootControlError::TerminalIdentityMismatch);
+        }
+        if terminal == TransactionTerminal::Complete
+            && (participant.state() != SlotState::Confirmed || self.active_slot != participant_slot)
+        {
+            return Err(BootControlError::TerminalIdentityMismatch);
+        }
+        if terminal == TransactionTerminal::RolledBack
+            && (participant.state() != SlotState::Failed || self.active_slot == participant_slot)
+        {
+            return Err(BootControlError::TerminalIdentityMismatch);
+        }
+        if self.terminal == terminal {
+            return Ok(self);
+        }
+        if self.terminal != TransactionTerminal::None {
+            return Err(BootControlError::TerminalAlreadyRecorded);
+        }
+        self.terminal = terminal;
+        Ok(self)
     }
 
     /// 记录启动候选前必须提交的选择；候选预算耗尽时自动回退。
@@ -495,10 +618,12 @@ impl ControlBlock {
         out[44..48].copy_from_slice(&self.data_schema_min.to_le_bytes());
         out[48..52].copy_from_slice(&self.data_schema_max.to_le_bytes());
         out[52] = self.active_slot as u8;
+        out[53] = self.terminal as u8;
         for (index, record) in self.slots.iter().copied().enumerate() {
             let at = HEADER_BYTES + index * SLOT_BYTES;
             out[at] = record.state as u8;
             out[at + 1] = record.attempts;
+            out[at + 2] = u8::from(record.transaction_participant);
             out[at + 4..at + 12].copy_from_slice(&record.generation.to_le_bytes());
             out[at + 12..at + 20].copy_from_slice(&record.release.to_le_bytes());
             out[at + 20..at + 52].copy_from_slice(&record.digest);
@@ -539,10 +664,16 @@ impl ControlBlock {
             1 => Slot::B,
             _ => return Err(BootControlError::InvalidRecord),
         };
+        let terminal = match bytes[53] {
+            0 => TransactionTerminal::None,
+            7 => TransactionTerminal::Complete,
+            10 => TransactionTerminal::RolledBack,
+            _ => return Err(BootControlError::InvalidRecord),
+        };
         if generation == 0
             || transaction_id == 0
             || data_schema_min > data_schema_max
-            || bytes[53..56] != [0, 0, 0]
+            || bytes[54..56] != [0, 0]
         {
             return Err(BootControlError::InvalidRecord);
         }
@@ -556,12 +687,13 @@ impl ControlBlock {
                 3 => SlotState::Failed,
                 _ => return Err(BootControlError::InvalidRecord),
             };
-            if bytes[at + 2] != 0 || bytes[at + 3] != 0 {
+            if bytes[at + 2] > 1 || bytes[at + 3] != 0 {
                 return Err(BootControlError::InvalidRecord);
             }
             *record = SlotRecord {
                 state,
                 attempts: bytes[at + 1],
+                transaction_participant: bytes[at + 2] != 0,
                 generation: read_u64(&bytes[at + 4..at + 12]),
                 release: read_u64(&bytes[at + 12..at + 20]),
                 digest: bytes[at + 20..at + 52]
@@ -593,6 +725,7 @@ impl ControlBlock {
             data_schema_min,
             data_schema_max,
             active_slot,
+            terminal,
             slots,
         };
         let candidates = block
@@ -600,12 +733,40 @@ impl ControlBlock {
             .iter()
             .filter(|record| record.state == SlotState::Candidate)
             .count();
+        let participants = block
+            .slots
+            .iter()
+            .filter(|record| record.transaction_participant)
+            .count();
+        let terminal_valid = match block.terminal {
+            TransactionTerminal::None => true,
+            TransactionTerminal::Complete => {
+                block.slots.iter().enumerate().any(|(index, record)| {
+                    record.transaction_participant
+                        && record.state == SlotState::Confirmed
+                        && block.active_slot.index() == index
+                })
+            }
+            TransactionTerminal::RolledBack => {
+                block.slots.iter().enumerate().any(|(index, record)| {
+                    record.transaction_participant
+                        && record.state == SlotState::Failed
+                        && block.active_slot.index() != index
+                })
+            }
+        };
         let confirmed = block
             .slots
             .iter()
             .filter(|record| record.state == SlotState::Confirmed)
             .count();
-        if candidates > 1 || confirmed == 0 {
+        if candidates > 1
+            || confirmed == 0
+            || participants > 1
+            || (participants == 1 && block.transaction_digest().is_none())
+            || (block.terminal != TransactionTerminal::None && participants != 1)
+            || !terminal_valid
+        {
             return Err(BootControlError::InvalidRecord);
         }
         if block.slots[active_slot.index()].state != SlotState::Confirmed {
@@ -1110,6 +1271,74 @@ mod tests {
             ),
             Err(BootControlError::RollbackRejected)
         );
+    }
+
+    #[test]
+    fn terminal_outcome_is_bound_to_the_transaction_participant() {
+        let mut complete = initial();
+        stage(&mut complete);
+        complete.prepare_boot().unwrap();
+        complete.report_health(Slot::B, true).unwrap();
+        assert_eq!(complete.terminal(), TransactionTerminal::None);
+        assert_eq!(complete.transaction_digest(), Some(digest(2)));
+        assert_eq!(
+            complete.record_terminal(TransactionTerminal::Complete, 2, digest(1)),
+            Err(BootControlError::TerminalIdentityMismatch)
+        );
+        complete
+            .record_terminal(TransactionTerminal::Complete, 2, digest(2))
+            .unwrap();
+        assert_eq!(complete.terminal(), TransactionTerminal::Complete);
+        assert_eq!(ControlBlock::decode(&complete.encode()), Ok(complete));
+        let generation = complete.generation();
+        complete
+            .record_terminal(TransactionTerminal::Complete, 2, digest(2))
+            .unwrap();
+        assert_eq!(complete.generation(), generation);
+        assert_eq!(
+            complete.record_terminal(TransactionTerminal::RolledBack, 2, digest(2)),
+            Err(BootControlError::TerminalIdentityMismatch)
+        );
+
+        let mut rolled_back = initial();
+        stage(&mut rolled_back);
+        rolled_back.prepare_boot().unwrap();
+        rolled_back.report_health(Slot::B, false).unwrap();
+        assert_eq!(rolled_back.active_slot(), Slot::A);
+        assert_eq!(rolled_back.transaction_digest(), Some(digest(2)));
+        rolled_back
+            .record_terminal(TransactionTerminal::RolledBack, 2, digest(2))
+            .unwrap();
+        assert_eq!(rolled_back.terminal(), TransactionTerminal::RolledBack);
+        assert_eq!(ControlBlock::decode(&rolled_back.encode()), Ok(rolled_back));
+    }
+
+    #[test]
+    fn new_candidate_clears_the_previous_terminal_and_participant_marker() {
+        let mut block = initial();
+        stage(&mut block);
+        block.prepare_boot().unwrap();
+        block.report_health(Slot::B, true).unwrap();
+        block
+            .record_terminal(TransactionTerminal::Complete, 2, digest(2))
+            .unwrap();
+
+        block
+            .stage_candidate(
+                Slot::A,
+                Candidate {
+                    release: 3,
+                    digest: digest(3),
+                    transaction_id: 3,
+                    security_epoch: 3,
+                    data_schema_min: 1,
+                    data_schema_max: 2,
+                },
+            )
+            .unwrap();
+        assert_eq!(block.terminal(), TransactionTerminal::None);
+        assert_eq!(block.transaction_digest(), Some(digest(3)));
+        assert_eq!(ControlBlock::decode(&block.encode()), Ok(block));
     }
 
     #[test]

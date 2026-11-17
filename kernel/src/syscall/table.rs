@@ -37,7 +37,9 @@ include!(concat!(env!("OUT_DIR"), "/abi_generated.rs"));
 
 /// 按 ID 查找操作条目（错误码不可调用）。
 pub fn op(id: u64) -> Option<&'static AbiEntry> {
-    ENTRIES.iter().find(|e| e.kind == AbiKind::Op && e.id as u64 == id)
+    ENTRIES
+        .iter()
+        .find(|e| e.kind == AbiKind::Op && e.id as u64 == id)
 }
 
 /// 按 ID 查找任意条目（诊断与错误名显示用）。
