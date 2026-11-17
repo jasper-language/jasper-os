@@ -8,6 +8,10 @@
 
 use jasper_lifecycle_model::update::UpdateStage;
 use kernel_core::objtable::ObjId;
+use kernel_core::update_audit::{
+    AuditPrincipal, AuditRequest, AuditResponse, REQUEST_BYTES as AUDIT_REQUEST_BYTES,
+    RESPONSE_BYTES as AUDIT_RESPONSE_BYTES,
+};
 use kernel_core::update_service::{
     authorize, authorize_transaction_action, ActionPrincipal, Principal, StatusRequest,
     StatusResponse, TransactionAction, TransactionActionRequest, TransactionActionStatus,
@@ -29,6 +33,7 @@ use crate::syscall::{err, user_ptr_err};
 const STATUS_SERVICE_ID: u16 = 0x1101;
 const RECOVERY_SERVICE_ID: u16 = 0x1102;
 const ARCHIVE_SERVICE_ID: u16 = 0x1103;
+const AUDIT_SERVICE_ID: u16 = 0x1104;
 
 /// Query the authoritative update control state for one authenticated process.
 pub fn query(pid: ObjId, output_ptr: u64, capacity: u64) -> i64 {
@@ -481,6 +486,103 @@ pub fn archive_v1(pid: ObjId, request_ptr: u64, output_ptr: u64, capacity: u64) 
         terminal_stage
     );
     ACTION_RESPONSE_BYTES as i64
+}
+
+/// Query the current recovery-validated terminal archive receipt.
+///
+/// The request carries no path or caller-selected identity. A missing receipt
+/// is represented explicitly; malformed or conflicting receipt copies are not
+/// treated as “no history”.
+pub fn audit_v1(pid: ObjId, request_ptr: u64, output_ptr: u64, capacity: u64) -> i64 {
+    if pid.raw() == 0 {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    }
+    let context = match crate::security::require_active(pid) {
+        Ok(context) => context,
+        Err(_) => return err(SYSTEM_UPDATE_ERROR_UNAUTHORIZED),
+    };
+    let Ok(capacity) = usize::try_from(capacity) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    if capacity < AUDIT_RESPONSE_BYTES {
+        return err(SYSTEM_UPDATE_ERROR_BUFFER_TOO_SMALL);
+    }
+    let mut raw_request = [0u8; AUDIT_REQUEST_BYTES];
+    if let Err(error) = copy_from_user(&mut raw_request, request_ptr, AUDIT_REQUEST_BYTES) {
+        return user_ptr_err(error);
+    }
+    let Some(request) = AuditRequest::decode(&raw_request) else {
+        return err(SYSTEM_UPDATE_ERROR_PROTOCOL);
+    };
+    let tenant = principal_tenant(pid);
+    let principal = AuditPrincipal {
+        subject: pid.raw(),
+        tenant,
+        domain: context.mac.domain.0,
+        can_query_platform_update: true,
+    };
+    if principal.subject == 0 || principal.tenant == 0 {
+        return err(SYSTEM_UPDATE_ERROR_UNAUTHORIZED);
+    }
+    let receipt = match crate::lifecycle_health::read_archive_receipt() {
+        Ok(receipt) => receipt,
+        Err(_) => return err(SYSTEM_UPDATE_ERROR_UNAVAILABLE),
+    };
+    if request.expected_archive_sequence != 0
+        && receipt
+            .is_none_or(|receipt| receipt.archive_sequence() != request.expected_archive_sequence)
+    {
+        return err(SYSTEM_UPDATE_ERROR_STALE_GENERATION);
+    }
+    let slot = match crate::proc::begin_usi_request(pid, request.request_id, AUDIT_SERVICE_ID) {
+        Ok(Begin::New(slot)) => Some(slot),
+        Ok(Begin::Retry) => None,
+        Ok(Begin::Busy | Begin::Conflict | Begin::Exhausted) | Err(_) => {
+            return err(SYSTEM_UPDATE_ERROR_REQUEST_ID);
+        }
+    };
+    let response = match receipt {
+        Some(receipt) => AuditResponse {
+            request_id: request.request_id,
+            tenant: principal.tenant,
+            scope: SCOPE_PLATFORM,
+            domain: principal.domain,
+            available: true,
+            archive_sequence: receipt.archive_sequence(),
+            transaction_id: receipt.transaction_id(),
+            manifest_sha256: receipt.manifest_sha256(),
+            previous_sha256: receipt.previous_sha256(),
+            terminal_stage: receipt.terminal_stage() as u8,
+        },
+        None => AuditResponse::empty(request.request_id, principal),
+    };
+    let bytes = response.encode();
+    if AuditResponse::decode(&bytes) != Some(response) {
+        if let Some(slot) = slot {
+            crate::proc::abort_usi_request(pid, slot, request.request_id, AUDIT_SERVICE_ID);
+        }
+        return err(SYSTEM_UPDATE_ERROR_PROTOCOL);
+    }
+    if let Err(error) = copy_to_user(output_ptr, &bytes, capacity) {
+        if let Some(slot) = slot {
+            crate::proc::abort_usi_request(pid, slot, request.request_id, AUDIT_SERVICE_ID);
+        }
+        return user_ptr_err(error);
+    }
+    if let Some(slot) = slot {
+        crate::proc::complete_usi_request(pid, slot, request.request_id, AUDIT_SERVICE_ID);
+    }
+    crate::kprintln!(
+        "[JSR-UPDATE-AUDIT] caller={} tenant={} domain={} request={} available={} sequence={} transaction={} result=ok",
+        pid.raw(),
+        response.tenant,
+        response.domain,
+        response.request_id,
+        response.available,
+        response.archive_sequence,
+        response.transaction_id
+    );
+    AUDIT_RESPONSE_BYTES as i64
 }
 
 fn transaction_digest(current: jasper_lifecycle_boot::ControlBlock) -> [u8; 32] {

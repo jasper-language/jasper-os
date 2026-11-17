@@ -116,6 +116,8 @@ pub mod terminal_editor;
 pub mod update_status;
 /// Versioned update-status service identity, scope and generation contract.
 pub mod update_service;
+/// Bounded path-free query for the current durable update archive receipt.
+pub mod update_audit;
 /// Shared CLI and structured-Agent update client contract.
 pub mod update_client;
 /// Bounded structured-Agent frontend over the shared update client.

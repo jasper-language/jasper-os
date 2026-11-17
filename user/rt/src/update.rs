@@ -8,6 +8,9 @@ use kernel_core::native_install_abi::{MAX_UPDATE_LIST_BYTES, UPDATE_LIST_REQUEST
 use kernel_core::update_agent_ipc::{
     AgentOperation, AgentRequest, AgentResponse, REQUEST_MESSAGE_BYTES, RESPONSE_MESSAGE_BYTES,
 };
+use kernel_core::update_audit::{
+    AuditTransport, REQUEST_BYTES as AUDIT_REQUEST_BYTES, RESPONSE_BYTES as AUDIT_RESPONSE_BYTES,
+};
 use kernel_core::update_client::UpdateTransport;
 use kernel_core::update_list_agent::UpdateListTransport;
 use kernel_core::update_service::{
@@ -76,6 +79,31 @@ impl UpdateListTransport for NativeUpdateListTransport {
         };
         if result >= 0 {
             Ok(result as usize)
+        } else {
+            Err(result.unsigned_abs() as i64)
+        }
+    }
+}
+
+/// Native transport for the durable terminal archive receipt query.
+pub struct NativeUpdateAuditTransport;
+
+impl AuditTransport for NativeUpdateAuditTransport {
+    fn audit(
+        &mut self,
+        request: &[u8; AUDIT_REQUEST_BYTES],
+        output: &mut [u8; AUDIT_RESPONSE_BYTES],
+    ) -> Result<(), i64> {
+        let result = unsafe {
+            sys::call3(
+                ids::SYSTEM_UPDATE_AUDIT_QUERY,
+                request.as_ptr() as u64,
+                output.as_mut_ptr() as u64,
+                output.len() as u64,
+            )
+        };
+        if result == AUDIT_RESPONSE_BYTES as i64 {
+            Ok(())
         } else {
             Err(result.unsigned_abs() as i64)
         }

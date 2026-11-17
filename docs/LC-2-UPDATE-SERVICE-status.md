@@ -199,6 +199,28 @@ ABI syscall 和原生 Shell 消费。archive 已具备内核持久收据和正�
 help 四条 archive 路径，receipt 写入/读回成功，重复 action 幂等，CLI 资源回收。
 完整并发/重放矩阵和 Pixel 安装断电矩阵仍未完成。
 
+## 跨重启归档审计查询
+
+ABI 3.21 新增 `system.update.audit.query`（ID 115）和原生
+`system.update.audit [--help|--schema|--json]`：
+
+- 请求只包含 request ID 和可选 expected archive sequence，不携带 tenant、
+  subject、路径或块设备选择；
+- 内核从 authenticated principal 派生 tenant/domain，并通过既有
+  `read_archive_receipt` 读取恢复、校验后的最高有效归档收据；
+- 响应固定包含 available、archive sequence、transaction、manifest digest、
+  previous digest 和 terminal stage；
+- 无归档是显式 `available=false`；损坏或同代冲突副本失败关闭，不会伪装成空历史；
+- native CLI、JSON 与共享 `UpdateAuditClient` 使用同一响应验证。
+
+同一 P0/OVMF 状态连续启动两次；第二次没有重新生成 GPT、文件系统或 control，
+仍查询到同一归档：
+
+```text
+available=true sequence=1 transaction=1 terminal=complete
+digest=68d00296644483d365ecb17f4163588c5f1b27944a56f26f73556507a9c2bd3a
+```
+
 ## 验证
 
 ```text
@@ -216,6 +238,9 @@ cargo test --locked -p kernel-core update_client::tests
 
 cargo test --locked -p kernel-core update_agent::tests
 4 passed; 0 failed
+
+cargo test --locked -p kernel-core update_audit::tests
+3 passed; 0 failed
 
 cargo test --locked -p kernel-core update_agent_ipc::tests
 6 passed; 0 failed
@@ -273,7 +298,7 @@ bash scripts/issue21-uefi-boot-check.sh
 PASS mode=native-install-abi initialized=false qemu_rc=33
 
 bash scripts/abi-contract.sh check
-PASS (3.20.0)
+PASS (3.21.0)
 ```
 
 新增测试覆盖：
@@ -309,11 +334,14 @@ PASS (3.20.0)
   update record；short buffer 与伪造保留身份字节均被拒绝，首程序资源回基线。
 - `system update list` 的 human/JSON/schema/help 在真实 OVMF guest 中通过，CLI
   的机器结果绑定 ABI request ID，首程序退出 0 且资源回收。
+- archive-audit request/response 的零 ID、错误 scope、空/可用记录与路径泄漏负例；
+- 第二次真实 OVMF 启动仍返回相同 archive sequence、transaction、digest 和
+  terminal stage。
 
 ## 仍未完成
 
 - 信任根轮换、2-of-3 门限和签名撤销快照持久化；
-- 断点续传、生产发布源高可用和跨重启审计查询；
+- 断点续传和生产发布源高可用；
 - 系统级在线/离线发布演练和 Pixel 6a 安装/回滚/断电矩阵。
 
 因此本切片不能把 `LC-2-COMPONENT-UPDATE` 升为 done。

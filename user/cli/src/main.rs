@@ -7,11 +7,14 @@
 #![no_std]
 #![no_main]
 
-use jasper_rt::update::{NativeUpdateListTransport, NativeUpdateTransport};
+use jasper_rt::update::{
+    NativeUpdateAuditTransport, NativeUpdateListTransport, NativeUpdateTransport,
+};
 use jasper_rt::{entry, ids, sys};
 use kernel_core::jucs::{self, Command, Form, Invocation};
 use kernel_core::terminal_editor::{EditEvent, LineEditor};
 use kernel_core::update_agent::{AgentError, UpdateAgent, ACTION_JSON_BYTES, STATUS_JSON_BYTES};
+use kernel_core::update_audit::{encode_audit_json, UpdateAuditClient, AUDIT_JSON_BYTES};
 use kernel_core::update_client::{ClientError, UpdateClient};
 use kernel_core::update_list_agent::{
     AgentListError, UpdateListAgent, UpdateListClient, LIST_JSON_BYTES,
@@ -20,7 +23,7 @@ use kernel_core::update_status::UpdateStatus;
 
 const PROMPT: &[u8] = b"jasper> ";
 const HELP: &[u8] =
-    b"commands: help, echo <text>, system update status|recover|archive|list [--json], exit\n";
+    b"commands: help, echo <text>, system update status|recover|archive|list|audit [--json], exit\n";
 
 fn write(bytes: &[u8]) -> bool {
     let result = unsafe {
@@ -196,6 +199,12 @@ fn dispatch_jucs(invocation: Invocation, next_request: &mut u64) -> bool {
         (Command::UpdateList, Form::Schema) => write(jucs::UPDATE_LIST_SCHEMA.as_bytes()),
         (Command::UpdateList, Form::Invoke) => write_update_list(take_request(next_request), false),
         (Command::UpdateList, Form::Json) => write_update_list(take_request(next_request), true),
+        (Command::UpdateAudit, Form::Help) => write(jucs::UPDATE_AUDIT_HELP.as_bytes()),
+        (Command::UpdateAudit, Form::Schema) => write(jucs::UPDATE_AUDIT_SCHEMA.as_bytes()),
+        (Command::UpdateAudit, Form::Invoke) => {
+            write_update_audit(take_request(next_request), false)
+        }
+        (Command::UpdateAudit, Form::Json) => write_update_audit(take_request(next_request), true),
     }
 }
 
@@ -414,6 +423,59 @@ fn write_update_list(request_id: u64, json: bool) -> bool {
         && summary.push_u64(response.request_id())
         && summary.push(b"\nsystem-update-ok\n");
     ok && write(summary.as_bytes())
+}
+
+fn write_update_audit(request_id: u64, json: bool) -> bool {
+    let mut client = UpdateAuditClient::new(NativeUpdateAuditTransport);
+    let response = match client.query(request_id, 0) {
+        Ok(response) => response,
+        Err(error) => return write_audit_error(client_error_code(error), json),
+    };
+    if json {
+        let mut output = [0u8; AUDIT_JSON_BYTES];
+        return match encode_audit_json(response, &mut output) {
+            Ok(length) => write(&output[..length]),
+            Err(error) => write_audit_error(client_error_code(error), true),
+        };
+    }
+    let mut line = FixedText::new();
+    let mut ok = line.push(b"system-update audit=ok command=system.update.audit request=");
+    ok &= line.push_u64(request_id);
+    ok &= line.push(b" available=");
+    ok &= line.push(if response.available {
+        b"true"
+    } else {
+        b"false"
+    });
+    if response.available {
+        ok &= line.push(b" sequence=");
+        ok &= line.push_u64(response.archive_sequence);
+        ok &= line.push(b" transaction=");
+        ok &= line.push_u64(response.transaction_id);
+        ok &= line.push(b" terminal=");
+        ok &= line.push(match response.terminal_stage {
+            7 => b"complete".as_slice(),
+            10 => b"rolled_back".as_slice(),
+            _ => b"unknown".as_slice(),
+        });
+    }
+    ok &= line.push(b"\nsystem-update-ok\n");
+    ok && write(line.as_bytes())
+}
+
+fn write_audit_error(code: i64, json: bool) -> bool {
+    let mut output = FixedText::new();
+    let ok = if json {
+        output.push(
+            b"{\"schema\":\"jucs.result/1\",\"command\":\"system.update.audit\",\"status\":\"error\",\"code\":",
+        ) && output.push_i64(code)
+            && output.push(b"}\n")
+    } else {
+        output.push(b"jucs-error command=system.update.audit code=")
+            && output.push_i64(code)
+            && output.push(b"\nsystem-update-failed\n")
+    };
+    ok && write(output.as_bytes())
 }
 
 fn write_list_error(code: i64, json: bool) -> bool {

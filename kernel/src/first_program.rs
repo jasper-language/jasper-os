@@ -149,6 +149,7 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         abi::SYSTEM_UPDATE_STATUS_QUERY,
         abi::SYSTEM_UPDATE_ACTION_RECOVER,
         abi::SYSTEM_UPDATE_ACTION_ARCHIVE,
+        abi::SYSTEM_UPDATE_AUDIT_QUERY,
         abi::SYSTEM_INSTALL_UPDATE_LIST,
     ]));
     #[cfg(feature = "sandbox-launch-verify")]
@@ -190,6 +191,7 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         abi::SYSTEM_UPDATE_STATUS_QUERY,
         abi::SYSTEM_UPDATE_ACTION_RECOVER,
         abi::SYSTEM_UPDATE_ACTION_ARCHIVE,
+        abi::SYSTEM_UPDATE_AUDIT_QUERY,
     ]);
     #[cfg(all(feature = "terminal-session-verify", feature = "update-agent-verify"))]
     let allowed = allowed.union(SyscallSet::of(&[
@@ -217,6 +219,7 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         abi::SYSTEM_UPDATE_STATUS_QUERY,
         abi::SYSTEM_UPDATE_ACTION_RECOVER,
         abi::SYSTEM_UPDATE_ACTION_ARCHIVE,
+        abi::SYSTEM_UPDATE_AUDIT_QUERY,
         abi::SYSTEM_INSTALL_UPDATE_LIST,
     ]));
     #[cfg(not(any(

@@ -320,7 +320,7 @@ if { [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MO
     if [ "$MODE" = update-list ]; then
       printf 'help\nsystem update list\nsystem update list --json\nsystem update list --schema\nsystem update list --help\nexit\n' >&8
     else
-      printf 'help\nsystem update status\nsystem update status --json\nsystem update status --schema\nsystem update status --help\nsystem update recover\nsystem update recover --json\nsystem update recover --schema\nsystem update recover --help\nsystem update archive\nsystem update archive --json\nsystem update archive --schema\nsystem update archive --help\necho history\n\016\n\003\004' >&8
+    printf 'help\nsystem update status\nsystem update status --json\nsystem update status --schema\nsystem update status --help\nsystem update recover\nsystem update recover --json\nsystem update recover --schema\nsystem update recover --help\nsystem update archive\nsystem update archive --json\nsystem update archive --schema\nsystem update archive --help\nsystem update audit\nsystem update audit --json\nsystem update audit --schema\nsystem update audit --help\necho history\n\016\n\003\004' >&8
     fi
   ) &
   SERIAL_FEEDER=$!
@@ -382,6 +382,8 @@ if [ "$MODE" = terminal-recovery ]; then
   grep -aq '^\[JSR-UPDATE-ACTION\].*action=recover result=ok' "$OUT/serial.log"
   grep -aqE $'^system-update result=ok command=system[.]update[.]archive action=archive generation=[1-9][0-9]* transaction=[1-9][0-9]* archived=true tenant=[1-9][0-9]* request=[1-9][0-9]*\r?$' "$OUT/serial.log"
   grep -aq '^\[JSR-UPDATE-ARCHIVE\].*terminal=Complete result=ok' "$OUT/serial.log"
+  grep -aqE $'^system-update audit=ok command=system[.]update[.]audit request=[1-9][0-9]* available=true sequence=1 transaction=[1-9][0-9]* terminal=complete\r?$' "$OUT/serial.log"
+  grep -aqE $'^\[JSR-UPDATE-AUDIT\].*available=true sequence=1 .*result=ok\r?$' "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-HEALTH\] result=confirmed ' "$OUT/serial.log"
   python3 - "$OUT/serial.log" <<'PY'
 import json
@@ -390,6 +392,7 @@ import sys
 status_records = []
 recover_records = []
 archive_records = []
+audit_records = []
 with open(sys.argv[1], "rb") as stream:
     for raw in stream:
         line = raw.rstrip(b"\r\n")
@@ -401,6 +404,8 @@ with open(sys.argv[1], "rb") as stream:
                 recover_records.append(record)
             elif record["command"] == "system.update.archive":
                 archive_records.append(record)
+        if line.startswith(b'{"schema":"service.update.audit/1"'):
+            audit_records.append(json.loads(line))
 
 assert status_records, "missing structured update status"
 status = status_records[-1]
@@ -431,11 +436,22 @@ assert archive["transaction"] == status["transaction"]
 assert archive["digest"] == status["transaction_digest"]
 assert archive["archived"] is True
 assert archive["caller"]["domain"] == 1
+assert audit_records, "missing durable archive audit"
+audit = audit_records[-1]
+assert audit["schema"] == "service.update.audit/1"
+assert audit["command"] == "system.update.audit"
+assert audit["available"] is True
+assert audit["sequence"] == 1
+assert audit["transaction"] == archive["transaction"]
+assert audit["digest"] == archive["digest"]
+assert audit["terminal"] == "complete"
 PY
   grep -aqE $'^\{"schema":"jucs.command/1","id":"system.update.recover","version":1,"effects":"write","arguments":\[\],"options":\["--help","--schema","--json"\],"service":"service.update.recover","service_version":1\}\r?$' "$OUT/serial.log"
   grep -aqE $'^system update recover \[\-\-help\|--schema\|--json\]\r?$' "$OUT/serial.log"
   grep -aqE $'^\{"schema":"jucs.command/1","id":"system.update.archive","version":1,"effects":"write","arguments":\[\],"options":\["--help","--schema","--json"\],"service":"service.update.archive","service_version":1\}\r?$' "$OUT/serial.log"
   grep -aqE $'^system update archive \[\-\-help\|--schema\|--json\]\r?$' "$OUT/serial.log"
+  grep -aqE $'^\{"schema":"jucs.command/1","id":"system.update.audit","version":1,"effects":"read","arguments":\[\],"options":\["--help","--schema","--json"\],"service":"service.update.audit","service_version":1\}\r?$' "$OUT/serial.log"
+  grep -aqE $'^system update audit \[\-\-help\|--schema\|--json\]\r?$' "$OUT/serial.log"
   grep -aqE $'^native-bye\r?$' "$OUT/serial.log"
   ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
   echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
@@ -606,6 +622,8 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native
       grep -aq '^\[JSR-UPDATE-ACTION\].*action=recover result=ok' "$OUT/serial.log"
       grep -aqE $'^system-update result=ok command=system[.]update[.]archive action=archive generation=[1-9][0-9]* transaction=[1-9][0-9]* archived=true tenant=[1-9][0-9]* request=[1-9][0-9]*\r?$' "$OUT/serial.log"
       grep -aq '^\[JSR-UPDATE-ARCHIVE\].*terminal=Complete result=ok' "$OUT/serial.log"
+      grep -aqE $'^system-update audit=ok command=system[.]update[.]audit request=[1-9][0-9]* available=true sequence=1 transaction=[1-9][0-9]* terminal=complete\r?$' "$OUT/serial.log"
+      grep -aqE $'^\[JSR-UPDATE-AUDIT\].*available=true sequence=1 .*result=ok\r?$' "$OUT/serial.log"
       python3 - "$OUT/serial.log" <<'PY'
 import json
 import sys
@@ -613,6 +631,7 @@ import sys
 status_records = []
 recover_records = []
 archive_records = []
+audit_records = []
 with open(sys.argv[1], "rb") as stream:
     for raw in stream:
         line = raw.rstrip(b"\r\n")
@@ -624,6 +643,8 @@ with open(sys.argv[1], "rb") as stream:
                 recover_records.append(record)
             elif record["command"] == "system.update.archive":
                 archive_records.append(record)
+        if line.startswith(b'{"schema":"service.update.audit/1"'):
+            audit_records.append(json.loads(line))
 
 assert status_records, "missing structured update status"
 record = status_records[-1]
@@ -665,6 +686,15 @@ assert archive["generation"] == record["generation"]
 assert archive["transaction"] == record["transaction"]
 assert archive["digest"] == record["transaction_digest"]
 assert archive["archived"] is True
+assert audit_records, "missing structured update audit"
+audit = audit_records[-1]
+assert audit["schema"] == "service.update.audit/1"
+assert audit["command"] == "system.update.audit"
+assert audit["available"] is True
+assert audit["sequence"] == 1
+assert audit["transaction"] == archive["transaction"]
+assert audit["digest"] == archive["digest"]
+assert audit["terminal"] == "complete"
 PY
       grep -aqE $'^\{"schema":"jucs.command/1","id":"system.update.status","version":1,"effects":"read","arguments":\[\],"options":\["--help","--schema","--json"\],"service":"service.update.status","service_version":1\}\r?$' "$OUT/serial.log"
       grep -aqE $'^system update status \[\-\-help\|--schema\|--json\]\r?$' "$OUT/serial.log"
@@ -672,6 +702,8 @@ PY
       grep -aqE $'^system update recover \[\-\-help\|--schema\|--json\]\r?$' "$OUT/serial.log"
       grep -aqE $'^\{"schema":"jucs.command/1","id":"system.update.archive","version":1,"effects":"write","arguments":\[\],"options":\["--help","--schema","--json"\],"service":"service.update.archive","service_version":1\}\r?$' "$OUT/serial.log"
       grep -aqE $'^system update archive \[\-\-help\|--schema\|--json\]\r?$' "$OUT/serial.log"
+      grep -aqE $'^\{"schema":"jucs.command/1","id":"system.update.audit","version":1,"effects":"read","arguments":\[\],"options":\["--help","--schema","--json"\],"service":"service.update.audit","service_version":1\}\r?$' "$OUT/serial.log"
+      grep -aqE $'^system update audit \[\-\-help\|--schema\|--json\]\r?$' "$OUT/serial.log"
       [ "$(grep -acE $'^native-echo=history\r?$' "$OUT/serial.log")" -ge 2 ]
       grep -aqE $'^\^C\r?$' "$OUT/serial.log"
     fi
