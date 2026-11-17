@@ -19,6 +19,8 @@ pub enum ClientError {
     Protocol,
     /// The response was not bound to the request identifier.
     RequestMismatch,
+    /// Authenticated caller facts changed within one status/action exchange.
+    IdentityMismatch,
     /// The action response did not match the status transaction or digest.
     BindingMismatch,
 }
@@ -58,6 +60,9 @@ impl<T: UpdateTransport> UpdateClient<T> {
         request_id: u64,
         expected_generation: u64,
     ) -> Result<StatusResponse, ClientError> {
+        if request_id == 0 {
+            return Err(ClientError::Protocol);
+        }
         let request = StatusRequest {
             request_id,
             expected_generation,
@@ -72,6 +77,9 @@ impl<T: UpdateTransport> UpdateClient<T> {
         if response.authorization.request_id != request_id {
             return Err(ClientError::RequestMismatch);
         }
+        if response.authorization.domain != response.status.caller_domain {
+            return Err(ClientError::IdentityMismatch);
+        }
         Ok(response)
     }
 
@@ -81,7 +89,10 @@ impl<T: UpdateTransport> UpdateClient<T> {
         status_request_id: u64,
         action_request_id: u64,
     ) -> Result<TransactionActionStatus, ClientError> {
-        if status_request_id == 0 || action_request_id == 0 || status_request_id == action_request_id {
+        if status_request_id == 0
+            || action_request_id == 0
+            || status_request_id == action_request_id
+        {
             return Err(ClientError::Protocol);
         }
         let status = self.status(status_request_id, 0)?;
@@ -107,6 +118,12 @@ impl<T: UpdateTransport> UpdateClient<T> {
         if response.request_id != action_request_id {
             return Err(ClientError::RequestMismatch);
         }
+        if response.tenant != status.authorization.tenant
+            || response.domain != status.authorization.domain
+            || response.scope != status.authorization.scope
+        {
+            return Err(ClientError::IdentityMismatch);
+        }
         if response.transaction_id != status.status.transaction_id
             || response.manifest_sha256 != manifest_sha256
             || response.generation != status.status.service_generation
@@ -130,6 +147,9 @@ mod tests {
         recover_calls: u32,
         fail_status: Option<i64>,
         corrupt_action: bool,
+        action_tenant: Option<u64>,
+        action_domain: Option<u32>,
+        status_domain: Option<u32>,
         last_status_request: u64,
         last_action_request: u64,
     }
@@ -146,6 +166,9 @@ mod tests {
             self.last_status_request = decoded.request_id;
             let mut response = self.status;
             response.authorization.request_id = decoded.request_id;
+            if let Some(domain) = self.status_domain {
+                response.authorization.domain = domain;
+            }
             *output = response.encode();
             Ok(())
         }
@@ -166,6 +189,12 @@ mod tests {
             response.transaction_id = decoded.transaction_id;
             response.manifest_sha256 = decoded.manifest_sha256;
             response.generation = decoded.expected_generation;
+            if let Some(tenant) = self.action_tenant {
+                response.tenant = tenant;
+            }
+            if let Some(domain) = self.action_domain {
+                response.domain = domain;
+            }
             if self.corrupt_action {
                 response.generation = response.generation.saturating_add(1);
             }
@@ -228,6 +257,9 @@ mod tests {
             recover_calls: 0,
             fail_status: None,
             corrupt_action: false,
+            action_tenant: None,
+            action_domain: None,
+            status_domain: None,
             last_status_request: 0,
             last_action_request: 0,
         };
@@ -254,6 +286,9 @@ mod tests {
             recover_calls: 0,
             fail_status: Some(4170),
             corrupt_action: false,
+            action_tenant: None,
+            action_domain: None,
+            status_domain: None,
             last_status_request: 0,
             last_action_request: 0,
         };
@@ -269,6 +304,9 @@ mod tests {
             recover_calls: 0,
             fail_status: None,
             corrupt_action: true,
+            action_tenant: None,
+            action_domain: None,
+            status_domain: None,
             last_status_request: 0,
             last_action_request: 0,
         };
@@ -291,6 +329,9 @@ mod tests {
             recover_calls: 0,
             fail_status: None,
             corrupt_action: false,
+            action_tenant: None,
+            action_domain: None,
+            status_domain: None,
             last_status_request: 0,
             last_action_request: 0,
         };
@@ -299,5 +340,80 @@ mod tests {
         assert_eq!(recovered.transaction_id, 9);
         assert_eq!(recovered.generation, 7);
         assert_eq!(recovered.request_id, 34);
+    }
+
+    #[test]
+    fn zero_request_ids_and_cross_envelope_identity_changes_fail_closed() {
+        let fake = Fake {
+            status: status(3),
+            action: action(),
+            status_calls: 0,
+            recover_calls: 0,
+            fail_status: None,
+            corrupt_action: false,
+            action_tenant: None,
+            action_domain: None,
+            status_domain: None,
+            last_status_request: 0,
+            last_action_request: 0,
+        };
+        assert_eq!(
+            UpdateClient::new(fake).status(0, 0),
+            Err(ClientError::Protocol)
+        );
+
+        let fake = Fake {
+            status: status(3),
+            action: action(),
+            status_calls: 0,
+            recover_calls: 0,
+            fail_status: None,
+            corrupt_action: false,
+            action_tenant: Some(4),
+            action_domain: None,
+            status_domain: None,
+            last_status_request: 0,
+            last_action_request: 0,
+        };
+        assert_eq!(
+            UpdateClient::new(fake).recover(41, 42),
+            Err(ClientError::IdentityMismatch)
+        );
+
+        let fake = Fake {
+            status: status(3),
+            action: action(),
+            status_calls: 0,
+            recover_calls: 0,
+            fail_status: None,
+            corrupt_action: false,
+            action_tenant: None,
+            action_domain: Some(2),
+            status_domain: None,
+            last_status_request: 0,
+            last_action_request: 0,
+        };
+        assert_eq!(
+            UpdateClient::new(fake).recover(43, 44),
+            Err(ClientError::IdentityMismatch)
+        );
+
+        let fake = Fake {
+            status: status(3),
+            action: action(),
+            status_calls: 0,
+            recover_calls: 0,
+            fail_status: None,
+            corrupt_action: false,
+            action_tenant: None,
+            action_domain: None,
+            status_domain: Some(2),
+            last_status_request: 0,
+            last_action_request: 0,
+        };
+        assert_eq!(
+            UpdateClient::new(fake).status(45, 0),
+            Err(ClientError::IdentityMismatch)
+        );
     }
 }

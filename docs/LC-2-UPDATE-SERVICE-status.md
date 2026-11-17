@@ -88,6 +88,9 @@ jasper-update-recovery cleanup <control-root> <staging-root> <manifest-sha256-he
   response request 校验和 transaction/generation/digest 绑定校验只实现一次；
   一次 recover 显式消费独立 status/action 请求 ID，符合进程级账本“ID 跨服务不得
   复用”的规则；
+- 共用客户端拒绝零请求 ID，并要求 status 响应内的 caller domain 与认证域一致；
+  recover 响应必须与同一 exchange 的 status 保持 tenant、domain 和 scope 一致，
+  防止结构化 Agent transport 将不同主体的响应与事务拼接成一次成功调用；
 - 服务先验证当前调用者身份/系统域，再读取并恢复同一组双副本 A/B 控制记录；
 - 返回 `service.update.status` v1 请求头与固定状态载荷，包含 generation、transaction、槽状态、
   release、回滚下限、安全纪元、Schema 范围以及调用者身份；
@@ -122,7 +125,7 @@ cargo test --locked -p kernel-core update_service::tests
 6 passed; 0 failed
 
 cargo test --locked -p kernel-core update_client::tests
-3 passed; 0 failed
+4 passed; 0 failed
 ```
 
 新增测试覆盖：
@@ -140,6 +143,8 @@ cargo test --locked -p kernel-core update_client::tests
 - 在线/离线来源通过同一 service 信任和暂存路径；
 - terminal staging 必须先归档再清理；
 - 归档已发布但清理中断时，同一 archive root 可以幂等续作。
+- 零请求 ID、status 内部认证域不一致，以及 status/action 跨租户、域或作用域
+  拼接均在提交恢复动作前失败关闭。
 
 ## 仍未完成
 
