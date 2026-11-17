@@ -1,6 +1,6 @@
 # DC-1 Device Broker Core
 
-更新日期：2026-11-16。
+更新日期：2026-11-17。
 
 状态：**partial**。已实现受限 Driver Host 的核心授权与生命周期状态机；
 真实用户态 Driver Host 的 MMIO/DMA/IRQ 组合运行仍属于本节点退出门。
@@ -12,7 +12,9 @@
 1. 硬件发现只形成候选，不自动授予设备访问；
 2. 每次设备准入都必须提交明确的 Device/MMIO/DMA/IRQ 最小权限集合和容量策略；
 3. Device 在任一时刻只绑定给一个 host generation；
-4. MMIO、DMA、IRQ 请求在发布前检查授权和容量，容量失败不产生半发布状态；
+4. MMIO、DMA、IRQ 请求在发布前检查授权和容量，同一 pass 的 pending 请求会
+   实际预留 MMIO region、DMA page 与 IRQ route 配额；完成、取消、reset 或 crash
+   后释放，超配额失败不产生半发布状态；
 5. 每个请求只有一个终态：完成、取消或撤销；
 6. reset 在 DMA 与 IRQ 均确认静默前失败原子，不改变当前 grants；
 7. host 崩溃立即撤销请求和 passes；没有静默证明时设备进入 quarantine，
@@ -41,7 +43,7 @@ Memory、Handle、IRQ 或 DMA 的既有强制机制。它只规定设备服务�
 
 ```text
 cargo test --locked -p kernel-core driver_host
-6 passed; 0 failed
+9 passed; 0 failed
 
 cargo check --locked -p user-devprobe --target x86_64-unknown-none
 PASS
@@ -53,8 +55,9 @@ JASPER_CHECKS=arch2 JASPER_ACCEPT=spot bash scripts/accept.sh
 qemu_rc=33; ARCH-2 PASS; accept: SPOT PASS
 ```
 
-覆盖发现与准入分离、最小权限、设备独占、请求单终态、reset 失败原子与 token
-失效、崩溃 quarantine/recovery，以及容量失败不部分发布。
+覆盖发现与准入分离、最小权限、设备独占、请求单终态、pending 请求资源预留与
+释放、零需求拒绝、reset 失败原子与 token 失效、崩溃 quarantine/recovery，以及
+容量失败不部分发布。
 
 真实 x86_64 KVM guest 中，同一未特权 Driver Host 进程实际完成
 Device/Memory/DMA/MSI-X/Ring 组合，IRQ 等待经关闭中断句柄得到唯一

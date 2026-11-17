@@ -229,6 +229,7 @@ struct Request {
     host_generation: u64,
     device_slot: usize,
     kind: RequestKind,
+    amount: u64,
 }
 
 pub struct DriverHostBroker<
@@ -249,12 +250,8 @@ pub struct DriverHostBroker<
     revoked: u64,
 }
 
-impl<
-        const DEVICES: usize,
-        const HOSTS: usize,
-        const PASSES: usize,
-        const REQUESTS: usize,
-    > DriverHostBroker<DEVICES, HOSTS, PASSES, REQUESTS>
+impl<const DEVICES: usize, const HOSTS: usize, const PASSES: usize, const REQUESTS: usize>
+    DriverHostBroker<DEVICES, HOSTS, PASSES, REQUESTS>
 {
     pub const fn new() -> Self {
         Self {
@@ -378,7 +375,10 @@ impl<
                 0
             },
         });
-        self.devices[device_slot].as_mut().expect("checked device").state = DeviceState::Bound {
+        self.devices[device_slot]
+            .as_mut()
+            .expect("checked device")
+            .state = DeviceState::Bound {
             host_slot: host.slot,
             host_generation: host.generation,
         };
@@ -390,17 +390,50 @@ impl<
     }
 
     /// Start one bounded request. The grant already reserves its resource.
-    pub fn begin(
+    pub fn begin(&mut self, pass: PassToken, kind: RequestKind) -> Result<RequestToken, Error> {
+        self.begin_bounded(pass, kind, 1)
+    }
+
+    /// Reserve an explicit amount from one admitted resource grant.
+    ///
+    /// A pass is a capacity ceiling, not permission for an unlimited number of
+    /// concurrent requests. Requests are charged until they reach exactly one
+    /// terminal state, which releases the reservation.
+    pub fn begin_bounded(
         &mut self,
         pass: PassToken,
         kind: RequestKind,
+        amount: u64,
     ) -> Result<RequestToken, Error> {
         let admitted = self.require_pass(pass)?;
+        if amount == 0 {
+            return Err(Error::AuthorityDenied);
+        }
         if (kind == RequestKind::Mmio && admitted.mmio_regions == 0)
             || (kind == RequestKind::Dma && admitted.dma_pages == 0)
             || (kind == RequestKind::Irq && admitted.irq_routes == 0)
         {
             return Err(Error::AuthorityDenied);
+        }
+        let limit = match kind {
+            RequestKind::Mmio => u64::from(admitted.mmio_regions),
+            RequestKind::Dma => admitted.dma_pages,
+            RequestKind::Irq => u64::from(admitted.irq_routes),
+        };
+        let reserved = self
+            .requests
+            .iter()
+            .flatten()
+            .filter(|request| {
+                request.pass_slot == pass.slot
+                    && request.pass_generation == pass.generation
+                    && request.kind == kind
+            })
+            .try_fold(0u64, |total, request| total.checked_add(request.amount))
+            .ok_or(Error::Capacity)?;
+        let requested = reserved.checked_add(amount).ok_or(Error::Capacity)?;
+        if requested > limit {
+            return Err(Error::Capacity);
         }
         let slot = self
             .requests
@@ -417,6 +450,7 @@ impl<
             host_generation: admitted.host_generation,
             device_slot: admitted.device_slot,
             kind,
+            amount,
         });
         Ok(RequestToken { slot, generation })
     }
@@ -461,18 +495,13 @@ impl<
     ///
     /// The quiescence checks occur before any mutation: a failed reset leaves
     /// requests, grants and the current generation untouched.
-    pub fn reset(
-        &mut self,
-        host: HostToken,
-        proof: QuiesceProof,
-    ) -> Result<ResetReceipt, Error> {
+    pub fn reset(&mut self, host: HostToken, proof: QuiesceProof) -> Result<ResetReceipt, Error> {
         self.require_running_host(host)?;
         if !proof.dma_quiesced || !proof.irq_quiesced {
             return Err(Error::NotQuiesced);
         }
         let cancelled = self.cancel_requests_for_host(host.slot, host.generation);
-        let (revoked_passes, _) =
-            self.revoke_passes_for_host(host.slot, host.generation, false);
+        let (revoked_passes, _) = self.revoke_passes_for_host(host.slot, host.generation, false);
         let new_generation = host.generation.checked_add(1).ok_or(Error::Capacity)?;
         let record = self.hosts[host.slot].as_mut().expect("validated host");
         record.generation = new_generation;
@@ -488,11 +517,7 @@ impl<
 
     /// Crash a host. Without proven DMA and IRQ quiescence, its device remains
     /// quarantined and cannot be rebound by another host.
-    pub fn crash(
-        &mut self,
-        host: HostToken,
-        proof: QuiesceProof,
-    ) -> Result<CrashReceipt, Error> {
+    pub fn crash(&mut self, host: HostToken, proof: QuiesceProof) -> Result<CrashReceipt, Error> {
         self.require_running_host(host)?;
         let cancelled = self.cancel_requests_for_host(host.slot, host.generation);
         let (revoked_passes, quarantined_devices) = self.revoke_passes_for_host(
@@ -500,7 +525,10 @@ impl<
             host.generation,
             !proof.dma_quiesced || !proof.irq_quiesced,
         );
-        self.hosts[host.slot].as_mut().expect("validated host").state = HostState::Crashed;
+        self.hosts[host.slot]
+            .as_mut()
+            .expect("validated host")
+            .state = HostState::Crashed;
         Ok(CrashReceipt {
             cancelled,
             revoked_passes,
@@ -512,11 +540,7 @@ impl<
     ///
     /// Quarantined devices owned by this host become discoverable/available
     /// again. The returned generation invalidates every pre-crash token.
-    pub fn recover(
-        &mut self,
-        host: HostToken,
-        proof: QuiesceProof,
-    ) -> Result<HostToken, Error> {
+    pub fn recover(&mut self, host: HostToken, proof: QuiesceProof) -> Result<HostToken, Error> {
         let record = self.host(host)?;
         if record.state != HostState::Crashed {
             return Err(Error::HostNotCrashed);
@@ -566,11 +590,7 @@ impl<
                 .filter(|host| host.state == HostState::Running)
                 .count(),
             active_passes: self.passes.iter().flatten().count(),
-            pending_requests: self
-                .requests
-                .iter()
-                .flatten()
-                .count(),
+            pending_requests: self.requests.iter().flatten().count(),
             completed: self.completed,
             cancelled: self.cancelled,
             revoked: self.revoked,
@@ -614,8 +634,7 @@ impl<
             .get(token.slot)
             .and_then(|entry| *entry)
             .filter(|pass| {
-                pass.generation == token.generation
-                    && pass.host_generation == token.host_generation
+                pass.generation == token.generation && pass.host_generation == token.host_generation
             })
             .ok_or(Error::StalePass)?;
         self.require_running_host(HostToken {
@@ -630,8 +649,7 @@ impl<
         token: RequestToken,
         terminal: Terminal,
     ) -> Result<Terminal, Error> {
-        self
-            .requests
+        self.requests
             .get(token.slot)
             .and_then(|entry| *entry)
             .filter(|request| request.generation == token.generation)
@@ -645,16 +663,11 @@ impl<
         Ok(terminal)
     }
 
-    fn cancel_requests_for_host(
-        &mut self,
-        host_slot: usize,
-        host_generation: u64,
-    ) -> usize {
+    fn cancel_requests_for_host(&mut self, host_slot: usize, host_generation: u64) -> usize {
         let mut cancelled = 0;
         for request in self.requests.iter_mut() {
             if request.is_some_and(|request| {
-                request.host_slot == host_slot
-                    && request.host_generation == host_generation
+                request.host_slot == host_slot && request.host_generation == host_generation
             }) {
                 *request = None;
                 cancelled += 1;
@@ -716,12 +729,8 @@ impl<
     }
 }
 
-impl<
-        const DEVICES: usize,
-        const HOSTS: usize,
-        const PASSES: usize,
-        const REQUESTS: usize,
-    > Default for DriverHostBroker<DEVICES, HOSTS, PASSES, REQUESTS>
+impl<const DEVICES: usize, const HOSTS: usize, const PASSES: usize, const REQUESTS: usize> Default
+    for DriverHostBroker<DEVICES, HOSTS, PASSES, REQUESTS>
 {
     fn default() -> Self {
         Self::new()
@@ -748,12 +757,7 @@ mod tests {
         allowed: Needs,
     ) -> PassToken {
         broker
-            .admit(
-                host,
-                DEV,
-                requested,
-                Policy::new(allowed, 2, 8, 2),
-            )
+            .admit(host, DEV, requested, Policy::new(allowed, 2, 8, 2))
             .unwrap()
     }
 
@@ -808,7 +812,12 @@ mod tests {
         let _pass = admit(&mut broker, first, allowed, allowed);
 
         assert_eq!(
-            broker.admit(second, DEV, Needs::DEVICE, Policy::new(Needs::DEVICE, 1, 1, 1)),
+            broker.admit(
+                second,
+                DEV,
+                Needs::DEVICE,
+                Policy::new(Needs::DEVICE, 1, 1, 1)
+            ),
             Err(Error::DeviceUnavailable)
         );
         assert_eq!(
@@ -841,6 +850,68 @@ mod tests {
         assert_eq!(broker.stats().pending_requests, 0);
         assert_eq!(broker.stats().completed, 1);
         assert_eq!(broker.stats().cancelled, 1);
+    }
+
+    #[test]
+    fn pending_requests_reserve_grant_capacity_until_terminal() {
+        let mut broker = broker();
+        let host = broker.register_host().unwrap();
+        broker.discover(DEV).unwrap();
+        let allowed = Needs::DEVICE
+            .union(Needs::MMIO)
+            .union(Needs::DMA)
+            .union(Needs::IRQ);
+        let pass = broker
+            .admit(host, DEV, allowed, Policy::new(allowed, 2, 8, 2))
+            .unwrap();
+
+        let mmio = broker.begin_bounded(pass, RequestKind::Mmio, 2).unwrap();
+        assert_eq!(
+            broker.begin_bounded(pass, RequestKind::Mmio, 1),
+            Err(Error::Capacity)
+        );
+        let dma = broker.begin_bounded(pass, RequestKind::Dma, 6).unwrap();
+        let irq = broker.begin_bounded(pass, RequestKind::Irq, 1).unwrap();
+        assert_eq!(
+            broker.begin_bounded(pass, RequestKind::Dma, 3),
+            Err(Error::Capacity)
+        );
+        assert_eq!(broker.stats().pending_requests, 3);
+
+        assert_eq!(broker.complete(mmio), Ok(Terminal::Completed));
+        let replacement = broker.begin_bounded(pass, RequestKind::Mmio, 2).unwrap();
+        assert_eq!(
+            broker.begin_bounded(pass, RequestKind::Mmio, 1),
+            Err(Error::Capacity)
+        );
+
+        assert_eq!(broker.cancel(dma), Ok(Terminal::Cancelled));
+        assert!(broker.begin_bounded(pass, RequestKind::Dma, 8).is_ok());
+        assert_eq!(
+            broker.begin_bounded(pass, RequestKind::Irq, 2),
+            Err(Error::Capacity)
+        );
+
+        assert_eq!(broker.complete(replacement), Ok(Terminal::Completed));
+        assert_eq!(broker.cancel(irq), Ok(Terminal::Cancelled));
+    }
+
+    #[test]
+    fn zero_request_demand_is_rejected_without_consuming_capacity() {
+        let mut broker = DriverHostBroker::<1, 1, 1, 1>::new();
+        let host = broker.register_host().unwrap();
+        broker.discover(DEV).unwrap();
+        let allowed = Needs::DEVICE.union(Needs::MMIO);
+        let pass = broker
+            .admit(host, DEV, allowed, Policy::new(allowed, 1, 0, 0))
+            .unwrap();
+
+        assert_eq!(
+            broker.begin_bounded(pass, RequestKind::Mmio, 0),
+            Err(Error::AuthorityDenied)
+        );
+        assert_eq!(broker.stats().pending_requests, 0);
+        assert!(broker.begin_bounded(pass, RequestKind::Mmio, 1).is_ok());
     }
 
     #[test]
