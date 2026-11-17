@@ -155,6 +155,7 @@ case "$MODE" in
   native-install-abi) KERNEL_FEATURES=native-install-abi-verify ;;
   terminal-session) KERNEL_FEATURES=lifecycle-root-exec-verify,terminal-session-verify ;;
   terminal-recovery) KERNEL_FEATURES=user-programs,production,lifecycle-ab-health,terminal-session-verify ;;
+  update-agent) KERNEL_FEATURES=lifecycle-ab-health,update-agent-verify ;;
   android-ecosystem) KERNEL_FEATURES=lifecycle-root-exec-verify,android-ecosystem-verify ;;
   android-art) KERNEL_FEATURES=lifecycle-root-exec-verify,android-art-verify ;;
   vulkan-metal2vulkan) KERNEL_FEATURES=lifecycle-root-exec-verify,vulkan-metal2vulkan-verify ;;
@@ -166,7 +167,7 @@ if [ "${JASPER_ANDROID_ONLY:-0}" = 1 ]; then
   KERNEL_FEATURES="$KERNEL_FEATURES,android-fixture-verify"
 fi
 KERNEL_DEFAULT_FEATURES=()
-if [ "$MODE" = terminal-recovery ]; then
+if [ "$MODE" = terminal-recovery ] || [ "$MODE" = update-agent ]; then
   KERNEL_DEFAULT_FEATURES=(--no-default-features)
 fi
 if [ "$PREBUILT" = 1 ]; then
@@ -286,7 +287,7 @@ QEMU_EXTRA=(-monitor none)
 if [ -n "${ISSUE21_MONITOR_SOCKET:-}" ]; then
   QEMU_EXTRA=(-monitor "unix:$ISSUE21_MONITOR_SOCKET,server=on,wait=off")
 fi
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MODE" = update-agent ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
   CPU="${ISSUE21_QEMU_CPU:-max}"
   if [ "${ISSUE21_DISABLE_RDRAND:-0}" = 1 ]; then
     CPU=max,-rdrand,-rdseed
@@ -331,12 +332,19 @@ rc=$?
 set -e
 exec 9>&-
 printf '%s\n' "$rc" >"$OUT/qemu.rc"
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = update-agent ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
   [ "$rc" -eq 33 ]
 else
   [ "$rc" -eq 124 ]
 fi
 grep -aq 'Jasper-OS boot manager starting' "$OUT/serial.log"
+if [ "$MODE" = update-agent ]; then
+  grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
+  grep -aq 'text=\[JSR-UPDATE-AGENT\] transport=channel status=true recover=true archive=true replay=true timeout=true after_timeout=true server_app=[1-9][0-9]* child_exit=0 ok=true' "$OUT/serial.log"
+  ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
+  echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
+  exit 0
+fi
 if [ "$MODE" = terminal-recovery ]; then
   grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
   grep -aqE $'^Jasper-OS native CLI\r?$' "$OUT/serial.log"

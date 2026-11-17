@@ -41,6 +41,7 @@ pub mod sync;
 pub mod sys;
 pub mod task;
 pub mod time;
+pub mod update;
 
 pub use error::{Error, Result};
 pub use handle::Handle;

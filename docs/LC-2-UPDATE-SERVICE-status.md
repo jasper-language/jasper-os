@@ -98,6 +98,15 @@ jasper-update-recovery cleanup <control-root> <staging-root> <manifest-sha256-he
 - status 解码器现在拒绝“无候选槽却保留候选 release/state/attempts/digest”的
   矛盾记录，并要求存在候选槽时 release 与 digest 均非空；该一致性门位于共享
   协议层，文本 CLI、JSON CLI 和 Agent 前端不能产生不同判断；
+- `update_agent_ipc` 定义 112 字节固定请求和 224 字节固定响应封套：请求只允许
+  status/recover/archive，去掉消息头后仍必须通过原更新请求解码，envelope ID
+  必须与服务请求 ID 一致；响应固定绑定同一 message ID、operation 和结果形态；
+- 独立 `user-updateagentd` broker 通过内核 Channel 接收请求，首次收到的
+  kernel-stamped `sender_app` 会被固化；客户端同样固化首次响应的发送应用身份，
+  身份为 0 或后续变化均失败关闭；
+- broker 对重复 message ID/operation 返回缓存的完全相同响应，同一 ID 改换
+  operation 被拒绝；绝对 deadline 过期由 broker 在调用服务前拒绝，之后仍可继续
+  服务。Channel 的一问一答长度有界，不存在无界排队或 Agent 私有权限通道；
 - 服务先验证当前调用者身份/系统域，再读取并恢复同一组双副本 A/B 控制记录；
 - 返回 `service.update.status` v1 请求头与固定状态载荷，包含 generation、transaction、槽状态、
   release、回滚下限、安全纪元、Schema 范围以及调用者身份；
@@ -110,7 +119,7 @@ jasper-update-recovery cleanup <control-root> <staging-root> <manifest-sha256-he
 `system update status --json` 返回可由标准 JSON 解析器读取的同一状态；
 首程序查询前后资源断言为 `reclaimed=true`。
 
-这仍不是 Issue #34 的整体完成：外部 Agent IPC transport、租户级更新过滤、
+这仍不是 Issue #34 的整体完成：租户级更新过滤、
 完整并发/重放和 Pixel 安装矩阵尚未交付。因此 LC-2 继续保持 `core-passed`。
 
 recovery 已具备 path-free 数据/授权契约、`UpdateService` managed execution、
@@ -148,7 +157,7 @@ ABI syscall 和原生 Shell 消费。archive 已具备内核持久收据和正�
 
 真实 UEFI terminal-recovery 已在 OVMF/virtio-blk 上通过 human、JSON、schema、
 help 四条 archive 路径，receipt 写入/读回成功，重复 action 幂等，CLI 资源回收。
-Agent external IPC transport、完整并发/重放矩阵和 Pixel 安装断电矩阵仍未完成。
+完整并发/重放矩阵和 Pixel 安装断电矩阵仍未完成。
 
 ## 验证
 
@@ -168,6 +177,15 @@ cargo test --locked -p kernel-core update_client::tests
 cargo test --locked -p kernel-core update_agent::tests
 4 passed; 0 failed
 
+cargo test --locked -p kernel-core update_agent_ipc::tests
+4 passed; 0 failed
+
+cargo check --locked -p user-updateagentd --target x86_64-unknown-none
+PASS
+
+cargo check --locked -p user-agentprobe --target x86_64-unknown-none
+PASS
+
 cargo check --locked -p user-cli
 passed
 
@@ -186,6 +204,9 @@ passed
 
 bash scripts/issue21-uefi-boot-check.sh
 PASS mode=terminal-recovery qemu_rc=124
+
+ISSUE21_UEFI_MODE=update-agent bash scripts/issue21-uefi-boot-check.sh
+PASS mode=update-agent qemu_rc=33
 
 bash scripts/abi-contract.sh check
 PASS (3.19.0)
@@ -213,10 +234,13 @@ PASS (3.19.0)
   write/flush/readback 失败均失败关闭；真实文件后端重开和幂等提交通过。
 - 控制终态与 transaction participant 绑定正反例、Complete/RolledBack 崩溃恢复，
   以及 ABI 3.19 的 archive human/JSON/schema/help 均通过。
+- 外部 Agent 固定封套逐字节篡改、operation/ID 错配、错误 code/payload 形态被拒；
+  独立子进程的 status/recover/archive、重复请求缓存、sender identity 固化、
+  deadline timeout 和 timeout 后继续服务均通过真实 UEFI/virtio-blk。
 
 ## 仍未完成
 
-- 外部 Agent IPC/消息 transport、多租户更新集合与租户级可见性过滤；
+- 多租户更新集合与租户级可见性过滤；
 - 信任根轮换、2-of-3 门限和签名撤销快照持久化；
 - 断点续传、生产发布源高可用和跨重启审计查询；
 - 系统级在线/离线发布演练和 Pixel 6a 安装/回滚/断电矩阵。

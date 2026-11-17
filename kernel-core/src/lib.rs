@@ -120,6 +120,8 @@ pub mod update_service;
 pub mod update_client;
 /// Bounded structured-Agent frontend over the shared update client.
 pub mod update_agent;
+/// Fixed IPC envelope used by the external structured update Agent.
+pub mod update_agent_ipc;
 pub mod tick_lease;
 pub mod wake_mailbox;
 pub mod fdt;

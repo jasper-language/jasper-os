@@ -73,7 +73,10 @@ DAG；相关实现归入现有 LC-2、ISSUE-21 与 TERM-1 的后续验收。
 - 真实 UEFI 串口验收同时执行 `system update status --json`，以标准 JSON 解析器
   校验结构化字段，且查询仍走同一 JUCS 命令与 `system.update.status.query`。
 
-仍未完成：结构化 Agent 前端与 CLI 的端到端结果对照；租户过滤；archive 的
-正式资源动作；带 `system update recover` 的真实 UEFI 证据；权限、重放、旧
-generation、错误摘要和并发冲突的完整负例矩阵。在步骤 1–6 全部完成前，
-Issue #34 和 LC-2 都不能标记 done。
+当前已增加独立 Agent 进程与 CLI JSON 共用 `UpdateAgent`/`UpdateClient`：
+固定 status/recover/archive 封套在真实 UEFI/virtio-blk 中通过，包含 sender
+identity 固化、重复请求缓存和 deadline 拒绝。ABI 3.19 的正式
+`system update archive` 与 `system update recover` 均已有真实 UEFI 证据。
+仍需完成：租户过滤；完整权限、重放、旧 generation、错误摘要和并发冲突矩阵；
+真实断电与 Pixel 安装/回滚闭环。在这些退出门完成前，Issue #34 和 LC-2 都不能
+标记 done。

@@ -7,77 +7,17 @@
 #![no_std]
 #![no_main]
 
+use jasper_rt::update::NativeUpdateTransport;
 use jasper_rt::{entry, ids, sys};
 use kernel_core::jucs::{self, Command, Form, Invocation};
 use kernel_core::terminal_editor::{EditEvent, LineEditor};
 use kernel_core::update_agent::{AgentError, UpdateAgent, ACTION_JSON_BYTES, STATUS_JSON_BYTES};
-use kernel_core::update_client::{ClientError, UpdateClient, UpdateTransport};
-use kernel_core::update_service::{ACTION_RESPONSE_BYTES, RESPONSE_BYTES};
+use kernel_core::update_client::{ClientError, UpdateClient};
 use kernel_core::update_status::UpdateStatus;
 
 const PROMPT: &[u8] = b"jasper> ";
 const HELP: &[u8] =
     b"commands: help, echo <text>, system update status|recover|archive [--json], exit\n";
-
-struct NativeUpdateTransport;
-
-impl UpdateTransport for NativeUpdateTransport {
-    fn status(&mut self, request: &[u8], output: &mut [u8; RESPONSE_BYTES]) -> Result<(), i64> {
-        let result = unsafe {
-            sys::call3(
-                ids::SYSTEM_UPDATE_STATUS_QUERY,
-                request.as_ptr() as u64,
-                output.as_mut_ptr() as u64,
-                output.len() as u64,
-            )
-        };
-        if result == RESPONSE_BYTES as i64 {
-            Ok(())
-        } else {
-            Err(if result < 0 { -result } else { result })
-        }
-    }
-
-    fn recover(
-        &mut self,
-        request: &[u8],
-        output: &mut [u8; ACTION_RESPONSE_BYTES],
-    ) -> Result<(), i64> {
-        let result = unsafe {
-            sys::call3(
-                ids::SYSTEM_UPDATE_ACTION_RECOVER,
-                request.as_ptr() as u64,
-                output.as_mut_ptr() as u64,
-                output.len() as u64,
-            )
-        };
-        if result == ACTION_RESPONSE_BYTES as i64 {
-            Ok(())
-        } else {
-            Err(if result < 0 { -result } else { result })
-        }
-    }
-
-    fn archive(
-        &mut self,
-        request: &[u8],
-        output: &mut [u8; ACTION_RESPONSE_BYTES],
-    ) -> Result<(), i64> {
-        let result = unsafe {
-            sys::call3(
-                ids::SYSTEM_UPDATE_ACTION_ARCHIVE,
-                request.as_ptr() as u64,
-                output.as_mut_ptr() as u64,
-                output.len() as u64,
-            )
-        };
-        if result == ACTION_RESPONSE_BYTES as i64 {
-            Ok(())
-        } else {
-            Err(if result < 0 { -result } else { result })
-        }
-    }
-}
 
 fn write(bytes: &[u8]) -> bool {
     let result = unsafe {

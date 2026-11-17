@@ -43,6 +43,11 @@ impl<T: UpdateTransport> UpdateAgent<T> {
         }
     }
 
+    /// Return the underlying transport after a completed exchange.
+    pub fn into_inner(self) -> T {
+        self.client.into_inner()
+    }
+
     /// Query status and render `service.update.status/1`.
     pub fn status_json(
         &mut self,

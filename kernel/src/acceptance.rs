@@ -18,18 +18,21 @@
 use kernel_core::boot_stage::{str_eq, CaseSpec, PlanItem, Stage};
 
 use crate::arch::{self, ExitStatus};
-use crate::kmain::{BootCtx, Step};
-use crate::{
-    appid_demo, arbiter_demo, balance_demo, counter_demo, fix_demo, irq_demo, job_demo, kprint, kprintln, l10n_demo,
-    mech_demo, mm, msi_demo, nohz_demo, pci_demo, pi_demo, profile_demo, rtclass_demo, scale_demo, sched, smp,
-    user_demo, virtio_rng_demo, wcet,
-};
-#[cfg(feature = "user-programs")]
-use crate::{abi_demo, bench_demo, ipc_demo, longrun_demo, overload_demo, prog_demo, qos_demo, ring_demo, robust_demo, rt_demo, uptr_demo};
 #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
 use crate::device_demo;
+use crate::kmain::{BootCtx, Step};
 #[cfg(all(feature = "workload-verify", target_arch = "x86_64"))]
 use crate::workload_verify;
+#[cfg(feature = "user-programs")]
+use crate::{
+    abi_demo, bench_demo, ipc_demo, longrun_demo, overload_demo, prog_demo, qos_demo, ring_demo,
+    robust_demo, rt_demo, uptr_demo,
+};
+use crate::{
+    appid_demo, arbiter_demo, balance_demo, counter_demo, fix_demo, irq_demo, job_demo, kprint,
+    kprintln, l10n_demo, mech_demo, mm, msi_demo, nohz_demo, pci_demo, pi_demo, profile_demo,
+    rtclass_demo, scale_demo, sched, smp, user_demo, virtio_rng_demo, wcet,
+};
 
 /// 验收构建的启动失败：退出模拟器，由退出码和标记报告原因。
 /// An acceptance boot failure exits the emulator; the code and markers report why.
@@ -56,11 +59,19 @@ fn nssync_failed() -> u32 {
 }
 
 const fn row(name: &'static str, failed: fn() -> u32) -> Summary {
-    Summary { name, failed, timing: None }
+    Summary {
+        name,
+        failed,
+        timing: None,
+    }
 }
 
 const fn both(name: &'static str, failed: fn() -> u32, timing: fn() -> u32) -> Summary {
-    Summary { name, failed, timing: Some(timing) }
+    Summary {
+        name,
+        failed,
+        timing: Some(timing),
+    }
 }
 
 /// 全部汇总行（顺序即 `[JSR-EXIT]` 的输出顺序）；未编译的演练不出现。
@@ -100,7 +111,11 @@ pub const SUMMARIES: &[Summary] = &[
     #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
     row("drv2c1", crate::irqring_demo::failed),
     #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
-    both("drv2c2", crate::irqstorm_demo::failed, crate::irqstorm_demo::timing_failed),
+    both(
+        "drv2c2",
+        crate::irqstorm_demo::failed,
+        crate::irqstorm_demo::timing_failed,
+    ),
     #[cfg(target_arch = "x86_64")]
     row("drv3", crate::drv3_demo::failed),
     #[cfg(all(feature = "arch2-verify", target_arch = "x86_64"))]
@@ -204,13 +219,39 @@ const _: () = assert!(summaries_consistent(PLAN));
 // ---- 登记的简写 ----
 
 /// 登记一个用例：名称、依赖阶段、汇总行、执行体。
-const fn case(name: &'static str, requires: Stage, summary: &'static str, run: fn(&mut BootCtx)) -> Step {
-    PlanItem::Case(CaseSpec { name, requires: requires.bit(), summary, timing: false }, run)
+const fn case(
+    name: &'static str,
+    requires: Stage,
+    summary: &'static str,
+    run: fn(&mut BootCtx),
+) -> Step {
+    PlanItem::Case(
+        CaseSpec {
+            name,
+            requires: requires.bit(),
+            summary,
+            timing: false,
+        },
+        run,
+    )
 }
 
 /// 登记一个报告计时结果的用例。Register a case that reports timing results.
-const fn timed(name: &'static str, requires: Stage, summary: &'static str, run: fn(&mut BootCtx)) -> Step {
-    PlanItem::Case(CaseSpec { name, requires: requires.bit(), summary, timing: true }, run)
+const fn timed(
+    name: &'static str,
+    requires: Stage,
+    summary: &'static str,
+    run: fn(&mut BootCtx),
+) -> Step {
+    PlanItem::Case(
+        CaseSpec {
+            name,
+            requires: requires.bit(),
+            summary,
+            timing: true,
+        },
+        run,
+    )
 }
 
 const fn st(s: Stage) -> Step {
@@ -234,7 +275,10 @@ fn sched_preemptive(_: &mut BootCtx) {
 fn counter64(_: &mut BootCtx) {
     counter_demo::run();
     if counter_demo::failed() > 0 {
-        kprintln!("[JSR-EXIT] failure counter64_failed={}", counter_demo::failed());
+        kprintln!(
+            "[JSR-EXIT] failure counter64_failed={}",
+            counter_demo::failed()
+        );
         arch::exit_emulator(ExitStatus::Failure);
     }
 }
@@ -559,7 +603,8 @@ fn sync_counters(_: &mut BootCtx) {
     let ns_sync = sched::ns_sync_stats();
     let ns_budget = sched::ns_budget_stats();
     let (ns_mismatch, ns_audits) = sched::ns_audit();
-    let (timer_full, timer_bsp, timer_local, timer_highres, timer_cost) = sched::timer_progress_stats();
+    let (timer_full, timer_bsp, timer_local, timer_highres, timer_cost) =
+        sched::timer_progress_stats();
     kprintln!("[JSR-TIMER-PROGRESS] full={} deferred_tick={} deferred_local={} deferred_highres={} max_cost={}", timer_full, timer_bsp, timer_local, timer_highres, timer_cost);
     kprintln!(
         "[JSR-NS-SYNC] passes={} synced={} unchanged={} writes={} inserted={} rescheduled={} moved={} removed={} balanced={} audit_mismatch={} audits={}",
@@ -682,13 +727,62 @@ const HIGHRES: &[Step] = &[st(Stage::HighRes)];
 
 /// 全量验收在 `smp` 之后的用例。
 #[cfg(not(any(
-    feature = "rt1-verify", feature = "rt2-verify", feature = "rt3-verify", feature = "budget-window-verify",
+    feature = "rt1-verify",
+    feature = "rt2-verify",
+    feature = "rt3-verify",
+    feature = "budget-window-verify",
     feature = "runtime-registry-topology-verify",
-    feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
-    feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
-    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "hwv5-prod-verify", feature = "hwv6-verify", feature = "hwv7-gpu-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "native-install-block-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec5-verify", feature = "net2-verify", feature = "net3-verify", feature = "net4-runtime-verify", feature = "compat-elf-backend-verify", feature = "compat-syscall-verify", feature = "compat-dynamic-libc-verify", feature = "lifecycle-health-fail-verify", feature = "pex1-verify", feature = "pex2-verify", feature = "pex3-verify", feature = "pex4-verify", feature = "pex5-verify", feature = "pex7-verify", feature = "sec6-verify",
-    feature = "s2-only", feature = "s4-soak", feature = "workload-verify",
+    feature = "krn3-fast-tick-verify",
+    feature = "krn3-postsplit-verify",
+    feature = "krn3-p999-verify",
+    feature = "evt1-verify",
+    feature = "evt2-verify",
+    feature = "evt2-broadcast-verify",
+    feature = "s3-nohz-verify",
+    feature = "shm1-verify",
+    feature = "hwv1-verify",
+    feature = "hwv2-verify",
+    feature = "hwv3-verify",
+    feature = "hwv4-verify",
+    feature = "hwv5-prod-verify",
+    feature = "hwv6-verify",
+    feature = "hwv7-gpu-verify",
+    feature = "jaso1-verify",
+    feature = "drv3-verify",
+    feature = "arch2-verify",
+    feature = "fs1-ext4-verify",
+    feature = "blk1-verify",
+    feature = "fs0-journal-verify",
+    feature = "native-install-block-verify",
+    feature = "mod1-verify",
+    feature = "boot-stage-rollback-verify",
+    feature = "pex0-verify",
+    feature = "usi1-verify",
+    feature = "usi2-verify",
+    feature = "sec1-verify",
+    feature = "sec2-verify",
+    feature = "sec3-verify",
+    feature = "sec4-verify",
+    feature = "sec5-verify",
+    feature = "net2-verify",
+    feature = "net3-verify",
+    feature = "net4-runtime-verify",
+    feature = "compat-elf-backend-verify",
+    feature = "compat-syscall-verify",
+    feature = "compat-dynamic-libc-verify",
+    feature = "lifecycle-health-fail-verify",
+    feature = "pex1-verify",
+    feature = "pex2-verify",
+    feature = "pex3-verify",
+    feature = "pex4-verify",
+    feature = "pex5-verify",
+    feature = "pex7-verify",
+    feature = "sec6-verify",
+    feature = "s2-only",
+    feature = "s4-soak",
+    feature = "workload-verify",
     feature = "native-install-abi-verify",
+    feature = "update-agent-verify",
 )))]
 const FULL: &[Step] = &[
     case("krn0-tlb", Stage::Smp, "", krn0_tlb),
@@ -710,7 +804,12 @@ const FULL: &[Step] = &[
     case("user-lifecycle", Stage::UserRuntime, "user", user_lifecycle),
     case("user-handles", Stage::UserRuntime, "user", user_handles),
     #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
-    case("device-objects", Stage::UserRuntime, "drv1c", device_objects),
+    case(
+        "device-objects",
+        Stage::UserRuntime,
+        "drv1c",
+        device_objects,
+    ),
     #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
     case("irq-ring", Stage::UserRuntime, "drv2c1", irq_ring),
     #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
@@ -738,7 +837,12 @@ const FULL: &[Step] = &[
     #[cfg(all(feature = "user-programs", not(feature = "sched-rr")))]
     timed("qos", Stage::UserRuntime, "qos", qos),
     #[cfg(not(feature = "sched-rr"))]
-    timed("priority-inheritance", Stage::Smp, "pi", priority_inheritance),
+    timed(
+        "priority-inheritance",
+        Stage::Smp,
+        "pi",
+        priority_inheritance,
+    ),
     #[cfg(not(feature = "sched-rr"))]
     timed("balance", Stage::Smp, "balance", balance),
     #[cfg(not(feature = "sched-rr"))]
@@ -768,24 +872,122 @@ const FULL: &[Step] = &[
 ];
 
 #[cfg(not(any(
-    feature = "rt1-verify", feature = "rt2-verify", feature = "rt3-verify", feature = "budget-window-verify",
+    feature = "rt1-verify",
+    feature = "rt2-verify",
+    feature = "rt3-verify",
+    feature = "budget-window-verify",
     feature = "runtime-registry-topology-verify",
-    feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
-    feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
-    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "hwv5-prod-verify", feature = "hwv6-verify", feature = "hwv7-gpu-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "native-install-block-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec5-verify", feature = "net2-verify", feature = "net3-verify", feature = "net4-runtime-verify", feature = "compat-elf-backend-verify", feature = "compat-syscall-verify", feature = "compat-dynamic-libc-verify", feature = "lifecycle-health-fail-verify", feature = "pex1-verify", feature = "pex2-verify", feature = "pex3-verify", feature = "pex4-verify", feature = "pex5-verify", feature = "pex7-verify", feature = "sec6-verify",
-    feature = "s2-only", feature = "s4-soak", feature = "workload-verify",
+    feature = "krn3-fast-tick-verify",
+    feature = "krn3-postsplit-verify",
+    feature = "krn3-p999-verify",
+    feature = "evt1-verify",
+    feature = "evt2-verify",
+    feature = "evt2-broadcast-verify",
+    feature = "s3-nohz-verify",
+    feature = "shm1-verify",
+    feature = "hwv1-verify",
+    feature = "hwv2-verify",
+    feature = "hwv3-verify",
+    feature = "hwv4-verify",
+    feature = "hwv5-prod-verify",
+    feature = "hwv6-verify",
+    feature = "hwv7-gpu-verify",
+    feature = "jaso1-verify",
+    feature = "drv3-verify",
+    feature = "arch2-verify",
+    feature = "fs1-ext4-verify",
+    feature = "blk1-verify",
+    feature = "fs0-journal-verify",
+    feature = "native-install-block-verify",
+    feature = "mod1-verify",
+    feature = "boot-stage-rollback-verify",
+    feature = "pex0-verify",
+    feature = "usi1-verify",
+    feature = "usi2-verify",
+    feature = "sec1-verify",
+    feature = "sec2-verify",
+    feature = "sec3-verify",
+    feature = "sec4-verify",
+    feature = "sec5-verify",
+    feature = "net2-verify",
+    feature = "net3-verify",
+    feature = "net4-runtime-verify",
+    feature = "compat-elf-backend-verify",
+    feature = "compat-syscall-verify",
+    feature = "compat-dynamic-libc-verify",
+    feature = "lifecycle-health-fail-verify",
+    feature = "pex1-verify",
+    feature = "pex2-verify",
+    feature = "pex3-verify",
+    feature = "pex4-verify",
+    feature = "pex5-verify",
+    feature = "pex7-verify",
+    feature = "sec6-verify",
+    feature = "s2-only",
+    feature = "s4-soak",
+    feature = "workload-verify",
     feature = "native-install-abi-verify",
+    feature = "update-agent-verify",
 )))]
 pub use full_selected::{NAME, PLAN};
 
 #[cfg(not(any(
-    feature = "rt1-verify", feature = "rt2-verify", feature = "rt3-verify", feature = "budget-window-verify",
+    feature = "rt1-verify",
+    feature = "rt2-verify",
+    feature = "rt3-verify",
+    feature = "budget-window-verify",
     feature = "runtime-registry-topology-verify",
-    feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
-    feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
-    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "hwv5-prod-verify", feature = "hwv6-verify", feature = "hwv7-gpu-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "native-install-block-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec5-verify", feature = "net2-verify", feature = "net3-verify", feature = "net4-runtime-verify", feature = "compat-elf-backend-verify", feature = "compat-syscall-verify", feature = "compat-dynamic-libc-verify", feature = "lifecycle-health-fail-verify", feature = "pex1-verify", feature = "pex2-verify", feature = "pex3-verify", feature = "pex4-verify", feature = "pex5-verify", feature = "pex7-verify", feature = "sec6-verify",
-    feature = "s2-only", feature = "s4-soak", feature = "workload-verify",
+    feature = "krn3-fast-tick-verify",
+    feature = "krn3-postsplit-verify",
+    feature = "krn3-p999-verify",
+    feature = "evt1-verify",
+    feature = "evt2-verify",
+    feature = "evt2-broadcast-verify",
+    feature = "s3-nohz-verify",
+    feature = "shm1-verify",
+    feature = "hwv1-verify",
+    feature = "hwv2-verify",
+    feature = "hwv3-verify",
+    feature = "hwv4-verify",
+    feature = "hwv5-prod-verify",
+    feature = "hwv6-verify",
+    feature = "hwv7-gpu-verify",
+    feature = "jaso1-verify",
+    feature = "drv3-verify",
+    feature = "arch2-verify",
+    feature = "fs1-ext4-verify",
+    feature = "blk1-verify",
+    feature = "fs0-journal-verify",
+    feature = "native-install-block-verify",
+    feature = "mod1-verify",
+    feature = "boot-stage-rollback-verify",
+    feature = "pex0-verify",
+    feature = "usi1-verify",
+    feature = "usi2-verify",
+    feature = "sec1-verify",
+    feature = "sec2-verify",
+    feature = "sec3-verify",
+    feature = "sec4-verify",
+    feature = "sec5-verify",
+    feature = "net2-verify",
+    feature = "net3-verify",
+    feature = "net4-runtime-verify",
+    feature = "compat-elf-backend-verify",
+    feature = "compat-syscall-verify",
+    feature = "compat-dynamic-libc-verify",
+    feature = "lifecycle-health-fail-verify",
+    feature = "pex1-verify",
+    feature = "pex2-verify",
+    feature = "pex3-verify",
+    feature = "pex4-verify",
+    feature = "pex5-verify",
+    feature = "pex7-verify",
+    feature = "sec6-verify",
+    feature = "s2-only",
+    feature = "s4-soak",
+    feature = "workload-verify",
     feature = "native-install-abi-verify",
+    feature = "update-agent-verify",
 )))]
 mod full_selected {
     use super::*;
@@ -852,6 +1054,7 @@ const DEDICATED_SELECTED: usize = cfg!(feature = "rt1-verify") as usize
     + cfg!(feature = "pex7-verify") as usize
     + cfg!(feature = "sec6-verify") as usize
     + cfg!(feature = "native-install-abi-verify") as usize
+    + cfg!(feature = "update-agent-verify") as usize
     + cfg!(feature = "workload-verify") as usize
     + cfg!(feature = "s2-only") as usize
     + cfg!(feature = "s4-soak") as usize;
@@ -860,7 +1063,11 @@ const _: () = assert!(DEDICATED_SELECTED <= 1, "专项验收特性只能选一�
 /// 专项计划的收尾：按失败数退出。Finish a dedicated plan on a failure count.
 #[allow(dead_code)]
 fn exit_on(failed: u64) {
-    arch::exit_emulator(if failed == 0 { ExitStatus::Success } else { ExitStatus::Failure });
+    arch::exit_emulator(if failed == 0 {
+        ExitStatus::Success
+    } else {
+        ExitStatus::Failure
+    });
 }
 
 #[cfg(feature = "s4-soak")]
@@ -875,8 +1082,15 @@ mod dedicated {
         exit_on(u64::from(!passed));
     }
 
-    pub const PLAN: &[&[Step]] =
-        &[PREFIX, SMP_UP, &[st(Stage::HighRes), st(Stage::IdleTick), PlanItem::Finish(finish)]];
+    pub const PLAN: &[&[Step]] = &[
+        PREFIX,
+        SMP_UP,
+        &[
+            st(Stage::HighRes),
+            st(Stage::IdleTick),
+            PlanItem::Finish(finish),
+        ],
+    ];
 }
 
 #[cfg(feature = "rt3-verify")]
@@ -910,9 +1124,18 @@ fn sync_counters_ns_only() {
     let stats = sched::ns_sync_stats();
     let budget = sched::ns_budget_stats();
     let (mismatch, audits) = sched::ns_audit();
-    assert_eq!(budget.table_slots, 0, "budget settlement scanned the task table");
-    assert!(budget.running_settlements > 0, "RT2 must settle a running budget");
-    assert!(budget.inactive_settlements > 0, "RT2 must refill an inactive budget");
+    assert_eq!(
+        budget.table_slots, 0,
+        "budget settlement scanned the task table"
+    );
+    assert!(
+        budget.running_settlements > 0,
+        "RT2 must settle a running budget"
+    );
+    assert!(
+        budget.inactive_settlements > 0,
+        "RT2 must refill an inactive budget"
+    );
     kprintln!(
         "[JSR-NS-SYNC] passes={} synced={} unchanged={} writes={} inserted={} rescheduled={} moved={} removed={} balanced={} audit_mismatch={} audits={}",
         stats.passes, stats.synced, stats.unchanged, stats.writes(), stats.inserted, stats.rescheduled, stats.moved, stats.removed, stats.balanced(), mismatch, audits
@@ -983,7 +1206,8 @@ mod dedicated {
     use super::*;
     pub const NAME: &str = "krn3-fast-tick";
     fn finish(_: &mut BootCtx) {
-        let failed = scale_demo::run_fast_leaf_tick_contract() + balance_demo::run_affinity_diagnostic();
+        let failed =
+            scale_demo::run_fast_leaf_tick_contract() + balance_demo::run_affinity_diagnostic();
         exit_on(u64::from(failed));
     }
     pub const PLAN: &[&[Step]] = &[PREFIX, SMP_UP, &[PlanItem::Finish(finish)]];
@@ -1003,7 +1227,11 @@ mod dedicated {
         scale_demo::run();
         let failed = scale_demo::failed();
         let timing = scale_demo::timing_failed();
-        kprintln!("[JSR-KRN3-POSTSPLIT] done failed={} timing_failed={}", failed, timing);
+        kprintln!(
+            "[JSR-KRN3-POSTSPLIT] done failed={} timing_failed={}",
+            failed,
+            timing
+        );
         arch::exit_emulator(if failed != 0 {
             ExitStatus::Failure
         } else if timing != 0 {
@@ -1012,8 +1240,15 @@ mod dedicated {
             ExitStatus::Success
         });
     }
-    pub const PLAN: &[&[Step]] =
-        &[PREFIX, SMP_UP, &[st(Stage::HighRes), st(Stage::IdleTick), PlanItem::Finish(finish)]];
+    pub const PLAN: &[&[Step]] = &[
+        PREFIX,
+        SMP_UP,
+        &[
+            st(Stage::HighRes),
+            st(Stage::IdleTick),
+            PlanItem::Finish(finish),
+        ],
+    ];
 }
 
 #[cfg(feature = "krn3-p999-verify")]
@@ -1029,8 +1264,15 @@ mod dedicated {
         );
         exit_on(u64::from(scale_demo::run_wake_latency_contract()));
     }
-    pub const PLAN: &[&[Step]] =
-        &[PREFIX, SMP_UP, &[st(Stage::HighRes), st(Stage::IdleTick), PlanItem::Finish(finish)]];
+    pub const PLAN: &[&[Step]] = &[
+        PREFIX,
+        SMP_UP,
+        &[
+            st(Stage::HighRes),
+            st(Stage::IdleTick),
+            PlanItem::Finish(finish),
+        ],
+    ];
 }
 
 #[cfg(feature = "evt2-broadcast-verify")]
@@ -1352,10 +1594,7 @@ mod dedicated {
         crate::native_install_block::run();
     }
 
-    #[cfg(all(
-        target_arch = "x86_64",
-        feature = "lifecycle-diagnostic-block-verify"
-    ))]
+    #[cfg(all(target_arch = "x86_64", feature = "lifecycle-diagnostic-block-verify"))]
     fn exercise_diagnostics(_: &mut BootCtx) {
         crate::lifecycle_diagnostic_block::run();
     }
@@ -1386,10 +1625,7 @@ mod dedicated {
         case("drv3-dma", Stage::Smp, "drv3", drv3_dma),
         #[cfg(target_arch = "x86_64")]
         case("native-install", Stage::Smp, "", exercise),
-        #[cfg(all(
-            target_arch = "x86_64",
-            feature = "lifecycle-diagnostic-block-verify"
-        ))]
+        #[cfg(all(target_arch = "x86_64", feature = "lifecycle-diagnostic-block-verify"))]
         case("lifecycle-diagnostic", Stage::Smp, "", exercise_diagnostics),
         PlanItem::Finish(finish),
     ];
@@ -1409,10 +1645,8 @@ mod dedicated {
             state,
             reclaimed
         );
-        if state == Some(crate::proc::ProcState::Exited { code: 0 }) && reclaimed {
-            exit_on(0);
-        }
-        exit_on(1);
+        let ok = state == Some(crate::proc::ProcState::Exited { code: 0 }) && reclaimed;
+        exit_on(u64::from(!ok));
     }
 
     pub const PLAN: &[&[Step]] = &[PREFIX, SMP_UP, &[PlanItem::Finish(finish)]];
@@ -1487,7 +1721,11 @@ mod dedicated {
         exit_on(failed as u64);
     }
     // 独立机制 guest 只初始化地址空间、SMP 与空闲停表；原完整验收仍走全量计划。
-    pub const PLAN: &[&[Step]] = &[PREFIX, SMP_UP, &[st(Stage::IdleTick), PlanItem::Finish(finish)]];
+    pub const PLAN: &[&[Step]] = &[
+        PREFIX,
+        SMP_UP,
+        &[st(Stage::IdleTick), PlanItem::Finish(finish)],
+    ];
 }
 
 #[cfg(feature = "boot-stage-rollback-verify")]
@@ -1512,7 +1750,10 @@ mod dedicated {
         let nth = crate::fault_inject::BOOT_ACTIVATION
             .arm(0x7d03, 1)
             .expect("one-shot boot activation fault window");
-        kprintln!("[JSR-BOOT-FAULT] point=assembly_activation nth={} armed=true", nth);
+        kprintln!(
+            "[JSR-BOOT-FAULT] point=assembly_activation nth={} armed=true",
+            nth
+        );
     }
 
     fn finish(_: &mut BootCtx) {
@@ -1531,7 +1772,12 @@ mod dedicated {
         st(Stage::Devices),
         st(Stage::Profile),
         case("boot-duplicate-probe", Stage::Profile, "", duplicate_probe),
-        case("arm-boot-assembly-failure", Stage::Profile, "", arm_assembly_failure),
+        case(
+            "arm-boot-assembly-failure",
+            Stage::Profile,
+            "",
+            arm_assembly_failure,
+        ),
         st(Stage::Assembly),
         st(Stage::SchedMode),
         st(Stage::Space),
@@ -1555,7 +1801,13 @@ mod dedicated {
     fn finish(_: &mut BootCtx) {
         exit_on(1);
     }
-    pub const PLAN: &[&[Step]] = &[PREFIX, CLASSES, SMP_UP, HIGHRES, &[PlanItem::Finish(finish)]];
+    pub const PLAN: &[&[Step]] = &[
+        PREFIX,
+        CLASSES,
+        SMP_UP,
+        HIGHRES,
+        &[PlanItem::Finish(finish)],
+    ];
 }
 
 #[cfg(feature = "pex0-verify")]
@@ -1769,6 +2021,42 @@ mod dedicated {
     pub const PLAN: &[&[Step]] = &[PREFIX, SMP_UP, &[PlanItem::Finish(finish)]];
 }
 
+#[cfg(all(feature = "update-agent-verify", target_arch = "x86_64"))]
+mod dedicated {
+    use super::*;
+
+    pub const NAME: &str = "update-agent";
+
+    fn finish(_: &mut BootCtx) {
+        let (state, reclaimed) = crate::first_program::run();
+        kprintln!(
+            "[JSR-PROD] first_program state={:?} reclaimed={}",
+            state,
+            reclaimed
+        );
+        if state == Some(crate::proc::ProcState::Exited { code: 0 }) && reclaimed {
+            exit_on(0);
+        }
+        exit_on(1);
+    }
+
+    pub const PLAN: &[&[Step]] = &[
+        PREFIX,
+        &[
+            st(Stage::Space),
+            case("mm-space", Stage::Space, "mm", mm_space),
+            st(Stage::Smp),
+            case("smp-checks", Stage::Smp, "smp", smp_checks),
+        ],
+        &[
+            st(Stage::HighRes),
+            st(Stage::IdleTick),
+            st(Stage::UserRuntime),
+            PlanItem::Finish(finish),
+        ],
+    ];
+}
+
 #[cfg(all(feature = "lifecycle-health-fail-verify", target_arch = "x86_64"))]
 mod dedicated {
     use super::*;
@@ -1956,17 +2244,69 @@ mod dedicated {
         exit_on(u64::from(workload_verify::failed()));
     }
 
-    pub const PLAN: &[&[Step]] =
-        &[PREFIX, SMP_UP, &[st(Stage::UserRuntime), PlanItem::Finish(finish)]];
+    pub const PLAN: &[&[Step]] = &[
+        PREFIX,
+        SMP_UP,
+        &[st(Stage::UserRuntime), PlanItem::Finish(finish)],
+    ];
 }
 
 #[cfg(any(
-    feature = "rt1-verify", feature = "rt2-verify", feature = "rt3-verify", feature = "budget-window-verify",
+    feature = "rt1-verify",
+    feature = "rt2-verify",
+    feature = "rt3-verify",
+    feature = "budget-window-verify",
     feature = "runtime-registry-topology-verify",
-    feature = "krn3-fast-tick-verify", feature = "krn3-postsplit-verify", feature = "krn3-p999-verify",
-    feature = "evt1-verify", feature = "evt2-verify", feature = "evt2-broadcast-verify",
-    feature = "s3-nohz-verify", feature = "shm1-verify", feature = "hwv1-verify", feature = "hwv2-verify", feature = "hwv3-verify", feature = "hwv4-verify", feature = "hwv5-prod-verify", feature = "hwv6-verify", feature = "hwv7-gpu-verify", feature = "jaso1-verify", feature = "drv3-verify", feature = "arch2-verify", feature = "fs1-ext4-verify", feature = "blk1-verify", feature = "fs0-journal-verify", feature = "native-install-block-verify", feature = "mod1-verify", feature = "boot-stage-rollback-verify", feature = "pex0-verify", feature = "usi1-verify", feature = "usi2-verify", feature = "sec1-verify", feature = "sec2-verify", feature = "sec3-verify", feature = "sec4-verify", feature = "sec5-verify", feature = "net2-verify", feature = "net3-verify", feature = "net4-runtime-verify", feature = "compat-elf-backend-verify", feature = "compat-syscall-verify", feature = "compat-dynamic-libc-verify", feature = "lifecycle-health-fail-verify", feature = "pex1-verify", feature = "pex2-verify", feature = "pex3-verify", feature = "pex4-verify", feature = "pex5-verify", feature = "pex7-verify", feature = "sec6-verify",
-    feature = "s2-only", feature = "s4-soak", feature = "workload-verify",
+    feature = "krn3-fast-tick-verify",
+    feature = "krn3-postsplit-verify",
+    feature = "krn3-p999-verify",
+    feature = "evt1-verify",
+    feature = "evt2-verify",
+    feature = "evt2-broadcast-verify",
+    feature = "s3-nohz-verify",
+    feature = "shm1-verify",
+    feature = "hwv1-verify",
+    feature = "hwv2-verify",
+    feature = "hwv3-verify",
+    feature = "hwv4-verify",
+    feature = "hwv5-prod-verify",
+    feature = "hwv6-verify",
+    feature = "hwv7-gpu-verify",
+    feature = "jaso1-verify",
+    feature = "drv3-verify",
+    feature = "arch2-verify",
+    feature = "fs1-ext4-verify",
+    feature = "blk1-verify",
+    feature = "fs0-journal-verify",
+    feature = "native-install-block-verify",
+    feature = "mod1-verify",
+    feature = "boot-stage-rollback-verify",
+    feature = "pex0-verify",
+    feature = "usi1-verify",
+    feature = "usi2-verify",
+    feature = "sec1-verify",
+    feature = "sec2-verify",
+    feature = "sec3-verify",
+    feature = "sec4-verify",
+    feature = "sec5-verify",
+    feature = "net2-verify",
+    feature = "net3-verify",
+    feature = "net4-runtime-verify",
+    feature = "compat-elf-backend-verify",
+    feature = "compat-syscall-verify",
+    feature = "compat-dynamic-libc-verify",
+    feature = "lifecycle-health-fail-verify",
+    feature = "pex1-verify",
+    feature = "pex2-verify",
+    feature = "pex3-verify",
+    feature = "pex4-verify",
+    feature = "pex5-verify",
+    feature = "pex7-verify",
+    feature = "sec6-verify",
+    feature = "s2-only",
+    feature = "s4-soak",
+    feature = "workload-verify",
     feature = "native-install-abi-verify",
+    feature = "update-agent-verify",
 ))]
 pub use dedicated::{NAME, PLAN};

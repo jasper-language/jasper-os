@@ -636,6 +636,7 @@ fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version:
         ("user/bench", "user-bench", "JSR_USER_BENCH"),
         ("user/isohost", "user-isohost", "JSR_USER_ISOHOST"),
         ("user/usi", "user-usi", "JSR_USER_USI"),
+        ("user/agentprobe", "user-agentprobe", "JSR_USER_AGENTPROBE"),
     ];
     // DRV-1C / DRV-2C 的用户态演练只在 x86_64 上构建与内嵌（其它指令集冻结，不写对应代码）。
     if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64") {

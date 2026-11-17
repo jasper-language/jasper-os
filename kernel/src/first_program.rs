@@ -12,7 +12,7 @@ use kernel_core::paging::MapFlags;
 use crate::arch;
 use crate::mm::frame;
 use crate::syscall::{table as abi, SyscallSet};
-use crate::{kobj, proc, sched};
+use crate::{kobj, kprintln, proc, sched};
 
 /// 生产首程序用户栈相对私有窗口的顶端偏移。
 /// User-stack top offset relative to the private user window.
@@ -28,12 +28,16 @@ static USER_SANDBOXPROBE: &[u8] = include_bytes!(env!("JSR_USER_SANDBOXPROBE"));
 #[cfg(feature = "native-install-abi-verify")]
 static USER_INSTALLPROBE: &[u8] = include_bytes!(env!("JSR_USER_INSTALLPROBE"));
 
+#[cfg(feature = "update-agent-verify")]
+static USER_AGENTPROBE: &[u8] = include_bytes!(env!("JSR_USER_AGENTPROBE"));
+
 /// 内嵌 Jasper 原生 CLI 映像。 Embedded Jasper native CLI image.
 #[cfg(all(
     feature = "terminal-session-verify",
     not(any(
         feature = "sandbox-launch-verify",
-        feature = "native-install-abi-verify"
+        feature = "native-install-abi-verify",
+        feature = "update-agent-verify"
     ))
 ))]
 static USER_CLI: &[u8] = include_bytes!(env!("JSR_USER_CLI"));
@@ -41,29 +45,40 @@ static USER_CLI: &[u8] = include_bytes!(env!("JSR_USER_CLI"));
 /// 返回生产首程序使用的同一份不可变 ELF 镜像。
 /// Returns the same immutable ELF image used by the production first program.
 pub(crate) fn image() -> &'static [u8] {
-    #[cfg(feature = "native-install-abi-verify")]
+    #[cfg(feature = "update-agent-verify")]
     {
-        USER_INSTALLPROBE
+        return USER_AGENTPROBE;
     }
-    #[cfg(feature = "sandbox-launch-verify")]
-    #[cfg(not(feature = "native-install-abi-verify"))]
+    #[cfg(all(
+        feature = "native-install-abi-verify",
+        not(feature = "update-agent-verify")
+    ))]
     {
-        USER_SANDBOXPROBE
+        return USER_INSTALLPROBE;
+    }
+    #[cfg(all(
+        feature = "sandbox-launch-verify",
+        not(any(feature = "native-install-abi-verify", feature = "update-agent-verify"))
+    ))]
+    {
+        return USER_SANDBOXPROBE;
     }
     #[cfg(all(
         feature = "terminal-session-verify",
         not(any(
             feature = "sandbox-launch-verify",
-            feature = "native-install-abi-verify"
+            feature = "native-install-abi-verify",
+            feature = "update-agent-verify"
         ))
     ))]
     {
-        USER_CLI
+        return USER_CLI;
     }
     #[cfg(not(any(
         feature = "terminal-session-verify",
         feature = "sandbox-launch-verify",
-        feature = "native-install-abi-verify"
+        feature = "native-install-abi-verify",
+        feature = "update-agent-verify"
     )))]
     {
         USER_HELLO
@@ -76,7 +91,11 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
     #[cfg(all(feature = "terminal-session-verify", feature = "lifecycle-ab-health"))]
     {
         let frames_before_backend = frame::free_frames();
-        if crate::lifecycle_health::init_control_backend().is_err() {
+        if let Err(error) = crate::lifecycle_health::init_control_backend() {
+            crate::kprintln!(
+                "[JSR-PROD-DIAG] update_backend=false reason={}",
+                error.name()
+            );
             return (None, false);
         }
         crate::kprintln!(
@@ -143,6 +162,29 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         abi::SYSTEM_UPDATE_ACTION_RECOVER,
         abi::SYSTEM_UPDATE_ACTION_ARCHIVE,
     ]);
+    #[cfg(all(feature = "terminal-session-verify", feature = "update-agent-verify"))]
+    let allowed = allowed.union(SyscallSet::of(&[
+        abi::SYSTEM_CONSOLE_WRITE,
+        abi::SYSTEM_TERMINAL_READ,
+        abi::SYSTEM_TERMINAL_WRITE,
+        abi::SYSTEM_MEMORY_MAP,
+        abi::SYSTEM_MEMORY_UNMAP,
+        abi::SYSTEM_MEMORY_PROTECT,
+        abi::SYSTEM_PROCESS_EXIT,
+        abi::SYSTEM_TASK_EXIT,
+        abi::SYSTEM_TASK_YIELD,
+        abi::SYSTEM_TASK_WAIT,
+        abi::SYSTEM_PROCESS_SPAWN,
+        abi::SYSTEM_PROCESS_WAIT,
+        abi::SYSTEM_CHANNEL_SEND,
+        abi::SYSTEM_CHANNEL_RECV,
+        abi::SYSTEM_HANDLE_CLOSE,
+        abi::SYSTEM_TIME_NOW,
+        abi::SYSTEM_UPDATE_CONTROL_GET,
+        abi::SYSTEM_UPDATE_STATUS_QUERY,
+        abi::SYSTEM_UPDATE_ACTION_RECOVER,
+        abi::SYSTEM_UPDATE_ACTION_ARCHIVE,
+    ]));
     #[cfg(not(any(
         feature = "terminal-session-verify",
         feature = "sandbox-launch-verify",
@@ -153,9 +195,20 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         abi::SYSTEM_ABI_GET,
         abi::SYSTEM_TASK_EXIT,
     ]);
-    let Ok(pid) = proc::create("first-program", allowed) else {
-        return (None, false);
+    let pid = match proc::create("first-program", allowed) {
+        Ok(pid) => pid,
+        Err(error) => {
+            kprintln!("[JSR-PROD-DIAG] first_program create={error:?}");
+            return (None, false);
+        }
     };
+    #[cfg(feature = "update-agent-verify")]
+    if proc::set_app(pid, 0x5541_4447).is_err() {
+        kprintln!("[JSR-PROD-DIAG] first_program application_bind=false");
+        let _ = proc::reap(pid);
+        kobj::run_cleanup(usize::MAX);
+        return (None, false);
+    }
     #[cfg(all(target_arch = "x86_64", feature = "native-install-abi-verify"))]
     {
         use kernel_core::mac::{Integrity, MacLabel, Secrecy, OBJECT_CLASS_ALL};
@@ -193,7 +246,10 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
             .is_ok()
                 && proc::spawn_thread(pid, "first-program", entry, base + STACK_OFF, 0, 0).is_ok()
         }
-        Err(_) => false,
+        Err(error) => {
+            kprintln!("[JSR-PROD-DIAG] first_program load={error:?}");
+            false
+        }
     };
     if started {
         sched::run();
