@@ -31,6 +31,9 @@ static USER_INSTALLPROBE: &[u8] = include_bytes!(env!("JSR_USER_INSTALLPROBE"));
 #[cfg(feature = "update-agent-verify")]
 static USER_AGENTPROBE: &[u8] = include_bytes!(env!("JSR_USER_AGENTPROBE"));
 
+#[cfg(feature = "native-install-list-cli-verify")]
+static USER_UPDATE_LIST_CLI: &[u8] = include_bytes!(env!("JSR_USER_CLI"));
+
 /// 内嵌 Jasper 原生 CLI 映像。 Embedded Jasper native CLI image.
 #[cfg(all(
     feature = "terminal-session-verify",
@@ -45,13 +48,20 @@ static USER_CLI: &[u8] = include_bytes!(env!("JSR_USER_CLI"));
 /// 返回生产首程序使用的同一份不可变 ELF 镜像。
 /// Returns the same immutable ELF image used by the production first program.
 pub(crate) fn image() -> &'static [u8] {
+    #[cfg(feature = "native-install-list-cli-verify")]
+    {
+        return USER_UPDATE_LIST_CLI;
+    }
     #[cfg(feature = "update-agent-verify")]
     {
         return USER_AGENTPROBE;
     }
     #[cfg(all(
         feature = "native-install-abi-verify",
-        not(feature = "update-agent-verify")
+        not(any(
+            feature = "update-agent-verify",
+            feature = "native-install-list-cli-verify"
+        ))
     ))]
     {
         return USER_INSTALLPROBE;
@@ -131,6 +141,16 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         abi::SYSTEM_HANDLE_RESTRICT,
         abi::SYSTEM_HANDLE_CLOSE,
     ]);
+    #[cfg(feature = "native-install-list-cli-verify")]
+    let allowed = allowed.union(SyscallSet::of(&[
+        abi::SYSTEM_TERMINAL_READ,
+        abi::SYSTEM_TERMINAL_WRITE,
+        abi::SYSTEM_UPDATE_CONTROL_GET,
+        abi::SYSTEM_UPDATE_STATUS_QUERY,
+        abi::SYSTEM_UPDATE_ACTION_RECOVER,
+        abi::SYSTEM_UPDATE_ACTION_ARCHIVE,
+        abi::SYSTEM_INSTALL_UPDATE_LIST,
+    ]));
     #[cfg(feature = "sandbox-launch-verify")]
     #[cfg(not(feature = "native-install-abi-verify"))]
     let allowed = SyscallSet::of(&[

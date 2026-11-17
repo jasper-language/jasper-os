@@ -4,10 +4,12 @@
 //! The external transport carries its already-encoded request/response records
 //! through a bounded Channel and remains only a mechanical bridge.
 
+use kernel_core::native_install_abi::{MAX_UPDATE_LIST_BYTES, UPDATE_LIST_REQUEST_BYTES};
 use kernel_core::update_agent_ipc::{
     AgentOperation, AgentRequest, AgentResponse, REQUEST_MESSAGE_BYTES, RESPONSE_MESSAGE_BYTES,
 };
 use kernel_core::update_client::UpdateTransport;
+use kernel_core::update_list_agent::UpdateListTransport;
 use kernel_core::update_service::{
     StatusRequest, TransactionAction, TransactionActionRequest, ACTION_RESPONSE_BYTES,
     RESPONSE_BYTES, SCOPE_PLATFORM,
@@ -51,6 +53,31 @@ impl UpdateTransport for NativeUpdateTransport {
         output: &mut [u8; ACTION_RESPONSE_BYTES],
     ) -> Result<(), i64> {
         action_call(ids::SYSTEM_UPDATE_ACTION_ARCHIVE, request, output)
+    }
+}
+
+/// Native list transport shared by CLI and structured frontends.
+pub struct NativeUpdateListTransport;
+
+impl UpdateListTransport for NativeUpdateListTransport {
+    fn list(
+        &mut self,
+        request: &[u8; UPDATE_LIST_REQUEST_BYTES],
+        output: &mut [u8; MAX_UPDATE_LIST_BYTES],
+    ) -> Result<usize, i64> {
+        let result = unsafe {
+            sys::call3(
+                ids::SYSTEM_INSTALL_UPDATE_LIST,
+                request.as_ptr() as u64,
+                output.as_mut_ptr() as u64,
+                output.len() as u64,
+            )
+        };
+        if result >= 0 {
+            Ok(result as usize)
+        } else {
+            Err(result.unsigned_abs() as i64)
+        }
     }
 }
 

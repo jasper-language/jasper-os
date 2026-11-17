@@ -122,6 +122,8 @@ pub mod update_client;
 pub mod update_agent;
 /// Fixed IPC envelope used by the external structured update Agent.
 pub mod update_agent_ipc;
+/// Shared bounded client and structured renderer for tenant update lists.
+pub mod update_list_agent;
 pub mod tick_lease;
 pub mod wake_mailbox;
 pub mod fdt;

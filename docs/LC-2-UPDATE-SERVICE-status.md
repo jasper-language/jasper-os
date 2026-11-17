@@ -48,6 +48,13 @@ header + 96 字节记录，包含安装、包、AppID、publisher、version、co
 source 和 enabled，不包含路径或调用者可选择的身份。容量不足和保留身份字节被篡改
 均在写用户缓冲前失败关闭。
 
+原生 JUCS/CLI 现在提供 `system update list [--help|--schema|--json]`。
+`kernel-core::update_list_agent` 对 ABI 3.20 响应执行 request、record count、
+record width、尾随字节和短输出校验；人类输出与 JSON 消费同一个
+`UpdateListClient`，JSON 的稳定 Schema 为 `service.update.list/1`。外部
+`user-updateagentd` 的 Channel 协议尚未扩展 list operation，因此该产品化门仍
+未完全关闭。
+
 受信救援环境可以携带底层路径运行独立的 `jasper-update-recovery` 维护工具：
 
 ```text
@@ -193,6 +200,9 @@ cargo test --locked -p kernel-core update_agent::tests
 cargo test --locked -p kernel-core update_agent_ipc::tests
 4 passed; 0 failed
 
+cargo test --locked -p kernel-core update_list_agent::tests
+2 passed; 0 failed
+
 cargo test --locked -p kernel-core native_install_service::tests
 3 passed; 0 failed
 
@@ -223,6 +233,9 @@ PASS mode=terminal-recovery qemu_rc=124
 
 ISSUE21_UEFI_MODE=update-agent bash scripts/issue21-uefi-boot-check.sh
 PASS mode=update-agent qemu_rc=33
+
+ISSUE21_UEFI_MODE=update-list bash scripts/issue21-uefi-boot-check.sh
+PASS mode=update-list qemu_rc=33
 
 bash scripts/abi-contract.sh check
 PASS (3.19.0)
@@ -258,10 +271,12 @@ PASS (3.19.0)
   过小时整体返回容量错误且不写入部分 record。
 - ABI 3.20 的 `system.install.update.list` 在真实 OVMF guest 中返回当前主体的
   update record；short buffer 与伪造保留身份字节均被拒绝，首程序资源回基线。
+- `system update list` 的 human/JSON/schema/help 在真实 OVMF guest 中通过，CLI
+  的机器结果绑定 ABI request ID，首程序退出 0 且资源回收。
 
 ## 仍未完成
 
-- 租户可见更新集合的 UI/Agent 产品化；版本化原生 ABI 已具备隔离过滤；
+- 租户更新集合的生产持久后端及外部 Agent list operation；原生 ABI/CLI 已具备；
 - 信任根轮换、2-of-3 门限和签名撤销快照持久化；
 - 断点续传、生产发布源高可用和跨重启审计查询；
 - 系统级在线/离线发布演练和 Pixel 6a 安装/回滚/断电矩阵。

@@ -161,6 +161,11 @@ native-install-abi-verify = [
     "user-programs",
     "kernel-core/sec1-verify",
 ]
+# Native CLI discovery for the tenant-scoped update list ABI.
+native-install-list-cli-verify = [
+    "native-install-abi-verify",
+    "terminal-session-verify",
+]
 # Real virtio-blk persistence and bounded privacy queries for LC-1 diagnostics.
 lifecycle-diagnostic-block-verify = [
     "lifecycle-diagnostic-sources",

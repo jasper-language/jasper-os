@@ -13,6 +13,8 @@ pub const UPDATE_RECOVER_ID: &str = "system.update.recover";
 pub const UPDATE_RECOVER_VERSION: u16 = 1;
 pub const UPDATE_ARCHIVE_ID: &str = "system.update.archive";
 pub const UPDATE_ARCHIVE_VERSION: u16 = 1;
+pub const UPDATE_LIST_ID: &str = "system.update.list";
+pub const UPDATE_LIST_VERSION: u16 = 1;
 
 pub const UPDATE_STATUS_HELP: &str =
     "system update status [--help|--schema|--json]\nShow the authenticated system update and boot-slot status.\n";
@@ -20,6 +22,8 @@ pub const UPDATE_RECOVER_HELP: &str =
     "system update recover [--help|--schema|--json]\nRecover the current dual-copy update control transaction.\n";
 pub const UPDATE_ARCHIVE_HELP: &str =
     "system update archive [--help|--schema|--json]\nArchive the current verified terminal update transaction.\n";
+pub const UPDATE_LIST_HELP: &str =
+    "system update list [--help|--schema|--json]\nList installations visible for update to the authenticated caller.\n";
 
 pub const UPDATE_STATUS_SCHEMA: &str = concat!(
     "{\"schema\":\"jucs.command/1\",\"id\":\"system.update.status\",",
@@ -42,6 +46,13 @@ pub const UPDATE_ARCHIVE_SCHEMA: &str = concat!(
     "\"service\":\"service.update.archive\",\"service_version\":1}\n"
 );
 
+pub const UPDATE_LIST_SCHEMA: &str = concat!(
+    "{\"schema\":\"jucs.command/1\",\"id\":\"system.update.list\",",
+    "\"version\":1,\"effects\":\"read\",\"arguments\":[],",
+    "\"options\":[\"--help\",\"--schema\",\"--json\"],",
+    "\"service\":\"service.update.list\",\"service_version\":1}\n"
+);
+
 /// A JUCS command whose identity has been frozen for this runtime generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -51,6 +62,8 @@ pub enum Command {
     UpdateRecover,
     /// Archive the current verified terminal transaction without caller paths.
     UpdateArchive,
+    /// List installations visible for update to the authenticated caller.
+    UpdateList,
 }
 
 impl Command {
@@ -60,6 +73,7 @@ impl Command {
             Self::UpdateStatus => UPDATE_STATUS_ID,
             Self::UpdateRecover => UPDATE_RECOVER_ID,
             Self::UpdateArchive => UPDATE_ARCHIVE_ID,
+            Self::UpdateList => UPDATE_LIST_ID,
         }
     }
 
@@ -69,6 +83,7 @@ impl Command {
             Self::UpdateStatus => UPDATE_STATUS_VERSION,
             Self::UpdateRecover => UPDATE_RECOVER_VERSION,
             Self::UpdateArchive => UPDATE_ARCHIVE_VERSION,
+            Self::UpdateList => UPDATE_LIST_VERSION,
         }
     }
 }
@@ -135,6 +150,7 @@ pub fn parse(line: &[u8]) -> Result<Invocation, ParseError> {
         Some(b"status") => Command::UpdateStatus,
         Some(b"recover") => Command::UpdateRecover,
         Some(b"archive") => Command::UpdateArchive,
+        Some(b"list") => Command::UpdateList,
         Some(_) => return Err(ParseError::Unknown),
         None => return Err(ParseError::Unknown),
     };
@@ -241,6 +257,20 @@ mod tests {
             parse(b"system update archive --json").unwrap().form,
             Form::Json
         );
+        assert_eq!(
+            parse(b"system update list"),
+            Ok(Invocation {
+                command: Command::UpdateList,
+                form: Form::Invoke,
+            })
+        );
+        for (line, form) in [
+            (b"system update list --help".as_slice(), Form::Help),
+            (b"system update list --schema".as_slice(), Form::Schema),
+            (b"system update list --json".as_slice(), Form::Json),
+        ] {
+            assert_eq!(parse(line).unwrap().form, form);
+        }
     }
 
     #[test]

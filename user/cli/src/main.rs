@@ -7,17 +7,20 @@
 #![no_std]
 #![no_main]
 
-use jasper_rt::update::NativeUpdateTransport;
+use jasper_rt::update::{NativeUpdateListTransport, NativeUpdateTransport};
 use jasper_rt::{entry, ids, sys};
 use kernel_core::jucs::{self, Command, Form, Invocation};
 use kernel_core::terminal_editor::{EditEvent, LineEditor};
 use kernel_core::update_agent::{AgentError, UpdateAgent, ACTION_JSON_BYTES, STATUS_JSON_BYTES};
 use kernel_core::update_client::{ClientError, UpdateClient};
+use kernel_core::update_list_agent::{
+    AgentListError, UpdateListAgent, UpdateListClient, LIST_JSON_BYTES,
+};
 use kernel_core::update_status::UpdateStatus;
 
 const PROMPT: &[u8] = b"jasper> ";
 const HELP: &[u8] =
-    b"commands: help, echo <text>, system update status|recover|archive [--json], exit\n";
+    b"commands: help, echo <text>, system update status|recover|archive|list [--json], exit\n";
 
 fn write(bytes: &[u8]) -> bool {
     let result = unsafe {
@@ -189,6 +192,10 @@ fn dispatch_jucs(invocation: Invocation, next_request: &mut u64) -> bool {
             let action_request = take_request(next_request);
             write_update_archive(status_request, action_request, true)
         }
+        (Command::UpdateList, Form::Help) => write(jucs::UPDATE_LIST_HELP.as_bytes()),
+        (Command::UpdateList, Form::Schema) => write(jucs::UPDATE_LIST_SCHEMA.as_bytes()),
+        (Command::UpdateList, Form::Invoke) => write_update_list(take_request(next_request), false),
+        (Command::UpdateList, Form::Json) => write_update_list(take_request(next_request), true),
     }
 }
 
@@ -357,6 +364,96 @@ fn write_archive_error(code: i64, json: bool) -> bool {
     ok && write(output.as_bytes())
 }
 
+fn write_update_list(request_id: u64, json: bool) -> bool {
+    if json {
+        let mut agent = UpdateListAgent::new(NativeUpdateListTransport);
+        let mut output = [0u8; LIST_JSON_BYTES];
+        return match agent.list_json(request_id, &mut output) {
+            Ok(length) => write(&output[..length]),
+            Err(error) => write_list_error(agent_list_error_code(error), true),
+        };
+    }
+    let mut client = UpdateListClient::new(NativeUpdateListTransport);
+    let response = match client.list(request_id) {
+        Ok(response) => response,
+        Err(error) => return write_list_error(client_error_code(error), json),
+    };
+    for index in 0..response.len() {
+        let Some(record) = response.record(index) else {
+            return false;
+        };
+        let mut line = FixedText::new();
+        let scope = scope_name(record.scope);
+        let ok = line.push(b"system-update-update installation=")
+            && line.push_u64(record.installation.to_raw())
+            && line.push(b" package=")
+            && line.push_u64(record.package.to_raw())
+            && line.push(b" app_id=")
+            && line.push_u64(record.app_id)
+            && line.push(b" publisher=")
+            && line.push_u64(record.publisher)
+            && line.push(b" version=")
+            && line.push_u64(u64::from(record.version))
+            && line.push(b" scope=")
+            && line.push(scope.0)
+            && line.push(b":")
+            && line.push_u64(scope.1)
+            && line.push(b" source=")
+            && line.push(source_name(record.source))
+            && line.push(b" enabled=")
+            && line.push(if record.enabled { b"true" } else { b"false" })
+            && line.push(b"\n");
+        if !ok || !write(line.as_bytes()) {
+            return false;
+        }
+    }
+    let mut summary = FixedText::new();
+    let ok = summary.push(b"system-update list=ok command=system.update.list count=")
+        && summary.push_u64(response.len() as u64)
+        && summary.push(b" request=")
+        && summary.push_u64(response.request_id())
+        && summary.push(b"\nsystem-update-ok\n");
+    ok && write(summary.as_bytes())
+}
+
+fn write_list_error(code: i64, json: bool) -> bool {
+    let mut output = FixedText::new();
+    let ok = if json {
+        output.push(
+            b"{\"schema\":\"jucs.result/1\",\"command\":\"system.update.list\",\"status\":\"error\",\"code\":",
+        ) && output.push_i64(code)
+            && output.push(b"}\n")
+    } else {
+        output.push(b"jucs-error command=system.update.list code=")
+            && output.push_i64(code)
+            && output.push(b"\nsystem-update-failed\n")
+    };
+    ok && write(output.as_bytes())
+}
+
+fn scope_name(scope: kernel_core::native_install::OwnerScope) -> (&'static [u8], u64) {
+    use kernel_core::native_install::OwnerScope;
+    match scope {
+        OwnerScope::System => (b"system", 0),
+        OwnerScope::Device(id) => (b"device", id),
+        OwnerScope::User(id) => (b"user", id),
+        OwnerScope::Group(id) => (b"group", id),
+        OwnerScope::Tenant(id) => (b"tenant", id),
+        OwnerScope::Workload(id) => (b"workload", id),
+    }
+}
+
+fn source_name(source: kernel_core::native_install::PackageSource) -> &'static [u8] {
+    use kernel_core::native_install::PackageSource;
+    match source {
+        PackageSource::SystemBuiltin => b"system_builtin",
+        PackageSource::Store => b"store",
+        PackageSource::UserImport => b"user_import",
+        PackageSource::Enterprise => b"enterprise",
+        PackageSource::Developer => b"developer",
+    }
+}
+
 fn client_error_code(error: ClientError) -> i64 {
     match error {
         ClientError::Transport(code) => code,
@@ -372,6 +469,13 @@ fn agent_error_code(error: AgentError) -> i64 {
     match error {
         AgentError::Client(error) => client_error_code(error),
         AgentError::BufferTooSmall => ids::SYSTEM_UPDATE_ERROR_BUFFER_TOO_SMALL as i64,
+    }
+}
+
+fn agent_list_error_code(error: AgentListError) -> i64 {
+    match error {
+        AgentListError::Client(error) => client_error_code(error),
+        AgentListError::BufferTooSmall => ids::SYSTEM_UPDATE_ERROR_BUFFER_TOO_SMALL as i64,
     }
 }
 
