@@ -11,12 +11,12 @@ pub const UPDATE_STATUS_ID: &str = "system.update.status";
 pub const UPDATE_STATUS_VERSION: u16 = 1;
 
 pub const UPDATE_STATUS_HELP: &str =
-    "system update status [--help|--schema]\nShow the authenticated system update and boot-slot status.\n";
+    "system update status [--help|--schema|--json]\nShow the authenticated system update and boot-slot status.\n";
 
 pub const UPDATE_STATUS_SCHEMA: &str = concat!(
     "{\"schema\":\"jucs.command/1\",\"id\":\"system.update.status\",",
     "\"version\":1,\"effects\":\"read\",\"arguments\":[],",
-    "\"options\":[\"--help\",\"--schema\"],",
+    "\"options\":[\"--help\",\"--schema\",\"--json\"],",
     "\"service\":\"service.update.status\",\"service_version\":1}\n"
 );
 
@@ -52,6 +52,8 @@ pub enum Form {
     Help,
     /// Return the machine-readable command schema.
     Schema,
+    /// Execute the command and return the stable structured result.
+    Json,
 }
 
 /// One parsed command ready for the single JUCS service dispatcher.
@@ -106,6 +108,7 @@ pub fn parse(line: &[u8]) -> Result<Invocation, ParseError> {
         None => Form::Invoke,
         Some(b"--help") if tokens.next().is_none() => Form::Help,
         Some(b"--schema") if tokens.next().is_none() => Form::Schema,
+        Some(b"--json") if tokens.next().is_none() => Form::Json,
         Some(_) => return Err(ParseError::InvalidOption),
     };
     Ok(Invocation {
@@ -165,6 +168,10 @@ mod tests {
             parse(b"system update status --schema").unwrap().form,
             Form::Schema
         );
+        assert_eq!(
+            parse(b"system update status --json").unwrap().form,
+            Form::Json
+        );
     }
 
     #[test]
@@ -184,6 +191,10 @@ mod tests {
         );
         assert_eq!(
             parse(b"system update status --help extra"),
+            Err(ParseError::InvalidOption)
+        );
+        assert_eq!(
+            parse(b"system update status --json extra"),
             Err(ParseError::InvalidOption)
         );
         assert_eq!(parse(b" \r\n"), Err(ParseError::Empty));

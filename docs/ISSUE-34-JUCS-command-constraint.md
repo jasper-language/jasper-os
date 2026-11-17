@@ -47,6 +47,9 @@ DAG；相关实现归入现有 LC-2、ISSUE-21 与 TERM-1 的后续验收。
   拒绝 `jucs`/`jasper` 工具前缀、未知参数失败关闭，并提供 `--help`/`--schema`；
 - 原生 CLI 通过该 JUCS 路由调用版本化 `system.update.status.query`，不复制
   更新执行器；旧 `system.update.control.get` 保留为兼容只读机制；
+- `system update status --json` 与人类可读形式消费同一个版本化响应；结构化结果
+  固定携带 `service.update.status/1`、调用者盖章字段、A/B slot、release、
+  attempts、digest 与 request identity，供脚本和后续 Agent 共用；
 - `system.update.status.query` v1 增加版本化 `service.update.status` 请求/响应：
   请求携带非零请求 ID、可选 expected generation 和唯一平台范围；租户由内核
   安全身份与 Workload Domain 派生，请求不能指定其他租户或内部路径；
@@ -59,6 +62,8 @@ DAG；相关实现归入现有 LC-2、ISSUE-21 与 TERM-1 的后续验收。
 - 真实 UEFI 串口和 framebuffer/PS-2 原生终端均输入了无前缀
   `system update status`，返回同一结构状态；首程序帧与堆资源断言保持
   `reclaimed=true`。
+- 真实 UEFI 串口验收同时执行 `system update status --json`，以标准 JSON 解析器
+  校验结构化字段，且查询仍走同一 JUCS 命令与 `system.update.status.query`。
 
 仍未完成：结构化 Agent 与 CLI 的结果对照；租户过滤；恢复/归档的正式
 资源动作；真实 UEFI 验收证据；权限、重放、旧 generation、错误摘要和并发冲突的

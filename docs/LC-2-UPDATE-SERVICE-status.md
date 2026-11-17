@@ -62,6 +62,10 @@ jasper-update-recovery cleanup <control-root> <staging-root> <manifest-sha256-he
 - 原生 CLI 已通过版本化 `system.update.status.query` 调用
   `service.update.status` v1：请求含稳定请求 ID、可选 expected generation 和
   平台范围，但租户只能由内核认证身份/Workload Domain 派生；
+- 原生 CLI 的 `--json` 与人类可读输出使用同一次
+  `system.update.status.query` 响应，不复制服务执行器；JSON 固定包含 generation、
+  transaction、A/B 状态、release/attempts/digest、schema、caller/domain/tenant 与
+  request identity；
 - 服务先验证当前调用者身份/系统域，再读取并恢复同一组双副本 A/B 控制记录；
 - 返回 `service.update.status` v1 请求头与固定状态载荷，包含 generation、transaction、槽状态、
   release、回滚下限、安全纪元、Schema 范围以及调用者身份；
@@ -71,6 +75,7 @@ jasper-update-recovery cleanup <control-root> <staging-root> <manifest-sha256-he
 请求 ID 复用进程级幂等账本。真实 UEFI 验证已覆盖串口与 framebuffer/PS-2
 两个原生终端前端：输入
 `system update status` 后均返回同一份 A/B 控制记录，`--help`/`--schema` 也可发现；
+`system update status --json` 返回可由标准 JSON 解析器读取的同一状态；
 首程序查询前后资源断言为 `reclaimed=true`。
 
 这仍不是 Issue #34 的整体完成：结构化 Agent 与 CLI 的同契约对照、租户级更新

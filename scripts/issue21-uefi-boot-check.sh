@@ -299,7 +299,7 @@ if [ "$MODE" = terminal-session ] && [ "${ISSUE21_MANUAL_INPUT:-0}" != 1 ]; then
     while ! grep -aq '^jasper> ' "$OUT/serial.log"; do
       sleep 1
     done
-    printf 'help\nsystem update status\nsystem update status --schema\nsystem update status --help\necho history\n\016\n\003\004' >&8
+    printf 'help\nsystem update status\nsystem update status --json\nsystem update status --schema\nsystem update status --help\necho history\n\016\n\003\004' >&8
   ) &
   SERIAL_FEEDER=$!
   SERIAL_ARGS=(-serial "pipe:$OUT/serial")
@@ -469,8 +469,34 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native
       grep -aqE $'^native-help-ok\r?$' "$OUT/serial.log"
       grep -aqE $'^system-update status=ok command=system[.]update[.]status generation=[1-9][0-9]* transaction=[1-9][0-9]* active=[AB] state=confirmed release=[1-9][0-9]* .*caller=[1-9][0-9]* domain=1 tenant=[1-9][0-9]* request=[1-9][0-9]*\r?$' "$OUT/serial.log"
       grep -aqE $'^system-update-ok\r?$' "$OUT/serial.log"
-      grep -aqE $'^\{"schema":"jucs.command/1","id":"system.update.status","version":1,"effects":"read","arguments":\[\],"options":\["--help","--schema"\],"service":"service.update.status","service_version":1\}\r?$' "$OUT/serial.log"
-      grep -aqE $'^system update status \[\-\-help\|--schema\]\r?$' "$OUT/serial.log"
+      python3 - "$OUT/serial.log" <<'PY'
+import json
+import sys
+
+records = []
+with open(sys.argv[1], "rb") as stream:
+    for raw in stream:
+        line = raw.rstrip(b"\r\n")
+        if line.startswith(b'{"schema":"service.update.status/1"'):
+            records.append(json.loads(line))
+
+assert records, "missing structured update status"
+record = records[-1]
+assert record["schema"] == "service.update.status/1"
+assert record["command"] == "system.update.status"
+assert record["status"] == "ok"
+assert record["generation"] > 0
+assert record["transaction"] > 0
+assert record["active"]["slot"] in ("A", "B")
+assert record["active"]["state"] == "confirmed"
+assert len(record["active"]["digest"]) == 64
+assert record["caller"]["subject"] > 0
+assert record["caller"]["domain"] == 1
+assert record["caller"]["tenant"] > 0
+assert record["request"] > 0
+PY
+      grep -aqE $'^\{"schema":"jucs.command/1","id":"system.update.status","version":1,"effects":"read","arguments":\[\],"options":\["--help","--schema","--json"\],"service":"service.update.status","service_version":1\}\r?$' "$OUT/serial.log"
+      grep -aqE $'^system update status \[\-\-help\|--schema\|--json\]\r?$' "$OUT/serial.log"
       [ "$(grep -acE $'^native-echo=history\r?$' "$OUT/serial.log")" -ge 2 ]
       grep -aqE $'^\^C\r?$' "$OUT/serial.log"
     fi

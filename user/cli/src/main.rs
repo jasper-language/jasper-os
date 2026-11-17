@@ -10,13 +10,11 @@
 use jasper_rt::{entry, ids, sys};
 use kernel_core::jucs::{self, Command, Form, Invocation};
 use kernel_core::terminal_editor::{EditEvent, LineEditor};
-use kernel_core::update_service::{
-    StatusRequest, StatusResponse, RESPONSE_BYTES, SCOPE_PLATFORM,
-};
+use kernel_core::update_service::{StatusRequest, StatusResponse, RESPONSE_BYTES, SCOPE_PLATFORM};
 use kernel_core::update_status::{UpdateStatus, NO_SLOT};
 
 const PROMPT: &[u8] = b"jasper> ";
-const HELP: &[u8] = b"commands: help, echo <text>, system update status, exit\n";
+const HELP: &[u8] = b"commands: help, echo <text>, system update status [--json], exit\n";
 
 fn write(bytes: &[u8]) -> bool {
     let result = unsafe {
@@ -70,14 +68,14 @@ fn write_echo(text: &[u8]) -> bool {
 }
 
 struct FixedText {
-    bytes: [u8; 640],
+    bytes: [u8; 1280],
     len: usize,
 }
 
 impl FixedText {
     const fn new() -> Self {
         Self {
-            bytes: [0; 640],
+            bytes: [0; 1280],
             len: 0,
         }
     }
@@ -119,6 +117,16 @@ impl FixedText {
     fn as_bytes(&self) -> &[u8] {
         &self.bytes[..self.len]
     }
+
+    fn push_hex(&mut self, bytes: &[u8]) -> bool {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for byte in bytes {
+            if !self.push(&[HEX[(byte >> 4) as usize], HEX[(byte & 0xf) as usize]]) {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 fn slot_name(slot: u8) -> &'static [u8] {
@@ -143,11 +151,26 @@ fn dispatch_jucs(invocation: Invocation, request_id: u64) -> bool {
     match (invocation.command, invocation.form) {
         (_, Form::Help) => write(jucs::UPDATE_STATUS_HELP.as_bytes()),
         (_, Form::Schema) => write(jucs::UPDATE_STATUS_SCHEMA.as_bytes()),
-        (Command::UpdateStatus, Form::Invoke) => write_update_status(request_id),
+        (Command::UpdateStatus, Form::Invoke) => write_update_status(request_id, false),
+        (Command::UpdateStatus, Form::Json) => write_update_status(request_id, true),
     }
 }
 
-fn write_update_status(request_id: u64) -> bool {
+fn write_update_error(code: i64, json: bool) -> bool {
+    let mut output = FixedText::new();
+    let ok = if json {
+        output.push(b"{\"schema\":\"jucs.result/1\",\"command\":\"system.update.status\",\"status\":\"error\",\"code\":")
+            && output.push_i64(code)
+            && output.push(b"}\n")
+    } else {
+        output.push(b"jucs-error command=system.update.status code=")
+            && output.push_i64(code)
+            && output.push(b"\nsystem-update-failed\n")
+    };
+    ok && write(output.as_bytes())
+}
+
+fn write_update_status(request_id: u64, json: bool) -> bool {
     let request = StatusRequest {
         request_id,
         expected_generation: 0,
@@ -164,22 +187,33 @@ fn write_update_status(request_id: u64) -> bool {
         )
     };
     if result != RESPONSE_BYTES as i64 {
-        let mut error = FixedText::new();
-        if !error.push(b"jucs-error command=system.update.status code=")
-            || !error.push_i64(if result < 0 { -result } else { result })
-            || !error.push(b"\nsystem-update-failed\n")
-        {
-            return false;
-        }
-        return write(error.as_bytes());
+        return write_update_error(if result < 0 { -result } else { result }, json);
     }
     let Some(response) = StatusResponse::decode(&output) else {
-        return write(b"jucs-error command=system.update.status code=protocol\n");
+        return write(if json {
+            b"{\"schema\":\"jucs.result/1\",\"command\":\"system.update.status\",\"status\":\"error\",\"code\":\"protocol\"}\n"
+        } else {
+            b"jucs-error command=system.update.status code=protocol\n"
+        });
     };
     if response.authorization.request_id != request_id {
-        return write(b"jucs-error command=system.update.status code=response_request\n");
+        return write(if json {
+            b"{\"schema\":\"jucs.result/1\",\"command\":\"system.update.status\",\"status\":\"error\",\"code\":\"response_request\"}\n"
+        } else {
+            b"jucs-error command=system.update.status code=response_request\n"
+        });
     }
     let status: UpdateStatus = response.status;
+    if status.candidate_slot == NO_SLOT && status.candidate_release != 0 {
+        return write(if json {
+            b"{\"schema\":\"jucs.result/1\",\"command\":\"system.update.status\",\"status\":\"error\",\"code\":\"protocol\"}\n"
+        } else {
+            b"jucs-error command=system.update.status code=protocol\n"
+        });
+    }
+    if json {
+        return write_update_status_json(status, response.authorization.tenant, request_id);
+    }
     let mut line = FixedText::new();
     let valid = line.push(b"system-update status=ok command=system.update.status generation=")
         && line.push_u64(status.service_generation)
@@ -214,10 +248,64 @@ fn write_update_status(request_id: u64) -> bool {
         && line.push(b" request=")
         && line.push_u64(response.authorization.request_id)
         && line.push(b"\nsystem-update-ok\n");
-    if !valid || status.candidate_slot == NO_SLOT && status.candidate_release != 0 {
+    if !valid {
         return false;
     }
     write(line.as_bytes())
+}
+
+fn write_update_status_json(status: UpdateStatus, tenant: u64, request_id: u64) -> bool {
+    let mut line = FixedText::new();
+    let mut ok = line.push(
+        b"{\"schema\":\"service.update.status/1\",\"command\":\"system.update.status\",\"status\":\"ok\",\"generation\":",
+    );
+    ok &= line.push_u64(status.service_generation);
+    ok &= line.push(b",\"transaction\":");
+    ok &= line.push_u64(status.transaction_id);
+    ok &= line.push(b",\"active\":{\"slot\":\"");
+    ok &= line.push(slot_name(status.active_slot));
+    ok &= line.push(b"\",\"state\":\"");
+    ok &= line.push(state_name(status.active_state));
+    ok &= line.push(b"\",\"release\":");
+    ok &= line.push_u64(status.active_release);
+    ok &= line.push(b",\"attempts\":");
+    ok &= line.push_u64(status.active_attempts as u64);
+    ok &= line.push(b",\"digest\":\"");
+    ok &= line.push_hex(&status.active_digest);
+    ok &= line.push(b"\"},\"candidate\":");
+    if status.candidate_slot == NO_SLOT {
+        ok &= line.push(b"null");
+    } else {
+        ok &= line.push(b"{\"slot\":\"");
+        ok &= line.push(slot_name(status.candidate_slot));
+        ok &= line.push(b"\",\"state\":\"");
+        ok &= line.push(state_name(status.candidate_state));
+        ok &= line.push(b"\",\"release\":");
+        ok &= line.push_u64(status.candidate_release);
+        ok &= line.push(b",\"attempts\":");
+        ok &= line.push_u64(status.candidate_attempts as u64);
+        ok &= line.push(b",\"digest\":\"");
+        ok &= line.push_hex(&status.candidate_digest);
+        ok &= line.push(b"\"}");
+    }
+    ok &= line.push(b",\"rollback_floor\":");
+    ok &= line.push_u64(status.rollback_floor);
+    ok &= line.push(b",\"security_epoch\":");
+    ok &= line.push_u64(status.security_epoch);
+    ok &= line.push(b",\"data_schema\":{\"min\":");
+    ok &= line.push_u64(status.data_schema_min as u64);
+    ok &= line.push(b",\"max\":");
+    ok &= line.push_u64(status.data_schema_max as u64);
+    ok &= line.push(b"},\"caller\":{\"subject\":");
+    ok &= line.push_u64(status.caller_subject);
+    ok &= line.push(b",\"domain\":");
+    ok &= line.push_u64(status.caller_domain as u64);
+    ok &= line.push(b",\"tenant\":");
+    ok &= line.push_u64(tenant);
+    ok &= line.push(b"},\"request\":");
+    ok &= line.push_u64(request_id);
+    ok &= line.push(b"}\n");
+    ok && write(line.as_bytes())
 }
 
 fn write_jucs_parse_error(name: &str) -> bool {
