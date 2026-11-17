@@ -20,6 +20,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,6 @@ DOMAIN = b"JASPER-RELEASE-V1\0"
 CHANNELS = {"stable", "lts"}
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_SIGNERS = 8
-MIN_THRESHOLD = 2
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 ABI_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
@@ -54,6 +54,30 @@ def digest(path: Path) -> tuple[str, int]:
             hasher.update(chunk)
             size += len(chunk)
     return hasher.hexdigest(), size
+
+
+def signing_policy() -> tuple[int, int]:
+    """Read the repository's authoritative threshold policy.
+
+    从仓库发布策略读取门限和签名者数量，验证器不能自行接受更宽松的门限。
+    """
+    policy_path = Path(__file__).resolve().parents[1] / "release" / "release-policy.toml"
+    try:
+        with policy_path.open("rb") as stream:
+            policy = tomllib.load(stream)
+        threshold = policy["release_signer_threshold"]
+        signers = policy["release_signer_count"]
+    except (OSError, KeyError, tomllib.TOMLDecodeError) as error:
+        fail(f"cannot load release signing policy: {error}")
+    if (
+        not isinstance(threshold, int)
+        or not isinstance(signers, int)
+        or threshold < 2
+        or threshold >= signers
+        or signers > MAX_SIGNERS
+    ):
+        fail("release signing policy is invalid")
+    return threshold, signers
 
 
 def openssl(*args: str, input_bytes: bytes | None = None) -> bytes:
@@ -94,9 +118,12 @@ def create(args: argparse.Namespace) -> None:
     payload = data_file(args.payload, "--payload")
     sbom = data_file(args.sbom, "--sbom")
     keys = [data_file(value, "--private-key") for value in args.private_key]
-    if not MIN_THRESHOLD <= args.threshold <= len(keys) <= MAX_SIGNERS:
+    threshold, required_signers = signing_policy()
+    threshold = threshold if args.threshold is None else args.threshold
+    if threshold != required_signers - 1 or len(keys) != required_signers:
         fail(
-            f"threshold must satisfy {MIN_THRESHOLD} <= threshold <= signers <= {MAX_SIGNERS}"
+            f"release policy requires {required_signers - 1}-of-{required_signers}, "
+            f"got threshold={threshold} signers={len(keys)}"
         )
     if args.channel not in CHANNELS:
         fail(f"unsupported channel: {args.channel}")
@@ -145,7 +172,7 @@ def create(args: argparse.Namespace) -> None:
             "size": sbom_size,
         },
         "signing": {
-            "threshold": args.threshold,
+            "threshold": threshold,
             "signers": [
                 {
                     "fingerprint": fingerprint,
@@ -189,7 +216,7 @@ def create(args: argparse.Namespace) -> None:
     for fingerprint, signature in signed:
         signature_paths[fingerprint].write_bytes(signature)
     print(
-        f"release-artifact: CREATED threshold={args.threshold} signers={len(signers)} "
+        f"release-artifact: CREATED threshold={threshold} signers={len(signers)} "
         f"channel={args.channel} payload={payload_sha256} sbom={sbom_sha256}"
     )
 
@@ -247,13 +274,18 @@ def load_manifest(path: Path) -> tuple[dict[str, Any], bytes]:
         fail("signing descriptor is not recognized")
     threshold = signing["threshold"]
     signers = signing["signers"]
+    required_threshold, required_signers = signing_policy()
+    actual_signers = len(signers) if isinstance(signers, list) else -1
     if (
         not isinstance(threshold, int)
-        or not MIN_THRESHOLD <= threshold <= MAX_SIGNERS
         or not isinstance(signers, list)
-        or not threshold <= len(signers) <= MAX_SIGNERS
+        or threshold != required_threshold
+        or actual_signers != required_signers
     ):
-        fail("release signing threshold or signer count is invalid")
+        fail(
+            f"release policy requires {required_threshold}-of-{required_signers}, "
+            f"got threshold={threshold} signers={actual_signers}"
+        )
     fingerprints = []
     signature_names = []
     for signer in signers:
@@ -403,7 +435,7 @@ def main() -> int:
     create_parser.add_argument("--payload", required=True)
     create_parser.add_argument("--sbom", required=True)
     create_parser.add_argument("--private-key", action="append", required=True)
-    create_parser.add_argument("--threshold", type=int, default=MIN_THRESHOLD)
+    create_parser.add_argument("--threshold", type=int)
     create_parser.add_argument("--output-dir", required=True)
     create_parser.add_argument("--name", required=True)
     create_parser.add_argument("--channel", required=True)

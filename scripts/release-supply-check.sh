@@ -149,10 +149,10 @@ from pathlib import Path
 import sys
 path = Path(sys.argv[1])
 data = path.read_bytes()
-old = b'"threshold":2'
+old = b'"target":"x86_64-unknown-none"'
 if data.count(old) != 1:
-    raise SystemExit("release-supply-check: threshold marker is not unique")
-path.write_bytes(data.replace(old, b'"threshold":3'))
+    raise SystemExit("release-supply-check: target marker is not unique")
+path.write_bytes(data.replace(old, b'"target":"x86_64-unknown-nonf"'))
 PY
 if verify \
   "$work/tampered-manifest.json" \
