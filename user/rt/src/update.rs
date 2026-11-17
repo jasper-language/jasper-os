@@ -17,6 +17,7 @@ use kernel_core::update_service::{
 
 use crate::channel::Channel;
 use crate::error::Error;
+use crate::ring::Ring;
 use crate::{ids, sys, time};
 
 /// Native syscall transport shared by CLI and the Agent broker process.
@@ -106,6 +107,7 @@ pub struct AgentChannelTransport {
     channel: Channel,
     timeout_ticks: u64,
     server_app: Option<u32>,
+    ring: Option<Ring>,
 }
 
 impl AgentChannelTransport {
@@ -115,6 +117,7 @@ impl AgentChannelTransport {
             channel,
             timeout_ticks: timeout_ticks.max(1),
             server_app: None,
+            ring: None,
         }
     }
 
@@ -128,40 +131,61 @@ impl AgentChannelTransport {
         self.channel
             .send(&request.encode())
             .map_err(|error| error.id() as i64)?;
-        let mut bytes = [0u8; RESPONSE_MESSAGE_BYTES];
-        let received = self
-            .channel
-            .recv(&mut bytes)
-            .map_err(|error| error.id() as i64)?;
-        if !received.handles.is_empty() || received.sender_app == 0 {
-            crate::println!(
-                "[JSR-UPDATE-AGENT-CLIENT] reject=sender handles={} sender_app={}",
-                received.handles.len(),
-                received.sender_app
-            );
-            return Err(ids::SYSTEM_UPDATE_ERROR_TENANT_SCOPE as i64);
-        }
-        if let Some(expected) = self.server_app {
-            if received.sender_app != expected {
+        let deadline = if request.deadline_tick == 0 {
+            time::now().saturating_add(self.timeout_ticks)
+        } else {
+            request.deadline_tick
+        };
+        loop {
+            if self.ring.is_none() {
+                self.ring = Some(Ring::create(4).map_err(|error| error.id() as i64)?);
+            }
+            let mut bytes = [0u8; RESPONSE_MESSAGE_BYTES];
+            let received = self
+                .channel
+                .recv_until(
+                    self.ring
+                        .as_ref()
+                        .ok_or(Error::INVALID_ARGUMENT.id() as i64)?,
+                    &mut bytes,
+                    deadline,
+                )
+                .map_err(|error| error.id() as i64)?;
+            if !received.handles.is_empty() || received.sender_app == 0 {
                 crate::println!(
-                    "[JSR-UPDATE-AGENT-CLIENT] reject=sender_change expected={} actual={}",
-                    expected,
+                    "[JSR-UPDATE-AGENT-CLIENT] reject=sender handles={} sender_app={}",
+                    received.handles.len(),
                     received.sender_app
                 );
                 return Err(ids::SYSTEM_UPDATE_ERROR_TENANT_SCOPE as i64);
             }
-        } else {
-            self.server_app = Some(received.sender_app);
+            if let Some(expected) = self.server_app {
+                if received.sender_app != expected {
+                    crate::println!(
+                        "[JSR-UPDATE-AGENT-CLIENT] reject=sender_change expected={} actual={}",
+                        expected,
+                        received.sender_app
+                    );
+                    return Err(ids::SYSTEM_UPDATE_ERROR_TENANT_SCOPE as i64);
+                }
+            } else {
+                self.server_app = Some(received.sender_app);
+            }
+            let response =
+                AgentResponse::decode(&bytes).ok_or(ids::SYSTEM_UPDATE_ERROR_PROTOCOL as i64)?;
+            if response.message_id != request.message_id || response.operation != request.operation
+            {
+                // A timed-out receive can complete in the broker after the
+                // caller has already cancelled its wait. Discard that response
+                // rather than returning it to the next request. Its handles are
+                // closed by `Received` when this iteration ends.
+                continue;
+            }
+            if response.code != 0 {
+                return Err(response.code.unsigned_abs() as i64);
+            }
+            return Ok(response);
         }
-        let response =
-            AgentResponse::decode(&bytes).ok_or(ids::SYSTEM_UPDATE_ERROR_PROTOCOL as i64)?;
-        if response.message_id != request.message_id || response.operation != request.operation {
-            return Err(ids::SYSTEM_UPDATE_ERROR_PROTOCOL as i64);
-        }
-        if response.code != 0 {
-            return Err(response.code.unsigned_abs() as i64);
-        }
-        Ok(response)
     }
 
     fn call(

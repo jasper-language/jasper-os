@@ -6,10 +6,13 @@
 
 use alloc::vec::Vec;
 
-use kernel_core::ring_abi::{MsgDesc, MSG_DESC_SIZE};
+use kernel_core::ring_abi::{
+    Cqe, EnterArgs, EnterUntilArgs, MsgDesc, Sqe, ENTER_UNTIL_SIZE, MSG_DESC_SIZE,
+};
 
 use crate::error::{check, Error, Result};
 use crate::handle::Handle;
+use crate::ring::{Completion, Ring};
 use crate::{ids, sys};
 
 /// 单条消息的句柄数上限（与内核一致）。
@@ -41,7 +44,12 @@ pub fn pair() -> Result<(Channel, Channel)> {
     // SAFETY：out 是本函数栈上 16 字节的可写缓冲。
     check(unsafe { sys::call3(ids::SYSTEM_CHANNEL_CREATE, out.as_mut_ptr() as u64, 0, 0) })?;
     // SAFETY：内核刚放入本进程句柄表的两个新句柄。
-    Ok(unsafe { (Channel(Handle::from_raw(out[0])), Channel(Handle::from_raw(out[1]))) })
+    Ok(unsafe {
+        (
+            Channel(Handle::from_raw(out[0])),
+            Channel(Handle::from_raw(out[1])),
+        )
+    })
 }
 
 impl Channel {
@@ -66,7 +74,11 @@ impl Channel {
     }
 
     /// 发送字节与句柄。成功时句柄随消息转移给接收方；失败时原样交还（连同错误）。
-    pub fn send_with(&self, data: &[u8], handles: Vec<Handle>) -> core::result::Result<(), (Error, Vec<Handle>)> {
+    pub fn send_with(
+        &self,
+        data: &[u8],
+        handles: Vec<Handle>,
+    ) -> core::result::Result<(), (Error, Vec<Handle>)> {
         let raw: Vec<u64> = handles.iter().map(Handle::raw).collect();
         match self.send_raw(data, &raw) {
             Ok(()) => {
@@ -95,13 +107,104 @@ impl Channel {
         };
         let b = desc.encode();
         // SAFETY：描述、消息体、句柄数组都在调用期间有效；内核在返回前复制完毕。
-        check(unsafe { sys::call3(ids::SYSTEM_CHANNEL_SEND, self.0.raw() as u64, b.as_ptr() as u64, 0) }).map(|_| ())
+        check(unsafe {
+            sys::call3(
+                ids::SYSTEM_CHANNEL_SEND,
+                self.0.raw() as u64,
+                b.as_ptr() as u64,
+                0,
+            )
+        })
+        .map(|_| ())
     }
 
     /// 阻塞接收一条消息到 `buf`。缓冲区不足 ⇒ `CHANNEL_BUFFER_TOO_SMALL`，消息留在队列
     /// （需要自动扩大缓冲区时用 [`Channel::recv_vec`]）。对端已关闭且队列为空 ⇒ `CHANNEL_PEER_CLOSED`。
     pub fn recv(&self, buf: &mut [u8]) -> Result<Received> {
         self.recv_into(buf).map(|(r, _)| r).map_err(|(e, _)| e)
+    }
+
+    /// 在绝对 tick 期限前接收一条消息。
+    /// Receive one message with an absolute tick deadline.
+    ///
+    /// The receive is submitted through an async ring. On timeout the request
+    /// is synchronously cancelled and its completion reaped, so a late response
+    /// cannot be delivered as a success. Any handles that raced with delivery
+    /// are closed before the timeout is reported.
+    pub fn recv_until(&self, ring: &Ring, buf: &mut [u8], deadline_tick: u64) -> Result<Received> {
+        if buf.len() > MAX_BYTES {
+            return Err(Error::INVALID_ARGUMENT);
+        }
+        let mut handles = [0u64; MAX_HANDLES];
+        let desc = MsgDesc {
+            data_ptr: buf.as_mut_ptr() as u64,
+            handles_ptr: handles.as_mut_ptr() as u64,
+            data_len: buf.len() as u32,
+            handles_cap: MAX_HANDLES as u32,
+            ..MsgDesc::default()
+        };
+        let mut desc_bytes = desc.encode();
+        let sqe = Sqe {
+            op: ids::SYSTEM_CHANNEL_RECV as u32,
+            flags: 0,
+            user_tag: 1,
+            arg0: self.0.raw(),
+            arg1: desc_bytes.as_mut_ptr() as u64,
+        };
+        let mut sq = [sqe];
+        let mut request_ids = [0u64; 1];
+        let mut completions = [Cqe::default(); 1];
+        let until = EnterUntilArgs {
+            version: 1,
+            bytes: ENTER_UNTIL_SIZE as u32,
+            deadline: deadline_tick,
+            enter: EnterArgs {
+                sq_ptr: sq.as_mut_ptr() as u64,
+                cq_ptr: completions.as_mut_ptr() as u64,
+                id_ptr: request_ids.as_mut_ptr() as u64,
+                sq_count: 1,
+                cq_max: 1,
+                wait_min: 1,
+                ..EnterArgs::default()
+            },
+        };
+        let mut until_bytes = until.encode();
+        // SAFETY: all submitted records and fixed buffers in this stack frame
+        // remain valid until the completion is reaped below.
+        let ret = unsafe {
+            sys::call3(
+                ids::SYSTEM_ASYNC_RING_DEADLINE_ENTER,
+                ring.handle().raw(),
+                until_bytes.as_mut_ptr() as u64,
+                0,
+            )
+        };
+        let output_desc = MsgDesc::decode(&desc_bytes);
+        let output = EnterUntilArgs::decode_checked(&until_bytes)
+            .map(|value| value.enter)
+            .ok_or(Error::INVALID_ARGUMENT)?;
+        if ret >= 0 && output.submitted == 1 && output.reaped == 1 {
+            return received_from_desc(output_desc, &handles, buf.len());
+        }
+
+        if request_ids[0] != 0 {
+            let _ = ring.cancel(request_ids[0]);
+            let mut completions = [Completion {
+                request_id: 0,
+                user_tag: 0,
+                op: 0,
+                result: 0,
+            }; 1];
+            let _ = ring.reap(&mut completions, 1);
+        }
+        close_handles(&handles, output_desc.out_handles);
+        if ret < 0 {
+            return Err(Error(ret.unsigned_abs()));
+        }
+        if output.first_error < 0 {
+            return Err(Error(output.first_error.unsigned_abs()));
+        }
+        Err(Error::INVALID_ARGUMENT)
     }
 
     /// 阻塞接收一条消息，按需扩大缓冲区（不超过 [`MAX_BYTES`]）。
@@ -113,7 +216,11 @@ impl Channel {
                     buf.truncate(r.len);
                     return Ok((buf, r.handles));
                 }
-                Err((e, need)) if e == Error::CHANNEL_BUFFER_TOO_SMALL && need > buf.len() && need <= MAX_BYTES => {
+                Err((e, need))
+                    if e == Error::CHANNEL_BUFFER_TOO_SMALL
+                        && need > buf.len()
+                        && need <= MAX_BYTES =>
+                {
                     buf.resize(need, 0);
                 }
                 Err((e, _)) => return Err(e),
@@ -136,16 +243,73 @@ impl Channel {
         };
         let mut b: [u8; MSG_DESC_SIZE] = desc.encode();
         // SAFETY：描述、缓冲区、句柄数组都在调用期间有效（同步 recv 在返回前完成交付）。
-        let ret = unsafe { sys::call3(ids::SYSTEM_CHANNEL_RECV, self.0.raw() as u64, b.as_mut_ptr() as u64, 0) };
+        let ret = unsafe {
+            sys::call3(
+                ids::SYSTEM_CHANNEL_RECV,
+                self.0.raw() as u64,
+                b.as_mut_ptr() as u64,
+                0,
+            )
+        };
         let out = MsgDesc::decode(&b);
         match check(ret) {
             Ok(_) => {
                 let n = (out.out_handles as usize).min(MAX_HANDLES);
                 // SAFETY：这些句柄由内核随消息放入本进程句柄表，尚无人拥有。
-                let handles = hs[..n].iter().map(|&h| unsafe { Handle::from_raw(h) }).collect();
-                Ok((Received { len: out.out_data_len as usize, handles, sender_app: out.out_sender_app }, out.out_data_len as usize))
+                let handles = hs[..n]
+                    .iter()
+                    .map(|&h| unsafe { Handle::from_raw(h) })
+                    .collect();
+                Ok((
+                    Received {
+                        len: out.out_data_len as usize,
+                        handles,
+                        sender_app: out.out_sender_app,
+                    },
+                    out.out_data_len as usize,
+                ))
             }
             Err(e) => Err((e, out.out_data_len as usize)),
         }
+    }
+}
+
+fn received_from_desc(
+    desc: MsgDesc,
+    handles: &[u64; MAX_HANDLES],
+    capacity: usize,
+) -> Result<Received> {
+    if desc.out_data_len as usize > capacity || desc.out_handles as usize > MAX_HANDLES {
+        close_handles(handles, desc.out_handles);
+        return Err(if desc.out_data_len as usize > capacity {
+            Error::CHANNEL_BUFFER_TOO_SMALL
+        } else {
+            Error::INVALID_ARGUMENT
+        });
+    }
+    let n = desc.out_handles as usize;
+    // SAFETY: these handles were installed by the kernel for this delivered
+    // message and have not yet been wrapped by another owner.
+    let handles = handles[..n]
+        .iter()
+        .map(|&raw| unsafe { Handle::from_raw(raw) })
+        .collect();
+    Ok(Received {
+        len: desc.out_data_len as usize,
+        handles,
+        sender_app: desc.out_sender_app,
+    })
+}
+
+fn close_handles(raw: &[u64; MAX_HANDLES], count: u32) {
+    let mut remaining = count;
+    for value in raw {
+        if remaining == 0 {
+            break;
+        }
+        remaining -= 1;
+        // SAFETY: this path is used only after the ring terminal has been
+        // reaped and the handles are no longer eligible for delivery.
+        drop(unsafe { Handle::from_raw(*value) });
     }
 }

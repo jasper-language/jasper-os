@@ -143,8 +143,10 @@ jasper-update-recovery cleanup <control-root> <staging-root> <manifest-sha256-he
   身份为 0 或后续变化均失败关闭；
 - broker 对同一 message ID、operation 和 service payload 的重试返回缓存的完全
   相同响应；重试 deadline 可以更新，但同一 ID 改换 operation 或 payload 被拒绝；
-  绝对 deadline 过期由 broker 在调用服务前拒绝，之后仍可继续服务。Channel 的
-  一问一答长度有界，不存在无界排队或 Agent 私有权限通道；
+  绝对 deadline 过期由 broker 在调用服务前拒绝，之后仍可继续服务；
+- 客户端 Channel recv 经 async Ring 的 deadline enter 提交。超时后同步取消请求、
+  收取 cancelled completion，并关闭与完成竞态到达的句柄；迟到响应若不属于当前
+  message ID/operation 会被丢弃，不会返回给后续请求，也不产生陈旧成功；
 - 服务先验证当前调用者身份/系统域，再读取并恢复同一组双副本 A/B 控制记录；
 - 返回 `service.update.status` v1 请求头与固定状态载荷，包含 generation、transaction、槽状态、
   release、回滚下限、安全纪元、Schema 范围以及调用者身份；
@@ -298,8 +300,9 @@ PASS (3.20.0)
   以及 ABI 3.19 的 archive human/JSON/schema/help 均通过。
 - 外部 Agent 固定封套逐字节篡改、operation/ID 错配、错误 code/payload 形态被拒；
   独立子进程的 status/recover/archive/list、同 ID 同 operation 但 payload 变化的
-  缓存冲突、重复请求缓存、sender identity 固化、deadline timeout 和 timeout 后
-  继续服务均通过真实 UEFI/virtio-blk。
+  缓存冲突、重复请求缓存、sender identity 固化、async deadline timeout、
+  `system.async.cancel` 成功、completion 排空和 timeout 后继续服务均通过真实
+  UEFI/virtio-blk。
 - tenant A/B 的可见更新集合互不串租户；系统主体不隐式获得租户更新权；输出缓冲
   过小时整体返回容量错误且不写入部分 record。
 - ABI 3.20 的 `system.install.update.list` 在真实 OVMF guest 中返回当前主体的
