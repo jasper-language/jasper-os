@@ -56,11 +56,19 @@ Memory、Handle、IRQ 或 DMA 的既有强制机制。它只规定设备服务�
 该日志是持久回执与审计事实，不是完整的磁盘 IOMMU 编程后端；真实设备仍必须在
 重建授权前完成硬件静默和 reset。
 
+P0 集成切片使用与 lifecycle 服务相同的已验证 virtio-blk 设备，并在 Control A
+尾部保留独立 32 KiB 区域。空区首次启动才格式化；非空但无有效 journal、损坏
+快照或 I/O 错误失败关闭。两次真实 OVMF 启动使用同一 P0/OVMF 状态：
+第一次记录 registration/admission 后 `initialized=true`，第二次
+`initialized=false` 并恢复同一 sequence/device identity；两次均为
+`qemu_rc=33`，且 `live_restored=false`。证据：
+`evidence/driver-host-journal-boot1`、`evidence/driver-host-journal-boot2`。
+
 ## 验证
 
 ```text
 cargo test --locked -p kernel-core driver_host
-14 passed; 0 failed
+15 passed; 0 failed
 
 cargo check --locked -p user-devprobe --target x86_64-unknown-none
 PASS

@@ -183,6 +183,8 @@ pub mod fs0_demo;
 pub mod native_install_block;
 #[cfg(all(target_arch = "x86_64", feature = "native-install-abi-verify"))]
 pub mod native_install_abi;
+#[cfg(all(target_arch = "x86_64", feature = "driver-host-journal-verify"))]
+pub mod driver_host_persistence;
 #[cfg(any(feature = "linux-abi", feature = "sec3-verify"))]
 pub mod native_module_authority;
 pub mod native_module_catalog;

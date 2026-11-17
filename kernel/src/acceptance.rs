@@ -928,6 +928,7 @@ const FULL: &[Step] = &[
     feature = "workload-verify",
     feature = "native-install-abi-verify",
     feature = "update-agent-verify",
+    feature = "driver-host-journal-verify",
 )))]
 pub use full_selected::{NAME, PLAN};
 
@@ -1635,6 +1636,49 @@ mod dedicated {
     pub const PLAN: &[&[Step]] = &[PREFIX, STAGES];
 }
 
+#[cfg(feature = "driver-host-journal-verify")]
+mod dedicated {
+    use super::*;
+
+    pub const NAME: &str = "driver-host-journal";
+
+    #[cfg(target_arch = "x86_64")]
+    fn finish(_: &mut BootCtx) {
+        match crate::driver_host_persistence::run() {
+            Ok(report) => {
+                kprintln!(
+                    "[JSR-DRIVER-HOST-JOURNAL] summary initialized={} sequence={} device=0x{:08x} generation={} live_restored=false ok=true",
+                    report.initialized,
+                    report.sequence,
+                    report.device_identity,
+                    report.device_generation
+                );
+                exit_on(0);
+            }
+            Err(error) => {
+                kprintln!("[JSR-DRIVER-HOST-JOURNAL] failed=true reason={}", error);
+                exit_on(1);
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    fn finish(_: &mut BootCtx) {
+        kprintln!("[JSR-DRIVER-HOST-JOURNAL] unsupported_arch=true failed=true");
+        exit_on(1);
+    }
+
+    const STAGES: &[Step] = &[
+        st(Stage::Space),
+        case("mm-space", Stage::Space, "mm", mm_space),
+        st(Stage::Smp),
+        case("smp-checks", Stage::Smp, "smp", smp_checks),
+        #[cfg(target_arch = "x86_64")]
+        case("drv3-dma", Stage::Smp, "drv3", drv3_dma),
+    ];
+    pub const PLAN: &[&[Step]] = &[PREFIX, STAGES, &[PlanItem::Finish(finish)]];
+}
+
 #[cfg(all(
     feature = "native-install-abi-verify",
     not(feature = "update-agent-verify")
@@ -2325,5 +2369,6 @@ mod dedicated {
     feature = "workload-verify",
     feature = "native-install-abi-verify",
     feature = "update-agent-verify",
+    feature = "driver-host-journal-verify",
 ))]
 pub use dedicated::{NAME, PLAN};

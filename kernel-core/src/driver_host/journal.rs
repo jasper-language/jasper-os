@@ -7,6 +7,8 @@
 //! order so stale admission/reset/crash receipts fail closed.
 
 use crate::fs::journal::{JournalError, SectorIo, SECTORS_PER_STORAGE_UNIT, STORAGE_UNIT_BYTES};
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use super::{CrashReceipt, DeviceIdentity, HostToken, PassToken, QuiesceProof, ResetReceipt};
 
@@ -194,17 +196,61 @@ impl DriverHostJournalError {
 pub struct DriverHostJournal<D: SectorIo, const HOSTS: usize> {
     device: D,
     sequence: u64,
-    events: [Option<DriverHostPersistentEvent>; MAX_DRIVER_HOST_EVENTS],
+    events: Box<[Option<DriverHostPersistentEvent>]>,
+}
+
+fn empty_events() -> Result<Box<[Option<DriverHostPersistentEvent>]>, DriverHostJournalError> {
+    let mut events = Vec::new();
+    events
+        .try_reserve_exact(MAX_DRIVER_HOST_EVENTS)
+        .map_err(|_| DriverHostJournalError::Capacity)?;
+    events.resize(MAX_DRIVER_HOST_EVENTS, None);
+    Ok(events.into_boxed_slice())
 }
 
 impl<D: SectorIo, const HOSTS: usize> DriverHostJournal<D, HOSTS> {
+    /// Open an initialized journal, or format only a completely empty region.
+    ///
+    /// A non-zero region without a valid journal marker is rejected instead of
+    /// being overwritten. This lets first boot initialize the reserved region
+    /// while corrupt, foreign, or partially initialized storage fails closed.
+    pub fn mount_with_status(mut device: D) -> Result<(Self, bool), DriverHostJournalError> {
+        check_capacity(&device)?;
+        let mut empty = true;
+        let mut page = [0u8; STORAGE_UNIT_BYTES];
+        for unit in 0..TOTAL_UNITS {
+            device
+                .read_unit(
+                    (unit as u64)
+                        .checked_mul(SECTORS_PER_STORAGE_UNIT)
+                        .ok_or(DriverHostJournalError::Capacity)?,
+                    &mut page,
+                )
+                .map_err(map_io)?;
+            if page.iter().any(|byte| *byte != 0) {
+                empty = false;
+                break;
+            }
+        }
+        if empty {
+            Self::format(device).map(|journal| (journal, true))
+        } else {
+            Self::open(device).map(|journal| (journal, false))
+        }
+    }
+
+    /// Open an initialized journal or initialize an empty reserved region.
+    pub fn mount(device: D) -> Result<Self, DriverHostJournalError> {
+        Self::mount_with_status(device).map(|(journal, _)| journal)
+    }
+
     /// Initialize an empty authority journal.
     pub fn format(device: D) -> Result<Self, DriverHostJournalError> {
         check_capacity(&device)?;
         let mut journal = Self {
             device,
             sequence: 0,
-            events: [None; MAX_DRIVER_HOST_EVENTS],
+            events: empty_events()?,
         };
         for slot in 0..2 {
             journal.write_unit(slot * SLOT_UNITS + BODY_UNITS, &[0u8; STORAGE_UNIT_BYTES])?;
@@ -559,7 +605,7 @@ fn read_slot<D: SectorIo, const HOSTS: usize>(
 ) -> Result<
     Option<(
         u64,
-        [Option<DriverHostPersistentEvent>; MAX_DRIVER_HOST_EVENTS],
+        Box<[Option<DriverHostPersistentEvent>]>,
     )>,
     DriverHostJournalError,
 > {
@@ -594,7 +640,7 @@ fn read_slot<D: SectorIo, const HOSTS: usize>(
     {
         return Ok(None);
     }
-    let mut events = [None; MAX_DRIVER_HOST_EVENTS];
+    let mut events = empty_events()?;
     for index in 0..sequence as usize {
         let at = HEADER_BYTES + index * EVENT_BYTES;
         events[index] = DriverHostPersistentEvent::decode(&body[at..at + EVENT_BYTES]);
@@ -871,6 +917,44 @@ mod tests {
             opened.record_reset(host, QuiesceProof::CLEAN, old_reset),
             Err(DriverHostJournalError::StaleGeneration)
         );
+    }
+
+    #[test]
+    fn mount_formats_only_an_empty_region_and_reopens_receipts() {
+        let (mut journal, initialized) =
+            DriverHostJournal::<_, 1>::mount_with_status(MemoryDisk::new()).unwrap();
+        assert!(initialized);
+        let mut broker = DriverHostBroker::<1, 1, 1, 1>::new();
+        let identity = DeviceIdentity {
+            identity: 0x1044,
+            generation: 1,
+        };
+        let host = broker.register_host().unwrap();
+        journal.record_registration(host).unwrap();
+        broker.discover(identity).unwrap();
+        let allowed = Needs::DEVICE.union(Needs::MMIO).union(Needs::IRQ);
+        let pass = broker
+            .admit(host, identity, allowed, Policy::new(allowed, 1, 0, 1))
+            .unwrap();
+        journal.record_admission(host, pass, identity).unwrap();
+
+        let (reopened, initialized) =
+            DriverHostJournal::<_, 1>::mount_with_status(journal.device).unwrap();
+        assert!(!initialized);
+        assert_eq!(reopened.len(), 2);
+        assert_eq!(
+            reopened.last().map(DriverHostPersistentEvent::kind),
+            Some(DriverHostPersistentEventKind::Admitted)
+        );
+
+        let mut foreign = MemoryDisk::new();
+        foreign.units[0][0] = 1;
+        assert!(matches!(
+            DriverHostJournal::<_, 1>::mount_with_status(foreign).err(),
+            Some(
+                DriverHostJournalError::InvalidFormat | DriverHostJournalError::Corrupt
+            )
+        ));
     }
 
     #[test]

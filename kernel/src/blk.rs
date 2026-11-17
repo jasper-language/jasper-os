@@ -236,6 +236,11 @@ impl BlockDevice {
         self.geometry
     }
 
+    /// PCI identity of the backing block function.
+    pub const fn bdf(&self) -> kernel_core::pci::Bdf {
+        self.virtio.bdf()
+    }
+
     fn frames(&self) -> &[PhysFrame] {
         &self.data_frames
     }

@@ -45,6 +45,12 @@ pub const P0_INSTALL_STORE_LBA: u64 = P0_CONTROL_A_LBA + 16; // JASPER-HARDCODE-
 /// 原生安装状态保留区扇区数（16 MiB）。
 /// Sector count reserved for native installation state (16 MiB).
 pub const P0_INSTALL_STORE_SECTORS: u64 = 32_768; // JASPER-HARDCODE-REVIEW: issue=33 source=lifecycle-storage-region reason=bounded-store-region-under-64-mib-control-partition
+/// P0 Control A 尾部的 Driver Host 权威日志保留区。
+/// Driver Host authority-journal region at the end of P0 Control A.
+pub const P0_DRIVER_HOST_JOURNAL_LBA: u64 = P0_CONTROL_B_LBA - 64; // JASPER-HARDCODE-REVIEW: issue=33 source=lifecycle-storage-region reason=isolated-tail-before-control-b
+/// Driver Host 权威日志保留区扇区数（32 KiB）。
+/// Sector count reserved for the Driver Host authority journal (32 KiB).
+pub const P0_DRIVER_HOST_JOURNAL_SECTORS: u64 = 64; // JASPER-HARDCODE-REVIEW: issue=33 source=driver-host-journal-v1 reason=seven-storage-units-rounded-to-lba-window
 /// P0 Control B 的分区类型 GUID 原始字节。
 /// Raw partition-type GUID bytes for P0 Control B.
 pub const P0_CONTROL_B_TYPE_GUID: [u8; 16] = [
@@ -1157,6 +1163,11 @@ mod tests {
         assert_eq!(P0_ARCHIVE_B_LBA, P0_CONTROL_B_LBA + 8);
         assert_eq!(P0_INSTALL_STORE_LBA, control_a + 16);
         assert!(P0_INSTALL_STORE_LBA + P0_INSTALL_STORE_SECTORS <= P0_CONTROL_B_LBA);
+        assert!(P0_DRIVER_HOST_JOURNAL_LBA >= P0_INSTALL_STORE_LBA + P0_INSTALL_STORE_SECTORS);
+        assert!(
+            P0_DRIVER_HOST_JOURNAL_LBA + P0_DRIVER_HOST_JOURNAL_SECTORS
+                <= P0_CONTROL_B_LBA
+        );
         assert!(P0_ARCHIVE_A_LBA < P0_CONTROL_B_LBA);
         assert!(P0_ARCHIVE_B_LBA < control_a + 2 * CONTROL_SECTORS);
     }
