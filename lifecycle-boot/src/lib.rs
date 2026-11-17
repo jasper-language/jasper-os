@@ -30,6 +30,15 @@ pub const P0_CONTROL_A_PARTITION_GUID: [u8; 16] = [
 /// P0 Control B 的固定绝对 LBA。
 /// Fixed absolute LBA of P0 Control B.
 pub const P0_CONTROL_B_LBA: u64 = 34_736_128;
+/// P0 Control A 分区内归档收据副本的固定绝对 LBA。
+///
+/// 控制记录只占用分区的第一个 4 KiB 页；归档副本使用紧随其后的页，避免建立第二套
+/// 分区或把路径传给归档动作。
+/// Fixed absolute LBA of the archive-receipt copy inside P0 Control A.
+pub const P0_ARCHIVE_A_LBA: u64 = P0_CONTROL_A_LBA + 8;
+/// P0 Control B 分区内归档收据副本的固定绝对 LBA。
+/// Fixed absolute LBA of the archive-receipt copy inside P0 Control B.
+pub const P0_ARCHIVE_B_LBA: u64 = P0_CONTROL_B_LBA + 8;
 /// P0 Control B 的分区类型 GUID 原始字节。
 /// Raw partition-type GUID bytes for P0 Control B.
 pub const P0_CONTROL_B_TYPE_GUID: [u8; 16] = [
@@ -886,21 +895,21 @@ mod tests {
 
     #[test]
     fn repair_duplicates_the_highest_valid_generation() {
-        let first = ControlBlock::initialize(Slot::A, 2, digest(1), 1, 1, 1, 1)
-            .unwrap();
+        let first = ControlBlock::initialize(Slot::A, 2, digest(1), 1, 1, 1, 1).unwrap();
         let mut second = first;
-        second.stage_candidate(
-            Slot::B,
-            Candidate {
-                release: 3,
-                digest: digest(2),
-                transaction_id: 2,
-                security_epoch: 1,
-                data_schema_min: 1,
-                data_schema_max: 1,
-            },
-        )
-        .unwrap();
+        second
+            .stage_candidate(
+                Slot::B,
+                Candidate {
+                    release: 3,
+                    digest: digest(2),
+                    transaction_id: 2,
+                    security_epoch: 1,
+                    data_schema_min: 1,
+                    data_schema_max: 1,
+                },
+            )
+            .unwrap();
         let mut io = MemoryIo::new(first.encode(), second.encode());
         let first_bytes = io.copies[0];
         let second_bytes = io.copies[1];
@@ -920,7 +929,10 @@ mod tests {
             .encode();
         let corrupt = [0u8; CONTROL_RECORD_BYTES];
         let mut io = MemoryIo::new(valid, corrupt);
-        assert_eq!(repair_copies(&valid, &corrupt, &mut io), Ok(ControlBlock::decode(&valid).unwrap()));
+        assert_eq!(
+            repair_copies(&valid, &corrupt, &mut io),
+            Ok(ControlBlock::decode(&valid).unwrap())
+        );
         assert_eq!(io.copies, [valid, valid]);
 
         let other = ControlBlock::initialize(Slot::A, 2, digest(9), 1, 1, 1, 1)
@@ -974,6 +986,10 @@ mod tests {
         let control_a = MIB_SECTORS + ESP_SECTORS + 2 * SYSTEM_SECTORS;
         assert_eq!(P0_CONTROL_A_LBA, control_a);
         assert_eq!(P0_CONTROL_B_LBA, control_a + CONTROL_SECTORS);
+        assert_eq!(P0_ARCHIVE_A_LBA, control_a + 8);
+        assert_eq!(P0_ARCHIVE_B_LBA, P0_CONTROL_B_LBA + 8);
+        assert!(P0_ARCHIVE_A_LBA < P0_CONTROL_B_LBA);
+        assert!(P0_ARCHIVE_B_LBA < control_a + 2 * CONTROL_SECTORS);
     }
 
     #[test]
@@ -981,29 +997,29 @@ mod tests {
         assert_eq!(
             P0_CONTROL_A_TYPE_GUID,
             [
-                0x70, 0x73, 0x61, 0x4a, 0x72, 0x65, 0x53, 0x4f, 0x80, 0x01, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x03,
+                0x70, 0x73, 0x61, 0x4a, 0x72, 0x65, 0x53, 0x4f, 0x80, 0x01, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x03,
             ]
         );
         assert_eq!(
             P0_CONTROL_A_PARTITION_GUID,
             [
-                0x70, 0x73, 0x61, 0x4a, 0x72, 0x65, 0x53, 0x4f, 0xa0, 0x04, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x04,
+                0x70, 0x73, 0x61, 0x4a, 0x72, 0x65, 0x53, 0x4f, 0xa0, 0x04, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x04,
             ]
         );
         assert_eq!(
             P0_CONTROL_B_TYPE_GUID,
             [
-                0x70, 0x73, 0x61, 0x4a, 0x72, 0x65, 0x53, 0x4f, 0x80, 0x01, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x04,
+                0x70, 0x73, 0x61, 0x4a, 0x72, 0x65, 0x53, 0x4f, 0x80, 0x01, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x04,
             ]
         );
         assert_eq!(
             P0_CONTROL_B_PARTITION_GUID,
             [
-                0x70, 0x73, 0x61, 0x4a, 0x72, 0x65, 0x53, 0x4f, 0xa0, 0x05, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x05,
+                0x70, 0x73, 0x61, 0x4a, 0x72, 0x65, 0x53, 0x4f, 0xa0, 0x05, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x05,
             ]
         );
     }

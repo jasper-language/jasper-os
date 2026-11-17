@@ -116,8 +116,28 @@ jasper-update-recovery cleanup <control-root> <staging-root> <manifest-sha256-he
 
 recovery 已具备 path-free 数据/授权契约、`UpdateService` managed execution、
 ABI syscall 和原生 Shell 消费。archive 仍只有 host-side managed execution；
-尚无内核可写的 terminal staging/journal archive 后端，因此不注册伪造的
-`system update archive`。Agent transport、完整并发/重放和断电矩阵仍未完成。
+内核现在已有固定终态归档收据机制，但尚未把正式 `system update archive`
+注册为可伪造成功的 ABI。
+
+## 终态归档收据与持久后端
+
+新增 `jasper_lifecycle_model::archive` 的 128 字节固定归档收据：
+
+- 只接受 `Complete` 或 `RolledBack`，绑定非零 transaction、清单 SHA-256、
+  单调 archive sequence 和前一份收据的完整 SHA-256；
+- 使用固定双副本 `write_copy -> flush -> read_copy`；
+- 单副本撕裂可恢复，同 sequence 冲突失败且不写，跳号、错误前序和读写失败关闭；
+- `lifecycle-staging::archive_store::FileArchiveStore` 提供真实文件后端；提交发生在
+  staging 清理之前，同一终态交易重试幂等；
+- `UpdateService::configure_archive_ledger` 只接受运维启动时配置的目录，
+  action caller 仍不能提交任意路径；
+- `kernel::lifecycle_health` 增加了 P0 Control A/B 分区内固定归档页的块设备适配器，
+  可读写、修复并提交同一收据协议。
+
+不注册 `system update archive` 的原因是：当前控制记录还不能无歧义区分
+Complete 与 RolledBack 终态。若由 action 请求自行选择终态，会允许调用者伪造
+审计结论。下一步必须先让权威控制记录携带终态原因，再将该机制接到版本化 ABI。
+Agent external IPC transport、完整并发/重放和 Pixel 安装断电矩阵仍未完成。
 
 ## 验证
 
@@ -139,6 +159,19 @@ cargo test --locked -p kernel-core update_agent::tests
 
 cargo check --locked -p user-cli
 passed
+
+cargo test --locked -p jasper-lifecycle-model archive::tests
+6 passed; 0 failed
+
+cargo test --locked -p jasper-lifecycle-staging
+36 passed; 0 failed
+
+cargo test --locked -p jasper-lifecycle-boot
+20 passed; 0 failed
+
+cargo check --locked -p jasper-kernel --target x86_64-unknown-none \
+  --no-default-features --features production,lifecycle-ab-health
+passed
 ```
 
 新增测试覆盖：
@@ -159,6 +192,8 @@ passed
 - 零请求 ID、status 内部认证域不一致，以及 status/action 跨租户、域或作用域
   拼接均在提交恢复动作前失败关闭。
 - Agent 固定缓冲区过小时不发布半截 JSON；无候选槽的残留候选事实在解码阶段被拒绝。
+- 归档收据逐字节篡改、非终态、跳号、错误前序、单副本撕裂、同代冲突以及
+  write/flush/readback 失败均失败关闭；真实文件后端重开和幂等提交通过。
 
 ## 仍未完成
 

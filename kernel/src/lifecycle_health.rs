@@ -12,15 +12,19 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crc::{Crc, CRC_32_ISO_HDLC};
-use jasper_lifecycle_boot::{
-    recover, BootControlError, ControlBlock, ControlIo, ControlIoError, CONTROL_RECORD_BYTES,
-    P0_CONTROL_A_LBA, P0_CONTROL_A_PARTITION_GUID, P0_CONTROL_A_TYPE_GUID, P0_CONTROL_B_LBA,
-    P0_CONTROL_B_PARTITION_GUID, P0_CONTROL_B_TYPE_GUID, P0_DISK_GUID, P0_SYSTEM_A_LBA,
-    P0_SYSTEM_B_LBA, P0_SYSTEM_BYTES, Slot,
-};
 #[cfg(not(feature = "lifecycle-health-fail-verify"))]
 use jasper_lifecycle_boot::commit;
 use jasper_lifecycle_boot::CommitError;
+use jasper_lifecycle_boot::{
+    recover, BootControlError, ControlBlock, ControlIo, ControlIoError, Slot, CONTROL_RECORD_BYTES,
+    P0_ARCHIVE_A_LBA, P0_ARCHIVE_B_LBA, P0_CONTROL_A_LBA, P0_CONTROL_A_PARTITION_GUID,
+    P0_CONTROL_A_TYPE_GUID, P0_CONTROL_B_LBA, P0_CONTROL_B_PARTITION_GUID, P0_CONTROL_B_TYPE_GUID,
+    P0_DISK_GUID, P0_SYSTEM_A_LBA, P0_SYSTEM_BYTES, P0_SYSTEM_B_LBA,
+};
+use jasper_lifecycle_model::archive::{
+    self, ArchiveError, ArchiveIo, ArchiveReceipt, ARCHIVE_RECEIPT_BYTES,
+};
+use jasper_lifecycle_model::update::UpdateStage;
 use kernel_core::block::{self, Request, Terminal};
 use kernel_core::ext4_view::{Ext4ByteSource, Ext4Reader, Ext4SourceError};
 #[cfg(feature = "lifecycle-root-exec-verify")]
@@ -29,12 +33,12 @@ use kernel_core::security::ApplicationIdentity;
 use sha2::{Digest as _, Sha256};
 
 use crate::blk::BlockDevice;
-use crate::sync::IrqSpinLock;
 #[cfg(any(
     not(feature = "lifecycle-health-fail-verify"),
     feature = "lifecycle-root-exec-verify"
 ))]
 use crate::kprintln;
+use crate::sync::IrqSpinLock;
 use crate::{mmio, pci, virtio};
 
 const HEALTH_PAGES: u64 = 5;
@@ -50,8 +54,7 @@ const ROOT_USERLAND_MANIFEST: &[u8] =
 #[cfg(feature = "lifecycle-root-exec-verify")]
 const ROOT_EXEC_PROBE_PATH: &str = "/usr/libexec/jasper/health-probe";
 
-static CONTROL_DEVICE: spin::Mutex<Option<Arc<IrqSpinLock<BlockDevice>>>> =
-    spin::Mutex::new(None);
+static CONTROL_DEVICE: spin::Mutex<Option<Arc<IrqSpinLock<BlockDevice>>>> = spin::Mutex::new(None);
 static CONTROL_MUTATION: AtomicBool = AtomicBool::new(false);
 
 struct ControlMutationGuard;
@@ -115,6 +118,8 @@ pub enum HealthError {
     InjectedFailure,
     /// Another control-record mutation is active.
     Busy,
+    /// Durable terminal-archive receipt storage failed.
+    Archive(ArchiveError),
 }
 
 impl HealthError {
@@ -140,6 +145,7 @@ impl HealthError {
             Self::Commit(_) => "commit",
             Self::InjectedFailure => "injected_failure",
             Self::Busy => "busy",
+            Self::Archive(_) => "archive",
         }
     }
 }
@@ -251,6 +257,162 @@ impl ControlIo for KernelControlIo {
     }
 }
 
+struct KernelArchiveIo {
+    device: Arc<IrqSpinLock<BlockDevice>>,
+}
+
+impl KernelArchiveIo {
+    fn archive_lba(copy: usize) -> Result<u64, ArchiveError> {
+        match copy {
+            0 => Ok(P0_ARCHIVE_A_LBA),
+            1 => Ok(P0_ARCHIVE_B_LBA),
+            _ => Err(ArchiveError::Readback),
+        }
+    }
+
+    fn read_page(&self, lba: u64) -> Result<[u8; block::IO_ALIGNMENT as usize], ArchiveError> {
+        let mut device = self.device.lock();
+        if !matches!(
+            device.execute(Request::read(lba, 1), false),
+            Ok(Terminal::Completed)
+        ) {
+            return Err(ArchiveError::Readback);
+        }
+        let mut page = [0u8; block::IO_ALIGNMENT as usize];
+        device
+            .copy_prefix(&mut page)
+            .map_err(|_| ArchiveError::Readback)?;
+        Ok(page)
+    }
+
+    fn write_page(
+        &self,
+        lba: u64,
+        page: &[u8; block::IO_ALIGNMENT as usize],
+    ) -> Result<(), ArchiveError> {
+        let mut device = self.device.lock();
+        device
+            .fill_pattern(0, page)
+            .map_err(|_| ArchiveError::Write)?;
+        if matches!(
+            device.execute(Request::write(lba, 1, true), false),
+            Ok(Terminal::Completed)
+        ) {
+            Ok(())
+        } else {
+            Err(ArchiveError::Write)
+        }
+    }
+}
+
+impl ArchiveIo for KernelArchiveIo {
+    fn write_copy(
+        &mut self,
+        copy: usize,
+        bytes: &[u8; ARCHIVE_RECEIPT_BYTES],
+    ) -> Result<(), ArchiveError> {
+        let lba = Self::archive_lba(copy)?;
+        let mut page = self.read_page(lba)?;
+        page[..ARCHIVE_RECEIPT_BYTES].copy_from_slice(bytes);
+        self.write_page(lba, &page)
+    }
+
+    fn flush(&mut self) -> Result<(), ArchiveError> {
+        if matches!(
+            self.device.lock().execute(Request::flush(), false),
+            Ok(Terminal::Completed)
+        ) {
+            Ok(())
+        } else {
+            Err(ArchiveError::Flush)
+        }
+    }
+
+    fn read_copy(
+        &mut self,
+        copy: usize,
+        out: &mut [u8; ARCHIVE_RECEIPT_BYTES],
+    ) -> Result<(), ArchiveError> {
+        let page = self.read_page(Self::archive_lba(copy)?)?;
+        out.copy_from_slice(&page[..ARCHIVE_RECEIPT_BYTES]);
+        Ok(())
+    }
+}
+
+fn archive_io() -> Result<KernelArchiveIo, HealthError> {
+    let device = CONTROL_DEVICE
+        .lock()
+        .clone()
+        .ok_or(HealthError::Unsupported)?;
+    Ok(KernelArchiveIo { device })
+}
+
+fn receipt_copy(
+    io: &mut KernelArchiveIo,
+    copy: usize,
+) -> Result<Option<[u8; ARCHIVE_RECEIPT_BYTES]>, HealthError> {
+    let mut bytes = [0u8; ARCHIVE_RECEIPT_BYTES];
+    io.read_copy(copy, &mut bytes)
+        .map_err(HealthError::Archive)?;
+    Ok((bytes.iter().any(|byte| *byte != 0)).then_some(bytes))
+}
+
+/// Read the highest valid terminal-archive receipt from the two fixed P0 pages.
+pub fn read_archive_receipt() -> Result<Option<ArchiveReceipt>, HealthError> {
+    let mut io = archive_io()?;
+    let first = receipt_copy(&mut io, 0)?;
+    let second = receipt_copy(&mut io, 1)?;
+    match (first.as_ref(), second.as_ref()) {
+        (None, None) => Ok(None),
+        (Some(first), second) => archive::recover(Some(first), second)
+            .map(Some)
+            .map_err(HealthError::Archive),
+        (None, Some(second)) => archive::recover(None, Some(second))
+            .map(Some)
+            .map_err(HealthError::Archive),
+    }
+}
+
+/// Commit the next terminal-archive receipt to the fixed dual-copy P0 pages.
+///
+/// This is a kernel mechanism only. It intentionally has no path argument and
+/// is not yet exposed as an ABI action until the control record carries an
+/// unambiguous Complete/RolledBack terminal fact.
+pub fn commit_archive_receipt(
+    transaction_id: u64,
+    manifest_sha256: [u8; 32],
+    terminal_stage: UpdateStage,
+) -> Result<ArchiveReceipt, HealthError> {
+    let _mutation = ControlMutationGuard::acquire()?;
+    let current = read_archive_receipt()?;
+    if let Some(receipt) = current {
+        if receipt.transaction_id() == transaction_id
+            && receipt.manifest_sha256() == manifest_sha256
+            && receipt.terminal_stage() == terminal_stage
+        {
+            return Ok(receipt);
+        }
+    }
+    let next_sequence = match current {
+        Some(receipt) => receipt
+            .archive_sequence()
+            .checked_add(1)
+            .ok_or(HealthError::Archive(ArchiveError::Sequence))?,
+        None => 1,
+    };
+    let previous_sha256 = current.map_or([0; 32], ArchiveReceipt::chain_sha256);
+    let next = ArchiveReceipt::new(
+        next_sequence,
+        transaction_id,
+        manifest_sha256,
+        previous_sha256,
+        terminal_stage,
+    )
+    .map_err(HealthError::Archive)?;
+    let mut io = archive_io()?;
+    archive::commit(&mut io, current, next).map_err(HealthError::Archive)
+}
+
 /// Initialize the single update-control storage backend used by status and health.
 ///
 /// This consumes the process, DMA and queue resources before a frontend can
@@ -327,9 +489,7 @@ impl Ext4ByteSource for PartitionExt4Source {
             ) {
                 return Err(Ext4SourceError);
             }
-            device
-                .copy_prefix(&mut page)
-                .map_err(|_| Ext4SourceError)?;
+            device.copy_prefix(&mut page).map_err(|_| Ext4SourceError)?;
             drop(device);
             dst[done..done + take].copy_from_slice(&page[inner..inner + take]);
             done += take;
@@ -346,10 +506,7 @@ fn read_u64(bytes: &[u8]) -> u64 {
     u64::from_le_bytes(bytes[..8].try_into().expect("fixed u64 field"))
 }
 
-fn validate_gpt(
-    page: &[u8],
-    capacity: u64,
-) -> Result<(), HealthError> {
+fn validate_gpt(page: &[u8], capacity: u64) -> Result<(), HealthError> {
     let mbr = &page[..block::SECTOR_BYTES as usize];
     if mbr[510..512] != [0x55, 0xaa]
         || mbr[446 + 4] != 0xee
@@ -440,7 +597,7 @@ fn validate_system_root(
         device: source_device,
         start_lba,
     })
-        .map_err(|_| HealthError::RootMount)?;
+    .map_err(|_| HealthError::RootMount)?;
     let actual_label = root
         .label()
         .split(|byte| *byte == 0 || *byte == b' ')
@@ -588,8 +745,8 @@ fn execute_root_linux_probe(root: &Ext4Reader, enforce_resources: bool) -> Resul
         kernel_core::paging::MapFlags::USER | kernel_core::paging::MapFlags::WRITE,
     )
     .is_ok();
-    let started = mapped
-        && crate::proc::spawn_thread(pid, "root-linux-probe", entry, stack, 0, 0).is_ok();
+    let started =
+        mapped && crate::proc::spawn_thread(pid, "root-linux-probe", entry, stack, 0, 0).is_ok();
     if started {
         crate::sched::run();
     }
@@ -746,10 +903,7 @@ fn install_root_android_files(
         ) {
             Ok(bytes) => bytes,
             Err(_) => {
-                #[cfg(any(
-                    feature = "android-art-verify",
-                    feature = "vulkan-metal2vulkan-verify"
-                ))]
+                #[cfg(any(feature = "android-art-verify", feature = "vulkan-metal2vulkan-verify"))]
                 crate::kprintln!(
                     "[JSR-ANDROID-ART] file-skip path={}",
                     core::str::from_utf8(path).unwrap_or("<non-utf8>")
@@ -759,10 +913,7 @@ fn install_root_android_files(
         };
         let byte_len = bytes.len();
         if !crate::linux_vfs::install_root_android_file(path, bytes) {
-            #[cfg(any(
-                feature = "android-art-verify",
-                feature = "vulkan-metal2vulkan-verify"
-            ))]
+            #[cfg(any(feature = "android-art-verify", feature = "vulkan-metal2vulkan-verify"))]
             crate::kprintln!(
                 "[JSR-ANDROID-ART] file-install-fail path={}",
                 core::str::from_utf8(path).unwrap_or("<non-utf8>")
@@ -773,12 +924,7 @@ fn install_root_android_files(
             let interpreter = root
                 .read_file("/lib64/ld-linux-x86-64.so.2", 16 * 1024 * 1024)
                 .map_err(|_| HealthError::RootExecute)?;
-            if !crate::linux_vfs::install_root_program(
-                origin,
-                path,
-                byte_len,
-                interpreter.len(),
-            ) {
+            if !crate::linux_vfs::install_root_program(origin, path, byte_len, interpreter.len()) {
                 return Err(HealthError::RootExecute);
             }
         }
@@ -868,10 +1014,10 @@ fn execute_root_dynamic_programs(
         return Err(HealthError::RootExecute);
     }
     install_root_libraries(root)?;
-#[cfg(feature = "android-art-verify")]
-{
-    install_root_android_files(root, origin)?;
-    let art_argv: [&[u8]; 6] = [
+    #[cfg(feature = "android-art-verify")]
+    {
+        install_root_android_files(root, origin)?;
+        let art_argv: [&[u8]; 6] = [
         b"/system/bin/dalvikvm64",
         b"-Xuse-stderr-logger",
         b"-Xbootclasspath:/apex/com.android.art/javalib/core-oj.jar:/apex/com.android.art/javalib/core-libart.jar:/apex/com.android.i18n/javalib/core-icu4j.jar",
@@ -879,14 +1025,14 @@ fn execute_root_dynamic_programs(
         b"/data/local/tmp/classes.dex",
         b"HelloJvm",
     ];
-    let art_envp: [&[u8]; 5] = [
-        b"ANDROID_ROOT=/system",
-        b"ANDROID_DATA=/data",
-        b"ANDROID_ART_ROOT=/apex/com.android.art",
-        b"ANDROID_I18N_ROOT=/apex/com.android.i18n",
-        b"ANDROID_TZDATA_ROOT=/system/etc",
-    ];
-    let official_001_argv: [&[u8]; 6] = [
+        let art_envp: [&[u8]; 5] = [
+            b"ANDROID_ROOT=/system",
+            b"ANDROID_DATA=/data",
+            b"ANDROID_ART_ROOT=/apex/com.android.art",
+            b"ANDROID_I18N_ROOT=/apex/com.android.i18n",
+            b"ANDROID_TZDATA_ROOT=/system/etc",
+        ];
+        let official_001_argv: [&[u8]; 6] = [
         b"/system/bin/dalvikvm64",
         b"-Xuse-stderr-logger",
         b"-Xbootclasspath:/apex/com.android.art/javalib/core-oj.jar:/apex/com.android.art/javalib/core-libart.jar:/apex/com.android.i18n/javalib/core-icu4j.jar",
@@ -894,15 +1040,15 @@ fn execute_root_dynamic_programs(
         b"/data/local/tmp/art-official-001.dex",
         b"Main",
     ];
-    run_root_android_program(
-        root,
-        "android-art-official-001",
-        "/system/bin/dalvikvm64",
-        "/system/bin/linker64",
-        &official_001_argv,
-        &art_envp,
-    )?;
-    let official_002_argv: [&[u8]; 6] = [
+        run_root_android_program(
+            root,
+            "android-art-official-001",
+            "/system/bin/dalvikvm64",
+            "/system/bin/linker64",
+            &official_001_argv,
+            &art_envp,
+        )?;
+        let official_002_argv: [&[u8]; 6] = [
         b"/system/bin/dalvikvm64",
         b"-Xuse-stderr-logger",
         b"-Xbootclasspath:/apex/com.android.art/javalib/core-oj.jar:/apex/com.android.art/javalib/core-libart.jar:/apex/com.android.i18n/javalib/core-icu4j.jar",
@@ -910,15 +1056,15 @@ fn execute_root_dynamic_programs(
         b"/data/local/tmp/art-official-002.dex",
         b"Main",
     ];
-    run_root_android_program(
-        root,
-        "android-art-official-002",
-        "/system/bin/dalvikvm64",
-        "/system/bin/linker64",
-        &official_002_argv,
-        &art_envp,
-    )?;
-    let official_003_argv: [&[u8]; 6] = [
+        run_root_android_program(
+            root,
+            "android-art-official-002",
+            "/system/bin/dalvikvm64",
+            "/system/bin/linker64",
+            &official_002_argv,
+            &art_envp,
+        )?;
+        let official_003_argv: [&[u8]; 6] = [
         b"/system/bin/dalvikvm64",
         b"-Xuse-stderr-logger",
         b"-Xbootclasspath:/apex/com.android.art/javalib/core-oj.jar:/apex/com.android.art/javalib/core-libart.jar:/apex/com.android.i18n/javalib/core-icu4j.jar",
@@ -926,23 +1072,23 @@ fn execute_root_dynamic_programs(
         b"/data/local/tmp/art-official-003.dex",
         b"Main",
     ];
-    run_root_android_program(
-        root,
-        "android-art-official-003",
-        "/system/bin/dalvikvm64",
-        "/system/bin/linker64",
-        &official_003_argv,
-        &art_envp,
-    )?;
-    run_root_android_program(
-        root,
-        "system/bin/dalvikvm64",
-        "/system/bin/dalvikvm64",
-        "/system/bin/linker64",
-        &art_argv,
-        &art_envp,
-    )?;
-    let apk_argv: [&[u8]; 6] = [
+        run_root_android_program(
+            root,
+            "android-art-official-003",
+            "/system/bin/dalvikvm64",
+            "/system/bin/linker64",
+            &official_003_argv,
+            &art_envp,
+        )?;
+        run_root_android_program(
+            root,
+            "system/bin/dalvikvm64",
+            "/system/bin/dalvikvm64",
+            "/system/bin/linker64",
+            &art_argv,
+            &art_envp,
+        )?;
+        let apk_argv: [&[u8]; 6] = [
         b"/system/bin/dalvikvm64",
         b"-Xuse-stderr-logger",
         b"-Xbootclasspath:/apex/com.android.art/javalib/core-oj.jar:/apex/com.android.art/javalib/core-libart.jar:/apex/com.android.i18n/javalib/core-icu4j.jar",
@@ -950,116 +1096,112 @@ fn execute_root_dynamic_programs(
         b"/data/local/tmp/app.apk",
         b"androidx.constraintlayout.core.motion.parse.KeyParser",
     ];
-    run_root_android_program(
-        root,
-        "android-art-upstream-apk",
-        "/system/bin/dalvikvm64",
-        "/system/bin/linker64",
-        &apk_argv,
-        &art_envp,
-    )?;
-    return Ok(());
-}
-#[cfg(feature = "android-ecosystem-verify")]
-{
-    install_root_android_files(root, origin)?;
-    let android_toybox_argv: [&[u8]; 3] = [
-        b"/system/bin/toybox",
-        b"uname",
-        b"-a",
-    ];
-    run_root_android_program(
-        root,
-        "system/bin/toybox",
-        "/system/bin/toybox",
-        "/system/bin/linker64",
-        &android_toybox_argv,
-        &[],
-    )?;
-    let toybox = root
-        .read_file("/usr/bin/toybox", 4 * 1024 * 1024)
-        .map_err(|_| HealthError::RootExecute)?;
-    let uname_argv: [&[u8]; 3] = [b"/usr/bin/toybox", b"uname", b"-a"];
-    let printf_argv: [&[u8]; 3] = [b"/usr/bin/toybox", b"printf", b"toybox-ok\n"];
-    let sha_argv: [&[u8]; 3] = [
-        b"/usr/bin/toybox",
-        b"sha256sum",
-        b"/usr/lib/x86_64-linux-gnu/libc.so.6",
-    ];
-    let frames_before = crate::mm::frame::free_frames();
-    if !crate::compat_dynamic_demo::run_root_static_program(
-        "android-toybox-uname",
-        &toybox,
-        &uname_argv,
-        frames_before,
-        false,
-    ) || !crate::compat_dynamic_demo::run_root_static_program(
-        "android-toybox-printf",
-        &toybox,
-        &printf_argv,
-        frames_before,
-        false,
-    ) || !crate::compat_dynamic_demo::run_root_static_program(
-        "android-toybox-sha256sum",
-        &toybox,
-        &sha_argv,
-        frames_before,
-        false,
-    ) {
-        return Err(HealthError::RootExecute);
+        run_root_android_program(
+            root,
+            "android-art-upstream-apk",
+            "/system/bin/dalvikvm64",
+            "/system/bin/linker64",
+            &apk_argv,
+            &art_envp,
+        )?;
+        return Ok(());
     }
-    let binder_test = root
-        .read_file("/usr/bin/aosp-binder-driver-test", 16 * 1024 * 1024)
-        .map_err(|_| HealthError::RootExecute)?;
-    let binder_argv: [&[u8]; 1] = [b"/usr/bin/aosp-binder-driver-test"];
-    if !crate::compat_dynamic_demo::run_root_static_program(
-        "aosp-binder-driver-test",
-        &binder_test,
-        &binder_argv,
-        crate::mm::frame::free_frames(),
-        false,
-    ) {
-        return Err(HealthError::RootExecute);
+    #[cfg(feature = "android-ecosystem-verify")]
+    {
+        install_root_android_files(root, origin)?;
+        let android_toybox_argv: [&[u8]; 3] = [b"/system/bin/toybox", b"uname", b"-a"];
+        run_root_android_program(
+            root,
+            "system/bin/toybox",
+            "/system/bin/toybox",
+            "/system/bin/linker64",
+            &android_toybox_argv,
+            &[],
+        )?;
+        let toybox = root
+            .read_file("/usr/bin/toybox", 4 * 1024 * 1024)
+            .map_err(|_| HealthError::RootExecute)?;
+        let uname_argv: [&[u8]; 3] = [b"/usr/bin/toybox", b"uname", b"-a"];
+        let printf_argv: [&[u8]; 3] = [b"/usr/bin/toybox", b"printf", b"toybox-ok\n"];
+        let sha_argv: [&[u8]; 3] = [
+            b"/usr/bin/toybox",
+            b"sha256sum",
+            b"/usr/lib/x86_64-linux-gnu/libc.so.6",
+        ];
+        let frames_before = crate::mm::frame::free_frames();
+        if !crate::compat_dynamic_demo::run_root_static_program(
+            "android-toybox-uname",
+            &toybox,
+            &uname_argv,
+            frames_before,
+            false,
+        ) || !crate::compat_dynamic_demo::run_root_static_program(
+            "android-toybox-printf",
+            &toybox,
+            &printf_argv,
+            frames_before,
+            false,
+        ) || !crate::compat_dynamic_demo::run_root_static_program(
+            "android-toybox-sha256sum",
+            &toybox,
+            &sha_argv,
+            frames_before,
+            false,
+        ) {
+            return Err(HealthError::RootExecute);
+        }
+        let binder_test = root
+            .read_file("/usr/bin/aosp-binder-driver-test", 16 * 1024 * 1024)
+            .map_err(|_| HealthError::RootExecute)?;
+        let binder_argv: [&[u8]; 1] = [b"/usr/bin/aosp-binder-driver-test"];
+        if !crate::compat_dynamic_demo::run_root_static_program(
+            "aosp-binder-driver-test",
+            &binder_test,
+            &binder_argv,
+            crate::mm::frame::free_frames(),
+            false,
+        ) {
+            return Err(HealthError::RootExecute);
+        }
+        return Ok(());
     }
-    return Ok(());
-}
-#[cfg(feature = "vulkan-metal2vulkan-verify")]
-{
-    install_root_android_files(root, origin)?;
-    let vulkan_envp: [&[u8]; 5] = [
-        b"LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu",
-        b"VK_DRIVER_FILES=/usr/lib/x86_64-linux-gnu/vk_swiftshader_icd.json",
-        b"VK_ICD_FILENAMES=/usr/lib/x86_64-linux-gnu/vk_swiftshader_icd.json",
-        b"HOME=/data",
-        b"XDG_CACHE_HOME=/data/.cache",
-    ];
-    let compute_argv: [&[u8]; 1] = [b"/usr/bin/metal2vulkan-compute"];
-    crate::linux_abi::reset_vulkan_trace_budget();
-    run_root_android_program(
-        root,
-        "metal2vulkan-compute",
-        "/usr/bin/metal2vulkan-compute",
-        "/lib64/ld-linux-x86-64.so.2",
-        &compute_argv,
-        &vulkan_envp,
-    )?;
-    let render_argv: [&[u8]; 1] = [b"/usr/bin/metal2vulkan-render"];
-    crate::linux_abi::reset_vulkan_trace_budget();
-    run_root_android_program(
-        root,
-        "metal2vulkan-render",
-        "/usr/bin/metal2vulkan-render",
-        "/lib64/ld-linux-x86-64.so.2",
-        &render_argv,
-        &vulkan_envp,
-    )?;
-    return Ok(());
-}
-#[cfg(feature = "android-fixture-verify")]
-{
-    let ppid_argv: [&[u8]; 1] = [b"/usr/bin/jasper-getppid"];
-    return run_root_program(root, origin, "/usr/bin/jasper-getppid", &ppid_argv);
-}
+    #[cfg(feature = "vulkan-metal2vulkan-verify")]
+    {
+        install_root_android_files(root, origin)?;
+        let vulkan_envp: [&[u8]; 5] = [
+            b"LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu",
+            b"VK_DRIVER_FILES=/usr/lib/x86_64-linux-gnu/vk_swiftshader_icd.json",
+            b"VK_ICD_FILENAMES=/usr/lib/x86_64-linux-gnu/vk_swiftshader_icd.json",
+            b"HOME=/data",
+            b"XDG_CACHE_HOME=/data/.cache",
+        ];
+        let compute_argv: [&[u8]; 1] = [b"/usr/bin/metal2vulkan-compute"];
+        crate::linux_abi::reset_vulkan_trace_budget();
+        run_root_android_program(
+            root,
+            "metal2vulkan-compute",
+            "/usr/bin/metal2vulkan-compute",
+            "/lib64/ld-linux-x86-64.so.2",
+            &compute_argv,
+            &vulkan_envp,
+        )?;
+        let render_argv: [&[u8]; 1] = [b"/usr/bin/metal2vulkan-render"];
+        crate::linux_abi::reset_vulkan_trace_budget();
+        run_root_android_program(
+            root,
+            "metal2vulkan-render",
+            "/usr/bin/metal2vulkan-render",
+            "/lib64/ld-linux-x86-64.so.2",
+            &render_argv,
+            &vulkan_envp,
+        )?;
+        return Ok(());
+    }
+    #[cfg(feature = "android-fixture-verify")]
+    {
+        let ppid_argv: [&[u8]; 1] = [b"/usr/bin/jasper-getppid"];
+        return run_root_program(root, origin, "/usr/bin/jasper-getppid", &ppid_argv);
+    }
     let true_argv: [&[u8]; 1] = [b"/bin/true"];
     run_root_program(root, origin, "/bin/true", &true_argv)?;
     let getconf_argv: [&[u8]; 2] = [b"/usr/bin/getconf", b"GNU_LIBC_VERSION"];
@@ -1068,11 +1210,9 @@ fn execute_root_dynamic_programs(
     run_root_program(root, origin, "/usr/bin/uname", &uname_argv)?;
     let hostname_argv: [&[u8]; 1] = [b"/usr/bin/hostname"];
     run_root_program(root, origin, "/usr/bin/hostname", &hostname_argv)?;
-    let basename_argv: [&[u8]; 2] =
-        [b"/usr/bin/basename", b"/usr/lib/x86_64-linux-gnu/libc.so.6"];
+    let basename_argv: [&[u8]; 2] = [b"/usr/bin/basename", b"/usr/lib/x86_64-linux-gnu/libc.so.6"];
     run_root_program(root, origin, "/usr/bin/basename", &basename_argv)?;
-    let dirname_argv: [&[u8]; 2] =
-        [b"/usr/bin/dirname", b"/usr/lib/x86_64-linux-gnu/libc.so.6"];
+    let dirname_argv: [&[u8]; 2] = [b"/usr/bin/dirname", b"/usr/lib/x86_64-linux-gnu/libc.so.6"];
     run_root_program(root, origin, "/usr/bin/dirname", &dirname_argv)?;
     let id_argv: [&[u8]; 2] = [b"/usr/bin/id", b"-u"];
     run_root_program(root, origin, "/usr/bin/id", &id_argv)?;
@@ -1133,9 +1273,7 @@ pub fn recover_control_block(repair_durable_copies: bool) -> Result<ControlBlock
         .transpose()?;
     let device = control_device()?;
     let capacity = device.lock().geometry().capacity_sectors;
-    let mut io = KernelControlIo {
-        device,
-    };
+    let mut io = KernelControlIo { device };
     let gpt = io.read_gpt()?;
     validate_gpt(&gpt, capacity)?;
     let mut first = [0u8; CONTROL_RECORD_BYTES];
@@ -1175,15 +1313,15 @@ pub fn confirm_minimum_health() -> Result<(), HealthError> {
         .map_err(|_| HealthError::Block)?;
     let current = recover(Some(&first), Some(&second)).map_err(HealthError::Recovery)?;
 
-#[cfg(all(
-    feature = "lifecycle-health-fail-verify",
-    not(feature = "lifecycle-root-exec-verify")
-))]
+    #[cfg(all(
+        feature = "lifecycle-health-fail-verify",
+        not(feature = "lifecycle-root-exec-verify")
+    ))]
     {
         let _ = current;
         Err(HealthError::InjectedFailure)
     }
-#[cfg(feature = "lifecycle-root-exec-verify")]
+    #[cfg(feature = "lifecycle-root-exec-verify")]
     {
         let slot = current
             .candidate()
@@ -1198,7 +1336,7 @@ pub fn confirm_minimum_health() -> Result<(), HealthError> {
         );
         Ok(())
     }
-#[cfg(not(feature = "lifecycle-health-fail-verify"))]
+    #[cfg(not(feature = "lifecycle-health-fail-verify"))]
     {
         let slot = current
             .candidate()

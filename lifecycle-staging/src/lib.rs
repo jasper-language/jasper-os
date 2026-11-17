@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod archive_store;
 pub mod control;
 pub mod gpt_layout;
 pub mod p0_control;
@@ -25,6 +26,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use jasper_lifecycle_model::archive::ArchiveError;
 use jasper_lifecycle_model::boot::{
     BootControlError, BootDecision, BootReason, Candidate, ControlBlock, Slot, SlotState,
 };
@@ -38,6 +40,7 @@ use jasper_lifecycle_model::transaction::{recover, TransactionError, Transaction
 use jasper_lifecycle_model::update::{TransitionError, UpdateEvent, UpdateMachine, UpdateStage};
 use sha2::{Digest, Sha256};
 
+use crate::archive_store::FileArchiveStore;
 use crate::control::{ControlStoreError, FileControlStore};
 use crate::source::{materialize_verified, MaterializedUpdate, SourceError, UpdateBundleSource};
 
@@ -976,9 +979,7 @@ pub fn archive_completed_transaction(
 }
 
 /// Reopen an already-published terminal transaction archive.
-pub fn load_archived_transaction(
-    archive_root: &Path,
-) -> Result<ArchivedTransaction, StagingError> {
+pub fn load_archived_transaction(archive_root: &Path) -> Result<ArchivedTransaction, StagingError> {
     let record = load_transaction_record(archive_root)?;
     if !matches!(
         record.stage(),
@@ -1393,6 +1394,8 @@ pub enum ServiceError {
     RecoveryTargetMismatch,
     /// No trusted archive root was configured for this service instance.
     ArchiveRootUnavailable,
+    /// The durable terminal-archive receipt store failed.
+    Archive(ArchiveError),
     /// Underlying coordinator operation failed.
     Coordinator(CoordinatorError),
     /// Terminal transaction archiving failed.
@@ -1405,18 +1408,28 @@ impl fmt::Display for ServiceError {
             Self::Busy => write!(formatter, "an update transaction is already active"),
             Self::NoActive => write!(formatter, "no update transaction is active"),
             Self::StaleGeneration { expected, actual } => {
-                write!(formatter, "stale service generation: expected {expected}, got {actual}")
+                write!(
+                    formatter,
+                    "stale service generation: expected {expected}, got {actual}"
+                )
             }
             Self::WrongStage { expected, actual } => {
-                write!(formatter, "wrong update stage: expected {expected:?}, got {actual:?}")
+                write!(
+                    formatter,
+                    "wrong update stage: expected {expected:?}, got {actual:?}"
+                )
             }
             Self::PreparedUnavailable => write!(formatter, "prepared transaction is unavailable"),
             Self::RecoveryTargetMismatch => {
-                write!(formatter, "recovery target does not match the active transaction")
+                write!(
+                    formatter,
+                    "recovery target does not match the active transaction"
+                )
             }
             Self::ArchiveRootUnavailable => {
                 write!(formatter, "no archive root is configured for this service")
             }
+            Self::Archive(error) => write!(formatter, "terminal archive receipt failed: {error:?}"),
             Self::Coordinator(error) => write!(formatter, "{error}"),
             Self::Staging(error) => write!(formatter, "{error}"),
         }
@@ -1442,6 +1455,7 @@ pub struct UpdateService {
     active: Option<ServiceUpdate>,
     next_generation: u64,
     archive_root: Option<PathBuf>,
+    archive_ledger_root: Option<PathBuf>,
 }
 
 impl UpdateService {
@@ -1455,6 +1469,7 @@ impl UpdateService {
             active: None,
             next_generation,
             archive_root: None,
+            archive_ledger_root: None,
         })
     }
 
@@ -1471,6 +1486,7 @@ impl UpdateService {
             active: None,
             next_generation,
             archive_root: None,
+            archive_ledger_root: None,
         })
     }
 
@@ -1483,6 +1499,21 @@ impl UpdateService {
         let mut service = Self::open(control_root)?;
         service.archive_root = Some(archive_root.into());
         Ok(service)
+    }
+
+    /// Configure the trusted dual-copy archive-receipt ledger.
+    ///
+    /// The path is operator configuration, not part of an action request. The
+    /// destination must already exist and is checked before any transaction can
+    /// publish an archive receipt.
+    pub fn configure_archive_ledger(
+        &mut self,
+        root: impl Into<PathBuf>,
+    ) -> Result<(), ServiceError> {
+        let root = root.into();
+        FileArchiveStore::open(&root).map_err(ServiceError::Archive)?;
+        self.archive_ledger_root = Some(root);
+        Ok(())
     }
 
     /// Return a stable snapshot of the active transaction and control state.
@@ -1550,7 +1581,13 @@ impl UpdateService {
             metadata_headroom,
         )?;
         let manifest_sha256 = prepared.manifest.manifest.manifest_sha256;
-        self.publish_active(generation, coordinator, prepared, staging_root, manifest_sha256)?;
+        self.publish_active(
+            generation,
+            coordinator,
+            prepared,
+            staging_root,
+            manifest_sha256,
+        )?;
         Ok(self.status())
     }
 
@@ -1581,7 +1618,13 @@ impl UpdateService {
             metadata_headroom,
         )?;
         let manifest_sha256 = prepared.manifest.manifest.manifest_sha256;
-        self.publish_active(generation, coordinator, prepared, staging_root, manifest_sha256)?;
+        self.publish_active(
+            generation,
+            coordinator,
+            prepared,
+            staging_root,
+            manifest_sha256,
+        )?;
         Ok(self.status())
     }
 
@@ -1640,10 +1683,11 @@ impl UpdateService {
     ) -> Result<ServiceStatus, ServiceError> {
         let active = Self::require_generation(&mut self.active, generation)?;
         Self::require_stage(active, UpdateStage::Trial)?;
-        if let Err(error) = active
-            .coordinator
-            .report_candidate_health(&mut self.control, &active.staging_root, healthy)
-        {
+        if let Err(error) = active.coordinator.report_candidate_health(
+            &mut self.control,
+            &active.staging_root,
+            healthy,
+        ) {
             active.recovery_required = true;
             return Err(ServiceError::Coordinator(error));
         }
@@ -1681,9 +1725,7 @@ impl UpdateService {
     pub fn cancel_prepared(&mut self, generation: u64) -> Result<ServiceStatus, ServiceError> {
         let active = Self::require_generation(&mut self.active, generation)?;
         Self::require_stage(active, UpdateStage::Prepared)?;
-        active
-            .coordinator
-            .cancel_prepared(&active.staging_root)?;
+        active.coordinator.cancel_prepared(&active.staging_root)?;
         self.active = None;
         Ok(self.status())
     }
@@ -1764,6 +1806,17 @@ impl UpdateService {
         };
         if archive.manifest_sha256 != active.manifest_sha256 {
             return Err(ServiceError::Staging(StagingError::ArchiveMismatch));
+        }
+        if let Some(root) = self.archive_ledger_root.as_ref() {
+            let terminal_stage = active.coordinator.stage();
+            FileArchiveStore::open(root)
+                .map_err(ServiceError::Archive)?
+                .commit_next(
+                    self.control.current().transaction_id(),
+                    active.manifest_sha256,
+                    terminal_stage,
+                )
+                .map_err(ServiceError::Archive)?;
         }
         cleanup_staged_transaction(&active.staging_root, &archive)
             .map_err(ServiceError::Staging)?;
@@ -2828,10 +2881,7 @@ mod tests {
         let complete = service.finalize_confirmed(generation).unwrap();
         assert_eq!(complete.stage, Some(UpdateStage::Complete));
         let archive = service
-            .archive_and_cleanup(
-                generation,
-                &temp.path().join("service-success-archive"),
-            )
+            .archive_and_cleanup(generation, &temp.path().join("service-success-archive"))
             .unwrap();
         assert_eq!(archive.record.stage(), UpdateStage::Complete);
         assert_eq!(service.status().stage, None);
@@ -2861,9 +2911,20 @@ mod tests {
         ));
 
         service.archive_root = Some(temp.path().join("managed-archive"));
+        let ledger_root = temp.path().join("managed-archive-ledger");
+        fs::create_dir(&ledger_root).unwrap();
+        service.configure_archive_ledger(&ledger_root).unwrap();
         let archive = service.archive_bound(binding).unwrap();
         assert_eq!(archive.manifest_sha256, binding.manifest_sha256);
         assert_eq!(archive.record.stage(), UpdateStage::Complete);
+        let receipt = FileArchiveStore::open(&ledger_root)
+            .unwrap()
+            .load()
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.transaction_id(), binding.transaction_id);
+        assert_eq!(receipt.manifest_sha256(), binding.manifest_sha256);
+        assert_eq!(receipt.terminal_stage(), UpdateStage::Complete);
         assert_eq!(service.status().stage, None);
     }
 
@@ -2885,15 +2946,9 @@ mod tests {
             Some(UpdateStage::Rollback)
         );
         assert_eq!(service.finish_rollback(generation).unwrap(), Slot::A);
-        assert_eq!(
-            service.status().stage,
-            Some(UpdateStage::RolledBack)
-        );
+        assert_eq!(service.status().stage, Some(UpdateStage::RolledBack));
         let archive = service
-            .archive_and_cleanup(
-                generation,
-                &temp.path().join("service-rollback-archive"),
-            )
+            .archive_and_cleanup(generation, &temp.path().join("service-rollback-archive"))
             .unwrap();
         assert_eq!(archive.record.stage(), UpdateStage::RolledBack);
     }
@@ -2901,16 +2956,14 @@ mod tests {
     #[test]
     fn service_cleanup_reopens_an_archive_published_before_cleanup_retry() {
         let temp = TestDir::new("service-archive-retry");
-        let (mut service, generation, staging_root) =
-            prepared_service(&temp, "archive-retry");
+        let (mut service, generation, staging_root) = prepared_service(&temp, "archive-retry");
         service.commit(generation, Slot::B, 2).unwrap();
         service.begin_trial(generation).unwrap();
         service.report_health(generation, true).unwrap();
         service.finalize_confirmed(generation).unwrap();
 
         let archive_root = temp.path().join("archive-retry-audit");
-        let published =
-            archive_completed_transaction(&staging_root, &archive_root).unwrap();
+        let published = archive_completed_transaction(&staging_root, &archive_root).unwrap();
         assert_eq!(published.record.stage(), UpdateStage::Complete);
 
         let reopened = service
@@ -2957,8 +3010,7 @@ mod tests {
     #[test]
     fn active_recovery_uses_only_stable_binding_identity() {
         let temp = TestDir::new("service-bound-recovery");
-        let (mut service, generation, staging_root) =
-            prepared_service(&temp, "bound-recovery");
+        let (mut service, generation, staging_root) = prepared_service(&temp, "bound-recovery");
         let prepared_record = service
             .active
             .as_ref()
@@ -3037,11 +3089,9 @@ mod tests {
         .unwrap();
 
         let initial = ControlBlock::initialize(Slot::A, 1, [1; 32], 1, 1, 1, 2).unwrap();
-        let mut offline = UpdateService::initialize(
-            temp.path().join("service-offline-control"),
-            initial,
-        )
-        .unwrap();
+        let mut offline =
+            UpdateService::initialize(temp.path().join("service-offline-control"), initial)
+                .unwrap();
         let offline_status = offline
             .prepare_from_source(
                 policy,
@@ -3060,11 +3110,8 @@ mod tests {
             signature,
             artifact: artifact_bytes.to_vec(),
         };
-        let mut online = UpdateService::initialize(
-            temp.path().join("service-online-control"),
-            initial,
-        )
-        .unwrap();
+        let mut online =
+            UpdateService::initialize(temp.path().join("service-online-control"), initial).unwrap();
         let online_status = online
             .prepare_from_source(
                 policy,
