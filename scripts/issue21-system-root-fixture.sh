@@ -47,9 +47,23 @@ LIBGCC_S=/usr/lib/x86_64-linux-gnu/libgcc_s.so.1
 LIBM=/usr/lib/x86_64-linux-gnu/libm.so.6
 LIBPCRE2=/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0
 
-[[ -x "$BINARY" && -f "$INTERPRETER" && -f "$LIBC" ]]
-readelf -l "$BINARY" | grep -Fq "interpreter: $INTERPRETER"
-ldd "$BINARY" | grep -Fq "libc.so.6 => $LIBC"
+fail() {
+  echo "system-root-fixture: FAIL $*" >&2
+  exit 1
+}
+
+for tool in readelf ldd dd debugfs e2fsck; do
+  command -v "$tool" >/dev/null 2>&1 || fail "missing required tool: $tool"
+done
+[[ -x "$BINARY" ]] || fail "missing executable: $BINARY"
+[[ -f "$INTERPRETER" ]] || fail "missing interpreter: $INTERPRETER"
+[[ -f "$LIBC" ]] || fail "missing libc: $LIBC"
+readelf -l "$BINARY" | grep -Fq "interpreter: $INTERPRETER" ||
+  fail "unexpected interpreter in $BINARY"
+libc_loaded="$(ldd "$BINARY" | awk '$1 == "libc.so.6" && $2 == "=>" { print $3; exit }')"
+[[ -n "$libc_loaded" ]] || fail "libc is not listed by ldd for $BINARY"
+[[ "$(readlink -f "$libc_loaded")" = "$(readlink -f "$LIBC")" ]] ||
+  fail "ldd libc $libc_loaded differs from fixture libc $LIBC"
 dd if="$IMAGE" of="$PARTITION" bs=512 skip="$START_LBA" count=16777216 \
   conv=sparse status=none
 printf 'slot=%s\nrelease=%s\nschema=1\n' "$SLOT" "$RELEASE" >"$MARKER"
