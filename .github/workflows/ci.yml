@@ -148,7 +148,7 @@ jobs:
       - name: 安装 QEMU / install QEMU
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 qemu-system-arm qemu-system-misc opensbi qemu-user
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 qemu-system-arm qemu-system-misc opensbi qemu-user ovmf
           qemu-system-x86_64 --version | head -1
           qemu-system-aarch64 --version | head -1
           qemu-system-riscv64 --version | head -1
@@ -165,6 +165,14 @@ jobs:
             ~/.cargo/git
             target
           key: accept-${{ env.RUST_NIGHTLY }}-${{ hashFiles('Cargo.lock') }}
+      - name: LC-2 原生恢复命令真实 UEFI / native recovery UEFI
+        env:
+          ISSUE21_UEFI_MODE: terminal-session
+          ISSUE21_QEMU_CPUS: 0-1
+          ISSUE21_QEMU_SMP: "2"
+          ISSUE21_QEMU_MEMORY: 1G
+          ISSUE21_UEFI_TIMEOUT: "360"
+        run: bash scripts/issue21-uefi-boot-check.sh
       - name: 一键验收 / scripts/accept.sh
         env:
           # 托管运行器只有少量核且没有硬件虚拟化：用全部核，QEMU 时限放宽（判据本身不变）。
