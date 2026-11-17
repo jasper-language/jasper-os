@@ -14,11 +14,11 @@ use crate::driver_host::{
 /// Signed driver or firmware package identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Package {
-    pub digest: [u8; 32],
-    pub signer: [u8; 32],
-    pub release: u64,
-    pub security_epoch: u64,
-    pub signature_valid: bool,
+    digest: [u8; 32],
+    signer: [u8; 32],
+    release: u64,
+    security_epoch: u64,
+    signature_valid: bool,
 }
 
 impl Package {
@@ -37,6 +37,31 @@ impl Package {
             security_epoch,
             signature_valid: true,
         }
+    }
+
+    /// Verified content digest.
+    pub const fn digest(self) -> [u8; 32] {
+        self.digest
+    }
+
+    /// Verified signer public key.
+    pub const fn signer(self) -> [u8; 32] {
+        self.signer
+    }
+
+    /// Monotonic package release.
+    pub const fn release(self) -> u64 {
+        self.release
+    }
+
+    /// Anti-rollback security epoch.
+    pub const fn security_epoch(self) -> u64 {
+        self.security_epoch
+    }
+
+    /// Whether the signing boundary marked this package verified.
+    pub const fn is_verified(self) -> bool {
+        self.signature_valid
     }
 
     fn valid_identity(self) -> bool {
