@@ -154,7 +154,7 @@ case "$MODE" in
   sandbox-launch) KERNEL_FEATURES=lifecycle-root-exec-verify,sandbox-launch-verify ;;
   native-install-abi) KERNEL_FEATURES=native-install-abi-verify ;;
   terminal-session) KERNEL_FEATURES=lifecycle-root-exec-verify,terminal-session-verify ;;
-  terminal-recovery) KERNEL_FEATURES=lifecycle-ab-health,terminal-session-verify ;;
+  terminal-recovery) KERNEL_FEATURES=production,lifecycle-ab-health,terminal-session-verify ;;
   android-ecosystem) KERNEL_FEATURES=lifecycle-root-exec-verify,android-ecosystem-verify ;;
   android-art) KERNEL_FEATURES=lifecycle-root-exec-verify,android-art-verify ;;
   vulkan-metal2vulkan) KERNEL_FEATURES=lifecycle-root-exec-verify,vulkan-metal2vulkan-verify ;;
@@ -163,6 +163,10 @@ case "$MODE" in
 esac
 if [ "${JASPER_ANDROID_ONLY:-0}" = 1 ]; then
   KERNEL_FEATURES="$KERNEL_FEATURES,android-fixture-verify"
+fi
+KERNEL_DEFAULT_FEATURES=()
+if [ "$MODE" = terminal-recovery ]; then
+  KERNEL_DEFAULT_FEATURES=(--no-default-features)
 fi
 if [ "$PREBUILT" = 1 ]; then
   [ -x "$KERNEL" ]
@@ -177,7 +181,7 @@ if [ "$PREBUILT" = 1 ]; then
   : >"$OUT/boot-manager-build.log"
 else
   CARGO_TARGET_DIR="$TARGET" guarded_cargo build --locked --release --target x86_64-unknown-none \
-    -p jasper-kernel --features "$KERNEL_FEATURES" >"$OUT/kernel-build.log" 2>&1
+    -p jasper-kernel "${KERNEL_DEFAULT_FEATURES[@]}" --features "$KERNEL_FEATURES" >"$OUT/kernel-build.log" 2>&1
   guarded_cargo build --locked --release -p xtask >"$OUT/xtask-build.log" 2>&1
   CARGO_TARGET_DIR="$TARGET" guarded_cargo build --locked --release --target x86_64-unknown-uefi \
     -p jasper-boot-manager >"$OUT/boot-manager-build.log" 2>&1
