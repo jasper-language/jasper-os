@@ -380,7 +380,8 @@ fn write_update_recovery(status_request_id: u64, action_request_id: u64, json: b
             && write(line.as_bytes());
     }
     let mut line = FixedText::new();
-    let ok = line.push(b"system-update result=ok command=system.update.recover action=recover generation=")
+    let ok = line
+        .push(b"system-update result=ok command=system.update.recover action=recover generation=")
         && line.push_u64(response.generation)
         && line.push(b" transaction=")
         && line.push_u64(response.transaction_id)
@@ -417,9 +418,9 @@ fn client_error_code(error: ClientError) -> i64 {
     match error {
         ClientError::Transport(code) => code,
         ClientError::Protocol => ids::SYSTEM_UPDATE_ERROR_PROTOCOL as i64,
-        ClientError::RequestMismatch | ClientError::BindingMismatch => {
-            ids::SYSTEM_UPDATE_ERROR_TRANSACTION_MISMATCH as i64
-        }
+        ClientError::RequestMismatch
+        | ClientError::IdentityMismatch
+        | ClientError::BindingMismatch => ids::SYSTEM_UPDATE_ERROR_TRANSACTION_MISMATCH as i64,
     }
 }
 
