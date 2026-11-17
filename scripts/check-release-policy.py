@@ -74,6 +74,10 @@ def main() -> int:
         + ",".join(channel["name"] for channel in policy["channel"])
         + " sources>="
         + str(policy["min_update_sources"])
+        + " signatures="
+        + str(policy["release_signer_threshold"])
+        + "-of-"
+        + str(policy["release_signer_count"])
     )
     return 0
 

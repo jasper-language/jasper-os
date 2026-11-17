@@ -103,7 +103,7 @@ release policy 的 `require_signed_revocation_snapshot`：
 三密钥集合后 2-of-3 成功，并从两个认证 HTTPS 源和一个离线副本得到相同字节。
 
 ```text
-release-policy: PASS channels=stable,lts sources>=2
+release-policy: PASS channels=stable,lts sources>=2 signatures=2-of-3
 release-supply-check: PASS threshold=2 signers=3 revocation=true
   revocation_snapshot_epoch=2 rotation=true https_sources=2
   offline_sources=1 tamper_rejected=true

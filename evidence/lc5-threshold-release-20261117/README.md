@@ -24,7 +24,7 @@ Commands:
 
 ```text
 python3 scripts/check-release-policy.py
-release-policy: PASS channels=stable,lts sources>=2
+release-policy: PASS channels=stable,lts sources>=2 signatures=2-of-3
 
 bash scripts/release-revocations-check.sh
 release-revocations-check: PASS signed=true monotonic=true replay_rejected=true rollback_rejected=true dual_copy=true audit=true
