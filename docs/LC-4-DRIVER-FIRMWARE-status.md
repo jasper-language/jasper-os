@@ -9,7 +9,9 @@
 `kernel-core/src/driver_lifecycle.rs` 在既有 Driver Host 单一设备权威之外增加纯生命周期
 策略，不建立第二套设备授权：
 
-- 驱动/固件包必须具有非零 digest、签名者、release 和 security epoch；
+- 驱动/固件包使用独立 Ed25519 32 字节公钥身份，必须具有非零 digest、signer、
+  release 和 security epoch；`Package::verified` 只允许承载已经由签名信任边界
+  验证过的包事实，不能再把窄整数当作签名者；
 - 只有显式信任的签名者及有效签名事实可以进入 `Verified`；
 - release floor、安全纪元和已运行版本阻止未经批准的回滚/降级；
 - `Verified → Authorized → Active` 必须由 generation token 驱动；

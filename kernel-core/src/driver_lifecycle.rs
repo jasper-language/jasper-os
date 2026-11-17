@@ -15,22 +15,41 @@ use crate::driver_host::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Package {
     pub digest: [u8; 32],
-    pub signer: u64,
+    pub signer: [u8; 32],
     pub release: u64,
     pub security_epoch: u64,
     pub signature_valid: bool,
 }
 
 impl Package {
+    /// Construct a package whose manifest signature was already verified by
+    /// the lifecycle trust boundary.
+    pub const fn verified(
+        digest: [u8; 32],
+        signer: [u8; 32],
+        release: u64,
+        security_epoch: u64,
+    ) -> Self {
+        Self {
+            digest,
+            signer,
+            release,
+            security_epoch,
+            signature_valid: true,
+        }
+    }
+
     fn valid_identity(self) -> bool {
-        self.signer != 0 && self.release != 0 && !self.digest.iter().all(|byte| *byte == 0)
+        self.signer.iter().any(|byte| *byte != 0)
+            && self.release != 0
+            && self.digest.iter().any(|byte| *byte != 0)
     }
 }
 
 /// Explicit lifecycle policy, not a hardware fact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LifecyclePolicy {
-    pub trusted_signer: u64,
+    pub trusted_signer: [u8; 32],
     pub release_floor: u64,
     pub security_epoch: u64,
     pub hotplug: bool,
@@ -416,18 +435,12 @@ mod tests {
     use super::*;
 
     fn package(release: u64) -> Package {
-        Package {
-            digest: [release as u8; 32],
-            signer: 7,
-            release,
-            security_epoch: 3,
-            signature_valid: true,
-        }
+        Package::verified([release as u8; 32], [7; 32], release, 3)
     }
 
     fn policy() -> LifecyclePolicy {
         LifecyclePolicy {
-            trusted_signer: 7,
+            trusted_signer: [7; 32],
             release_floor: 1,
             security_epoch: 3,
             hotplug: true,
@@ -446,7 +459,7 @@ mod tests {
         );
         assert_eq!(
             lifecycle.stage(Package {
-                signer: 8,
+                signer: [8; 32],
                 ..package(2)
             }),
             Err(Error::UntrustedSigner)
