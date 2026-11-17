@@ -6,6 +6,20 @@
 一个持有单一 `UpdateCoordinator` 和 `FileControlStore` 的有状态服务门面；
 Issue #39 的全系统统一授权、完整并发/断电故障矩阵和 Pixel 验收仍未完成。
 
+## 当前 QEMU 与 Pixel 6a 边界
+
+公开 `main` `235fc8a` 的四个独立 `user-updateagentd` 进程在真实
+OVMF/virtio-blk 启动中经过显式 readiness barrier，再同时执行六轮 status 和
+一次 list；所有请求成功，首程序退出 0 且资源回收。证据见
+`evidence/issue21-uefi-boot-20261117-233206/README.md`。这关闭的是有界并发
+起点、请求 ID 隔离和超时后继续服务，不是完整压力或断电矩阵。
+
+同一公开内核也通过 Pixel 6a 实物 `fastboot boot` 完成当前 runtime plan 的
+8 CPU/Ring 3/syscall/user-pointer 路径并走 PSCI reset，随后未改 slot 恢复
+Android；证据见 `evidence/pixel6a-runtime-20261117-233437/README.md`。该探针
+不包含 Jasper UFS provisioning、原生安装服务、更新事务、回滚或断电恢复，
+因此不能作为 LC-2 的 Pixel 安装验收。
+
 ## 服务状态机
 
 服务对外提供以下有界操作：
