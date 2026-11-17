@@ -28,7 +28,7 @@ CI 使用 `--check` 连续生成两次并比较。
 
 ```text
 release-repro: PASS target=x86_64-unknown-none
-sha256=66e6ad288b6fda73585f1799230a0d1d75d20f5a0e7ec099f6fd7008c4dc0661
+sha256=eb6eeb387c592da0089d04a42337c1fe6d4324c1c9fe55decd3c3a691bd2e644
 ```
 
 在故意请求不可用 cpuset 的 fallback 路径中，两次独立构建仍得到上述同一
@@ -51,8 +51,8 @@ workspace 许可证和所需供应链工具存在。
   撤销旧键、加入新键、撤掉旧根后的根轮换；
 - 两套独立 HTTPS loopback 源使用临时 CA 与主机名验证，逐文件比较两个在线源和
   一个离线副本；主源对象缺失时只从镜像取得完全相同字节；
-- 载荷、SBOM、manifest 或签名任一改变都失败关闭；实际内核载荷
-  `66e6ad…c0661` 与 SBOM `59da70…90969` 通过上述完整演练。
+- 载荷、SBOM、manifest 或签名任一改变都失败关闭；ABI 3.18 内核载荷
+  `eb6eeb…e644` 与当前 SBOM `475d05…9a84` 通过上述完整演练。
 
 新增 `release/vulnerabilities.toml` 与 `scripts/check-vulnerabilities.py`：
 生产登记表当前为空；确定性演练数据覆盖 Critical/High 响应与修复期限、受影响范围、

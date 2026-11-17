@@ -9,9 +9,10 @@ cd "$ROOT"
 KERNEL="${JASPER_RELEASE_KERNEL:-target/release-repro-a/x86_64-unknown-none/release/jasper-kernel}"
 SBOM="${JASPER_RELEASE_SBOM:-target/jasper-os-sbom.cdx.json}"
 [[ -f "$KERNEL" ]] || { echo "release-supply-check: missing kernel: $KERNEL" >&2; exit 1; }
-if [[ ! -f "$SBOM" ]]; then
+if [[ "${JASPER_RELEASE_SBOM_EXISTING:-0}" != 1 ]]; then
   python3 scripts/release-sbom.py --output "$SBOM"
 fi
+[[ -f "$SBOM" ]] || { echo "release-supply-check: missing SBOM: $SBOM" >&2; exit 1; }
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/jasper-release-supply.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
