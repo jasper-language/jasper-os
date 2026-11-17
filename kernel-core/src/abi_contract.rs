@@ -1989,6 +1989,11 @@ pub const OPERATIONS: &[OperationContract] = &[
         result: "i64:bytes_or_error",
     },
     OperationContract {
+        name: "system.install.update.list",
+        args: "u64:request_ptr,u64:output_ptr,u64:capacity",
+        result: "i64:bytes_or_error",
+    },
+    OperationContract {
         name: "system.diagnostic.query",
         args: "u64:request_ptr,u64:output_ptr,u64:capacity",
         result: "i64:bytes_or_error",

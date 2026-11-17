@@ -15,6 +15,168 @@ pub const PACKAGE_PUT_BYTES: usize = 80;
 pub const REGISTER_BYTES: usize = 64;
 pub const GRANT_BYTES: usize = 64;
 pub const INFO_BYTES: usize = 64;
+pub const UPDATE_LIST_MAGIC: u32 = u32::from_le_bytes(*b"JSIU");
+pub const UPDATE_LIST_VERSION: u16 = 1;
+pub const UPDATE_LIST_REQUEST_BYTES: usize = 32;
+pub const UPDATE_LIST_HEADER_BYTES: usize = 32;
+pub const UPDATE_LIST_RECORD_BYTES: usize = 96;
+pub const MAX_VISIBLE_UPDATES: usize = 32; // JASPER-HARDCODE-REVIEW: issue=33 source=storage-ABI-v1 reason=bounded-native-install-snapshot-capacity
+pub const MAX_UPDATE_LIST_BYTES: usize =
+    UPDATE_LIST_HEADER_BYTES + MAX_VISIBLE_UPDATES * UPDATE_LIST_RECORD_BYTES;
+
+/// Request for the authenticated caller's update-visible installation set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UpdateListRequest {
+    pub request_id: u64,
+}
+
+impl UpdateListRequest {
+    pub fn encode(self) -> Option<[u8; UPDATE_LIST_REQUEST_BYTES]> {
+        if self.request_id == 0 {
+            return None;
+        }
+        let mut out = [0u8; UPDATE_LIST_REQUEST_BYTES];
+        out[0..4].copy_from_slice(&UPDATE_LIST_MAGIC.to_le_bytes());
+        out[4..6].copy_from_slice(&UPDATE_LIST_VERSION.to_le_bytes());
+        out[8..16].copy_from_slice(&self.request_id.to_le_bytes());
+        Some(out)
+    }
+
+    pub fn decode(raw: &[u8]) -> Option<Self> {
+        if raw.len() != UPDATE_LIST_REQUEST_BYTES
+            || read_u32(raw, 0)? != UPDATE_LIST_MAGIC
+            || read_u16(raw, 4)? != UPDATE_LIST_VERSION
+            || read_u16(raw, 6)? != 0
+            || read_u64(raw, 8)? == 0
+            || raw[16..32].iter().any(|byte| *byte != 0)
+        {
+            return None;
+        }
+        Some(Self {
+            request_id: read_u64(raw, 8)?,
+        })
+    }
+}
+
+/// Fixed response header preceding zero or more update records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UpdateListHeader {
+    pub request_id: u64,
+    pub record_count: u32,
+}
+
+impl UpdateListHeader {
+    pub fn encode(self, out: &mut [u8; UPDATE_LIST_HEADER_BYTES]) -> bool {
+        if self.request_id == 0 || self.record_count as usize > MAX_VISIBLE_UPDATES {
+            return false;
+        }
+        out[0..4].copy_from_slice(&UPDATE_LIST_MAGIC.to_le_bytes());
+        out[4..6].copy_from_slice(&UPDATE_LIST_VERSION.to_le_bytes());
+        out[8..16].copy_from_slice(&self.request_id.to_le_bytes());
+        out[16..20].copy_from_slice(&self.record_count.to_le_bytes());
+        out[20..24].copy_from_slice(&(UPDATE_LIST_RECORD_BYTES as u32).to_le_bytes());
+        true
+    }
+
+    pub fn decode(raw: &[u8]) -> Option<Self> {
+        if raw.len() < UPDATE_LIST_HEADER_BYTES
+            || read_u32(raw, 0)? != UPDATE_LIST_MAGIC
+            || read_u16(raw, 4)? != UPDATE_LIST_VERSION
+            || read_u16(raw, 6)? != 0
+            || read_u64(raw, 8)? == 0
+            || read_u32(raw, 16)? as usize > MAX_VISIBLE_UPDATES
+            || read_u32(raw, 20)? as usize != UPDATE_LIST_RECORD_BYTES
+            || raw[24..32].iter().any(|byte| *byte != 0)
+        {
+            return None;
+        }
+        Some(Self {
+            request_id: read_u64(raw, 8)?,
+            record_count: read_u32(raw, 16)?,
+        })
+    }
+}
+
+/// One immutable installation/package fact visible to an update principal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UpdateListRecord {
+    pub installation: InstallationKey,
+    pub package: PackageKey,
+    pub app_id: u64,
+    pub publisher: u64,
+    pub version: u32,
+    pub content: [u8; CONTENT_BYTES],
+    pub scope: OwnerScope,
+    pub source: PackageSource,
+    pub enabled: bool,
+}
+
+impl UpdateListRecord {
+    pub const fn from_parts(
+        installation: InstallationKey,
+        package: crate::native_install::PackageSnapshot,
+        scope: OwnerScope,
+        source: PackageSource,
+        enabled: bool,
+    ) -> Self {
+        Self {
+            installation,
+            package: package.key,
+            app_id: package.spec.app_id,
+            publisher: package.spec.publisher,
+            version: package.spec.version,
+            content: package.spec.content,
+            scope,
+            source,
+            enabled,
+        }
+    }
+
+    pub fn encode(self) -> [u8; UPDATE_LIST_RECORD_BYTES] {
+        let mut out = [0u8; UPDATE_LIST_RECORD_BYTES];
+        out[0..8].copy_from_slice(&self.installation.to_raw().to_le_bytes());
+        out[8..16].copy_from_slice(&self.package.to_raw().to_le_bytes());
+        out[16..24].copy_from_slice(&self.app_id.to_le_bytes());
+        out[24..32].copy_from_slice(&self.publisher.to_le_bytes());
+        out[32..36].copy_from_slice(&self.version.to_le_bytes());
+        out[36..36 + CONTENT_BYTES].copy_from_slice(&self.content);
+        encode_scope(&mut out, 68, self.scope);
+        out[84] = package_source_tag(self.source);
+        out[85] = u8::from(self.enabled);
+        out
+    }
+
+    pub fn decode(raw: &[u8]) -> Option<Self> {
+        if raw.len() != UPDATE_LIST_RECORD_BYTES {
+            return None;
+        }
+        let mut content = [0u8; CONTENT_BYTES];
+        content.copy_from_slice(raw.get(36..36 + CONTENT_BYTES)?);
+        let record = Self {
+            installation: InstallationKey::from_raw(read_u64(raw, 0)?)?,
+            package: PackageKey::from_raw(read_u64(raw, 8)?)?,
+            app_id: read_u64(raw, 16)?,
+            publisher: read_u64(raw, 24)?,
+            version: read_u32(raw, 32)?,
+            content,
+            scope: decode_scope(raw, 68)?,
+            source: package_source_from_tag(raw[84])?,
+            enabled: match raw[85] {
+                0 => false,
+                1 => true,
+                _ => return None,
+            },
+        };
+        if record.app_id == 0
+            || record.publisher == 0
+            || record.version == 0
+            || raw[86..].iter().any(|byte| *byte != 0)
+        {
+            return None;
+        }
+        Some(record)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PackagePutArgs {
@@ -347,5 +509,46 @@ mod tests {
         assert_eq!(read_u64(&info, 16), Some(package.to_raw()));
         assert_eq!(decode_scope(&info, 24), Some(OwnerScope::Workload(7)));
         assert_eq!(decode_subject(&info, 48), Some(Subject::Workload(7)));
+    }
+
+    #[test]
+    fn update_list_wire_binds_request_and_rejects_identity_or_reserved_fields() {
+        let request = UpdateListRequest { request_id: 9 };
+        let encoded = request.encode().unwrap();
+        assert_eq!(UpdateListRequest::decode(&encoded), Some(request));
+        let mut spoofed = encoded;
+        spoofed[16] = 1;
+        assert_eq!(UpdateListRequest::decode(&spoofed), None);
+
+        let mut header = [0u8; UPDATE_LIST_HEADER_BYTES];
+        assert!(UpdateListHeader {
+            request_id: 9,
+            record_count: 1,
+        }
+        .encode(&mut header));
+        assert_eq!(
+            UpdateListHeader::decode(&header),
+            Some(UpdateListHeader {
+                request_id: 9,
+                record_count: 1,
+            })
+        );
+
+        let record = UpdateListRecord {
+            installation: InstallationKey::from_raw((2u64 << 16) | 1).unwrap(),
+            package: PackageKey::from_raw((1u64 << 16) | 1).unwrap(),
+            app_id: 0x41,
+            publisher: 7,
+            version: 3,
+            content: [0x5a; CONTENT_BYTES],
+            scope: OwnerScope::Tenant(8),
+            source: PackageSource::Enterprise,
+            enabled: true,
+        };
+        let encoded = record.encode();
+        assert_eq!(UpdateListRecord::decode(&encoded), Some(record));
+        let mut leaked = encoded;
+        leaked[86] = 1;
+        assert_eq!(UpdateListRecord::decode(&leaked), None);
     }
 }

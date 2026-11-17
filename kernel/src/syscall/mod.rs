@@ -927,6 +927,9 @@ syscall_dispatch! {
     SYSTEM_INSTALL_QUERY => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
         install_query(a.args[0], a.args[1], a.args[2])
     },
+    SYSTEM_INSTALL_UPDATE_LIST => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        install_update_list(a.args[0], a.args[1], a.args[2])
+    },
     SYSTEM_INSTALL_HANDLE_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
         install_handle_create(a.args[0])
     },
@@ -1833,6 +1836,78 @@ fn install_query(raw_key: u64, ptr: u64, cap: u64) -> i64 {
     }
 }
 
+fn install_update_list(desc_ptr: u64, ptr: u64, cap: u64) -> i64 {
+    #[cfg(feature = "native-install-abi-verify")]
+    {
+        use kernel_core::native_install_abi::{
+            UpdateListHeader, UpdateListRecord, UpdateListRequest, MAX_UPDATE_LIST_BYTES,
+            UPDATE_LIST_HEADER_BYTES, UPDATE_LIST_RECORD_BYTES, UPDATE_LIST_REQUEST_BYTES,
+        };
+
+        let Ok(cap) = usize::try_from(cap) else {
+            return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+        };
+        if cap < UPDATE_LIST_HEADER_BYTES {
+            return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+        }
+        let mut request = [0u8; UPDATE_LIST_REQUEST_BYTES];
+        let raw_len = request.len();
+        if let Err(error) = copy_from_user(&mut request, desc_ptr, raw_len) {
+            return user_ptr_err(error);
+        }
+        let Some(request) = UpdateListRequest::decode(&request) else {
+            return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+        };
+        let (visible, count) = match crate::native_install_abi::visible_updates() {
+            Ok(visible) => visible,
+            Err(error) => return install_service_error(error),
+        };
+        let Ok(record_count) = u32::try_from(count) else {
+            return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+        };
+        let bytes = UPDATE_LIST_HEADER_BYTES
+            .checked_add(count.saturating_mul(UPDATE_LIST_RECORD_BYTES))
+            .unwrap_or(usize::MAX);
+        if cap < bytes || bytes > MAX_UPDATE_LIST_BYTES {
+            return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+        }
+        let mut output = [0u8; MAX_UPDATE_LIST_BYTES];
+        let header = UpdateListHeader {
+            request_id: request.request_id,
+            record_count,
+        };
+        if !header.encode(
+            (&mut output[..UPDATE_LIST_HEADER_BYTES])
+                .try_into()
+                .unwrap(),
+        ) {
+            return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+        }
+        for (index, update) in visible.iter().flatten().enumerate() {
+            let at = UPDATE_LIST_HEADER_BYTES + index * UPDATE_LIST_RECORD_BYTES;
+            output[at..at + UPDATE_LIST_RECORD_BYTES].copy_from_slice(
+                &UpdateListRecord::from_parts(
+                    update.installation,
+                    update.package,
+                    update.scope,
+                    update.source,
+                    update.enabled,
+                )
+                .encode(),
+            );
+        }
+        if let Err(error) = copy_to_user(ptr, &output[..bytes], cap) {
+            return user_ptr_err(error);
+        }
+        bytes as i64
+    }
+    #[cfg(not(feature = "native-install-abi-verify"))]
+    {
+        let _ = (desc_ptr, ptr, cap);
+        err(SYSTEM_ERROR_UNSUPPORTED)
+    }
+}
+
 fn install_handle_create(raw_key: u64) -> i64 {
     #[cfg(feature = "native-install-abi-verify")]
     {
@@ -1904,6 +1979,7 @@ fn install_service_error(error: kernel_core::native_install_service::InstallServ
             err(SYSTEM_ERROR_RIGHTS_DENIED)
         }
         InstallServiceError::InvalidCaller => err(SYSTEM_ERROR_RIGHTS_DENIED),
+        InstallServiceError::Capacity => err(SYSTEM_ERROR_INVALID_ARGUMENT),
         InstallServiceError::Store(
             kernel_core::persistent_install::PersistentInstallError::Capacity,
         )

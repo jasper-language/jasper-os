@@ -104,6 +104,14 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
             frame::free_frames()
         );
     }
+    #[cfg(feature = "native-install-abi-verify")]
+    if let Err(error) = crate::native_install_abi::warmup() {
+        kprintln!(
+            "[JSR-PROD-DIAG] native_install_backend=false reason={}",
+            error.name()
+        );
+        return (None, false);
+    }
     let free_before = frame::free_frames();
     let (heap_total_before, heap_free_before, _, heap_mapped_before) = crate::mm::heap::stats();
     let heap_used_before = heap_total_before.saturating_sub(heap_free_before);
@@ -116,6 +124,7 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         abi::SYSTEM_INSTALL_REGISTRATION_CREATE,
         abi::SYSTEM_INSTALL_GRANT_CREATE,
         abi::SYSTEM_INSTALL_QUERY,
+        abi::SYSTEM_INSTALL_UPDATE_LIST,
         abi::SYSTEM_INSTALL_HANDLE_CREATE,
         abi::SYSTEM_INSTALL_HANDLE_QUERY,
         abi::SYSTEM_HANDLE_DUPLICATE,

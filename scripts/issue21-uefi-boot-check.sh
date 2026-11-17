@@ -423,7 +423,7 @@ if [ "$MODE" = block-timeout ]; then
 fi
 if [ "$MODE" = native-install-abi ]; then
   grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
-  grep -aqE $'^(\\[JSR-USERTEXT\\].*text=)?native-install-abi: ok package=true idempotent=true register=true grant=true query=true handle=true rights=true close=true denied_short=true\r?$' "$OUT/serial.log"
+  grep -aqE $'^(\\[JSR-USERTEXT\\].*text=)?native-install-abi: ok package=true idempotent=true register=true grant=true query=true updates=true update_short=true handle=true rights=true close=true denied_short=true\r?$' "$OUT/serial.log"
   ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
   echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
   exit 0

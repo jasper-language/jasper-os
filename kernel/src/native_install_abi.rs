@@ -10,9 +10,9 @@ use kernel_core::fs::journal::{JournalError, SectorIo, STORAGE_UNIT_BYTES};
 use kernel_core::native_install::{
     GrantKey, InstallationKey, InstallationSnapshot, PackageKey, PackageSpec, Subject,
 };
-use kernel_core::native_install_abi::{GrantArgs, RegisterArgs};
+use kernel_core::native_install_abi::{GrantArgs, RegisterArgs, MAX_VISIBLE_UPDATES};
 use kernel_core::native_install_service::{
-    InstallServiceCaller, InstallServiceError, NativeInstallService,
+    InstallServiceCaller, InstallServiceError, NativeInstallService, VisibleUpdate,
 };
 use kernel_core::persistent_install::PersistentInstallStore;
 use kernel_core::security::SecurityDomain;
@@ -60,8 +60,8 @@ impl SectorIo for RamDisk {
         out: &mut [u8; STORAGE_UNIT_BYTES],
     ) -> Result<(), JournalError> {
         let offset = Self::offset(sector)?;
-            let bytes = unsafe { &mut *RAM_STORAGE.0.get() };
-            out.copy_from_slice(&bytes[offset..offset + STORAGE_UNIT_BYTES]);
+        let bytes = unsafe { &mut *RAM_STORAGE.0.get() };
+        out.copy_from_slice(&bytes[offset..offset + STORAGE_UNIT_BYTES]);
         Ok(())
     }
 
@@ -88,11 +88,16 @@ fn ensure_backend(
     backend: &mut Option<NativeInstallService<RamDisk>>,
 ) -> Result<(), InstallServiceError> {
     if backend.is_none() {
-        let store =
-            PersistentInstallStore::format(RamDisk).map_err(InstallServiceError::Store)?;
+        let store = PersistentInstallStore::format(RamDisk).map_err(InstallServiceError::Store)?;
         *backend = Some(NativeInstallService::new(store));
     }
     Ok(())
+}
+
+/// Initialize the persistent installation service before user-process baselines.
+pub fn warmup() -> Result<(), InstallServiceError> {
+    let mut backend = BACKEND.lock();
+    ensure_backend(&mut backend)
 }
 
 fn current_caller() -> Result<InstallServiceCaller, InstallServiceError> {
@@ -161,4 +166,17 @@ pub fn query(
         .as_ref()
         .ok_or(InstallServiceError::InvalidCaller)?
         .query(caller, installation, now)
+}
+
+pub fn visible_updates(
+) -> Result<([Option<VisibleUpdate>; MAX_VISIBLE_UPDATES], usize), InstallServiceError> {
+    let caller = current_caller()?;
+    let mut backend = BACKEND.lock();
+    ensure_backend(&mut backend)?;
+    let mut output = [None; MAX_VISIBLE_UPDATES];
+    let written = backend
+        .as_ref()
+        .ok_or(InstallServiceError::InvalidCaller)?
+        .visible_updates(caller, &mut output)?;
+    Ok((output, written))
 }

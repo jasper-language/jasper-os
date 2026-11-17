@@ -8,8 +8,9 @@ use kernel_core::native_install::{
     CONTENT_BYTES,
 };
 use kernel_core::native_install_abi::{
-    GrantArgs, PackagePutArgs, RegisterArgs, GRANT_BYTES, INFO_BYTES, PACKAGE_PUT_BYTES,
-    REGISTER_BYTES,
+    GrantArgs, PackagePutArgs, RegisterArgs, UpdateListHeader, UpdateListRecord, UpdateListRequest,
+    GRANT_BYTES, INFO_BYTES, PACKAGE_PUT_BYTES, REGISTER_BYTES, UPDATE_LIST_HEADER_BYTES,
+    UPDATE_LIST_RECORD_BYTES, UPDATE_LIST_REQUEST_BYTES,
 };
 
 const PACKAGE_BYTES: &[u8] = b"native-install-abi";
@@ -105,6 +106,58 @@ fn query(installation: u64, package: u64) -> Result<(), i32> {
     Ok(())
 }
 
+fn update_list(installation: u64, package: u64) -> Result<(), i32> {
+    let request = UpdateListRequest { request_id: 0x55 }.encode().ok_or(27)?;
+    let mut output = [0u8; UPDATE_LIST_HEADER_BYTES + UPDATE_LIST_RECORD_BYTES];
+    let result = call(
+        ids::SYSTEM_INSTALL_UPDATE_LIST,
+        request.as_ptr() as u64,
+        output.as_mut_ptr() as u64,
+        output.len() as u64,
+    );
+    if result != output.len() as i64 {
+        return Err(28);
+    }
+    let header = UpdateListHeader::decode(&output).ok_or(29)?;
+    if header.request_id != 0x55 || header.record_count != 1 {
+        return Err(30);
+    }
+    let record = UpdateListRecord::decode(&output[UPDATE_LIST_HEADER_BYTES..]).ok_or(31)?;
+    if record.installation.to_raw() != installation
+        || record.package.to_raw() != package
+        || record.app_id != 0x494e_5354_414c_4c31
+        || !record.enabled
+    {
+        return Err(32);
+    }
+
+    let mut short = [0xa5u8; UPDATE_LIST_HEADER_BYTES + UPDATE_LIST_RECORD_BYTES - 1];
+    let short_before = short;
+    if call(
+        ids::SYSTEM_INSTALL_UPDATE_LIST,
+        request.as_ptr() as u64,
+        short.as_mut_ptr() as u64,
+        short.len() as u64,
+    ) != -(ids::SYSTEM_ERROR_INVALID_ARGUMENT as i64)
+        || short != short_before
+    {
+        return Err(33);
+    }
+
+    let mut spoofed = request;
+    spoofed[UPDATE_LIST_REQUEST_BYTES - 1] = 1;
+    if call(
+        ids::SYSTEM_INSTALL_UPDATE_LIST,
+        spoofed.as_ptr() as u64,
+        output.as_mut_ptr() as u64,
+        output.len() as u64,
+    ) != -(ids::SYSTEM_ERROR_INVALID_ARGUMENT as i64)
+    {
+        return Err(34);
+    }
+    Ok(())
+}
+
 fn open_handle(installation: u64) -> Result<u64, i32> {
     let handle = call(ids::SYSTEM_INSTALL_HANDLE_CREATE, installation, 0, 0);
     (handle > 0).then_some(handle as u64).ok_or(19)
@@ -141,6 +194,7 @@ fn run() -> Result<(), i32> {
     let installation = register(package)?;
     grant(installation)?;
     query(installation, package)?;
+    update_list(installation, package)?;
     let short = call(
         ids::SYSTEM_INSTALL_QUERY,
         installation,
@@ -186,7 +240,7 @@ fn run() -> Result<(), i32> {
         return Err(26);
     }
     println!(
-        "native-install-abi: ok package=true idempotent=true register=true grant=true query=true handle=true rights=true close=true denied_short=true"
+        "native-install-abi: ok package=true idempotent=true register=true grant=true query=true updates=true update_short=true handle=true rights=true close=true denied_short=true"
     );
     Ok(())
 }

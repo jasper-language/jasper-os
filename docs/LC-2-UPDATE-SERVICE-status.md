@@ -42,6 +42,12 @@ authenticated subject 可更新的组件集合，只依据每条安装的显式 
 写任何记录前检查；容量不足失败且不留下部分结果。租户 scope、更新主体与安装数据
 scope 仍保持独立。
 
+ABI 3.20 将该集合暴露为 `system.install.update.list`（ID 114）。请求只携带
+request ID；主体、租户与可见范围全部由内核认证信息派生。响应使用固定
+header + 96 字节记录，包含安装、包、AppID、publisher、version、content、scope、
+source 和 enabled，不包含路径或调用者可选择的身份。容量不足和保留身份字节被篡改
+均在写用户缓冲前失败关闭。
+
 受信救援环境可以携带底层路径运行独立的 `jasper-update-recovery` 维护工具：
 
 ```text
@@ -250,10 +256,12 @@ PASS (3.19.0)
   服务均通过真实 UEFI/virtio-blk。
 - tenant A/B 的可见更新集合互不串租户；系统主体不隐式获得租户更新权；输出缓冲
   过小时整体返回容量错误且不写入部分 record。
+- ABI 3.20 的 `system.install.update.list` 在真实 OVMF guest 中返回当前主体的
+  update record；short buffer 与伪造保留身份字节均被拒绝，首程序资源回基线。
 
 ## 仍未完成
 
-- 租户可见更新集合的正式用户 ABI/UI 暴露；服务核心已具备隔离过滤；
+- 租户可见更新集合的 UI/Agent 产品化；版本化原生 ABI 已具备隔离过滤；
 - 信任根轮换、2-of-3 门限和签名撤销快照持久化；
 - 断点续传、生产发布源高可用和跨重启审计查询；
 - 系统级在线/离线发布演练和 Pixel 6a 安装/回滚/断电矩阵。

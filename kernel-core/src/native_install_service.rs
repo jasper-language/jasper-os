@@ -10,7 +10,6 @@ use crate::native_install::{
     Actor, DataKey, DataOwnerKind, DataSnapshot, GrantKey, GrantRights, GrantSpec, InstallError,
     InstallSpec, InstallationKey, InstallationSnapshot, OwnerScope, PackageKey, PackageSnapshot,
     PackageSpec, PrincipalSpec, RuntimeKey, RuntimeSnapshot, Subject, UpdateAuthority,
-    CONTENT_BYTES,
 };
 use crate::persistent_install::{PersistentInstallError, PersistentInstallStore};
 use crate::security::{SecurityContext, SecurityError};
@@ -436,7 +435,7 @@ const fn subject_id(subject: Subject) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::fs::journal::{JournalError, STORAGE_UNIT_BYTES};
-    use crate::native_install::{PackageSource, PrincipalKind};
+    use crate::native_install::{PackageSource, PrincipalKind, CONTENT_BYTES};
     use crate::security::{BootId, IdentityClass, MetadataState};
 
     struct MemoryDisk {
