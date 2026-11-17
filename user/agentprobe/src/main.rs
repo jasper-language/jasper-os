@@ -77,8 +77,8 @@ fn main(_: u64, _: u64) -> i32 {
     };
     let first = match transport.exchange(replay_request) {
         Ok(response) => response,
-        Err(_) => {
-            println!("[JSR-UPDATE-AGENT] failed=status");
+        Err(code) => {
+            println!("[JSR-UPDATE-AGENT] failed=status code={}", code);
             return 4;
         }
     };

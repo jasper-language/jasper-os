@@ -134,10 +134,20 @@ impl AgentChannelTransport {
             .recv(&mut bytes)
             .map_err(|error| error.id() as i64)?;
         if !received.handles.is_empty() || received.sender_app == 0 {
+            crate::println!(
+                "[JSR-UPDATE-AGENT-CLIENT] reject=sender handles={} sender_app={}",
+                received.handles.len(),
+                received.sender_app
+            );
             return Err(ids::SYSTEM_UPDATE_ERROR_TENANT_SCOPE as i64);
         }
         if let Some(expected) = self.server_app {
             if received.sender_app != expected {
+                crate::println!(
+                    "[JSR-UPDATE-AGENT-CLIENT] reject=sender_change expected={} actual={}",
+                    expected,
+                    received.sender_app
+                );
                 return Err(ids::SYSTEM_UPDATE_ERROR_TENANT_SCOPE as i64);
             }
         } else {
@@ -262,8 +272,19 @@ pub fn serve(channel: Channel) -> i32 {
             Err(_) => return 1,
         };
         if !received.handles.is_empty() || received.sender_app == 0 {
+            crate::println!(
+                "[JSR-UPDATE-AGENT-BROKER] reject=sender handles={} sender_app={}",
+                received.handles.len(),
+                received.sender_app
+            );
             let _ = channel.send(&protocol_error());
             continue;
+        }
+        if client_app.is_none() {
+            crate::println!(
+                "[JSR-UPDATE-AGENT-BROKER] client_app={}",
+                received.sender_app
+            );
         }
         match client_app {
             None => client_app = Some(received.sender_app),
@@ -274,6 +295,13 @@ pub fn serve(channel: Channel) -> i32 {
             Some(_) => {}
         }
         let Some(request) = AgentRequest::decode(&bytes) else {
+            let version = u16::from_le_bytes([bytes[4], bytes[5]]);
+            let operation = bytes[6];
+            crate::println!(
+                "[JSR-UPDATE-AGENT-BROKER] reject=request version={} operation={}",
+                version,
+                operation
+            );
             let _ = channel.send(&protocol_error());
             continue;
         };

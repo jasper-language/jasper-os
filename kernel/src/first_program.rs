@@ -232,14 +232,11 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
             return (None, false);
         }
     };
-    #[cfg(feature = "update-agent-verify")]
-    if proc::set_app(pid, 0x5541_4447).is_err() {
-        kprintln!("[JSR-PROD-DIAG] first_program application_bind=false");
-        let _ = proc::reap(pid);
-        kobj::run_cleanup(usize::MAX);
-        return (None, false);
-    }
-    #[cfg(all(target_arch = "x86_64", feature = "native-install-abi-verify"))]
+    #[cfg(all(
+        target_arch = "x86_64",
+        feature = "native-install-abi-verify",
+        not(feature = "update-agent-verify")
+    ))]
     {
         use kernel_core::mac::{Integrity, MacLabel, Secrecy, OBJECT_CLASS_ALL};
         use kernel_core::security::{
@@ -264,6 +261,13 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
             kobj::run_cleanup(usize::MAX);
             return (None, false);
         }
+    }
+    #[cfg(feature = "update-agent-verify")]
+    if proc::set_app(pid, 0x5541_4447).is_err() {
+        kprintln!("[JSR-PROD-DIAG] first_program application_bind=false");
+        let _ = proc::reap(pid);
+        kobj::run_cleanup(usize::MAX);
+        return (None, false);
     }
     let base = arch::USER_WINDOW.0;
     let started = match proc::load_elf(pid, image()) {
