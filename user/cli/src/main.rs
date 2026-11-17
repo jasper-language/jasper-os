@@ -10,9 +10,10 @@
 use jasper_rt::{entry, ids, sys};
 use kernel_core::jucs::{self, Command, Form, Invocation};
 use kernel_core::terminal_editor::{EditEvent, LineEditor};
+use kernel_core::update_agent::{AgentError, UpdateAgent, ACTION_JSON_BYTES, STATUS_JSON_BYTES};
 use kernel_core::update_client::{ClientError, UpdateClient, UpdateTransport};
 use kernel_core::update_service::{ACTION_RESPONSE_BYTES, RESPONSE_BYTES};
-use kernel_core::update_status::{UpdateStatus, NO_SLOT};
+use kernel_core::update_status::UpdateStatus;
 
 const PROMPT: &[u8] = b"jasper> ";
 const HELP: &[u8] =
@@ -159,16 +160,6 @@ impl FixedText {
     fn as_bytes(&self) -> &[u8] {
         &self.bytes[..self.len]
     }
-
-    fn push_hex(&mut self, bytes: &[u8]) -> bool {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        for byte in bytes {
-            if !self.push(&[HEX[(byte >> 4) as usize], HEX[(byte & 0xf) as usize]]) {
-                return false;
-            }
-        }
-        true
-    }
 }
 
 fn slot_name(slot: u8) -> &'static [u8] {
@@ -235,22 +226,20 @@ fn write_update_error(code: i64, json: bool) -> bool {
 }
 
 fn write_update_status(request_id: u64, json: bool) -> bool {
+    if json {
+        let mut agent = UpdateAgent::new(NativeUpdateTransport);
+        let mut output = [0u8; STATUS_JSON_BYTES];
+        return match agent.status_json(request_id, 0, &mut output) {
+            Ok(length) => write(&output[..length]),
+            Err(error) => write_update_error(agent_error_code(error), true),
+        };
+    }
     let mut client = UpdateClient::new(NativeUpdateTransport);
     let response = match client.status(request_id, 0) {
         Ok(response) => response,
         Err(error) => return write_update_error(client_error_code(error), json),
     };
     let status: UpdateStatus = response.status;
-    if status.candidate_slot == NO_SLOT && status.candidate_release != 0 {
-        return write(if json {
-            b"{\"schema\":\"jucs.result/1\",\"command\":\"system.update.status\",\"status\":\"error\",\"code\":\"protocol\"}\n"
-        } else {
-            b"jucs-error command=system.update.status code=protocol\n"
-        });
-    }
-    if json {
-        return write_update_status_json(status, response.authorization.tenant, request_id);
-    }
     let mut line = FixedText::new();
     let valid = line.push(b"system-update status=ok command=system.update.status generation=")
         && line.push_u64(status.service_generation)
@@ -291,94 +280,20 @@ fn write_update_status(request_id: u64, json: bool) -> bool {
     write(line.as_bytes())
 }
 
-fn write_update_status_json(status: UpdateStatus, tenant: u64, request_id: u64) -> bool {
-    let mut line = FixedText::new();
-    let mut ok = line.push(
-        b"{\"schema\":\"service.update.status/1\",\"command\":\"system.update.status\",\"status\":\"ok\",\"generation\":",
-    );
-    ok &= line.push_u64(status.service_generation);
-    ok &= line.push(b",\"transaction\":");
-    ok &= line.push_u64(status.transaction_id);
-    ok &= line.push(b",\"active\":{\"slot\":\"");
-    ok &= line.push(slot_name(status.active_slot));
-    ok &= line.push(b"\",\"state\":\"");
-    ok &= line.push(state_name(status.active_state));
-    ok &= line.push(b"\",\"release\":");
-    ok &= line.push_u64(status.active_release);
-    ok &= line.push(b",\"attempts\":");
-    ok &= line.push_u64(status.active_attempts as u64);
-    ok &= line.push(b",\"digest\":\"");
-    ok &= line.push_hex(&status.active_digest);
-    ok &= line.push(b"\"},\"candidate\":");
-    if status.candidate_slot == NO_SLOT {
-        ok &= line.push(b"null");
-    } else {
-        ok &= line.push(b"{\"slot\":\"");
-        ok &= line.push(slot_name(status.candidate_slot));
-        ok &= line.push(b"\",\"state\":\"");
-        ok &= line.push(state_name(status.candidate_state));
-        ok &= line.push(b"\",\"release\":");
-        ok &= line.push_u64(status.candidate_release);
-        ok &= line.push(b",\"attempts\":");
-        ok &= line.push_u64(status.candidate_attempts as u64);
-        ok &= line.push(b",\"digest\":\"");
-        ok &= line.push_hex(&status.candidate_digest);
-        ok &= line.push(b"\"}");
-    }
-    ok &= line.push(b",\"rollback_floor\":");
-    ok &= line.push_u64(status.rollback_floor);
-    ok &= line.push(b",\"security_epoch\":");
-    ok &= line.push_u64(status.security_epoch);
-    ok &= line.push(b",\"data_schema\":{\"min\":");
-    ok &= line.push_u64(status.data_schema_min as u64);
-    ok &= line.push(b",\"max\":");
-    ok &= line.push_u64(status.data_schema_max as u64);
-    ok &= line.push(b"},\"caller\":{\"subject\":");
-    ok &= line.push_u64(status.caller_subject);
-    ok &= line.push(b",\"domain\":");
-    ok &= line.push_u64(status.caller_domain as u64);
-    ok &= line.push(b",\"tenant\":");
-    ok &= line.push_u64(tenant);
-    ok &= line.push(b"},\"request\":");
-    ok &= line.push_u64(request_id);
-    ok &= line.push(b"}\n");
-    ok && write(line.as_bytes())
-}
-
 fn write_update_recovery(status_request_id: u64, action_request_id: u64, json: bool) -> bool {
+    if json {
+        let mut agent = UpdateAgent::new(NativeUpdateTransport);
+        let mut output = [0u8; ACTION_JSON_BYTES];
+        return match agent.recover_json(status_request_id, action_request_id, &mut output) {
+            Ok(length) => write(&output[..length]),
+            Err(error) => write_recovery_error(agent_error_code(error), true),
+        };
+    }
     let mut client = UpdateClient::new(NativeUpdateTransport);
     let response = match client.recover(status_request_id, action_request_id) {
         Ok(response) => response,
         Err(error) => return write_recovery_error(client_error_code(error), json),
     };
-    if json {
-        let mut line = FixedText::new();
-        let ok = line.push(
-            b"{\"schema\":\"service.update.action/1\",\"command\":\"system.update.recover\",\"status\":\"ok\",\"action\":\"recover\",\"generation\":",
-        );
-        return ok
-            && line.push_u64(response.generation)
-            && line.push(b",\"transaction\":")
-            && line.push_u64(response.transaction_id)
-            && line.push(b",\"digest\":\"")
-            && line.push_hex(&response.manifest_sha256)
-            && line.push(b"\",\"recovery_required\":")
-            && line.push(if response.recovery_required {
-                b"true"
-            } else {
-                b"false"
-            })
-            && line.push(b",\"archived\":")
-            && line.push(if response.archived { b"true" } else { b"false" })
-            && line.push(b",\"caller\":{\"tenant\":")
-            && line.push_u64(response.tenant)
-            && line.push(b",\"domain\":")
-            && line.push_u64(response.domain as u64)
-            && line.push(b"},\"request\":")
-            && line.push_u64(response.request_id)
-            && line.push(b"}\n")
-            && write(line.as_bytes());
-    }
     let mut line = FixedText::new();
     let ok = line
         .push(b"system-update result=ok command=system.update.recover action=recover generation=")
@@ -418,9 +333,17 @@ fn client_error_code(error: ClientError) -> i64 {
     match error {
         ClientError::Transport(code) => code,
         ClientError::Protocol => ids::SYSTEM_UPDATE_ERROR_PROTOCOL as i64,
-        ClientError::RequestMismatch
-        | ClientError::IdentityMismatch
-        | ClientError::BindingMismatch => ids::SYSTEM_UPDATE_ERROR_TRANSACTION_MISMATCH as i64,
+        ClientError::IdentityMismatch => ids::SYSTEM_UPDATE_ERROR_TENANT_SCOPE as i64,
+        ClientError::RequestMismatch | ClientError::BindingMismatch => {
+            ids::SYSTEM_UPDATE_ERROR_TRANSACTION_MISMATCH as i64
+        }
+    }
+}
+
+fn agent_error_code(error: AgentError) -> i64 {
+    match error {
+        AgentError::Client(error) => client_error_code(error),
+        AgentError::BufferTooSmall => ids::SYSTEM_UPDATE_ERROR_BUFFER_TOO_SMALL as i64,
     }
 }
 

@@ -91,6 +91,13 @@ jasper-update-recovery cleanup <control-root> <staging-root> <manifest-sha256-he
 - 共用客户端拒绝零请求 ID，并要求 status 响应内的 caller domain 与认证域一致；
   recover 响应必须与同一 exchange 的 status 保持 tenant、domain 和 scope 一致，
   防止结构化 Agent transport 将不同主体的响应与事务拼接成一次成功调用；
+- `kernel-core::update_agent` 提供有界的 `UpdateAgent` 结构化前端。它直接包装
+  `UpdateClient`，由共享客户端完成认证结果校验和事务绑定；Agent 与 CLI JSON
+  模式共同调用同一个固定缓冲区序列化器，输出 `service.update.status/1` 与
+  `service.update.action/1`，不能再各自维护一份 JSON 协议；
+- status 解码器现在拒绝“无候选槽却保留候选 release/state/attempts/digest”的
+  矛盾记录，并要求存在候选槽时 release 与 digest 均非空；该一致性门位于共享
+  协议层，文本 CLI、JSON CLI 和 Agent 前端不能产生不同判断；
 - 服务先验证当前调用者身份/系统域，再读取并恢复同一组双副本 A/B 控制记录；
 - 返回 `service.update.status` v1 请求头与固定状态载荷，包含 generation、transaction、槽状态、
   release、回滚下限、安全纪元、Schema 范围以及调用者身份；
@@ -126,6 +133,12 @@ cargo test --locked -p kernel-core update_service::tests
 
 cargo test --locked -p kernel-core update_client::tests
 4 passed; 0 failed
+
+cargo test --locked -p kernel-core update_agent::tests
+4 passed; 0 failed
+
+cargo check --locked -p user-cli
+passed
 ```
 
 新增测试覆盖：
@@ -145,10 +158,11 @@ cargo test --locked -p kernel-core update_client::tests
 - 归档已发布但清理中断时，同一 archive root 可以幂等续作。
 - 零请求 ID、status 内部认证域不一致，以及 status/action 跨租户、域或作用域
   拼接均在提交恢复动作前失败关闭。
+- Agent 固定缓冲区过小时不发布半截 JSON；无候选槽的残留候选事实在解码阶段被拒绝。
 
 ## 仍未完成
 
-- 结构化 Agent transport 与租户级更新可见性过滤；
+- 外部 Agent IPC/消息 transport、多租户更新集合与租户级可见性过滤；
 - 内核可写的 terminal transaction archive 后端与正式 `system update archive`；
 - 信任根轮换、2-of-3 门限和签名撤销快照持久化；
 - 断点续传、生产发布源高可用和跨重启审计查询；

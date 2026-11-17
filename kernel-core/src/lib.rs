@@ -118,6 +118,8 @@ pub mod update_status;
 pub mod update_service;
 /// Shared CLI and structured-Agent update client contract.
 pub mod update_client;
+/// Bounded structured-Agent frontend over the shared update client.
+pub mod update_agent;
 pub mod tick_lease;
 pub mod wake_mailbox;
 pub mod fdt;

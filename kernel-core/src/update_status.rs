@@ -91,6 +91,20 @@ impl UpdateStatus {
         let mut candidate_digest = [0u8; 32];
         active_digest.copy_from_slice(&bytes[96..128]);
         candidate_digest.copy_from_slice(&bytes[128..160]);
+        let candidate_release = get_u64(bytes, 56);
+        if bytes[73] == NO_SLOT
+            && (candidate_release != 0
+                || bytes[75] != 0
+                || bytes[77] != 0
+                || candidate_digest.iter().any(|byte| *byte != 0))
+        {
+            return None;
+        }
+        if bytes[73] != NO_SLOT
+            && (candidate_release == 0 || candidate_digest.iter().all(|byte| *byte == 0))
+        {
+            return None;
+        }
         Some(Self {
             service_generation: get_u64(bytes, 16),
             transaction_id: get_u64(bytes, 24),
@@ -103,7 +117,7 @@ impl UpdateStatus {
             active_attempts: bytes[76],
             candidate_attempts: bytes[77],
             active_release: get_u64(bytes, 48),
-            candidate_release: get_u64(bytes, 56),
+            candidate_release,
             data_schema_min: get_u32(bytes, 64),
             data_schema_max: get_u32(bytes, 68),
             caller_subject: get_u64(bytes, 80),
@@ -161,7 +175,7 @@ mod tests {
             caller_subject: 0x55,
             caller_domain: 1,
             active_digest: [0x31; 32],
-            candidate_digest: [0x32; 32],
+            candidate_digest: if candidate { [0x32; 32] } else { [0; 32] },
         }
     }
 
@@ -181,6 +195,19 @@ mod tests {
         assert_eq!(UpdateStatus::decode(&bytes), None);
         let mut bytes = record.encode();
         bytes[12] = 0;
+        assert_eq!(UpdateStatus::decode(&bytes), None);
+    }
+
+    #[test]
+    fn absent_candidate_cannot_retain_candidate_facts() {
+        let record = sample(false);
+        let mut bytes = record.encode();
+        bytes[56..64].copy_from_slice(&4u64.to_le_bytes());
+        assert_eq!(UpdateStatus::decode(&bytes), None);
+
+        let mut bytes = record.encode();
+        bytes[96 + 0] = 0;
+        bytes[128 + 0] = 1;
         assert_eq!(UpdateStatus::decode(&bytes), None);
     }
 }
