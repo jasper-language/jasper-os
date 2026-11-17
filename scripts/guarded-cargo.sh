@@ -15,6 +15,8 @@ minimum_available_kib=${JASPER_BUILD_MIN_AVAILABLE_GIB:-12884902}
 minimum_disk_kib=${JASPER_BUILD_MIN_DISK_GIB:-12582912}
 lock_path=${JASPER_BUILD_LOCK:-/tmp/jasper-os-cargo-$(id -u).lock}
 allow_vbox=${JASPER_BUILD_ALLOW_VBOX:-0}
+build_affinity=()
+affinity_status="$build_cpus"
 
 if [ ! -x "$cargo_bin" ]; then
     echo "guarded-cargo: cargo not executable: $cargo_bin" >&2
@@ -63,9 +65,16 @@ if [ "${disk_kib:-0}" -lt "$minimum_disk_kib" ]; then
     exit 75
 fi
 
-echo "guarded-cargo: cpus=$build_cpus jobs=$build_jobs mem=${available_kib}KiB disk=${disk_kib}KiB" >&2
+if taskset -c "$build_cpus" true 2>/dev/null; then
+    build_affinity=(taskset -c "$build_cpus")
+else
+    affinity_status=scheduler-selected
+    echo "guarded-cargo: affinity=$build_cpus unavailable; using scheduler-selected CPUs" >&2
+fi
+
+echo "guarded-cargo: cpus=$affinity_status jobs=$build_jobs mem=${available_kib}KiB disk=${disk_kib}KiB" >&2
 exec env CARGO_BUILD_JOBS="$build_jobs" \
-    taskset -c "$build_cpus" \
+    "${build_affinity[@]}" \
     nice -n 10 \
     timeout 1800 \
     "$cargo_bin" "$@"
