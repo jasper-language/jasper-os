@@ -20,7 +20,9 @@ CI 使用 `--check` 连续生成两次并比较。
 新增 `scripts/release-repro-check.sh`：用固定工具链/lockfile、
 `SOURCE_DATE_EPOCH=0`、关闭 incremental、相同 RUSTFLAGS 和 CPU 亲和执行两个
 完全独立的 x86_64 no-default-features kernel release build，要求 ELF SHA-256
-一致。该检查不启动 VM。
+一致。默认尝试本机验收预算 `4-11`；宿主或 CI 的 cpuset 不允许该集合时，
+明确记录 `affinity=scheduler-selected` 后由调度器选核，不放宽两次构建的字节
+一致性。该检查不启动 VM。
 
 当前实测：
 
@@ -28,6 +30,9 @@ CI 使用 `--check` 连续生成两次并比较。
 release-repro: PASS target=x86_64-unknown-none
 sha256=66e6ad288b6fda73585f1799230a0d1d75d20f5a0e7ec099f6fd7008c4dc0661
 ```
+
+在故意请求不可用 cpuset 的 fallback 路径中，两次独立构建仍得到上述同一
+SHA-256；CI 托管运行器不再因固定的 `4-11` 亲和失败。
 
 `release/release-policy.toml` 与 `scripts/check-release-policy.py` 定义了 stable
 和 LTS 通道、支持期、漏洞响应时限，以及 SBOM、reproducible build、签名清单、

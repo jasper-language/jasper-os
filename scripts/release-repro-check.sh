@@ -12,6 +12,15 @@ B="${ROOT}/target/release-repro-b"
 jobs="${JASPER_REPRO_JOBS:-2}"
 cpus="${JASPER_REPRO_CPUS:-4-11}"
 
+affinity=()
+affinity_status="scheduler-selected"
+if taskset -c "$cpus" true 2>/dev/null; then
+  affinity=(taskset -c "$cpus")
+  affinity_status="$cpus"
+else
+  echo "release-repro: affinity=$cpus unavailable; using scheduler-selected CPUs" >&2
+fi
+
 build() {
   local target_dir=$1
   find "$target_dir" -depth -delete 2>/dev/null || true
@@ -21,7 +30,7 @@ build() {
     CARGO_BUILD_JOBS="$jobs" \
     CARGO_TARGET_DIR="$target_dir" \
     RUSTFLAGS='--cfg sha2_backend="soft" --cfg curve25519_dalek_backend="serial" -C metadata=jasper-release-repro' \
-    taskset -c "$cpus" cargo build \
+    "${affinity[@]}" cargo build \
       --locked \
       --release \
       --target "$TARGET" \
@@ -44,4 +53,5 @@ if [ "$HASH_A" != "$HASH_B" ]; then
   exit 1
 fi
 
-printf 'release-repro: PASS target=%s sha256=%s\n' "$TARGET" "$HASH_A"
+printf 'release-repro: PASS target=%s affinity=%s sha256=%s\n' \
+  "$TARGET" "$affinity_status" "$HASH_A"
