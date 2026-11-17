@@ -238,7 +238,7 @@ ISSUE21_UEFI_MODE=update-list bash scripts/issue21-uefi-boot-check.sh
 PASS mode=update-list qemu_rc=33
 
 bash scripts/abi-contract.sh check
-PASS (3.19.0)
+PASS (3.20.0)
 ```
 
 新增测试覆盖：
