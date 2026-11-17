@@ -1,0 +1,20 @@
+schema = 1
+min_update_sources = 2
+require_sbom = true
+require_reproducible_build = true
+require_signed_manifest = true
+require_offline_source = true
+
+[[channel]]
+name = "stable"
+support_days = 180
+security_response_hours = 24
+critical_fix_days = 7
+high_fix_days = 30
+
+[[channel]]
+name = "lts"
+support_days = 1095
+security_response_hours = 24
+critical_fix_days = 7
+high_fix_days = 30

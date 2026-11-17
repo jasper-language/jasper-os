@@ -29,6 +29,11 @@ release-repro: PASS target=x86_64-unknown-none
 sha256=66e6ad288b6fda73585f1799230a0d1d75d20f5a0e7ec099f6fd7008c4dc0661
 ```
 
+`release/release-policy.toml` 与 `scripts/check-release-policy.py` 定义了 stable
+和 LTS 通道、支持期、漏洞响应时限，以及 SBOM、reproducible build、签名清单、
+离线源和至少两个更新源的强制策略。CI 验证通道唯一性、LTS 支持期、漏洞期限、
+workspace 许可证和所需供应链工具存在。
+
 ## 仍未完成
 
 - release/LTS 通道、补丁回源和删除策略；
