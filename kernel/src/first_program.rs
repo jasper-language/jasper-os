@@ -203,6 +203,7 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         abi::SYSTEM_MEMORY_PROTECT,
         abi::SYSTEM_PROCESS_EXIT,
         abi::SYSTEM_TASK_EXIT,
+        abi::SYSTEM_TASK_SPAWN,
         abi::SYSTEM_TASK_YIELD,
         abi::SYSTEM_TASK_WAIT,
         abi::SYSTEM_PROCESS_SPAWN,
