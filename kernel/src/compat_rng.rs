@@ -83,7 +83,8 @@ fn initialize() -> Option<Device> {
     };
     virtio.add_status(virtio::STATUS_DRIVER_OK);
     kprintln!(
-        "[JSR-COMPAT-RNG] source=virtio-rng queue_size={} bdf={:02x}:{:02x}.{}",
+        "[JSR-COMPAT-RNG] source=virtio-rng forced={} queue_size={} bdf={:02x}:{:02x}.{}",
+        cfg!(feature = "compat-rng-force"),
         queue.size(),
         virtio.bdf().bus(),
         virtio.bdf().device(),

@@ -129,6 +129,9 @@ compat-syscall-verify = ["user-programs", "linux-abi"]
 compat-dynamic-libc-verify = ["linux-abi", "compat-elf"]
 # Unmodified Ubuntu glibc pthread create/join/mutex/condvar path over clone/futex.
 compat-pthread-verify = ["compat-dynamic-libc-verify"]
+# Negative entropy-source exercise: require getrandom to use the virtio-rng
+# fallback even when the host CPU advertises RDRAND.
+compat-rng-force = []
 # Unmodified Ubuntu glibc sigaction, tgkill, blocking and nested rt_sigreturn path.
 compat-signal-verify = ["compat-dynamic-libc-verify"]
 # Real YMM0-YMM15 scheduler/migration matrix over Linux pthreads.

@@ -7283,9 +7283,10 @@ fn linux_setrlimit(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     Ok(0)
 }
 
-/// Fills a bounded userspace buffer from x86_64 RDRAND.
+/// Fills a bounded userspace buffer from x86_64 RDRAND or virtio-rng.
 ///
-/// 从 CPUID 验证过的 RDRAND 填充有界用户缓冲区；没有硬件熵源时明确返回 EAGAIN。
+/// 优先使用 CPUID 验证过的 RDRAND；硬件随机指令不可用或验收强制关闭时，使用有界
+/// virtio-rng 队列。两个来源都不可用时明确返回 EAGAIN。
 fn linux_getrandom(args: [u64; 6]) -> Result<u64, CompatErrno> {
     const GRND_NONBLOCK: u64 = 1;
     const GRND_RANDOM: u64 = 2;
@@ -7301,7 +7302,12 @@ fn linux_getrandom(args: [u64; 6]) -> Result<u64, CompatErrno> {
     let mut output = alloc::vec![0u8; length];
     let mut offset = 0usize;
     while offset < output.len() {
-        match crate::arch::x86_64::hardware_random_u64() {
+        let hardware = if cfg!(feature = "compat-rng-force") {
+            None
+        } else {
+            crate::arch::x86_64::hardware_random_u64()
+        };
+        match hardware {
             Some(value) => {
                 let bytes = value.to_le_bytes();
                 let count = (output.len() - offset).min(bytes.len());
@@ -7309,7 +7315,10 @@ fn linux_getrandom(args: [u64; 6]) -> Result<u64, CompatErrno> {
                 offset += count;
             }
             None => {
-                #[cfg(feature = "lifecycle-root-exec-verify")]
+                #[cfg(any(
+                    feature = "lifecycle-root-exec-verify",
+                    feature = "compat-dynamic-libc-verify"
+                ))]
                 if crate::compat_rng::fill(&mut output[offset..]) {
                     offset = output.len();
                     continue;

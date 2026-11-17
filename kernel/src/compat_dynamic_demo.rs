@@ -526,7 +526,7 @@ pub fn run() {
         GETCONF,
         INTERPRETER,
         &getconf_argv,
-        frames_before,
+        true_baseline,
         true,
     );
     kprintln!(

@@ -18,7 +18,8 @@ gcc -O2 -pthread verification/fixtures/linux/pthread_basic.c \
 export JSR_UBUNTU_PTHREAD="$TARGET/pthread-basic"
 
 CARGO_TARGET_DIR="$TARGET" cargo build --locked --release --target x86_64-unknown-none \
-  -p jasper-kernel --features compat-pthread-verify >"$OUT/kernel-build.log" 2>&1
+  -p jasper-kernel --features compat-pthread-verify,compat-rng-force \
+  >"$OUT/kernel-build.log" 2>&1
 cargo build --locked --release -p xtask >"$OUT/xtask-build.log" 2>&1
 target/release/xtask "$TARGET/x86_64-unknown-none/release/jasper-kernel" "$OUT/kernel.img" \
   >"$OUT/image.log" 2>&1
@@ -31,6 +32,7 @@ timeout "$TIMEOUT" qemu-system-x86_64 \
   -m 512M \
   -smp "$CPUS" \
   -drive format=raw,file="$OUT/kernel.img" \
+  -device virtio-rng-pci \
   -serial "file:$OUT/serial.log" \
   -display none -monitor none -no-reboot \
   -device isa-debug-exit,iobase=0xf4,iosize=0x04
@@ -39,6 +41,7 @@ set -e
 printf '%s\n' "$rc" >"$OUT/qemu.rc"
 [ "$rc" -eq 33 ]
 grep -aq '^jasper-pthread-ok' "$OUT/serial.log"
+grep -aq '^\[JSR-COMPAT-RNG\] source=virtio-rng forced=true ' "$OUT/serial.log"
 grep -aqE '^\[JSR-COMPAT-PTHREAD\] .*exit_zero=true .*resources=true failed=0' \
   "$OUT/serial.log"
 ! grep -aqE '^\[JSR-(PANIC|COMPAT-DYNAMIC-FAIL|LINUX-ABI-FAIL)\]|panicked at|KERNEL PANIC' \
