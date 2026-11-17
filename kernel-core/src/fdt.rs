@@ -1098,7 +1098,7 @@ mod tests {
         let cpus = fdt.cpu_topology(2, |r| u32::try_from(r).ok()).unwrap();
         assert!(cpus.boot_listed);
         assert_eq!(cpus.listed, 4);
-        assert_eq!(cpus.topology.ids(), &[2, 0, 1]);
+        assert_eq!(cpus.topology.iter().collect::<Vec<_>>(), vec![2, 0, 1]);
         assert_eq!((cpus.topology.disabled, cpus.topology.dropped), (1, 0));
         let psci = fdt.find_compatible("arm,psci-0.2").unwrap().unwrap();
         assert_eq!(psci.string("method"), Some("hvc"));
@@ -1130,7 +1130,7 @@ mod tests {
             .unwrap();
         // 换算失败必须计入 dropped，合法条目全部保留。
         assert_eq!(cpus2.topology.dropped, 2);
-        assert_eq!(cpus2.topology.ids(), &[0, 1, 2]);
+        assert_eq!(cpus2.topology.iter().collect::<Vec<_>>(), vec![0, 1, 2]);
         // 结构损坏：返回错误而不是部分结果
         let mut bad = blob.clone();
         let so = u32::from_be_bytes(bad[8..12].try_into().unwrap()) as usize;
@@ -1139,7 +1139,10 @@ mod tests {
         // 没有任何处理器节点：只有引导处理器
         let none = virt_like();
         let c = Fdt::parse(&none).unwrap().cpu_topology(7, |r| Some(r as u32)).unwrap();
-        assert_eq!((c.topology.ids(), c.boot_listed, c.listed), (&[7u32][..], false, 0));
+        assert_eq!(
+            (c.topology.iter().collect::<Vec<_>>(), c.boot_listed, c.listed),
+            (vec![7], false, 0)
+        );
     }
 
     /// PDA-1 形状：QEMU `virt` 的节点集合 + `/chosen` 的 bootargs / initrd + 帧缓冲。

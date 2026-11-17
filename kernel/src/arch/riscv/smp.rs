@@ -187,7 +187,7 @@ extern "C" fn jsr_rv_secondary_main(index: usize) -> ! {
 
 /// 逻辑下标 `index` 的 hart 号（设备树拓扑中没有时为 `None`）。
 pub fn hart_of(index: usize) -> Option<u32> {
-    FIRMWARE.get().and_then(|(t, _)| t.ids().get(index).copied())
+    FIRMWARE.get().and_then(|(t, _)| t.hw_id(index))
 }
 
 /// 当前处理器的逻辑下标（`tp`；引导处理器在入口处置 0）。

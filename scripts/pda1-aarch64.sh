@@ -110,7 +110,8 @@ log_path, rc = sys.argv[1], int(sys.argv[2])
 text = Path(log_path).read_text(errors="replace")
 line = next((l for l in text.splitlines() if "[JSR-EXIT]" in l), None)
 # 已登记的基线：main 上尚未合入 Q66 的 AArch64 x86 专用演练。
-baseline = {"pci_failed": 4, "msi_failed": 2, "krn0_failed": 1}
+# 计数来自结构化失败行；低于基线也不允许因“看起来更好”而静默漂移。
+baseline = {"pci_failed": 3, "msi_failed": 0, "krn0_failed": 1}
 if rc in (33, 37):
     if line is not None:
         print(f"✗ 退出码 {rc} 但出现失败行：{line}")

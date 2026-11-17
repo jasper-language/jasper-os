@@ -5,10 +5,12 @@ PCI-SIG-MSI-X	33	spec	PCI-Local-Bus-Specification-MSI-X
 actual-smp-report	33	runtime	SMP-StartReport-online-failed-dropped
 admitted-smp-report	33	runtime	SMP-admitted-topology
 boot-handshake	33	spec	architecture-boot-handshake
+bootstrap-cpu-inventory	35	policy	Issue-35-multi-topology-preheap-inventory
 build-only-physical-runtime-plan	33	build	verification-feature-platform-plan
 diagnostic-usi-v1-contract	21	spec	diagnostic-USI-v1-wire-contract
 irq-policy	33	policy	explicit-IRQ-safety-policy
 physical-runtime-plan	33	build	verification-feature-platform-plan
+pixel-verification-platform	35	build	physical-device-verification-feature-only
 program-caps-note-v1	33	spec	program-capabilities-note-v1
 released-request-runtime-state	33	runtime	IRQ-released-request-state
 runtime-stage-state	33	runtime	lifecycle-stage-state

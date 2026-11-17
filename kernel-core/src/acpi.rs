@@ -736,7 +736,7 @@ mod tests {
         let m = image(0, &[lapic(0, 1), lapic(1, 1), lapic(2, 0), lapic(3, 1)]);
         let madt = parse_madt(&m, 0x100, 0).unwrap();
         assert_eq!(madt.local_controller, 0xFEE0_0000);
-        assert_eq!(madt.topology.ids(), &[0, 1, 3]);
+        assert_eq!(madt.topology.iter().collect::<Vec<_>>(), vec![0, 1, 3]);
         assert_eq!(madt.topology.disabled, 1);
     }
 
@@ -756,7 +756,7 @@ mod tests {
         );
         let madt = parse_madt(&m, 0x100, 5).unwrap();
         assert_eq!(madt.local_controller, 0xFED0_0000);
-        assert_eq!(madt.topology.ids(), &[5, 0, 300]);
+        assert_eq!(madt.topology.iter().collect::<Vec<_>>(), vec![5, 0, 300]);
     }
 
     #[test]

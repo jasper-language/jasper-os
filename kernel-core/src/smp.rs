@@ -26,6 +26,10 @@ use alloc::vec::Vec;
 /// 内核支持的逻辑处理器数上限（[`CpuSet`] 的位宽）。
 /// Maximum number of logical processors.
 pub const MAX_CPUS: usize = 32;
+/// Bootstrap CPU inventory that must be usable before the kernel heap exists.
+///
+/// 内核堆就绪前必须可用的处理器库存上限。
+pub const BOOTSTRAP_CPUS: usize = 128; // JASPER-HARDCODE-REVIEW: issue=35 source=bootstrap-cpu-inventory reason=firmware-inventory-required-before-heap
 
 /// Count inventory records that were discovered but not admitted.
 ///
@@ -265,6 +269,11 @@ impl Topology {
         &self.hw_ids[..self.count]
     }
 
+    /// Iterate hardware identities in logical-index order.
+    pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+        self.ids().iter().copied()
+    }
+
     /// 逻辑下标对应的硬件标识。
     /// Hardware identifier of logical index `cpu`.
     pub fn hw_id(&self, cpu: usize) -> Option<u32> {
@@ -285,7 +294,9 @@ impl Topology {
 #[cfg(any(test, feature = "cpu-dynamic"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Topology {
-    hw_ids: Vec<u32>,
+    bootstrap: [u32; BOOTSTRAP_CPUS],
+    bootstrap_len: usize,
+    overflow: Vec<u32>,
     /// Firmware entries that could not identify a usable hardware CPU.
     pub dropped: usize,
     /// Firmware-reported CPUs that are disabled.
@@ -295,45 +306,53 @@ pub struct Topology {
 #[cfg(any(test, feature = "cpu-dynamic"))]
 impl Topology {
     pub fn boot_only(boot_hw_id: u32) -> Topology {
-        let mut hw_ids = Vec::new();
-        let dropped = if hw_ids.try_reserve_exact(1).is_ok() {
-            hw_ids.push(boot_hw_id);
-            0
-        } else {
-            1
-        };
+        let mut bootstrap = [0u32; BOOTSTRAP_CPUS];
+        bootstrap[0] = boot_hw_id;
         Topology {
-            hw_ids,
-            dropped,
+            bootstrap,
+            bootstrap_len: 1,
+            overflow: Vec::new(),
+            dropped: 0,
             disabled: 0,
         }
     }
 
     pub fn push(&mut self, hw_id: u32) {
-        if self.hw_ids.contains(&hw_id) {
+        if self.iter().any(|id| id == hw_id) {
             return;
         }
-        if self.hw_ids.try_reserve(1).is_err() {
+        if self.bootstrap_len < BOOTSTRAP_CPUS {
+            self.bootstrap[self.bootstrap_len] = hw_id;
+            self.bootstrap_len += 1;
+            return;
+        }
+        if self.overflow.try_reserve(1).is_err() {
             self.dropped += 1;
             return;
         }
-        self.hw_ids.push(hw_id);
+        self.overflow.push(hw_id);
     }
 
     pub fn count(&self) -> usize {
-        self.hw_ids.len()
+        self.bootstrap_len + self.overflow.len()
     }
 
-    pub fn ids(&self) -> &[u32] {
-        &self.hw_ids
+    pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+        self.bootstrap[..self.bootstrap_len]
+            .iter()
+            .copied()
+            .chain(self.overflow.iter().copied())
     }
 
     pub fn hw_id(&self, cpu: usize) -> Option<u32> {
-        self.hw_ids.get(cpu).copied()
+        if cpu < self.bootstrap_len {
+            return Some(self.bootstrap[cpu]);
+        }
+        self.overflow.get(cpu - self.bootstrap_len).copied()
     }
 
     pub fn index_of(&self, hw_id: u32) -> Option<usize> {
-        self.hw_ids.iter().position(|&id| id == hw_id)
+        self.iter().position(|id| id == hw_id)
     }
 }
 
@@ -827,7 +846,7 @@ mod tests {
         t.push(7); // 重复：忽略
         t.push(1);
         t.push(2);
-        assert_eq!(t.ids(), &[7, 1, 2]);
+        assert_eq!(t.iter().collect::<Vec<_>>(), vec![7, 1, 2]);
         assert_eq!(t.index_of(2), Some(2));
         assert_eq!(t.hw_id(0), Some(7));
         assert_eq!(t.hw_id(3), None);
@@ -845,7 +864,7 @@ mod tests {
                 _ => 97 + i as u32,
             })
             .collect();
-        assert_eq!(t.ids(), expected);
+        assert_eq!(t.iter().collect::<Vec<_>>(), expected);
     }
 
     #[test]
