@@ -41,11 +41,26 @@ Memory、Handle、IRQ 或 DMA 的既有强制机制。它只规定设备服务�
 该组合由 `arch2-verify` 的同一用户驱动验收路径执行，避免 MMIO、DMA 和 IRQ 各自
 在不同进程中通过却未证明组合能力。
 
+### 持久 Driver Host 授权回执
+
+`DriverHostJournal` 在通用 `SectorIo` 上保存有界 authority receipt，不保存可复活
+的 live pass/request：
+
+- registration、admission、reset、crash 与 recovery 回执形成连续序号和 host
+  generation 链；旧 generation、在 crash 后跳过 recovery、错误 quiescence 均失败；
+- crash 回执保留 cancelled/revoked/quarantined 数量，供重启后的隔离判断和审计；
+- 两份 A/B metadata 副本只有在 body、marker、flush 与 readback 完成后才切换；
+- 新副本损坏、marker 写失败或普通断电时继续选择上一份完整快照；
+- 重开日志不会恢复旧 pass、request 或 capability，只返回已验证的授权历史。
+
+该日志是持久回执与审计事实，不是完整的磁盘 IOMMU 编程后端；真实设备仍必须在
+重建授权前完成硬件静默和 reset。
+
 ## 验证
 
 ```text
 cargo test --locked -p kernel-core driver_host
-11 passed; 0 failed
+14 passed; 0 failed
 
 cargo check --locked -p user-devprobe --target x86_64-unknown-none
 PASS
@@ -59,7 +74,8 @@ qemu_rc=33; ARCH-2 PASS; accept: SPOT PASS
 
 覆盖发现与准入分离、最小权限、设备独占、请求单终态、pending 请求资源预留与
 释放、virtqueue 的 MMIO/DMA/IRQ 跨资源原子预留、零需求拒绝、reset 失败原子与
-token 失效、崩溃 quarantine/recovery，以及容量失败不部分发布。
+token 失效、崩溃 quarantine/recovery、A/B receipt 恢复、marker 半写和损坏回退，
+以及容量失败不部分发布。
 
 真实 x86_64 KVM guest 中，同一未特权 Driver Host 进程实际完成
 Device/Memory/DMA/MSI-X/Ring 组合，IRQ 等待经关闭中断句柄得到唯一

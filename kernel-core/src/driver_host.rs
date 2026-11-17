@@ -10,6 +10,13 @@
 //! quiescence facts; an architecture backend must still enforce the returned
 //! grants. Capacity exhaustion and stale generations fail closed.
 
+mod journal;
+
+pub use journal::{
+    DriverHostJournal, DriverHostJournalError, DriverHostPersistentEvent,
+    DriverHostPersistentEventKind,
+};
+
 /// Device discovery is permission to consider a device, never permission to use it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeviceIdentity {
