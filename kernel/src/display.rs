@@ -389,6 +389,9 @@ impl Runtime {
                     }
                 }
                 0x20..=0x7e => {
+                    if self.cursor >= TEXT_CELLS {
+                        self.newline();
+                    }
                     self.text[self.cursor] = byte.to_ascii_uppercase();
                     self.cursor += 1;
                     if self.cursor % TEXT_COLUMNS == 0 {
@@ -410,7 +413,7 @@ impl Runtime {
 
     fn newline(&mut self) {
         let row = self.cursor / TEXT_COLUMNS;
-        if row + 1 == TEXT_ROWS {
+        if self.cursor >= TEXT_CELLS || row + 1 >= TEXT_ROWS {
             self.text.copy_within(TEXT_COLUMNS.., 0);
             self.text[TEXT_CELLS - TEXT_COLUMNS..].fill(b' ');
             self.cursor = TEXT_CELLS - TEXT_COLUMNS;
