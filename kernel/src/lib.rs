@@ -232,6 +232,8 @@ pub mod sync;
 pub mod syscall;
 pub mod task;
 pub mod usi;
+#[cfg(feature = "lifecycle-ab-health")]
+pub mod update_status_service;
 pub mod workload;
 #[cfg(all(feature = "workload-verify", target_arch = "x86_64"))]
 pub mod workload_verify;

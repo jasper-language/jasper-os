@@ -8,10 +8,12 @@
 #![no_main]
 
 use jasper_rt::{entry, ids, sys};
+use kernel_core::jucs::{self, Command, Form, Invocation};
 use kernel_core::terminal_editor::{EditEvent, LineEditor};
+use kernel_core::update_status::{UpdateStatus, BYTES, NO_SLOT};
 
 const PROMPT: &[u8] = b"jasper> ";
-const HELP: &[u8] = b"commands: help, echo <text>, exit\n";
+const HELP: &[u8] = b"commands: help, echo <text>, system update status, exit\n";
 
 fn write(bytes: &[u8]) -> bool {
     let result = unsafe {
@@ -64,6 +66,151 @@ fn write_echo(text: &[u8]) -> bool {
     write(&output[..length])
 }
 
+struct FixedText {
+    bytes: [u8; 640],
+    len: usize,
+}
+
+impl FixedText {
+    const fn new() -> Self {
+        Self {
+            bytes: [0; 640],
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, text: &[u8]) -> bool {
+        let Some(end) = self.len.checked_add(text.len()) else {
+            return false;
+        };
+        if end > self.bytes.len() {
+            return false;
+        }
+        self.bytes[self.len..end].copy_from_slice(text);
+        self.len = end;
+        true
+    }
+
+    fn push_u64(&mut self, mut value: u64) -> bool {
+        let mut digits = [0u8; 20];
+        let mut at = digits.len();
+        loop {
+            at -= 1;
+            digits[at] = b'0' + (value % 10) as u8;
+            value /= 10;
+            if value == 0 {
+                break;
+            }
+        }
+        self.push(&digits[at..])
+    }
+
+    fn push_i64(&mut self, value: i64) -> bool {
+        if value < 0 {
+            self.push(b"-") && self.push_u64(value.unsigned_abs())
+        } else {
+            self.push_u64(value as u64)
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+fn slot_name(slot: u8) -> &'static [u8] {
+    match slot {
+        0 => b"A",
+        1 => b"B",
+        _ => b"none",
+    }
+}
+
+fn state_name(state: u8) -> &'static [u8] {
+    match state {
+        0 => b"empty",
+        1 => b"candidate",
+        2 => b"confirmed",
+        3 => b"failed",
+        _ => b"unknown",
+    }
+}
+
+fn dispatch_jucs(invocation: Invocation) -> bool {
+    match (invocation.command, invocation.form) {
+        (_, Form::Help) => write(jucs::UPDATE_STATUS_HELP.as_bytes()),
+        (_, Form::Schema) => write(jucs::UPDATE_STATUS_SCHEMA.as_bytes()),
+        (Command::UpdateStatus, Form::Invoke) => write_update_status(),
+    }
+}
+
+fn write_update_status() -> bool {
+    let mut output = [0u8; BYTES];
+    let result = unsafe {
+        sys::call3(
+            ids::SYSTEM_UPDATE_CONTROL_GET,
+            output.as_mut_ptr() as u64,
+            output.len() as u64,
+            0,
+        )
+    };
+    if result != BYTES as i64 {
+        let mut error = FixedText::new();
+        if !error.push(b"jucs-error command=system.update.status code=")
+            || !error.push_i64(if result < 0 { -result } else { result })
+            || !error.push(b"\nsystem-update-failed\n")
+        {
+            return false;
+        }
+        return write(error.as_bytes());
+    }
+    let Some(status) = UpdateStatus::decode(&output) else {
+        return write(b"jucs-error command=system.update.status code=protocol\n");
+    };
+    let mut line = FixedText::new();
+    let valid = line.push(b"system-update status=ok command=system.update.status generation=")
+        && line.push_u64(status.service_generation)
+        && line.push(b" transaction=")
+        && line.push_u64(status.transaction_id)
+        && line.push(b" active=")
+        && line.push(slot_name(status.active_slot))
+        && line.push(b" state=")
+        && line.push(state_name(status.active_state))
+        && line.push(b" release=")
+        && line.push_u64(status.active_release)
+        && line.push(b" attempts=")
+        && line.push_u64(status.active_attempts as u64)
+        && line.push(b" candidate=")
+        && line.push(slot_name(status.candidate_slot))
+        && line.push(b" candidate_release=")
+        && line.push_u64(status.candidate_release)
+        && line.push(b" rollback_floor=")
+        && line.push_u64(status.rollback_floor)
+        && line.push(b" security_epoch=")
+        && line.push_u64(status.security_epoch)
+        && line.push(b" schema=")
+        && line.push_u64(status.data_schema_min as u64)
+        && line.push(b"..")
+        && line.push_u64(status.data_schema_max as u64)
+        && line.push(b" caller=")
+        && line.push_u64(status.caller_subject)
+        && line.push(b" domain=")
+        && line.push_u64(status.caller_domain as u64)
+        && line.push(b"\nsystem-update-ok\n");
+    if !valid || status.candidate_slot == NO_SLOT && status.candidate_release != 0 {
+        return false;
+    }
+    write(line.as_bytes())
+}
+
+fn write_jucs_parse_error(name: &str) -> bool {
+    let mut output = FixedText::new();
+    output.push(b"jucs-error command=system.update.status code=")
+        && output.push(name.as_bytes())
+        && output.push(b"\n")
+        && write(output.as_bytes())
+}
+
 fn main(_: u64, _: u64) -> i32 {
     if !write(b"Jasper-OS native CLI\n") {
         return 1;
@@ -110,7 +257,20 @@ fn main(_: u64, _: u64) -> i32 {
             }
         }
         let command = editor.line();
-        if command == b"help" {
+        if command.starts_with(b"system update ")
+            || command.starts_with(b"jucs ")
+            || command.starts_with(b"jasper system ")
+        {
+            match jucs::parse(command) {
+                Ok(invocation) => {
+                    if !dispatch_jucs(invocation) {
+                        return 3;
+                    }
+                }
+                Err(error) if !write_jucs_parse_error(error.name()) => return 3,
+                Err(_) => {}
+            }
+        } else if command == b"help" {
             if !write(HELP) || !write(b"native-help-ok\n") {
                 return 3;
             }

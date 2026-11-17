@@ -109,8 +109,9 @@ on_exit() {
 trap on_exit EXIT
 
 free_kib=$(df -Pk "$TARGET" | awk 'NR == 2 { print $4 }')
-if [ "${free_kib:-0}" -lt 4194304 ]; then
-  echo "FAIL QEMU target filesystem has less than 4 GiB free: $TARGET" >&2
+disk_floor_kib="${JASPER_QEMU_MIN_DISK_KIB:-4194304}"
+if [ "${free_kib:-0}" -lt "$disk_floor_kib" ]; then
+  echo "FAIL QEMU target filesystem has less than ${disk_floor_kib} KiB free: $TARGET" >&2
   exit 75
 fi
 available_kib=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
@@ -298,7 +299,7 @@ if [ "$MODE" = terminal-session ] && [ "${ISSUE21_MANUAL_INPUT:-0}" != 1 ]; then
     while ! grep -aq '^jasper> ' "$OUT/serial.log"; do
       sleep 1
     done
-    printf 'help\necho history\n\016\n\003\004' >&8
+    printf 'help\nsystem update status\nsystem update status --schema\nsystem update status --help\necho history\n\016\n\003\004' >&8
   ) &
   SERIAL_FEEDER=$!
   SERIAL_ARGS=(-serial "pipe:$OUT/serial")
@@ -460,6 +461,10 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native
     grep -aqE $'^Jasper-OS native CLI\r?$' "$OUT/serial.log"
     if [ "${ISSUE21_MANUAL_INPUT:-0}" != 1 ]; then
       grep -aqE $'^native-help-ok\r?$' "$OUT/serial.log"
+      grep -aqE $'^system-update status=ok command=system[.]update[.]status generation=[1-9][0-9]* transaction=[1-9][0-9]* active=[AB] state=confirmed release=[1-9][0-9]* .*caller=[1-9][0-9]* domain=1\r?$' "$OUT/serial.log"
+      grep -aqE $'^system-update-ok\r?$' "$OUT/serial.log"
+      grep -aqE $'^\{"schema":"jucs.command/1","id":"system.update.status","version":1,"effects":"read","arguments":\[\],"options":\["--help","--schema"\],"output":"service.update-status/v1"\}\r?$' "$OUT/serial.log"
+      grep -aqE $'^system update status \[\-\-help\|--schema\]\r?$' "$OUT/serial.log"
       [ "$(grep -acE $'^native-echo=history\r?$' "$OUT/serial.log")" -ge 2 ]
       grep -aqE $'^\^C\r?$' "$OUT/serial.log"
     fi

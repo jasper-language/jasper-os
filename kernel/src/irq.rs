@@ -904,14 +904,16 @@ pub mod device {
             }
         }
         for index in 0..released_count {
-            let line = QUOTAS[cpu]
+            let Some(line) = QUOTAS[cpu]
                 .lock()
                 .released_lines()
                 .get(index)
                 .copied()
-                .unwrap_or_else(|| arch::halt_forever());
+            else {
+                arch::halt_forever();
+            };
             // JASPER-HARDCODE-REVIEW: issue=33 source=released-request-runtime-state reason=line-missing-from-current-table-is-not-enabled
-            let enabled = ROUTING.lock().enabled.get(line).copied().unwrap_or(false);
+            let enabled = ROUTING.lock().enabled.get(line).copied() == Some(true);
             if enabled {
                 arch::device_irq_set_masked(line, false);
             }

@@ -41,4 +41,19 @@ DAG；相关实现归入现有 LC-2、ISSUE-21 与 TERM-1 的后续验收。
 6. 完成错误参数、越权、跨租户、旧 generation、错误摘要、并发冲突和断电恢复
    负例；救援工具继续只存在于可信恢复边界。
 
-在步骤 1–6 完成前，LC-2 的正式 JUCS/Shell 命令入口必须保持未交付状态。
+## 当前实现切片
+
+- JUCS 层已建立无分配的 `system.update.status` v1 命令身份、精确三段式解析、
+  拒绝 `jucs`/`jasper` 工具前缀、未知参数失败关闭，并提供 `--help`/`--schema`；
+- 原生 CLI 已通过该 JUCS 路由调用 `system.update.control.get`，不复制更新执行器；
+- 内核只读机制返回固定 `service.update-status/v1` 记录，调用者身份和域由内核
+  盖章；control/staging/archive 路径不进入 ABI；
+- 查询先验证当前进程的活动安全身份，再读取并恢复同一双副本 A/B 控制记录；
+- ABI 3.16.0 快照和系统接口冻结已更新。
+- 真实 UEFI 串口和 framebuffer/PS-2 原生终端均输入了无前缀
+  `system update status`，返回同一结构状态；首程序帧与堆资源断言保持
+  `reclaimed=true`。
+
+仍未完成：结构化 Agent 与 CLI 的结果对照；租户过滤；恢复/归档的正式
+资源动作；真实 UEFI 验收证据；权限、重放、旧 generation、错误摘要和并发冲突的
+完整负例矩阵。在步骤 1–6 全部完成前，Issue #34 和 LC-2 都不能标记 done。

@@ -52,8 +52,25 @@ jasper-update-recovery cleanup <control-root> <staging-root> <manifest-sha256-he
 按照 Issue #34，**该工具不是 Jasper 原生 Shell 的正常用户命令**。正式原生入口
 必须是无前缀的 `system update status`，通过 JUCS 命令发现、Schema、调用者身份
 与版本化更新服务执行；普通生产用户不能通过直接提供 control/staging/archive
-路径获得恢复特权。当前原生 Shell/JUCS 到该服务的调用链仍未交付，因此不能用
-`jasper-update-recovery` 或 `jucs jasper-update-recovery` 冒充正式命令完成。
+路径获得恢复特权。
+
+当前源码已交付只读状态链的第一片：
+
+- 原生 CLI 解析规范化 `system update status`，同时提供 `--help` 与 `--schema`；
+- JUCS 命令身份为 `system.update.status` v1，不把命令名当 syscall；
+- 内核机制 `system.update.control.get` 只接收输出缓冲与容量，不接受路径；
+- 服务先验证当前调用者身份/系统域，再读取并恢复同一组双副本 A/B 控制记录；
+- 返回固定 `service.update-status/v1` 记录，包含 generation、transaction、槽状态、
+  release、回滚下限、安全纪元、Schema 范围以及调用者身份；
+- 返回记录不包含 control/staging/archive 路径或任意可执行对象。
+
+真实 UEFI 验证已覆盖串口与 framebuffer/PS-2 两个原生终端前端：输入
+`system update status` 后均返回同一份 A/B 控制记录，`--help`/`--schema` 也可发现；
+首程序查询前后资源断言为 `reclaimed=true`。
+
+这仍不是 Issue #34 的整体完成：结构化 Agent 与 CLI 的同契约对照、租户级更新
+过滤、恢复/归档正式资源动作和完整负例矩阵尚未交付。因此 LC-2 继续保持
+`core-passed`，恢复工具也不能冒充正式命令。
 
 ## 验证
 

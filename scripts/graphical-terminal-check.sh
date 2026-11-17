@@ -81,6 +81,32 @@ done
 grep -aq '^native-help-ok' "$OUT/serial.log"
 
 printf '%s\n' \
+  'sendkey s 30' 'sendkey y 30' 'sendkey s 30' 'sendkey t 30' \
+  'sendkey e 30' 'sendkey m 30' 'sendkey spc 30' \
+  'sendkey u 30' 'sendkey p 30' 'sendkey d 30' 'sendkey a 30' \
+  'sendkey t 30' 'sendkey e 30' 'sendkey spc 30' \
+  'sendkey s 30' 'sendkey t 30' 'sendkey a 30' 'sendkey t 30' \
+  'sendkey u 30' 'sendkey s 30' 'sendkey ret 30' |
+  timeout 10 socat - "UNIX-CONNECT:$SOCKET" >"$OUT/monitor-status.log" 2>&1
+
+for _ in $(seq 1 120); do
+  grep -aqE $'^system-update-ok\r?$' "$OUT/serial.log" 2>/dev/null && break
+  if ! kill -0 "$runner" 2>/dev/null; then
+    set +e
+    wait "$runner"
+    runner_status=$?
+    set -e
+    cat "$OUT/runner.log" >&2
+    echo "graphical-terminal: runner exited status=$runner_status" >&2
+    exit "$runner_status"
+  fi
+  sleep 1
+done
+grep -aqE $'^system-update status=ok command=system[.]update[.]status .*domain=1\r?$' \
+  "$OUT/serial.log"
+grep -aqE $'^system-update-ok\r?$' "$OUT/serial.log"
+
+printf '%s\n' \
   'sendkey e 30' 'sendkey c 30' 'sendkey h 30' 'sendkey o 30' \
   'sendkey spc 30' 'sendkey h 30' 'sendkey i 30' 'sendkey s 30' \
   'sendkey t 30' 'sendkey o 30' 'sendkey r 30' 'sendkey y 30' \

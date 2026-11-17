@@ -73,6 +73,21 @@ pub(crate) fn image() -> &'static [u8] {
 /// 装载并运行生产首程序，要求退出码为 0 且页帧全部归还。
 /// Loads and runs the production first program; requires exit code zero and full frame reclamation.
 pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
+    #[cfg(all(
+        feature = "terminal-session-verify",
+        feature = "lifecycle-ab-health"
+    ))]
+    {
+        let frames_before_backend = frame::free_frames();
+        if crate::lifecycle_health::init_control_backend().is_err() {
+            return (None, false);
+        }
+        crate::kprintln!(
+            "[JSR-UPDATE-BACKEND] frames_before={} frames_after={}",
+            frames_before_backend,
+            frame::free_frames()
+        );
+    }
     let free_before = frame::free_frames();
     let (heap_total_before, heap_free_before, _, heap_mapped_before) =
         crate::mm::heap::stats();
@@ -127,6 +142,7 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         abi::SYSTEM_TERMINAL_WRITE,
         abi::SYSTEM_MEMORY_MAP,
         abi::SYSTEM_PROCESS_EXIT,
+        abi::SYSTEM_UPDATE_CONTROL_GET,
     ]);
     #[cfg(not(any(
         feature = "terminal-session-verify",

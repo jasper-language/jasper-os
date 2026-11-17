@@ -169,3 +169,7 @@
 4163	error	system.terminal.error.failed	1	none	终端·会话发生故障	Terminal session failed
 108	op	system.sandbox.launch.start	1	write	沙箱启动计划·启动受限子进程	Start bounded sandbox child
 109	op	system.diagnostic.query	1	read	诊断·有界查询与状态	Query bounded diagnostics and status
+110	op	system.update.control.get	1	read	更新·读取 A/B 控制状态	Get update control status
+4164	error	system.update.error.unavailable	1	none	更新·控制状态不可用	Update control status unavailable
+4165	error	system.update.error.buffer_too_small	1	none	更新·状态缓冲区不足	Update status buffer too small
+4166	error	system.update.error.protocol	1	none	更新·状态协议非法	Update status protocol invalid

@@ -111,6 +111,8 @@ pub mod task_lifecycle;
 pub mod terminal_session;
 /// Bounded terminal line editing and command history.
 pub mod terminal_editor;
+/// Structured, path-free service update status records.
+pub mod update_status;
 pub mod tick_lease;
 pub mod wake_mailbox;
 pub mod fdt;
@@ -126,6 +128,8 @@ pub mod inherited_mutex;
 pub mod io;
 pub mod irq;
 pub mod job;
+/// Jasper Unified Command Standard command identities and parsing.
+pub mod jucs;
 pub mod l10n;
 pub mod lockorder;
 pub mod mac;

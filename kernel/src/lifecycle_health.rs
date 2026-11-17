@@ -12,8 +12,8 @@ use alloc::sync::Arc;
 
 use crc::{Crc, CRC_32_ISO_HDLC};
 use jasper_lifecycle_boot::{
-    recover, BootControlError, ControlIo, ControlIoError, CONTROL_RECORD_BYTES, P0_CONTROL_A_LBA,
-    P0_CONTROL_A_PARTITION_GUID, P0_CONTROL_A_TYPE_GUID, P0_CONTROL_B_LBA,
+    recover, BootControlError, ControlBlock, ControlIo, ControlIoError, CONTROL_RECORD_BYTES,
+    P0_CONTROL_A_LBA, P0_CONTROL_A_PARTITION_GUID, P0_CONTROL_A_TYPE_GUID, P0_CONTROL_B_LBA,
     P0_CONTROL_B_PARTITION_GUID, P0_CONTROL_B_TYPE_GUID, P0_DISK_GUID, P0_SYSTEM_A_LBA,
     P0_SYSTEM_B_LBA, P0_SYSTEM_BYTES, Slot,
 };
@@ -48,6 +48,9 @@ const ROOT_USERLAND_MANIFEST: &[u8] =
     b"arch=x86_64\nabi=linux\nentry=/bin/true\ninterpreter=/lib64/ld-linux-x86-64.so.2\nlibrary=/usr/lib/x86_64-linux-gnu/libc.so.6\n";
 #[cfg(feature = "lifecycle-root-exec-verify")]
 const ROOT_EXEC_PROBE_PATH: &str = "/usr/libexec/jasper/health-probe";
+
+static CONTROL_DEVICE: spin::Mutex<Option<Arc<IrqSpinLock<BlockDevice>>>> =
+    spin::Mutex::new(None);
 
 /// 健康门失败原因。
 /// Health-gate failure reason.
@@ -224,6 +227,46 @@ impl ControlIo for KernelControlIo {
         out.copy_from_slice(&page[..CONTROL_RECORD_BYTES]);
         Ok(())
     }
+}
+
+/// Initialize the single update-control storage backend used by status and health.
+///
+/// This consumes the process, DMA and queue resources before a frontend can
+/// query status. Repeated calls reuse the same device and return no new authority.
+pub fn init_control_backend() -> Result<(), HealthError> {
+    if CONTROL_DEVICE.lock().is_some() {
+        return Ok(());
+    }
+    mmio::prepare_window().map_err(|_| HealthError::Block)?;
+    let device = pci::table()
+        .devices()
+        .find(|device| {
+            device.header.vendor == virtio::VIRTIO_VENDOR
+                && virtio::is_blk_device(device.header.device)
+        })
+        .ok_or(HealthError::Unsupported)?;
+    let blockdev = BlockDevice::new(device, HEALTH_PAGES).map_err(|_| HealthError::Block)?;
+    let device = Arc::new(IrqSpinLock::new(blockdev));
+    let io = KernelControlIo {
+        device: Arc::clone(&device),
+    };
+    let capacity = io.device.lock().geometry().capacity_sectors;
+    let gpt = io.read_gpt()?;
+    validate_gpt(&gpt, capacity)?;
+    let mut backend = CONTROL_DEVICE.lock();
+    if backend.is_none() {
+        *backend = Some(device);
+    }
+    Ok(())
+}
+
+fn control_device() -> Result<Arc<IrqSpinLock<BlockDevice>>, HealthError> {
+    init_control_backend()?;
+    CONTROL_DEVICE
+        .lock()
+        .as_ref()
+        .cloned()
+        .ok_or(HealthError::Block)
 }
 
 struct PartitionExt4Source {
@@ -1000,20 +1043,33 @@ fn execute_root_dynamic_programs(
     run_root_program(root, origin, "/usr/bin/jasper-signal-basic", &signal_argv)
 }
 
+/// Read and recover the authoritative A/B control record without mutating it.
+///
+/// The query validates the same P0 GPT and physical control locations as the
+/// health gate. This is a bounded kernel mechanism used by the versioned
+/// update-status service; it accepts no caller path or device selector.
+pub fn read_control_block() -> Result<ControlBlock, HealthError> {
+    let device = control_device()?;
+    let capacity = device.lock().geometry().capacity_sectors;
+    let mut io = KernelControlIo {
+        device,
+    };
+    let gpt = io.read_gpt()?;
+    validate_gpt(&gpt, capacity)?;
+    let mut first = [0u8; CONTROL_RECORD_BYTES];
+    let mut second = [0u8; CONTROL_RECORD_BYTES];
+    io.read_copy(0, &mut first)
+        .map_err(|_| HealthError::Block)?;
+    io.read_copy(1, &mut second)
+        .map_err(|_| HealthError::Block)?;
+    recover(Some(&first), Some(&second)).map_err(HealthError::Recovery)
+}
+
 /// 确认当前 A/B 槽的最小健康集合并持久提交。
 /// Confirms the minimum health set for the current A/B slot and commits it durably.
 pub fn confirm_minimum_health() -> Result<(), HealthError> {
-    mmio::prepare_window().map_err(|_| HealthError::Block)?;
-    let device = pci::table()
-        .devices()
-        .find(|device| {
-            device.header.vendor == virtio::VIRTIO_VENDOR
-                && virtio::is_blk_device(device.header.device)
-        })
-        .ok_or(HealthError::Unsupported)?;
-    let blockdev = BlockDevice::new(device, HEALTH_PAGES).map_err(|_| HealthError::Block)?;
-    let capacity = blockdev.geometry().capacity_sectors;
-    let device = Arc::new(IrqSpinLock::new(blockdev));
+    let device = control_device()?;
+    let capacity = device.lock().geometry().capacity_sectors;
     let mut io = KernelControlIo {
         device: Arc::clone(&device),
     };

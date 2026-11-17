@@ -190,3 +190,7 @@
 4161	error	system.terminal.error.would_block	1	none	终端·当前没有输入且要求非阻塞	Terminal input would block
 4162	error	system.terminal.error.closed	1	none	终端·会话已关闭	Terminal session closed
 4163	error	system.terminal.error.failed	1	none	终端·会话发生故障	Terminal session failed
+110	op	system.update.control.get	1	read	更新·读取 A/B 控制状态	Get update control status
+4164	error	system.update.error.unavailable	1	none	更新·控制状态不可用	Update control status unavailable
+4165	error	system.update.error.buffer_too_small	1	none	更新·状态缓冲区不足	Update status buffer too small
+4166	error	system.update.error.protocol	1	none	更新·状态协议非法	Update status protocol invalid
