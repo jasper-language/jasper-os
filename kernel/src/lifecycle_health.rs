@@ -9,6 +9,7 @@
 //! not mount the System A/B root images or represent full-service health.
 
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crc::{Crc, CRC_32_ISO_HDLC};
 use jasper_lifecycle_boot::{
@@ -51,6 +52,24 @@ const ROOT_EXEC_PROBE_PATH: &str = "/usr/libexec/jasper/health-probe";
 
 static CONTROL_DEVICE: spin::Mutex<Option<Arc<IrqSpinLock<BlockDevice>>>> =
     spin::Mutex::new(None);
+static CONTROL_MUTATION: AtomicBool = AtomicBool::new(false);
+
+struct ControlMutationGuard;
+
+impl ControlMutationGuard {
+    fn acquire() -> Result<Self, HealthError> {
+        CONTROL_MUTATION
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .map(|_| Self)
+            .map_err(|_| HealthError::Busy)
+    }
+}
+
+impl Drop for ControlMutationGuard {
+    fn drop(&mut self) {
+        CONTROL_MUTATION.store(false, Ordering::Release);
+    }
+}
 
 /// 健康门失败原因。
 /// Health-gate failure reason.
@@ -94,6 +113,8 @@ pub enum HealthError {
     Commit(CommitError),
     /// 专用负向构建在健康门注入失败。The dedicated negative build injected a health failure.
     InjectedFailure,
+    /// Another control-record mutation is active.
+    Busy,
 }
 
 impl HealthError {
@@ -118,6 +139,7 @@ impl HealthError {
             Self::State(_) => "state",
             Self::Commit(_) => "commit",
             Self::InjectedFailure => "injected_failure",
+            Self::Busy => "busy",
         }
     }
 }
@@ -1106,6 +1128,9 @@ pub fn read_control_block() -> Result<ControlBlock, HealthError> {
 /// both copies to the same highest-generation valid record, flush and read back.
 /// The operation accepts no path or device selector.
 pub fn recover_control_block(repair_durable_copies: bool) -> Result<ControlBlock, HealthError> {
+    let _mutation = repair_durable_copies
+        .then(ControlMutationGuard::acquire)
+        .transpose()?;
     let device = control_device()?;
     let capacity = device.lock().geometry().capacity_sectors;
     let mut io = KernelControlIo {
@@ -1133,6 +1158,7 @@ pub fn recover_control_block(repair_durable_copies: bool) -> Result<ControlBlock
 /// 确认当前 A/B 槽的最小健康集合并持久提交。
 /// Confirms the minimum health set for the current A/B slot and commits it durably.
 pub fn confirm_minimum_health() -> Result<(), HealthError> {
+    let _mutation = ControlMutationGuard::acquire()?;
     let device = control_device()?;
     let capacity = device.lock().geometry().capacity_sectors;
     let mut io = KernelControlIo {

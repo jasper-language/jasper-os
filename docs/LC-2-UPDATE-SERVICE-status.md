@@ -121,6 +121,8 @@ cargo test --locked -p kernel-core update_service::tests
 
 - 双副本回填：高低有效世代、单副本损坏、同世代冲突、write/flush/readback
   失败均原子失败或完成，冲突路径不产生写；
+- recovery 与健康确认共用一个内核 mutation guard；并发 mutation 明确返回 busy，
+  不会让较旧 recovery 覆盖另一条新提交；
 - generation 过期拒绝；
 - prepare→commit→trial→healthy→finalize→archive 完整成功路径；
 - 错误阶段不能跳过健康确认或直接 finalize；
