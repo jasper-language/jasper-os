@@ -130,6 +130,8 @@ mod tests {
         recover_calls: u32,
         fail_status: Option<i64>,
         corrupt_action: bool,
+        last_status_request: u64,
+        last_action_request: u64,
     }
 
     impl UpdateTransport for Fake {
@@ -141,6 +143,7 @@ mod tests {
             let Some(decoded) = StatusRequest::decode(request.try_into().unwrap()) else {
                 return Err(1);
             };
+            self.last_status_request = decoded.request_id;
             let mut response = self.status;
             response.authorization.request_id = decoded.request_id;
             *output = response.encode();
@@ -157,6 +160,7 @@ mod tests {
             else {
                 return Err(1);
             };
+            self.last_action_request = decoded.request_id;
             let mut response = self.action;
             response.request_id = decoded.request_id;
             response.transaction_id = decoded.transaction_id;
@@ -224,6 +228,8 @@ mod tests {
             recover_calls: 0,
             fail_status: None,
             corrupt_action: false,
+            last_status_request: 0,
+            last_action_request: 0,
         };
         let mut client = UpdateClient::new(fake);
         let queried = client.status(21, 7).unwrap();
@@ -235,6 +241,8 @@ mod tests {
         let fake = client.into_inner();
         assert_eq!(fake.status_calls, 2);
         assert_eq!(fake.recover_calls, 1);
+        assert_eq!(fake.last_status_request, 22);
+        assert_eq!(fake.last_action_request, 23);
     }
 
     #[test]
@@ -246,6 +254,8 @@ mod tests {
             recover_calls: 0,
             fail_status: Some(4170),
             corrupt_action: false,
+            last_status_request: 0,
+            last_action_request: 0,
         };
         assert_eq!(
             UpdateClient::new(base).status(1, 0),
@@ -259,6 +269,8 @@ mod tests {
             recover_calls: 0,
             fail_status: None,
             corrupt_action: true,
+            last_status_request: 0,
+            last_action_request: 0,
         };
         fake.action.transaction_id = 9;
         let mut client = UpdateClient::new(fake);
@@ -279,6 +291,8 @@ mod tests {
             recover_calls: 0,
             fail_status: None,
             corrupt_action: false,
+            last_status_request: 0,
+            last_action_request: 0,
         };
         let recovered = UpdateClient::new(fake).recover(33, 34).unwrap();
         assert_eq!(recovered.manifest_sha256, [0x77; 32]);
