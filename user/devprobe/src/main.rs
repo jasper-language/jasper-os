@@ -27,7 +27,10 @@ use kernel_core::device::{
     CapabilityRecord, Desc, Filter, Record, BAR_KIND_IO, BAR_KIND_NONE, CAP_CFG_COMMON, CAP_RECORD_SIZE, DESC_SIZE,
     FILTER_ALL_CLASS, FILTER_ALL_VENDOR, RECORD_SIZE,
 };
+use kernel_core::dma_abi::MapArgs as DmaMapArgs;
+use kernel_core::memory_abi::MapArgs as MemoryMapArgs;
 use kernel_core::object::Rights;
+use kernel_core::ring_abi::{Cqe, EnterArgs, Sqe};
 use kernel_core::user_layout::WINDOW_BASE_X86_64;
 
 /// 系统调用号（构建期从登记表生成）。
@@ -46,6 +49,8 @@ static mut CAPS: [u8; 256] = [0; 256];
 const MAP_VA: u64 = WINDOW_BASE_X86_64 + (960 << 20);
 /// 第二个设备窗口（重复映射与拒绝路径使用，与 [`MAP_VA`] 相距 64 KiB）。
 const MAP_VA2: u64 = MAP_VA + 0x1_0000;
+/// DC-1 user driver-host DMA window.
+const DRIVER_DMA_VA: u64 = WINDOW_BASE_X86_64 + (968 << 20);
 
 /// 断言总数与失败数。
 static mut CHECKS: u32 = 0;
@@ -192,6 +197,94 @@ fn capability_list(handle: i64, ptr: u64, cap: u64) -> i64 {
 fn map_bar(handle: i64, bar: u32, va: u64) -> i64 {
     // SAFETY：参数全是整数，内核自行校验。
     unsafe { syscall3(ids::SYSTEM_DEVICE_MAP, handle as u64, bar as u64, va) }
+}
+
+fn memory_create(pages: u64) -> i64 {
+    // SAFETY: the kernel validates the page count.
+    unsafe { syscall3(ids::SYSTEM_MEMORY_OBJECT_CREATE, pages, 0, 0) }
+}
+
+fn memory_map(handle: i64, args: &mut MemoryMapArgs) -> i64 {
+    // SAFETY: args points at this process's stack and remains valid for the call.
+    unsafe {
+        syscall3(
+            ids::SYSTEM_MEMORY_OBJECT_MAP,
+            handle as u64,
+            args as *mut MemoryMapArgs as u64,
+            0,
+        )
+    }
+}
+
+fn memory_unmap(va: u64, pages: u64) -> i64 {
+    // SAFETY: the kernel validates the mapped range.
+    unsafe { syscall3(ids::SYSTEM_MEMORY_OBJECT_UNMAP, va, pages, 0) }
+}
+
+fn dma_map(memory: i64, args: &mut DmaMapArgs) -> i64 {
+    // SAFETY: args points at this process's stack and remains valid for the call.
+    unsafe {
+        syscall3(
+            ids::SYSTEM_MEMORY_DMA_MAP,
+            memory as u64,
+            args as *mut DmaMapArgs as u64,
+            0,
+        )
+    }
+}
+
+fn bind_interrupt(device: i64, entry: u64, cpu: u64) -> i64 {
+    // SAFETY: all arguments are scalar values checked by the kernel.
+    unsafe {
+        syscall3(
+            ids::SYSTEM_DEVICE_INTERRUPT_CREATE,
+            device as u64,
+            entry,
+            cpu,
+        )
+    }
+}
+
+fn ring_create(capacity: u64) -> i64 {
+    // SAFETY: create does not dereference user pointers.
+    unsafe { syscall3(ids::SYSTEM_ASYNC_RING_CREATE, capacity, 0, 0) }
+}
+
+fn ring_enter(ring: i64, sq: &[Sqe], wait_min: u32, out: &mut Entered) -> i64 {
+    out.args = EnterArgs {
+        sq_ptr: sq.as_ptr() as u64,
+        cq_ptr: out.cqes.as_mut_ptr() as u64,
+        id_ptr: out.ids.as_mut_ptr() as u64,
+        sq_count: sq.len() as u32,
+        cq_max: out.cqes.len() as u32,
+        wait_min,
+        ..EnterArgs::default()
+    };
+    // SAFETY: all ring buffers are fixed arrays in this stack frame.
+    unsafe {
+        syscall3(
+            ids::SYSTEM_ASYNC_RING_ENTER,
+            ring as u64,
+            &mut out.args as *mut EnterArgs as u64,
+            0,
+        )
+    }
+}
+
+struct Entered {
+    args: EnterArgs,
+    ids: [u64; 8],
+    cqes: [Cqe; 8],
+}
+
+impl Entered {
+    fn new() -> Self {
+        Self {
+            args: EnterArgs::default(),
+            ids: [0; 8],
+            cqes: [Cqe::default(); 8],
+        }
+    }
 }
 
 /// 读取 MMIO 的 32 位字（设备寄存器必须用 volatile；映射页不可缓存）。
@@ -777,6 +870,192 @@ fn probe_service_driver(control: usize) -> ! {
     exit(0)
 }
 
+/// DC-1: combine Device/MMIO, Memory/DMA and IRQ/Ring in one unprivileged process.
+///
+/// This is the capability-composition slice. It intentionally does not claim a
+/// completed virtqueue: user-visible DMA mappings return opaque IOVA values, so
+/// an actual device request still requires an admitted IOMMU translation backend.
+fn probe_driver_host() -> ! {
+    let mut live = 0i32;
+    // SAFETY: single-threaded probe owns LIST.
+    let list: &mut [u8] = unsafe { &mut *core::ptr::addr_of_mut!(LIST) };
+    let listed = list_raw(Filter::ALL.to_word(), list.as_mut_ptr() as u64, list.len() as u64);
+    let count = if listed > 0 { listed as usize / RECORD_SIZE } else { 0 };
+    let mut rng_bdf = 0u32;
+    for index in 0..count {
+        let mut raw = [0u8; RECORD_SIZE];
+        raw.copy_from_slice(&list[index * RECORD_SIZE..(index + 1) * RECORD_SIZE]);
+        let record = Record::decode(&raw);
+        if record.vendor == 0x1AF4 && matches!(record.device, 0x1004 | 0x1044) {
+            rng_bdf = record.bdf;
+            break;
+        }
+    }
+    emit!(rng_bdf != 0, "dc1 case=find_rng bdf=0x{:06x}", rng_bdf);
+    if rng_bdf == 0 {
+        exit(1);
+    }
+
+    let rights = Rights::READ
+        .union(Rights::MAP)
+        .union(Rights::CONTROL)
+        .union(Rights::TRANSFER)
+        .union(Rights::DUPLICATE);
+    let device = open(rng_bdf, rights);
+    if device > 0 {
+        live += 1;
+    }
+    emit!(device > 0, "dc1 case=device handle={}", device);
+    if device <= 0 {
+        exit(1);
+    }
+
+    let desc_buf: &mut [u8] = unsafe { &mut *core::ptr::addr_of_mut!(DESC) };
+    let described = get(device, desc_buf);
+    let mut desc_raw = [0u8; DESC_SIZE];
+    desc_raw.copy_from_slice(desc_buf);
+    let desc = Desc::decode(&desc_raw);
+    let cap_need = capability_list(device, 0, 0);
+    let caps: &mut [u8] = unsafe { &mut *core::ptr::addr_of_mut!(CAPS) };
+    let caps_got = capability_list(device, caps.as_mut_ptr() as u64, caps.len() as u64);
+    let cap_count = if caps_got > 0 { caps_got as usize / CAP_RECORD_SIZE } else { 0 };
+    let mut common = CapabilityRecord::NONE;
+    for index in 0..cap_count {
+        let mut raw = [0u8; CAP_RECORD_SIZE];
+        raw.copy_from_slice(&caps[index * CAP_RECORD_SIZE..(index + 1) * CAP_RECORD_SIZE]);
+        let cap = CapabilityRecord::decode(&raw);
+        if cap.cfg_type == CAP_CFG_COMMON {
+            common = cap;
+            break;
+        }
+    }
+    emit!(
+        described == DESC_SIZE as i64
+            && caps_got == cap_need
+            && common.cfg_type == CAP_CFG_COMMON
+            && (common.bar as usize) < desc.bars.len(),
+        "dc1 case=caps bytes={} common_bar={}",
+        caps_got,
+        common.bar
+    );
+    let mapped = map_bar(device, common.bar as u32, MAP_VA);
+    emit!(mapped == 0, "dc1 case=mmio ret={}", mapped);
+    let common_va = MAP_VA + common.bar_offset as u64;
+    let status = if mapped == 0 {
+        unsafe { core::ptr::read_volatile((common_va + 0x14) as *const u8) }
+    } else {
+        0xff
+    };
+    emit!(mapped == 0 && status != 0xff, "dc1 case=mmio_read status={}", status);
+
+    let memory = memory_create(1);
+    if memory > 0 {
+        live += 1;
+    }
+    let mut memory_args = MemoryMapArgs::new(DRIVER_DMA_VA, 0, 1, true);
+    let mapped_memory = if memory > 0 {
+        memory_map(memory, &mut memory_args)
+    } else {
+        -1
+    };
+    emit!(
+        memory > 0 && mapped_memory == 0,
+        "dc1 case=memory handle={} map={}",
+        memory,
+        mapped_memory
+    );
+    if mapped_memory == 0 {
+        // SAFETY: the kernel mapped exactly one writable page at this VA.
+        unsafe { core::ptr::write_volatile(DRIVER_DMA_VA as *mut u64, 0x4443_315f_444d4155) };
+    }
+    let mut dma_args = DmaMapArgs::new(device as u64, 0, 1, true);
+    let dma = if mapped_memory == 0 {
+        dma_map(memory, &mut dma_args)
+    } else {
+        -1
+    };
+    if dma > 0 {
+        live += 1;
+    }
+    let iova = dma_args.iova;
+    emit!(
+        dma > 0
+            && iova != 0
+            && iova % kernel_core::memory_object::PAGE_BYTES == 0
+            && iova != DRIVER_DMA_VA,
+        "dc1 case=dma handle={} iova=0x{:x} opaque=true",
+        dma,
+        iova
+    );
+
+    let interrupt = bind_interrupt(device, 0, 0);
+    if interrupt > 0 {
+        live += 1;
+    }
+    let ring = ring_create(8);
+    if ring > 0 {
+        live += 1;
+    }
+    emit!(
+        interrupt > 0 && ring > 0,
+        "dc1 case=irq_ring interrupt={} ring={}",
+        interrupt,
+        ring
+    );
+    if interrupt > 0 && ring > 0 {
+        let wait = [Sqe {
+            op: ids::SYSTEM_DEVICE_INTERRUPT_WAIT as u32,
+            flags: 0,
+            user_tag: 0xdc1,
+            arg0: interrupt as u64,
+            arg1: 0,
+        }];
+        let mut first = Entered::new();
+        let submit = ring_enter(ring, &wait, 0, &mut first);
+        let closed = close(interrupt);
+        if closed == 0 {
+            live -= 1;
+        }
+        let mut done = Entered::new();
+        let reap = ring_enter(ring, &[], 1, &mut done);
+        emit!(
+            submit == 0
+                && closed == 0
+                && reap == 0
+                && done.args.reaped == 1
+                && done.cqes[0].user_tag == 0xdc1
+                && done.cqes[0].result
+                    == -(ids::SYSTEM_DEVICE_ERROR_INTERRUPT_CLOSED as i64),
+            "dc1 case=ring_close submit={} reap={} result={}",
+            submit,
+            reap,
+            done.cqes[0].result
+        );
+    }
+
+    if ring > 0 && close(ring) == 0 {
+        live -= 1;
+    }
+    if dma > 0 && close(dma) == 0 {
+        live -= 1;
+    }
+    if mapped_memory == 0 && memory_unmap(DRIVER_DMA_VA, 1) == 0 {
+        // no handle count changes; mapping is revoked independently
+    }
+    if memory > 0 && close(memory) == 0 {
+        live -= 1;
+    }
+    if device > 0 && close(device) == 0 {
+        live -= 1;
+    }
+    emit!(live == 0, "dc1 case=handles_closed live={}", live);
+    log(format_args!(
+        "[JSR-DC1] summary device=true mmio=true dma=true irq=true ring=true queue_work=false failed={}",
+        failed()
+    ));
+    exit(if failed() == 0 && live == 0 { 0 } else { 1 });
+}
+
 /// 角色 1：进程没有设备访问能力；设备调用必须在分发层被拒。
 fn probe_no_capability() -> ! {
     let list_ret = list_raw(Filter::ALL.to_word(), 0, 0);
@@ -816,6 +1095,7 @@ pub extern "C" fn _start(role: usize, arg: usize) -> ! {
         2 => probe_map(),
         3 => probe_map_no_capability(),
         5 => probe_service_driver(arg),
+        6 => probe_driver_host(),
         _ => exit(100),
     }
 }

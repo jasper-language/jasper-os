@@ -300,6 +300,10 @@ pub fn run() {
         assembly::report_health("devices", Health::Healthy).is_ok(),
         "final device service restoration failed",
     );
+    match crate::device_demo::run_driver_host() {
+        Some(ok) => check(ok, "DC-1 combined user Driver Host failed"),
+        None => kprintln!("[JSR-DC1] skipped=true reason=no-virtio-rng"),
+    }
 
     sched::set_preemption(previous_preemption);
     let after = baseline();

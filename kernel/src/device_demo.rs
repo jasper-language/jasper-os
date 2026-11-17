@@ -97,6 +97,52 @@ fn run_role(name: &'static str, role: u64, allowed: SyscallSet) -> bool {
     ok
 }
 
+fn driver_host_calls() -> SyscallSet {
+    SyscallSet::of(&[
+        abi::SYSTEM_CONSOLE_WRITE,
+        abi::SYSTEM_DEVICE_LIST,
+        abi::SYSTEM_DEVICE_OPEN,
+        abi::SYSTEM_DEVICE_GET,
+        abi::SYSTEM_DEVICE_CAPABILITY_LIST,
+        abi::SYSTEM_DEVICE_MAP,
+        abi::SYSTEM_DEVICE_INTERRUPT_CREATE,
+        abi::SYSTEM_MEMORY_OBJECT_CREATE,
+        abi::SYSTEM_MEMORY_OBJECT_MAP,
+        abi::SYSTEM_MEMORY_OBJECT_UNMAP,
+        abi::SYSTEM_MEMORY_DMA_MAP,
+        abi::SYSTEM_ASYNC_RING_CREATE,
+        abi::SYSTEM_ASYNC_RING_ENTER,
+        abi::SYSTEM_HANDLE_CLOSE,
+        abi::SYSTEM_TASK_EXIT,
+    ])
+}
+
+fn has_virtio_rng() -> bool {
+    crate::pci::table().devices().any(|device| {
+        device.header.vendor == VIRTIO_VENDOR
+            && crate::virtio::is_rng_device(device.header.device)
+    })
+}
+
+/// Run only the DC-1 capability-composition role.
+///
+/// Returns `None` when the required virtio-rng device is absent.
+pub(crate) fn run_driver_host() -> Option<bool> {
+    if !has_virtio_rng() {
+        kprintln!("[JSR-DC1] case=role6 skipped=true reason=no-virtio-rng");
+        return None;
+    }
+    let before = crate::baseline::baseline();
+    let ok = run_role("driver-host", 6, driver_host_calls());
+    let after = crate::baseline::baseline();
+    kprintln!(
+        "[JSR-DC1] cleanup resources={} ok={}",
+        after == before,
+        after == before && ok
+    );
+    Some(ok && after == before)
+}
+
 /// 运行 DRV-1C 演练并输出汇总（`failed` 进入内核的失败计数）。
 /// Runs the DRV-1C demo and emits the summary.
 pub fn run() {
@@ -154,6 +200,19 @@ pub fn run() {
         abi::SYSTEM_TASK_EXIT,
     ]);
     check(run_role("device-nomap", 3, no_map), "无映射能力的拒绝演练（角色 3）未以退出码 0 结束");
+
+    // DC-1 capability-composition slice: one user process combines Device,
+    // MMIO, Memory/DMA, IRQ and Ring. Actual virtqueue DMA remains blocked on
+    // translating user-visible IOVA through an admitted IOMMU backend.
+    if has_virtio_rng() {
+        let driver_host = driver_host_calls();
+        check(
+            run_role("driver-host", 6, driver_host),
+            "DC-1 用户态 Driver Host 能力组合未以退出码 0 结束",
+        );
+    } else {
+        kprintln!("[JSR-DC1] case=role6 skipped=true reason=no-virtio-rng");
+    }
 
     kobj::run_cleanup(usize::MAX);
     let (live_after, pending_after, _) = kobj::stats();

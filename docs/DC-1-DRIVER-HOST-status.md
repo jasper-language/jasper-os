@@ -23,11 +23,31 @@
 Memory、Handle、IRQ 或 DMA 的既有强制机制。它只规定设备服务层如何在不制造第二
 权限根的前提下组合这些机制。
 
+### 用户态能力组合
+
+`user-devprobe` 角色 6 在同一个未特权进程中组合：
+
+- 打开真实 virtio-rng Device；
+- 映射并读取现代 virtio common BAR；
+- 创建、映射一个 Memory 对象并建立带 opaque IOVA 的可写 DMA 映射；
+- 绑定真实 MSI-X 表项并创建 Ring；
+- 提交 IRQ 等待，关闭 IRQ handle 后收到唯一 `InterruptClosed` 终态；
+- 关闭 Ring/DMA/Memory/Device，要求对象与页帧资源回基线。
+
+该组合由 `arch2-verify` 的同一用户驱动验收路径执行，避免 MMIO、DMA 和 IRQ 各自
+在不同进程中通过却未证明组合能力。
+
 ## 验证
 
 ```text
 cargo test --locked -p kernel-core driver_host
 6 passed; 0 failed
+
+cargo check --locked -p user-devprobe --target x86_64-unknown-none
+PASS
+
+cargo check --locked --target x86_64-unknown-none -p jasper-kernel --features arch2-verify
+PASS
 ```
 
 覆盖发现与准入分离、最小权限、设备独占、请求单终态、reset 失败原子与 token
@@ -35,8 +55,9 @@ cargo test --locked -p kernel-core driver_host
 
 ## 未完成
 
-- 同一真实用户态进程组合获取 Device/Memory/IRQ/DMA capability；
-- 真实 virtio 用户态驱动完成 MMIO、DMA queue、IRQ completion 和 timeout；
+- 真实 virtio 用户态 Driver Host 完成 queue notify、used-ring completion 和 timeout；
+  当前 DMA capability 只向用户暴露 opaque IOVA，实际设备 queue 仍需经准入的
+  IOMMU translation backend，不能把 capability 组合通过冒充 queue 完成；
 - host crash、设备 reset、驱动进程退出后的硬件级静默与资源回基线；
 - Pixel 6a 物理验收。
 
