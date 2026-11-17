@@ -109,8 +109,10 @@ impl SectorIo for ReservedVirtioSectorIo {
 
 static BACKEND: IrqSpinLock<Option<NativeInstallService<ReservedVirtioSectorIo>>> =
     IrqSpinLock::ranked(crate::lockorder::NATIVE_INSTALL, None);
+static INIT_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 
 fn ensure_initialized() -> Result<(), InstallServiceError> {
+    let _initialization = INIT_LOCK.lock();
     if BACKEND.lock().is_some() {
         return Ok(());
     }
