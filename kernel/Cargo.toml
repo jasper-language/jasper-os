@@ -153,7 +153,7 @@ native-install-block-verify = [
     "kernel-core/persistent-install",
 ]
 # Persisted Driver Host authority receipts on the validated P0 disk.
-driver-host-journal-verify = ["lifecycle-ab-health"]
+driver-host-journal-verify = ["lifecycle-ab-health", "kernel-core/driver-host-journal"]
 # Deep test-only codec fault injection; retained outside the production-stack
 # two-boot persistence drill.
 native-install-fault-verify = ["native-install-block-verify"]

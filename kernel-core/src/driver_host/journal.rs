@@ -7,7 +7,9 @@
 //! order so stale admission/reset/crash receipts fail closed.
 
 use crate::fs::journal::{JournalError, SectorIo, SECTORS_PER_STORAGE_UNIT, STORAGE_UNIT_BYTES};
+#[cfg(any(test, feature = "driver-host-journal"))]
 use alloc::boxed::Box;
+#[cfg(any(test, feature = "driver-host-journal"))]
 use alloc::vec::Vec;
 
 use super::{CrashReceipt, DeviceIdentity, HostToken, PassToken, QuiesceProof, ResetReceipt};
@@ -196,16 +198,27 @@ impl DriverHostJournalError {
 pub struct DriverHostJournal<D: SectorIo, const HOSTS: usize> {
     device: D,
     sequence: u64,
-    events: Box<[Option<DriverHostPersistentEvent>]>,
+    events: EventStorage,
 }
 
-fn empty_events() -> Result<Box<[Option<DriverHostPersistentEvent>]>, DriverHostJournalError> {
+#[cfg(any(test, feature = "driver-host-journal"))]
+type EventStorage = Box<[Option<DriverHostPersistentEvent>]>;
+#[cfg(not(any(test, feature = "driver-host-journal")))]
+type EventStorage = [Option<DriverHostPersistentEvent>; MAX_DRIVER_HOST_EVENTS];
+
+#[cfg(any(test, feature = "driver-host-journal"))]
+fn empty_events() -> Result<EventStorage, DriverHostJournalError> {
     let mut events = Vec::new();
     events
         .try_reserve_exact(MAX_DRIVER_HOST_EVENTS)
         .map_err(|_| DriverHostJournalError::Capacity)?;
     events.resize(MAX_DRIVER_HOST_EVENTS, None);
     Ok(events.into_boxed_slice())
+}
+
+#[cfg(not(any(test, feature = "driver-host-journal")))]
+const fn empty_events() -> Result<EventStorage, DriverHostJournalError> {
+    Ok([None; MAX_DRIVER_HOST_EVENTS])
 }
 
 impl<D: SectorIo, const HOSTS: usize> DriverHostJournal<D, HOSTS> {
@@ -605,7 +618,7 @@ fn read_slot<D: SectorIo, const HOSTS: usize>(
 ) -> Result<
     Option<(
         u64,
-        Box<[Option<DriverHostPersistentEvent>]>,
+        EventStorage,
     )>,
     DriverHostJournalError,
 > {

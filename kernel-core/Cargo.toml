@@ -79,6 +79,9 @@ cpu-dynamic = []
 # Persistent installation requires the kernel heap for bounded transactional
 # state snapshots; core profiles that do not use it remain allocation-free.
 persistent-install = []
+# Runtime-sized Driver Host authority receipts use the kernel heap. User ABI
+# crates keep the allocation-free default surface.
+driver-host-journal = []
 # FS-1 read-only ext4 VFS plus JBD2 recovery overlay.
 ext4-view = ["dep:crc", "dep:ext4-view"]
 # Experimental FS-1 write engine: buffered ext4_rs metadata operations committed

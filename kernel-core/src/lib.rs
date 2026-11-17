@@ -55,6 +55,20 @@
 //! 本 crate 内的 Rust 模块名只是代码组织，不是接口。
 #![cfg_attr(not(test), no_std)]
 
+#[cfg(any(
+    test,
+    feature = "acpi-dynamic",
+    feature = "network-dynamic",
+    feature = "terminal-dynamic",
+    feature = "display-dynamic",
+    feature = "hwvirt-vcpu-dynamic",
+    feature = "gpu-dynamic",
+    feature = "cpu-dynamic",
+    feature = "ext4-view",
+    feature = "persistent-install",
+    feature = "runtime-registries",
+    feature = "driver-host-journal"
+))]
 extern crate alloc;
 
 pub mod abi;
