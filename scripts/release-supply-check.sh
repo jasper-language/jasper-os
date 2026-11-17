@@ -27,6 +27,8 @@ openssl genpkey -algorithm ED25519 -out "$keys/a.private.pem"
 openssl pkey -in "$keys/a.private.pem" -pubout -out "$keys/a.public.pem"
 openssl genpkey -algorithm ED25519 -out "$keys/b.private.pem"
 openssl pkey -in "$keys/b.private.pem" -pubout -out "$keys/b.public.pem"
+openssl genpkey -algorithm ED25519 -out "$keys/governance.private.pem"
+openssl pkey -in "$keys/governance.private.pem" -pubout -out "$keys/governance.public.pem"
 
 fp_a="$(python3 scripts/release-artifact.py fingerprint --public-key "$keys/a.public.pem" | cut -d= -f2)"
 fp_b="$(python3 scripts/release-artifact.py fingerprint --public-key "$keys/b.public.pem" | cut -d= -f2)"
@@ -43,6 +45,21 @@ abi="$(
 commit="$(git rev-parse HEAD)"
 cp "$KERNEL" "$bundle/jasper-kernel"
 cp "$SBOM" "$bundle/sbom.json"
+
+printf -v zero '%064d' 0
+: > "$work/revoked-empty.txt"
+python3 scripts/release-revocations.py create \
+  --private-key "$keys/governance.private.pem" \
+  --output-dir "$bundle" \
+  --name revocations-1 \
+  --epoch 1 \
+  --previous-sha256 "$zero" \
+  --revoked "$work/revoked-empty.txt"
+python3 scripts/release-revocations.py accept \
+  --snapshot "$bundle/revocations-1.revocations.json" \
+  --signature "$bundle/revocations-1.revocations.sig" \
+  --governance-public-key "$keys/governance.public.pem" \
+  --state-dir "$work/revocation-state"
 
 python3 scripts/release-artifact.py create \
   --payload "$bundle/jasper-kernel" \
@@ -66,14 +83,34 @@ verify() {
     --revoked "$work/revoked.txt"
 }
 
-: > "$work/revoked.txt"
+python3 scripts/release-revocations.py export \
+  --state-dir "$work/revocation-state" \
+  --governance-public-key "$keys/governance.public.pem" \
+  --output "$work/revoked.txt"
 verify \
   "$bundle/release.manifest.json" \
   "$bundle/release.manifest.sig" \
   "$bundle/jasper-kernel" \
   "$bundle/sbom.json"
 
-printf '%s\n' "$fp_a" > "$work/revoked.txt"
+revocations1="$(sha256sum "$bundle/revocations-1.revocations.json" | cut -d' ' -f1)"
+printf '%s\n' "$fp_a" > "$work/revoked-a.txt"
+python3 scripts/release-revocations.py create \
+  --private-key "$keys/governance.private.pem" \
+  --output-dir "$bundle" \
+  --name revocations-2 \
+  --epoch 2 \
+  --previous-sha256 "$revocations1" \
+  --revoked "$work/revoked-a.txt"
+python3 scripts/release-revocations.py accept \
+  --snapshot "$bundle/revocations-2.revocations.json" \
+  --signature "$bundle/revocations-2.revocations.sig" \
+  --governance-public-key "$keys/governance.public.pem" \
+  --state-dir "$work/revocation-state"
+python3 scripts/release-revocations.py export \
+  --state-dir "$work/revocation-state" \
+  --governance-public-key "$keys/governance.public.pem" \
+  --output "$work/revoked.txt"
 if verify \
   "$bundle/release.manifest.json" \
   "$bundle/release.manifest.sig" \
@@ -121,7 +158,6 @@ data = bytearray(path.read_bytes())
 data[len(data) // 2] ^= 1
 path.write_bytes(data)
 PY
-: > "$work/revoked.txt"
 if verify \
   "$work/tampered/release.manifest.json" \
   "$work/tampered/release.manifest.sig" \
@@ -141,4 +177,4 @@ verify \
   "$download/jasper-kernel" \
   "$download/sbom.json"
 
-echo "release-supply-check: PASS signed=true revocation=true rotation=true https_sources=2 offline_sources=1 tamper_rejected=true"
+echo "release-supply-check: PASS signed=true revocation=true revocation_snapshot_epoch=2 rotation=true https_sources=2 offline_sources=1 tamper_rejected=true"

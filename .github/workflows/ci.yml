@@ -87,6 +87,9 @@ jobs:
           python3 scripts/check-vulnerabilities.py
           python3 scripts/check-vulnerabilities.py \
             --file release/vulnerabilities.example.toml
+      - name: LC-5 持久撤销快照 / persistent revocation snapshot
+        run: |
+          bash scripts/release-revocations-check.sh
       - name: LC-5 签名发布、信任轮换与多源演练 / signed release supply drill
         run: |
           bash scripts/release-supply-check.sh

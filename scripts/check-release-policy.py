@@ -37,6 +37,7 @@ def validate(policy: dict) -> None:
     assert policy["require_sbom"] is True
     assert policy["require_reproducible_build"] is True
     assert policy["require_signed_manifest"] is True
+    assert policy["require_signed_revocation_snapshot"] is True
     assert policy["require_offline_source"] is True
     channels = policy["channel"]
     names = [channel["name"] for channel in channels]
@@ -52,6 +53,8 @@ def validate(policy: dict) -> None:
     assert (ROOT / "scripts" / "release-sbom.py").is_file()
     assert (ROOT / "scripts" / "release-repro-check.sh").is_file()
     assert (ROOT / "scripts" / "release-artifact.py").is_file()
+    assert (ROOT / "scripts" / "release-revocations.py").is_file()
+    assert (ROOT / "scripts" / "release-revocations-check.sh").is_file()
     assert (ROOT / "scripts" / "release-source-drill.py").is_file()
     assert (ROOT / "scripts" / "release-supply-check.sh").is_file()
     assert (ROOT / "scripts" / "check-vulnerabilities.py").is_file()
