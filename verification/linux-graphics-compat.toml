@@ -1,0 +1,48 @@
+schema = 1
+node = "COMPAT-GRAPHICS-1"
+title = "Linux Vulkan, WSI, input and GPU service compatibility"
+status = "core-passed"
+updated = "2026-11-17"
+
+[[case]]
+id = "vulkan-capability-profiling"
+kind = "host-unit"
+command = "cargo test --locked -p jasper-compat-graphics"
+evidence = "capability reports and extension requirements fail closed"
+hardware_gpu = false
+
+[[case]]
+id = "wsi-input-lifecycle"
+kind = "host-unit"
+command = "cargo test --locked -p jasper-compat-graphics"
+evidence = "bounded window/surface/swapchain/input generations and resize revocation"
+hardware_gpu = false
+
+[[case]]
+id = "gpu-import-submit-sync-reset"
+kind = "host-unit"
+command = "cargo test --locked -p jasper-compat-graphics"
+evidence = "memory token revalidation, submit, completion, fences, timelines and reset"
+hardware_gpu = false
+
+[[case]]
+id = "vulkan-loader-swiftshader-compute"
+kind = "qemu-software"
+command = "bash scripts/compat-graphics-software-check.sh"
+evidence = "unmodified Vulkan loader and SwiftShader ICD execute the upstream compute example in Jasper root userland"
+hardware_gpu = false
+
+[[remaining_gate]]
+id = "physical-gpu-vulkan-wsi"
+reason = "physical GPU/vendor ICD, DRM/X11/Wayland surface, hardware completion, reset, DMA/IOMMU silence and pixel output"
+status = "pending"
+
+[[remaining_gate]]
+id = "metal2vulkan-render-present"
+reason = "render-to-texture reaches fragment work but page-faults at ip=0x100086f1909d while reading 0x10006e4ba4f0; WSI/present remains pending"
+status = "pending"
+
+[[remaining_gate]]
+id = "dxvk-vkd3d-execution"
+reason = "DXVK/VKD3D-Proton binaries execute a real Windows Direct3D workload on the declared backend"
+status = "pending"

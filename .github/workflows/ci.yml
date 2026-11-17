@@ -75,6 +75,7 @@ jobs:
         run: |
           python3 scripts/check-gpu-abi-boundary.py --self-test
           python3 scripts/check-gpu-abi-boundary.py
+          python3 scripts/check-linux-graphics-compat.py
       - name: LC-5 可重复 SBOM / deterministic SBOM
         run: |
           python3 scripts/release-sbom.py --check --output target/jasper-os-sbom.cdx.json

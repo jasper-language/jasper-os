@@ -7,4 +7,4 @@ description = "Bounded Linux Vulkan, WSI, input and Jasper GPU compatibility cor
 
 [dependencies]
 ash = { version = "=0.38.0", default-features = false }
-kernel-core = { path = "../kernel-core" }
+kernel-core = { path = "../kernel-core", features = ["compat-native-bounded"] }

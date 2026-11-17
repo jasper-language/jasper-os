@@ -1184,16 +1184,19 @@ fn execute_root_dynamic_programs(
             &compute_argv,
             &vulkan_envp,
         )?;
-        let render_argv: [&[u8]; 1] = [b"/usr/bin/metal2vulkan-render"];
-        crate::linux_abi::reset_vulkan_trace_budget();
-        run_root_android_program(
-            root,
-            "metal2vulkan-render",
-            "/usr/bin/metal2vulkan-render",
-            "/lib64/ld-linux-x86-64.so.2",
-            &render_argv,
-            &vulkan_envp,
-        )?;
+        #[cfg(not(feature = "vulkan-compute-only"))]
+        {
+            let render_argv: [&[u8]; 1] = [b"/usr/bin/metal2vulkan-render"];
+            crate::linux_abi::reset_vulkan_trace_budget();
+            run_root_android_program(
+                root,
+                "metal2vulkan-render",
+                "/usr/bin/metal2vulkan-render",
+                "/lib64/ld-linux-x86-64.so.2",
+                &render_argv,
+                &vulkan_envp,
+            )?;
+        }
         return Ok(());
     }
     #[cfg(feature = "android-fixture-verify")]

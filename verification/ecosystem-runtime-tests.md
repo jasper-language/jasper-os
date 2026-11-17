@@ -100,6 +100,13 @@ device. Both official examples passed:
 - compute dispatch: `output[0..4] = [0.0, 3.0, 6.0, 9.0]`
 - render-to-texture: all 8x8 texels matched the expected clear/draw pattern.
 
+This result is a host baseline only. In Jasper's software Vulkan path,
+`scripts/compat-graphics-software-check.sh` now proves the unmodified loader,
+SwiftShader ICD and compute example execute with all 1000 outputs correct and
+resources returned to baseline. The render example reaches the fragment
+pipeline but page-faults at `ip=0x100086f1909d` while reading
+`0x10006e4ba4f0`; it remains pending.
+
 ### Darling
 
 Darling `v0.1.20260608` was extracted. The official launcher requires

@@ -1,0 +1,612 @@
+[2J[001;001H[=3h[2J[001;001H[2J[001;001H[8;042;160t[2J[001;001H[2J[001;001H[8;056;240t[2J[001;001HBdsDxe: loading Boot0002 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x4,0x0)
+BdsDxe: starting Boot0002 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x4,0x0)
+Jasper-OS boot manager starting
+selecting slot=A reason=ConfirmedRelease attempt=1 release=1 kernel_bytes=3717088
+INFO : Framebuffer info: FrameBufferInfo { byte_len: 4096000, width: 1280, height: 800, pixel_format: Bgr, bytes_per_pixel: 4, stride: 1280 }
+INFO : Jasper-OS mature bootloader common starting
+TRACE: exiting boot services
+INFO : Elf file loaded at Pointer {
+    addr: 0x000000007d8c0000,
+    metadata: 3717088,
+}
+INFO : virtual_address_offset: 0x10000000000
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(4), offset: 0, virtual_addr: 0, physical_addr: 0, file_size: 3eb74, mem_size: 3eb74, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(5), offset: 3eb80, virtual_addr: 3fb80, physical_addr: 3fb80, file_size: 1c657f, mem_size: 1c657f, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 205100, virtual_addr: 207100, physical_addr: 207100, file_size: 13bb8, mem_size: 13f00, align: 1000 })
+INFO : Mapping bss section
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 218cc0, virtual_addr: 21bcc0, physical_addr: 21bcc0, file_size: df878, mem_size: 130c50, align: 1000 })
+INFO : Mapping bss section
+INFO : Entry point at: 0x1000003fe00
+INFO : Creating GDT at PhysAddr(0x191000)
+INFO : Map framebuffer
+INFO : Map physical memory
+INFO : Allocate bootinfo
+INFO : Create Memory Map
+INFO : Create bootinfo
+INFO : Jumping to kernel entry point at VirtAddr(0x1000003fe00)
+[JSR-BOOT] jasper-os rust kernel 0.0.1 x86_64
+[JSR-CONFIG] profile=standard valid=ok params=29
+[JSR-CONFIG] timer_hz=100
+[JSR-CONFIG] boot_ticks=25
+[JSR-CONFIG] quantum.0=2
+[JSR-CONFIG] quantum.1=2
+[JSR-CONFIG] quantum.2=4
+[JSR-CONFIG] quantum.3=4
+[JSR-CONFIG] decay_period=8
+[JSR-CONFIG] max_tasks=64
+[JSR-CONFIG] max_rt=8
+[JSR-CONFIG] kernel_stack_bytes=131072
+[JSR-CONFIG] watchdog_ticks=50
+[JSR-CONFIG] watchdog_log=16
+[JSR-CONFIG] cpu_burst_ticks=4
+[JSR-CONFIG] heap_grow_step=65536
+[JSR-CONFIG] heap_budget_permille=250
+[JSR-CONFIG] pressure_low_permille=125
+[JSR-CONFIG] pressure_critical_permille=50
+[JSR-CONFIG] pressure_reserve_frames=256
+[JSR-CONFIG] max_process_frames=0
+[JSR-CONFIG] max_vm_guest_frames=32768
+[JSR-CONFIG] max_map_pages=1024
+[JSR-CONFIG] max_objects=1024
+[JSR-CONFIG] handles_per_process=64
+[JSR-CONFIG] max_endpoints_per_process=64
+[JSR-CONFIG] ipc_max_queue_bytes=1048576
+[JSR-CONFIG] ipc_max_process_bytes=4194304
+[JSR-CONFIG] ipc_max_total_bytes=16777216
+[JSR-CONFIG] trace_capacity=32
+[JSR-CONFIG] irq_queue_len=64
+[JSR-CAP] cpus=32 tasks=64 objects=1024 handles=64 frames=0 rings=0 endpoints=64
+[JSR-BOOT-STAGE] done stage=console done_mask=0x1
+[JSR-GDT] ok
+[JSR-XSAVE] enabled=true avx=true avx_size=256 capacity=832
+[JSR-IDT] ok
+[JSR-EXC] breakpoint handler verified
+[JSR-BOOT-STAGE] done stage=platform done_mask=0x3
+[JSR-TICK] n=1
+[JSR-TICK] n=2
+[JSR-TICK] n=3
+[JSR-TICK] n=4
+[JSR-TICK] n=5
+[JSR-TICK] n=6
+[JSR-TICK] n=7
+[JSR-TICK] n=8
+[JSR-TICK] n=9
+[JSR-TICK] n=10
+[JSR-TICK] n=11
+[JSR-TICK] n=12
+[JSR-TICK] n=13
+[JSR-TICK] n=14
+[JSR-TICK] n=15
+[JSR-TICK] n=16
+[JSR-TICK] n=17
+[JSR-TICK] n=18
+[JSR-TICK] n=19
+[JSR-TICK] n=20
+[JSR-TICK] n=21
+[JSR-TICK] n=22
+[JSR-TICK] n=23
+[JSR-TICK] n=24
+[JSR-TICK] n=25
+[JSR-BOOT-STAGE] done stage=timer done_mask=0x7
+[JSR-BOOT-STAGE] done stage=frames done_mask=0xf
+[JSR-BOOT-STAGE] done stage=kernel_map done_mask=0x1f
+[JSR-TERM] capacity input=131072 output=131072 uart_pump=2048 available=533073920
+[JSR-DISPLAY-COMPOSITOR] layers=2 visible=2 primary=terminal overlays=bounded alpha=true full_frame=false damage=true overlay_damage=true text_full=true input_capacity=1000
+[JSR-BOOT-STAGE] done stage=heap done_mask=0x3f
+[JSR-SPAWN] child_limit=8 tasks=64 source=boot_capacity
+[JSR-WORKLOAD] capacity workloads=64 members=256 tasks=64 budget=533073920 dynamic=true
+[JSR-SCHED] qos quantum=[1, 1, 1, 1] decay=8 owed_cap=2000 timer_hz=100 tasks=64 dynamic=true
+[JSR-RING] capacity rings=64 in_flight=1024 tasks=64 objects=1024 dynamic=true
+[JSR-IPC] capacity endpoints=8 queue_bytes=262144 process_bytes=1048576 total_bytes=16777216 tasks=64 objects=1024 budget=533073920 dynamic=true
+[JSR-SANDBOX] capacity sandboxes=64 workloads=64 budget=533073920 dynamic=true
+[JSR-SANDBOX-STORAGE] capacity images=128 layers=2048 volumes=512 sandboxes=64 budget=533073920 dynamic=true
+[JSR-BOOT-STAGE] done stage=capacity done_mask=0x7f
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=1 keys=0 input_capacity=1000 dropped=0 compositor_layers=2 pressed=0 released=0
+[JSR-BOOT-STAGE] done stage=devices done_mask=0xff
+[JSR-PROFILE] table idx=0 name=headless valid=true modules=9 services=25 capabilities=10 min_tasks=32 min_objects=256 hot_load=0
+[JSR-PROFILE] table idx=1 name=headless-min valid=true modules=5 services=20 capabilities=5 min_tasks=32 min_objects=128 hot_load=0
+[JSR-PROFILE] active name=headless valid=true params=standard modules=9 services=25 capabilities=10 guarantees=2 dynamic=true
+[JSR-BOOT-STAGE] done stage=profile done_mask=0x1ff
+[JSR-ASSEMBLY] capacity modules=9 capabilities=10 services=25 metadata=1870 budget=520580 dynamic=true
+[JSR-LIFE] release_dispatch closing_locks=true outside_lock=5 none=11 none_empty=true destroyed_when_none=0 hooks_match_registry=true
+[JSR-ASSEMBLY] activate module=core objects=1024
+[JSR-ASSEMBLY] activate module=sched tasks=64 stacks=64
+[JSR-ASSEMBLY] activate module=realtime rt=8
+[JSR-ASSEMBLY] activate module=job queue=empty
+[JSR-PCI] dev bdf=00:00.0 vendor=0x8086 device=0x29c0 class=0x060000 bars=0 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:01.0 vendor=0x1234 device=0x1111 class=0x030000 bars=2 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:02.0 vendor=0x8086 device=0x10d3 class=0x020000 bars=4 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:03.0 vendor=0x1af4 device=0x1005 class=0x00ff00 bars=3 caps_discovered=5 caps_admitted=5 caps_truncated=0
+[JSR-PCI] dev bdf=00:04.0 vendor=0x1af4 device=0x1001 class=0x010000 bars=3 caps_discovered=5 caps_admitted=5 caps_truncated=0
+[JSR-PCI] dev bdf=00:1f.0 vendor=0x8086 device=0x2918 class=0x060100 bars=0 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:1f.2 vendor=0x8086 device=0x2922 class=0x010601 bars=2 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:1f.3 vendor=0x8086 device=0x2930 class=0x0c0500 bars=1 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-ASSEMBLY] activate module=devices pci=ecam functions=8
+[JSR-ASSEMBLY] module=core order=0 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=memory order=1 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=time order=2 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=sched order=3 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=channel order=4 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=realtime order=5 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=job order=6 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=async order=7 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=devices order=8 state=ready reason= version=1.0.0
+[JSR-CAP] boot source=derived objects=1024 tasks=64 rt=8 task_stacks=64 mem_limit=499519488
+[JSR-K06] profile=headless ops=106 kernel_base=70 module_service=36 active_unavailable=0 unclaimed=0 gate_mismatch=0 ring=available time=available sync=available
+[JSR-ASSEMBLY] summary profile=headless modules=9 ready=9 failed=0 blocked=0 declared=10 published=10 pre_publish=0 audit=ok restart=system.module.error.already_started stop_core=system.module.error.in_use stop_devices=system.module.error.permanent generation=0 readers=0
+[JSR-BOOT-STAGE] done stage=assembly done_mask=0x3ff
+[JSR-SCHED] mode=multi
+[JSR-CAPABILITY] domain=system.memory.boot-map state=verified inventory=complete discovered=139 supported=139 admitted=139 rejected=0 unsupported=0 enabled=139 exposed=139 verified=139 fault=none
+[JSR-CAPABILITY] domain=system.cpu.xstate state=exposed inventory=complete discovered=6 supported=6 admitted=3 rejected=0 unsupported=3 enabled=3 exposed=3 verified=0 fault=none
+[JSR-CAPABILITY] domain=system.device.pci-capabilities state=exposed inventory=complete discovered=10 supported=10 admitted=10 rejected=0 unsupported=0 enabled=10 exposed=10 verified=0 fault=none
+[JSR-CAPABILITY] domain=system.network state=discovered inventory=complete discovered=1 supported=0 admitted=0 rejected=0 unsupported=1 enabled=0 exposed=0 verified=0 fault=none
+[JSR-CAPABILITY] domain=system.device.gpu state=discovered inventory=complete discovered=1 supported=0 admitted=0 rejected=0 unsupported=1 enabled=0 exposed=0 verified=0 fault=none
+[JSR-BOOT-STAGE] done stage=sched_mode done_mask=0x7ff
+[JSR-BOOT-STAGE] done stage=space done_mask=0xfff
+[JSR-IOAPIC] controllers=1 pins=24 exposed=2 unsupported=22 invalid=0 dropped=0
+[JSR-IOAPIC] line=0 name=serial vector=80 gsi_pin=4 controlled=true
+[JSR-IOAPIC] line=1 name=rtc vector=81 gsi_pin=8 controlled=true
+[JSR-XSAVE] enabled=true avx=true avx_size=256 capacity=832
+[JSR-IRQ] topology source=smp_ready discovered=2 admitted=2 rejected=0 capacity=2 budget=520580 dynamic=true complete=true
+[JSR-BOOT-STAGE] done stage=smp done_mask=0x1fff
+[JSR-RT2] high_resolution=true legacy_tick_abi=true
+[JSR-BOOT-STAGE] done stage=highres done_mask=0x3fff
+[JSR-NOHZ] configured power=tickless divisor=4 cpus=2
+[JSR-BOOT-STAGE] done stage=idle_tick done_mask=0x7fff
+[JSR-STAGE] user_runtime embedded_programs=true
+[JSR-BOOT-STAGE] done stage=user_runtime done_mask=0xffff
+[JSR-PLAN] finish plan=lifecycle-health-fail stages=0xffff cases=0
+[JSR-PROC] event=system.process.created id=0x2 name=first-program memory_cap_capacity=4648 memory_cap_metadata_budget=16658560 memory_budget=533073920 process_slots=64 dynamic=true
+[JSR-PROC] event=system.task.spawned process=0x2 task=1001 task_obj=0x4 name=first-program
+[JSR-SEC3] policy=installed epoch=2 audit_capacity=256
+[JSR-SYSCALL] enter name=system.console.write id=4 task=first-program effects=write
+[JSR-USERTEXT] task=first-program bytes=57 text=你好，来自 ELF 装载的用户程序（user-hello）
+[JSR-SYSCALL] exit name=system.console.write id=4 ret=57 status=OK
+[JSR-SYSCALL] enter name=system.console.write id=4 task=first-program effects=write
+[JSR-USERTEXT] task=first-program bytes=13 text=bss_zero=true
+[JSR-SYSCALL] exit name=system.console.write id=4 ret=13 status=OK
+[JSR-SYSCALL] enter name=system.abi.get id=56 task=first-program effects=read
+[JSR-SYSCALL] exit name=system.abi.get id=56 ret=12886147072 status=OK
+[JSR-SYSCALL] enter name=system.console.write id=4 task=first-program effects=write
+[JSR-USERTEXT] task=first-program bytes=10 text=abi=3.19.0
+[JSR-SYSCALL] exit name=system.console.write id=4 ret=10 status=OK
+[JSR-SYSCALL] enter name=system.console.write id=4 task=first-program effects=write
+[JSR-USERTEXT] task=first-program bytes=14 text=abi_query=true
+[JSR-SYSCALL] exit name=system.console.write id=4 ret=14 status=OK
+[JSR-SYSCALL] enter name=system.task.exit id=1 task=first-program effects=irreversible
+[JSR-SYSCALL] exit name=system.task.exit id=1 code=0 action=task_exited
+[JSR-PROC] event=system.process.exited id=0x2 name=first-program code=0 threads=1 handles_closed=0
+[JSR-PROC] event=system.task.exit_switch task=1001 cause=exit
+[JSR-PROC] event=system.process.reaped id=0x2 frames=6 quarantined=0 threads=1 code=0
+[JSR-LIFE] cleanup destroy type=Task id=0x4
+[JSR-LIFE] cleanup destroy type=Process id=0x2
+[JSR-LIFE] cleanup destroy type=ExitState id=0x3
+[JSR-LIFE] cleanup destroy type=ExitState id=0x1
+[JSR-PROD] first_program state=Some(Exited { code: 0 }) reclaimed=true
+[JSR-PROC] event=system.process.created id=0x100000002 name=blk1 memory_cap_capacity=4648 memory_cap_metadata_budget=16658560 memory_budget=533073920 process_slots=64 dynamic=true
+[JSR-PROC] event=system.process.created id=0x7 name=root-linux-probe memory_cap_capacity=4648 memory_cap_metadata_budget=16658560 memory_budget=533073920 process_slots=64 dynamic=true
+[JSR-PROC] event=system.task.spawned process=0x7 task=1002 task_obj=0x9 name=root-linux-probe
+[JSR-LINUX-SYSCALL] index=0 tid=1 ip=0x100000400019 nr=1 a0=0x1 a1=0x10000040111f a2=0x2a a3=0x60f6 a4=0x1 a5=0x1
+linux-abi: fd1 raw x86_64 ET_EXEC entered
+[JSR-LINUX-SYSCALL] index=1 tid=1 ip=0x100000400037 nr=1 a0=0x2 a1=0x100000401149 a2=0x22 a3=0x60f6 a4=0x1 a5=0x1
+linux-abi: fd2 raw bytes accepted
+[JSR-LINUX-SYSCALL] index=2 tid=1 ip=0x10000040004d nr=1 a0=0x1 a1=0x0 a2=0x0 a3=0x60f6 a4=0x1 a5=0x1
+[JSR-LINUX-SYSCALL] index=3 tid=1 ip=0x100000400092 nr=1 a0=0x1 a1=0x0 a2=0x1 a3=0x60f6 a4=0x1 a5=0x1
+[JSR-LINUX-SYSCALL] index=4 tid=1 ip=0x1000004000a1 nr=39 a0=0x0 a1=0x0 a2=0x1 a3=0x60f6 a4=0x1 a5=0x1
+[JSR-LINUX-SYSCALL] index=5 tid=1 ip=0x1000004000ad nr=186 a0=0x0 a1=0x0 a2=0x1 a3=0x60f6 a4=0x1 a5=0x1
+[JSR-LINUX-SYSCALL] index=6 tid=1 ip=0x1000004000c0 nr=110 a0=0x0 a1=0x0 a2=0x1 a3=0x60f6 a4=0x1 a5=0x1
+[JSR-LINUX-SYSCALL] index=7 tid=1 ip=0x1000004001e2 nr=293 a0=0x100000bfffa0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=8 tid=1 ip=0x100000400203 nr=291 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=9 tid=1 ip=0x10000040023d nr=233 a0=0x5 a1=0x1 a2=0x3 a3=0x100000bfffb4 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=10 tid=1 ip=0x10000040025d nr=1 a0=0x4 a1=0x100000bfff9f a2=0x1 a3=0x100000bfffb4 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=11 tid=1 ip=0x100000400295 nr=232 a0=0x5 a1=0x100000bfffa8 a2=0x1 a3=0xc8 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=12 tid=1 ip=0x1000004002b1 nr=232 a0=0x5 a1=0x100000bfffa8 a2=0x1 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=13 tid=1 ip=0x1000004002ce nr=233 a0=0x5 a1=0x2 a2=0x3 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=14 tid=1 ip=0x1000004002d8 nr=3 a0=0x5 a1=0x2 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=15 tid=1 ip=0x1000004002e4 nr=3 a0=0x3 a1=0x2 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=16 tid=1 ip=0x1000004002f0 nr=3 a0=0x4 a1=0x2 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=17 tid=1 ip=0x100000400926 nr=9 a0=0x0 a1=0x2000 a2=0x3 a3=0x22 a4=0xffffffffffffffff a5=0x0
+[JSR-LINUX-SYSCALL] index=18 tid=1 ip=0x100000400944 nr=10 a0=0x100040000000 a1=0x2000 a2=0x1 a3=0x22 a4=0xffffffffffffffff a5=0x0
+[JSR-LINUX-SYSCALL] index=19 tid=1 ip=0x10000040096a nr=11 a0=0x100040000000 a1=0x2000 a2=0x1 a3=0x22 a4=0xffffffffffffffff a5=0x0
+[JSR-LINUX-SYSCALL] index=20 tid=1 ip=0x10000040035a nr=9 a0=0x0 a1=0x1000 a2=0x3 a3=0x21 a4=0xffffffffffffffff a5=0x0
+[JSR-LINUX-SYSCALL] index=21 tid=1 ip=0x100000400394 nr=56 a0=0x11 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-PROC] event=system.process.created id=0xb name=linux-fork memory_cap_capacity=4648 memory_cap_metadata_budget=16658560 memory_budget=533073920 process_slots=64 dynamic=true
+[JSR-PROC] event=system.task.spawned process=0xb task=1003 task_obj=0xd name=linux-fork
+[JSR-LINUX-SYSCALL] index=22 tid=2 ip=0x100000400586 nr=202 a0=0x100040002000 a1=0x0 a2=0x0 a3=0x100000401078 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=23 tid=1 ip=0x1000004003d8 nr=24 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=24 tid=1 ip=0x1000004003e1 nr=24 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=25 tid=1 ip=0x1000004003ea nr=24 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=26 tid=1 ip=0x1000004003f3 nr=24 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=27 tid=1 ip=0x1000004003fc nr=24 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=28 tid=1 ip=0x100000400405 nr=24 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=29 tid=1 ip=0x10000040040e nr=24 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=30 tid=1 ip=0x100000400417 nr=24 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=31 tid=1 ip=0x100000400420 nr=24 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=32 tid=1 ip=0x100000400429 nr=24 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=33 tid=1 ip=0x100000400446 nr=202 a0=0x100040002000 a1=0x1 a2=0x1 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=34 tid=2 ip=0x10000040059e nr=231 a0=0x0 a1=0x0 a2=0x0 a3=0x100000401078 a4=0x0 a5=0x0
+[JSR-PROC] event=system.process.exiting id=0xb code=0 handles_closed=0
+[JSR-PROC] event=system.process.exited id=0xb name=linux-fork code=0 threads=1 handles_closed=0
+[JSR-PROC] event=system.task.exit_switch task=1003 cause=linux process exit
+[JSR-LINUX-SYSCALL] index=35 tid=1 ip=0x10000040046b nr=61 a0=0x2 a1=0x100000bfffcc a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-PROC] event=system.process.reaped id=0xb frames=4 quarantined=0 threads=1 code=0
+[JSR-LIFE] cleanup destroy type=Task id=0xd
+[JSR-LIFE] cleanup destroy type=Process id=0xb
+[JSR-LIFE] cleanup destroy type=ExitState id=0xc
+[JSR-LIFE] cleanup destroy type=ExitState id=0xa
+[JSR-LINUX-SYSCALL] index=36 tid=1 ip=0x10000040054e nr=11 a0=0x100040002000 a1=0x100000401027 a2=0x1 a3=0x0 a4=0x1 a5=0x0
+[JSR-LINUX-SYSCALL] index=37 tid=1 ip=0x100000400662 nr=425 a0=0x4 a1=0x100000bfff50 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=38 tid=1 ip=0x100000400689 nr=9 a0=0x0 a1=0x2000 a2=0x3 a3=0x1 a4=0x3 a5=0x0
+[JSR-LINUX-SYSCALL] index=39 tid=1 ip=0x1000004006a0 nr=9 a0=0x0 a1=0x1000 a2=0x3 a3=0x1 a4=0x3 a5=0x10000000
+[JSR-LINUX-SYSCALL] index=40 tid=1 ip=0x100000400755 nr=426 a0=0x3 a1=0x1 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=41 tid=1 ip=0x1000004007f0 nr=293 a0=0x100000bfff48 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=42 tid=1 ip=0x10000040082d nr=427 a0=0x3 a1=0x2 a2=0x100000bfff48 a3=0x2 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=43 tid=1 ip=0x1000004008bd nr=427 a0=0x3 a1=0x3 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=44 tid=1 ip=0x10000040085c nr=3 a0=0x4 a1=0x3 a2=0x1 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=45 tid=1 ip=0x100000400868 nr=3 a0=0x5 a1=0x3 a2=0x1 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=46 tid=1 ip=0x100000400872 nr=11 a0=0x100040005000 a1=0x3 a2=0x1 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=47 tid=1 ip=0x10000040087c nr=11 a0=0x100040003000 a1=0x3 a2=0x1 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=48 tid=1 ip=0x100000400886 nr=3 a0=0x3 a1=0x3 a2=0x1 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=49 tid=1 ip=0x100000400140 nr=1 a0=0x1 a1=0x10000040116b a2=0x3c a3=0x0 a4=0x0 a5=0x0
+linux-native: epoll=true futex=true mmap=true io_uring=true
+[JSR-LINUX-SYSCALL] index=50 tid=1 ip=0x10000040014f nr=231 a0=0x0 a1=0x10000040116b a2=0x3c a3=0x0 a4=0x0 a5=0x0
+[JSR-PROC] event=system.process.exiting id=0x7 code=0 handles_closed=0
+[JSR-PROC] event=system.process.exited id=0x7 name=root-linux-probe code=0 threads=1 handles_closed=0
+[JSR-PROC] event=system.task.exit_switch task=1002 cause=linux process exit
+[JSR-PROC] event=system.process.reaped id=0x7 frames=4 quarantined=0 threads=1 code=0
+[JSR-LIFE] cleanup destroy type=Task id=0x9
+[JSR-LIFE] cleanup destroy type=Process id=0x7
+[JSR-LIFE] cleanup destroy type=ExitState id=0x8
+[JSR-LIFE] cleanup destroy type=ExitState id=0x6
+[JSR-LIFE-ROOT-EXEC] path=/usr/libexec/jasper/health-probe bytes=13544 mapped=true cpl3=true exited=true syscalls=51 frames_before=513774 frames_after=513646 resources=false
+[JSR-PROC] event=system.process.created id=0x100000007 name=root-linux-probe memory_cap_capacity=4648 memory_cap_metadata_budget=16658560 memory_budget=533073920 process_slots=64 dynamic=true
+[JSR-PROC] event=system.task.spawned process=0x100000007 task=1004 task_obj=0x100000009 name=root-linux-probe
+[JSR-LINUX-SYSCALL] index=51 tid=3 ip=0x100000400019 nr=1 a0=0x1 a1=0x10000040111f a2=0x2a a3=0x805c a4=0x1 a5=0x1
+linux-abi: fd1 raw x86_64 ET_EXEC entered
+[JSR-LINUX-SYSCALL] index=52 tid=3 ip=0x100000400037 nr=1 a0=0x2 a1=0x100000401149 a2=0x22 a3=0x805c a4=0x1 a5=0x1
+linux-abi: fd2 raw bytes accepted
+[JSR-LINUX-SYSCALL] index=53 tid=3 ip=0x10000040004d nr=1 a0=0x1 a1=0x0 a2=0x0 a3=0x805c a4=0x1 a5=0x1
+[JSR-LINUX-SYSCALL] index=54 tid=3 ip=0x100000400092 nr=1 a0=0x1 a1=0x0 a2=0x1 a3=0x805c a4=0x1 a5=0x1
+[JSR-LINUX-SYSCALL] index=55 tid=3 ip=0x1000004000a1 nr=39 a0=0x0 a1=0x0 a2=0x1 a3=0x805c a4=0x1 a5=0x1
+[JSR-LINUX-SYSCALL] index=56 tid=3 ip=0x1000004000ad nr=186 a0=0x0 a1=0x0 a2=0x3 a3=0x805c a4=0x1 a5=0x1
+[JSR-LINUX-SYSCALL] index=57 tid=3 ip=0x1000004000c0 nr=110 a0=0x0 a1=0x0 a2=0x3 a3=0x805c a4=0x1 a5=0x1
+[JSR-LINUX-SYSCALL] index=58 tid=3 ip=0x1000004001e2 nr=293 a0=0x100000bfffa0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=59 tid=3 ip=0x100000400203 nr=291 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=60 tid=3 ip=0x10000040023d nr=233 a0=0x5 a1=0x1 a2=0x3 a3=0x100000bfffb4 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=61 tid=3 ip=0x10000040025d nr=1 a0=0x4 a1=0x100000bfff9f a2=0x1 a3=0x100000bfffb4 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=62 tid=3 ip=0x100000400295 nr=232 a0=0x5 a1=0x100000bfffa8 a2=0x1 a3=0xc8 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=63 tid=3 ip=0x1000004002b1 nr=232 a0=0x5 a1=0x100000bfffa8 a2=0x1 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=64 tid=3 ip=0x1000004002ce nr=233 a0=0x5 a1=0x2 a2=0x3 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=65 tid=3 ip=0x1000004002d8 nr=3 a0=0x5 a1=0x2 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=66 tid=3 ip=0x1000004002e4 nr=3 a0=0x3 a1=0x2 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=67 tid=3 ip=0x1000004002f0 nr=3 a0=0x4 a1=0x2 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=68 tid=3 ip=0x100000400926 nr=9 a0=0x0 a1=0x2000 a2=0x3 a3=0x22 a4=0xffffffffffffffff a5=0x0
+[JSR-LINUX-SYSCALL] index=69 tid=3 ip=0x100000400944 nr=10 a0=0x100040000000 a1=0x2000 a2=0x1 a3=0x22 a4=0xffffffffffffffff a5=0x0
+[JSR-LINUX-SYSCALL] index=70 tid=3 ip=0x10000040096a nr=11 a0=0x100040000000 a1=0x2000 a2=0x1 a3=0x22 a4=0xffffffffffffffff a5=0x0
+[JSR-LINUX-SYSCALL] index=71 tid=3 ip=0x10000040035a nr=9 a0=0x0 a1=0x1000 a2=0x3 a3=0x21 a4=0xffffffffffffffff a5=0x0
+[JSR-LINUX-SYSCALL] index=72 tid=3 ip=0x100000400394 nr=56 a0=0x11 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-PROC] event=system.process.created id=0x10000000b name=linux-fork memory_cap_capacity=4648 memory_cap_metadata_budget=16658560 memory_budget=533073920 process_slots=64 dynamic=true
+[JSR-PROC] event=system.task.spawned process=0x10000000b task=1005 task_obj=0x10000000d name=linux-fork
+[JSR-LINUX-SYSCALL] index=73 tid=3 ip=0x1000004003b9 nr=24 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=74 tid=4 ip=0x100000400586 nr=202 a0=0x100040002000 a1=0x0 a2=0x0 a3=0x100000401078 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=75 tid=3 ip=0x1000004003d8 nr=24 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=76 tid=3 ip=0x1000004003e1 nr=24 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=77 tid=3 ip=0x1000004003ea nr=24 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=78 tid=3 ip=0x1000004003f3 nr=24 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=79 tid=3 ip=0x1000004003fc nr=24 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=80 tid=3 ip=0x100000400405 nr=24 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=81 tid=3 ip=0x10000040040e nr=24 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=82 tid=3 ip=0x100000400417 nr=24 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=83 tid=3 ip=0x100000400420 nr=24 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=84 tid=3 ip=0x100000400429 nr=24 a0=0x0 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=85 tid=3 ip=0x100000400446 nr=202 a0=0x100040002000 a1=0x1 a2=0x1 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=86 tid=3 ip=0x10000040046b nr=61 a0=0x4 a1=0x100000bfffcc a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=87 tid=4 ip=0x10000040059e nr=231 a0=0x0 a1=0x0 a2=0x0 a3=0x100000401078 a4=0x0 a5=0x0
+[JSR-PROC] event=system.process.exiting id=0x10000000b code=0 handles_closed=0
+[JSR-PROC] event=system.process.exited id=0x10000000b name=linux-fork code=0 threads=1 handles_closed=0
+[JSR-PROC] event=system.task.exit_switch task=1005 cause=linux process exit
+[JSR-PROC] event=system.process.reaped id=0x10000000b frames=4 quarantined=0 threads=1 code=0
+[JSR-LIFE] cleanup destroy type=Task id=0x10000000d
+[JSR-LIFE] cleanup destroy type=Process id=0x10000000b
+[JSR-LIFE] cleanup destroy type=ExitState id=0x10000000c
+[JSR-LIFE] cleanup destroy type=ExitState id=0x10000000a
+[JSR-LINUX-SYSCALL] index=88 tid=3 ip=0x10000040054e nr=11 a0=0x100040002000 a1=0x100000401027 a2=0x1 a3=0x0 a4=0x1 a5=0x0
+[JSR-LINUX-SYSCALL] index=89 tid=3 ip=0x100000400662 nr=425 a0=0x4 a1=0x100000bfff50 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=90 tid=3 ip=0x100000400689 nr=9 a0=0x0 a1=0x2000 a2=0x3 a3=0x1 a4=0x3 a5=0x0
+[JSR-LINUX-SYSCALL] index=91 tid=3 ip=0x1000004006a0 nr=9 a0=0x0 a1=0x1000 a2=0x3 a3=0x1 a4=0x3 a5=0x10000000
+[JSR-LINUX-SYSCALL] index=92 tid=3 ip=0x100000400755 nr=426 a0=0x3 a1=0x1 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=93 tid=3 ip=0x1000004007f0 nr=293 a0=0x100000bfff48 a1=0x0 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=94 tid=3 ip=0x10000040082d nr=427 a0=0x3 a1=0x2 a2=0x100000bfff48 a3=0x2 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=95 tid=3 ip=0x1000004008bd nr=427 a0=0x3 a1=0x3 a2=0x0 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=96 tid=3 ip=0x10000040085c nr=3 a0=0x4 a1=0x3 a2=0x1 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=97 tid=3 ip=0x100000400868 nr=3 a0=0x5 a1=0x3 a2=0x1 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=98 tid=3 ip=0x100000400872 nr=11 a0=0x100040005000 a1=0x3 a2=0x1 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=99 tid=3 ip=0x10000040087c nr=11 a0=0x100040003000 a1=0x3 a2=0x1 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=100 tid=3 ip=0x100000400886 nr=3 a0=0x3 a1=0x3 a2=0x1 a3=0x0 a4=0x0 a5=0x0
+[JSR-LINUX-SYSCALL] index=101 tid=3 ip=0x100000400140 nr=1 a0=0x1 a1=0x10000040116b a2=0x3c a3=0x0 a4=0x0 a5=0x0
+linux-native: epoll=true futex=true mmap=true io_uring=true
+[JSR-LINUX-SYSCALL] index=102 tid=3 ip=0x10000040014f nr=231 a0=0x0 a1=0x10000040116b a2=0x3c a3=0x0 a4=0x0 a5=0x0
+[JSR-PROC] event=system.process.exiting id=0x100000007 code=0 handles_closed=0
+[JSR-PROC] event=system.process.exited id=0x100000007 name=root-linux-probe code=0 threads=1 handles_closed=0
+[JSR-PROC] event=system.task.exit_switch task=1004 cause=linux process exit
+[JSR-PROC] event=system.process.reaped id=0x100000007 frames=4 quarantined=0 threads=1 code=0
+[JSR-LIFE] cleanup destroy type=Task id=0x100000009
+[JSR-LIFE] cleanup destroy type=Process id=0x100000007
+[JSR-LIFE] cleanup destroy type=ExitState id=0x100000008
+[JSR-LIFE] cleanup destroy type=ExitState id=0x100000006
+[JSR-LIFE-ROOT-EXEC] path=/usr/libexec/jasper/health-probe bytes=13544 mapped=true cpl3=true exited=true syscalls=52 frames_before=513646 frames_after=513646 resources=true
+[JSR-LIFE-ROOT-LIBS] count=6 bytes=5602240 source=system-ab
+[JSR-ANDROID-ART] file-skip path=/system/bin/linker64
+[JSR-ANDROID-ART] file-skip path=/system/bin/toybox
+[JSR-ANDROID-ART] file-skip path=/system/bin/sh
+[JSR-ANDROID-ART] file-skip path=/system/bin/dalvikvm64
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libc.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libm.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libdl.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libdl_android.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libc++.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libbase.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/liblog.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libcrypto.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libz.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libprocessgroup.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libselinux.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libcgrouprc.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libpcre2.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libpackagelistparser.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libstatssocket.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libart.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libartbase.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libartpalette.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libdexfile.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libart-compiler.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libnativehelper.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libsigchain.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/liblz4.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/liblzma.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libnativebridge.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libnativeloader.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libunwindstack.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libprofile.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libartpalette-system.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/heapprofd_client_api.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libprocinfo.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libnetd_client.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libcutils.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libtombstoned_client.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libjavacore.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libandroidicu.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libicu.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libicu_jni.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libicui18n.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libicuuc.so
+[JSR-ANDROID-ART] file-skip path=/system/framework/core-oj.jar
+[JSR-ANDROID-ART] file-skip path=/system/framework/core-libart.jar
+[JSR-ANDROID-ART] file-skip path=/system/framework/apache-xml.jar
+[JSR-ANDROID-ART] file-skip path=/system/framework/bouncycastle.jar
+[JSR-ANDROID-ART] file-skip path=/system/framework/boot.art
+[JSR-ANDROID-ART] file-skip path=/system/framework/boot.oat
+[JSR-ANDROID-ART] file-skip path=/system/framework/boot.vdex
+[JSR-ANDROID-ART] file-skip path=/system/framework/x86_64/boot.oat
+[JSR-ANDROID-ART] file-skip path=/system/framework/x86_64/boot.art
+[JSR-ANDROID-ART] file-skip path=/system/framework/x86_64/boot-core-libart.oat
+[JSR-ANDROID-ART] file-skip path=/system/framework/x86_64/boot-core-libart.art
+[JSR-ANDROID-ART] file-skip path=/system/framework/boot-core-libart.vdex
+[JSR-ANDROID-ART] file-skip path=/system/etc/public.libraries.txt
+[JSR-ANDROID-ART] file-skip path=/data/local/tmp/classes.dex
+[JSR-ANDROID-ART] file-skip path=/data/local/tmp/app.apk
+[JSR-ANDROID-ART] file-skip path=/apex/com.android.art/javalib/core-oj.jar
+[JSR-ANDROID-ART] file-skip path=/apex/com.android.art/javalib/core-libart.jar
+[JSR-ANDROID-ART] file-skip path=/apex/com.android.i18n/javalib/core-icu4j.jar
+[JSR-ANDROID-ART] file-skip path=/apex/com.android.i18n/etc/icu/icudt72l.dat
+[JSR-ANDROID-ART] file-skip path=/apex/com.android.i18n/lib64/libandroidicu.so
+[JSR-ANDROID-ART] file-skip path=/apex/com.android.i18n/lib64/libicu.so
+[JSR-ANDROID-ART] file-skip path=/apex/com.android.i18n/lib64/libicu_jni.so
+[JSR-ANDROID-ART] file-skip path=/apex/com.android.i18n/lib64/libicui18n.so
+[JSR-ANDROID-ART] file-skip path=/apex/com.android.i18n/lib64/libicuuc.so
+[JSR-ANDROID-ART] file-skip path=/linkerconfig/ld.config.txt
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libandroidio.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libexpat.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libopenjdk.so
+[JSR-ANDROID-ART] file-skip path=/system/lib64/libopenjdkjvm.so
+[JSR-ANDROID-ART] file-skip path=/data/local/tmp/art-official-001.dex
+[JSR-ANDROID-ART] file-skip path=/data/local/tmp/art-official-002.dex
+[JSR-ANDROID-ART] file-skip path=/data/local/tmp/art-official-003.dex
+[JSR-PROC] event=system.process.created id=0x200000007 name=metal2vulkan-compute memory_cap_capacity=4648 memory_cap_metadata_budget=16658560 memory_budget=533073920 process_slots=64 dynamic=true
+[JSR-PROC] event=system.task.spawned process=0x200000007 task=1006 task_obj=0x200000009 name=metal2vulkan-compute
+[JSR-LINUX-CLONE3-ARGS] flags=0x3d0f00 pidfd=0x100041013990 child_tid=0x100041013ce8 parent_tid=0x100041013990 exit_signal=0x0 stack=0x100040813000 size=0x7ffcc0 tls=0x1000410136c0 set_tid=0x0 set_tid_size=0 cgroup=0x0
+[JSR-LINUX-CLONE3] flags=0x3d0f00 stack=0x100040813000 size=0x7ffcc0 top=0x100041012cc0 tls=0x1000410136c0 child_tid=0x100041013ce8 parent_tid=0x100041013990 rip=0x10004028d57d
+[JSR-PROC] event=system.task.spawned process=0x200000007 task=1007 task_obj=0x20000000b name=linux-clone
+[JSR-VULKAN-THREAD] tid=1048576 name=Thread<00>
+[JSR-LINUX-CLONE3-ARGS] flags=0x3d0f00 pidfd=0x100049857990 child_tid=0x100049857ce8 parent_tid=0x100049857990 exit_signal=0x0 stack=0x100049057000 size=0x7ffcc0 tls=0x1000498576c0 set_tid=0x0 set_tid_size=0 cgroup=0x0
+[JSR-LINUX-CLONE3] flags=0x3d0f00 stack=0x100049057000 size=0x7ffcc0 top=0x100049856cc0 tls=0x1000498576c0 child_tid=0x100049857ce8 parent_tid=0x100049857990 rip=0x10004028d57d
+[JSR-PROC] event=system.task.spawned process=0x200000007 task=1008 task_obj=0x20000000d name=linux-clone
+[JSR-LINUX-CLONE3-ARGS] flags=0x3d0f00 pidfd=0x1000518d8990 child_tid=0x1000518d8ce8 parent_tid=0x1000518d8990 exit_signal=0x0 stack=0x100051858000 size=0x7fcc0 tls=0x1000518d86c0 set_tid=0x0 set_tid_size=0 cgroup=0x0
+[JSR-LINUX-CLONE3] flags=0x3d0f00 stack=0x100051858000 size=0x7fcc0 top=0x1000518d7cc0 tls=0x1000518d86c0 child_tid=0x1000518d8ce8 parent_tid=0x1000518d8990 rip=0x10004028d57d
+[JSR-PROC] event=system.task.spawned process=0x200000007 task=1009 task_obj=0xf name=linux-clone
+[JSR-VULKAN-THREAD] tid=1048578 name=metal2vulkan-ha
+[JSR-LINUX-CLONE3-ARGS] flags=0x3d0f00 pidfd=0x100059adc990 child_tid=0x100059adcce8 parent_tid=0x100059adc990 exit_signal=0x0 stack=0x1000598dc000 size=0x1ffcc0 tls=0x100059adc6c0 set_tid=0x0 set_tid_size=0 cgroup=0x0
+[JSR-LINUX-CLONE3] flags=0x3d0f00 stack=0x1000598dc000 size=0x1ffcc0 top=0x100059adbcc0 tls=0x100059adc6c0 child_tid=0x100059adcce8 parent_tid=0x100059adc990 rip=0x10004028d57d
+[JSR-PROC] event=system.task.spawned process=0x200000007 task=1010 task_obj=0x11 name=linux-clone
+[JSR-VULKAN-THREAD] tid=1048579 name=metal2vulkan-qu
+[JSR-LINUX-CLONE3-ARGS] flags=0x3d0f00 pidfd=0x100061ce0990 child_tid=0x100061ce0ce8 parent_tid=0x100061ce0990 exit_signal=0x0 stack=0x100061ae0000 size=0x1ffcc0 tls=0x100061ce06c0 set_tid=0x0 set_tid_size=0 cgroup=0x0
+[JSR-LINUX-CLONE3] flags=0x3d0f00 stack=0x100061ae0000 size=0x1ffcc0 top=0x100061cdfcc0 tls=0x100061ce06c0 child_tid=0x100061ce0ce8 parent_tid=0x100061ce0990 rip=0x10004028d57d
+[JSR-PROC] event=system.task.spawned process=0x200000007 task=1011 task_obj=0x13 name=linux-clone
+[JSR-VULKAN-THREAD] tid=1048580 name=metal2vulkan-sc
+[JSR-LINUX-CLONE3-ARGS] flags=0x3d0f00 pidfd=0x10006ed03990 child_tid=0x10006ed03ce8 parent_tid=0x10006ed03990 exit_signal=0x0 stack=0x10006eb03000 size=0x1ffcc0 tls=0x10006ed036c0 set_tid=0x0 set_tid_size=0 cgroup=0x0
+[JSR-LINUX-CLONE3] flags=0x3d0f00 stack=0x10006eb03000 size=0x1ffcc0 top=0x10006ed02cc0 tls=0x10006ed036c0 child_tid=0x10006ed03ce8 parent_tid=0x10006ed03990 rip=0x10004028d57d
+[JSR-PROC] event=system.task.spawned process=0x200000007 task=1012 task_obj=0x15 name=linux-clone
+[JSR-VULKAN-THREAD] tid=1048581 name=metal2vulkan-sh
+metal2vulkan: the device SwiftShader Device (Subzero): its `float` multiply and fused multiply-add round before they flush; a `float` product, fused multiply-add or `ldexp` whose exact value lies within half a unit below `2^-126` answers `2^-126` of its sign where Metal answers the zero of its sign [metal2vulkan-degrade-float-tininess-after-rounding]
+metal2vulkan: the device, on SwiftShader Device (Subzero): its driver lists no `VK_KHR_pipeline_binary`, whose device structure turns it off; the driver keeps its own cache of the device's pipelines beside the shader cache's records, with whatever it writes to disk and holds in memory for it; the pipelines made are the same [metal2vulkan-degrade-driver-pipeline-cache-kept]
+device: SwiftShader Device (Subzero)
+[JSR-LINUX-CLONE3-ARGS] flags=0x100004100 pidfd=0x0 child_tid=0x0 parent_tid=0x0 exit_signal=0x11 stack=0x100076d07000 size=0x9000 tls=0x0 set_tid=0x0 set_tid_size=0 cgroup=0x0
+[JSR-PROC] event=system.process.created id=0x17 name=linux-vfork memory_cap_capacity=4648 memory_cap_metadata_budget=16658560 memory_budget=533073920 process_slots=64 dynamic=true
+[JSR-PROC] event=system.task.spawned process=0x17 task=1013 task_obj=0x19 name=linux-vfork
+[JSR-LINUX-EXEC-FAIL] errno=NoEntry
+[JSR-PROC] event=system.process.exiting id=0x17 code=0 handles_closed=0
+[JSR-PROC] event=system.process.exited id=0x17 name=linux-vfork code=0 threads=1 handles_closed=0
+[JSR-PROC] event=system.task.exit_switch task=1013 cause=linux process exit
+[JSR-PROC] event=system.process.reaped id=0x17 frames=2052 quarantined=0 threads=1 code=0
+[JSR-LIFE] cleanup destroy type=Task id=0x19
+[JSR-LIFE] cleanup destroy type=Process id=0x17
+[JSR-LIFE] cleanup destroy type=ExitState id=0x18
+[JSR-LIFE] cleanup destroy type=ExitState id=0x16
+metal2vulkan: the kernel of a compute pipeline state: its translation records `PrecisionNote::DeviceDenormals`; results can differ from Metal's as the note's documentation states [metal2vulkan-degrade-device-denormals]
+metal2vulkan: the kernel of a compute pipeline state: its translation records `PrecisionNote::FastMathRewrites`; results can differ from Metal's as the note's documentation states [metal2vulkan-degrade-fast-math-rewrites]
+metal2vulkan: the kernel of a compute pipeline state: its translation records `PrecisionNote::NativeNanEncoding`; results can differ from Metal's as the note's documentation states [metal2vulkan-degrade-native-nan-encoding]
+pipeline: 256 threads per threadgroup at most, SIMD width 32
+[JSR-LINUX-CLONE3-ARGS] flags=0x3d0f00 pidfd=0x10007ef12990 child_tid=0x10007ef12ce8 parent_tid=0x10007ef12990 exit_signal=0x0 stack=0x10007ed12000 size=0x1ffcc0 tls=0x10007ef126c0 set_tid=0x0 set_tid_size=0 cgroup=0x0
+[JSR-LINUX-CLONE3] flags=0x3d0f00 stack=0x10007ed12000 size=0x1ffcc0 top=0x10007ef11cc0 tls=0x10007ef126c0 child_tid=0x10007ef12ce8 parent_tid=0x10007ef12990 rip=0x10004028d57d
+[JSR-PROC] event=system.task.spawned process=0x200000007 task=1014 task_obj=0x100000017 name=linux-clone
+[JSR-VULKAN-THREAD] tid=1048582 name=metal2vulkan-pi
+[JSR-LINUX-CLONE3-ARGS] flags=0x3d0f00 pidfd=0x10007f113990 child_tid=0x10007f113ce8 parent_tid=0x10007f113990 exit_signal=0x0 stack=0x10007ef13000 size=0x1ffcc0 tls=0x10007f1136c0 set_tid=0x0 set_tid_size=0 cgroup=0x0
+[JSR-LINUX-CLONE3] flags=0x3d0f00 stack=0x10007ef13000 size=0x1ffcc0 top=0x10007f112cc0 tls=0x10007f1136c0 child_tid=0x10007f113ce8 parent_tid=0x10007f113990 rip=0x10004028d57d
+[JSR-PROC] event=system.task.spawned process=0x200000007 task=1015 task_obj=0x100000019 name=linux-clone
+[JSR-VULKAN-THREAD] tid=1048583 name=metal2vulkan-pi
+metal2vulkan: a dispatch of kernel `scale_and_offset`: its grid of [1000, 1, 1] threads is not a whole number of threadgroups of [64, 1, 1]; one Vulkan dispatch per region (the interior and each partial edge, per chunk of group counts), each on its own specialized pipeline, a barrier between each two [metal2vulkan-degrade-split-dispatch]
+output[0..4] = [0.0, 3.0, 6.0, 9.0], ..., output[999] = 2997: as expected
+[JSR-LINUX-ROBUST] handled=0 tid=1048580
+[JSR-PROC] event=system.task.exit_switch task=1011 cause=linux thread exit
+[JSR-LINUX-ROBUST] handled=0 tid=1048579
+[JSR-PROC] event=system.task.exit_switch task=1010 cause=linux thread exit
+[JSR-LINUX-ROBUST] handled=0 tid=1048578
+[JSR-PROC] event=system.task.exit_switch task=1009 cause=linux thread exit
+[JSR-LINUX-ROBUST] handled=0 tid=1048581
+[JSR-PROC] event=system.task.exit_switch task=1012 cause=linux thread exit
+[JSR-LINUX-ROBUST] handled=0 tid=1048577
+[JSR-PROC] event=system.task.exit_switch task=1008 cause=linux thread exit
+[JSR-LINUX-ROBUST] handled=0 tid=1048576
+[JSR-PROC] event=system.task.exit_switch task=1007 cause=linux thread exit
+[JSR-PROC] event=system.process.exiting id=0x200000007 code=0 handles_closed=0
+[JSR-LINUX-ROBUST] handled=0 tid=5
+[JSR-PROC] event=system.task.exit_switch task=1006 cause=linux process exit
+[JSR-LINUX-ROBUST] handled=0 tid=1048583
+[JSR-PROC] event=system.task.exit_switch task=1015 cause=linux signal default action
+[JSR-LINUX-ROBUST] handled=0 tid=1048582
+[JSR-PROC] event=system.process.exited id=0x200000007 name=metal2vulkan-compute code=0 threads=9 handles_closed=0
+[JSR-PROC] event=system.task.exit_switch task=1014 cause=linux signal default action
+[JSR-COMPAT-DYNAMIC-REFS] program=metal2vulkan-compute pages=21150 references=21150 max=1
+[JSR-PROC] event=system.process.reaped id=0x200000007 frames=21150 quarantined=0 threads=9 code=0
+[JSR-LIFE] cleanup destroy type=Task id=0x13
+[JSR-LIFE] cleanup destroy type=Task id=0x11
+[JSR-LIFE] cleanup destroy type=Task id=0xf
+[JSR-LIFE] cleanup destroy type=Task id=0x15
+[JSR-LIFE] cleanup destroy type=Task id=0x20000000d
+[JSR-LIFE] cleanup destroy type=Task id=0x20000000b
+[JSR-LIFE] cleanup destroy type=Task id=0x200000009
+[JSR-LIFE] cleanup destroy type=Task id=0x100000019
+[JSR-LIFE] cleanup destroy type=Task id=0x100000017
+[JSR-LIFE] cleanup destroy type=Process id=0x200000007
+[JSR-LIFE] cleanup destroy type=ExitState id=0x12
+[JSR-LIFE] cleanup destroy type=ExitState id=0x10
+[JSR-LIFE] cleanup destroy type=ExitState id=0xe
+[JSR-LIFE] cleanup destroy type=ExitState id=0x14
+[JSR-LIFE] cleanup destroy type=ExitState id=0x20000000c
+[JSR-LIFE] cleanup destroy type=ExitState id=0x20000000a
+[JSR-LIFE] cleanup destroy type=ExitState id=0x200000008
+[JSR-LIFE] cleanup destroy type=ExitState id=0x100000018
+[JSR-LIFE] cleanup destroy type=ExitState id=0x100000016
+[JSR-LIFE] cleanup destroy type=ExitState id=0x200000006
+[JSR-COMPAT-DYNAMIC-RESOURCE] program=metal2vulkan-compute frames_before=505312 frames_after=498416 retained=6896 heap_used_before=44041536 heap_used_after=44056112 heap_mapped_delta=28192768 pins=0 orphaned=0 failed_frees=0 released=83573
+[JSR-LIFE-ROOT-DYNAMIC] program=metal2vulkan-compute path=/usr/bin/metal2vulkan-compute interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=1374 exit_zero=true frames_before=505312 resources=false failed=0
+[JSR-PROC] event=system.process.created id=0x300000007 name=metal2vulkan-compute memory_cap_capacity=4648 memory_cap_metadata_budget=16658560 memory_budget=533073920 process_slots=64 dynamic=true
+[JSR-PROC] event=system.task.spawned process=0x300000007 task=1016 task_obj=0x300000009 name=metal2vulkan-compute
+[JSR-LINUX-CLONE3-ARGS] flags=0x3d0f00 pidfd=0x100041013990 child_tid=0x100041013ce8 parent_tid=0x100041013990 exit_signal=0x0 stack=0x100040813000 size=0x7ffcc0 tls=0x1000410136c0 set_tid=0x0 set_tid_size=0 cgroup=0x0
+[JSR-LINUX-CLONE3] flags=0x3d0f00 stack=0x100040813000 size=0x7ffcc0 top=0x100041012cc0 tls=0x1000410136c0 child_tid=0x100041013ce8 parent_tid=0x100041013990 rip=0x10004028d57d
+[JSR-PROC] event=system.task.spawned process=0x300000007 task=1017 task_obj=0x30000000b name=linux-clone
+[JSR-VULKAN-THREAD] tid=1048584 name=Thread<00>
+[JSR-LINUX-CLONE3-ARGS] flags=0x3d0f00 pidfd=0x100049857990 child_tid=0x100049857ce8 parent_tid=0x100049857990 exit_signal=0x0 stack=0x100049057000 size=0x7ffcc0 tls=0x1000498576c0 set_tid=0x0 set_tid_size=0 cgroup=0x0
+[JSR-LINUX-CLONE3] flags=0x3d0f00 stack=0x100049057000 size=0x7ffcc0 top=0x100049856cc0 tls=0x1000498576c0 child_tid=0x100049857ce8 parent_tid=0x100049857990 rip=0x10004028d57d
+[JSR-PROC] event=system.task.spawned process=0x300000007 task=1018 task_obj=0x30000000d name=linux-clone
+[JSR-LINUX-CLONE3-ARGS] flags=0x3d0f00 pidfd=0x1000518d8990 child_tid=0x1000518d8ce8 parent_tid=0x1000518d8990 exit_signal=0x0 stack=0x100051858000 size=0x7fcc0 tls=0x1000518d86c0 set_tid=0x0 set_tid_size=0 cgroup=0x0
+[JSR-LINUX-CLONE3] flags=0x3d0f00 stack=0x100051858000 size=0x7fcc0 top=0x1000518d7cc0 tls=0x1000518d86c0 child_tid=0x1000518d8ce8 parent_tid=0x1000518d8990 rip=0x10004028d57d
+[JSR-PROC] event=system.task.spawned process=0x300000007 task=1019 task_obj=0x10000000f name=linux-clone
+[JSR-VULKAN-THREAD] tid=1048586 name=metal2vulkan-ha
+[JSR-LINUX-CLONE3-ARGS] flags=0x3d0f00 pidfd=0x100051ad9990 child_tid=0x100051ad9ce8 parent_tid=0x100051ad9990 exit_signal=0x0 stack=0x1000518d9000 size=0x1ffcc0 tls=0x100051ad96c0 set_tid=0x0 set_tid_size=0 cgroup=0x0
+[JSR-LINUX-CLONE3] flags=0x3d0f00 stack=0x1000518d9000 size=0x1ffcc0 top=0x100051ad8cc0 tls=0x100051ad96c0 child_tid=0x100051ad9ce8 parent_tid=0x100051ad9990 rip=0x10004028d57d
+[JSR-PROC] event=system.task.spawned process=0x300000007 task=1020 task_obj=0x100000011 name=linux-clone
+[JSR-VULKAN-THREAD] tid=1048587 name=metal2vulkan-qu
+[JSR-LINUX-CLONE3-ARGS] flags=0x3d0f00 pidfd=0x100059cdd990 child_tid=0x100059cddce8 parent_tid=0x100059cdd990 exit_signal=0x0 stack=0x100059add000 size=0x1ffcc0 tls=0x100059cdd6c0 set_tid=0x0 set_tid_size=0 cgroup=0x0
+[JSR-LINUX-CLONE3] flags=0x3d0f00 stack=0x100059add000 size=0x1ffcc0 top=0x100059cdccc0 tls=0x100059cdd6c0 child_tid=0x100059cddce8 parent_tid=0x100059cdd990 rip=0x10004028d57d
+[JSR-PROC] event=system.task.spawned process=0x300000007 task=1021 task_obj=0x100000013 name=linux-clone
+[JSR-VULKAN-THREAD] tid=1048588 name=metal2vulkan-sc
+[JSR-LINUX-CLONE3-ARGS] flags=0x3d0f00 pidfd=0x10006ed03990 child_tid=0x10006ed03ce8 parent_tid=0x10006ed03990 exit_signal=0x0 stack=0x10006eb03000 size=0x1ffcc0 tls=0x10006ed036c0 set_tid=0x0 set_tid_size=0 cgroup=0x0
+[JSR-LINUX-CLONE3] flags=0x3d0f00 stack=0x10006eb03000 size=0x1ffcc0 top=0x10006ed02cc0 tls=0x10006ed036c0 child_tid=0x10006ed03ce8 parent_tid=0x10006ed03990 rip=0x10004028d57d
+[JSR-PROC] event=system.task.spawned process=0x300000007 task=1022 task_obj=0x100000015 name=linux-clone
+[JSR-VULKAN-THREAD] tid=1048589 name=metal2vulkan-sh
+metal2vulkan: the device SwiftShader Device (Subzero): its `float` multiply and fused multiply-add round before they flush; a `float` product, fused multiply-add or `ldexp` whose exact value lies within half a unit below `2^-126` answers `2^-126` of its sign where Metal answers the zero of its sign [metal2vulkan-degrade-float-tininess-after-rounding]
+metal2vulkan: the device, on SwiftShader Device (Subzero): its driver lists no `VK_KHR_pipeline_binary`, whose device structure turns it off; the driver keeps its own cache of the device's pipelines beside the shader cache's records, with whatever it writes to disk and holds in memory for it; the pipelines made are the same [metal2vulkan-degrade-driver-pipeline-cache-kept]
+device: SwiftShader Device (Subzero)
+[JSR-LINUX-CLONE3-ARGS] flags=0x100004100 pidfd=0x0 child_tid=0x0 parent_tid=0x0 exit_signal=0x11 stack=0x100076d07000 size=0x9000 tls=0x0 set_tid=0x0 set_tid_size=0 cgroup=0x0
+[JSR-PROC] event=system.process.created id=0x200000017 name=linux-vfork memory_cap_capacity=4648 memory_cap_metadata_budget=16658560 memory_budget=533073920 process_slots=64 dynamic=true
+[JSR-PROC] event=system.task.spawned process=0x200000017 task=1023 task_obj=0x200000019 name=linux-vfork
+[JSR-LINUX-EXEC-FAIL] errno=NoEntry
+[JSR-PROC] event=system.process.exiting id=0x200000017 code=0 handles_closed=0
+[JSR-PROC] event=system.process.exited id=0x200000017 name=linux-vfork code=0 threads=1 handles_closed=0
+[JSR-PROC] event=system.task.exit_switch task=1023 cause=linux process exit
+[JSR-PROC] event=system.process.reaped id=0x200000017 frames=2052 quarantined=0 threads=1 code=0
+[JSR-LIFE] cleanup destroy type=Task id=0x200000019
+[JSR-LIFE] cleanup destroy type=Process id=0x200000017
+[JSR-LIFE] cleanup destroy type=ExitState id=0x200000018
+[JSR-LIFE] cleanup destroy type=ExitState id=0x200000016
+metal2vulkan: an entry of the shader cache directory /data/.cache/metal2vulkan was not written: the directory, a temporary file in it or the rename over the entry failed (cap 26843545600 bytes, an entry at most 268435456 bytes). This device's later failures are counted alone (`ShaderCacheStatistics::write_failures`). what the entry would hold is made again by the next process that needs it; what this process computes is unchanged
+metal2vulkan: the kernel of a compute pipeline state: its translation records `PrecisionNote::DeviceDenormals`; results can differ from Metal's as the note's documentation states [metal2vulkan-degrade-device-denormals]
+metal2vulkan: the kernel of a compute pipeline state: its translation records `PrecisionNote::FastMathRewrites`; results can differ from Metal's as the note's documentation states [metal2vulkan-degrade-fast-math-rewrites]
+metal2vulkan: the kernel of a compute pipeline state: its translation records `PrecisionNote::NativeNanEncoding`; results can differ from Metal's as the note's documentation states [metal2vulkan-degrade-native-nan-encoding]
+pipeline: 256 threads per threadgroup at most, SIMD width 32
+[JSR-LINUX-CLONE3-ARGS] flags=0x3d0f00 pidfd=0x10007ef12990 child_tid=0x10007ef12ce8 parent_tid=0x10007ef12990 exit_signal=0x0 stack=0x10007ed12000 size=0x1ffcc0 tls=0x10007ef126c0 set_tid=0x0 set_tid_size=0 cgroup=0x0
+[JSR-LINUX-CLONE3] flags=0x3d0f00 stack=0x10007ed12000 size=0x1ffcc0 top=0x10007ef11cc0 tls=0x10007ef126c0 child_tid=0x10007ef12ce8 parent_tid=0x10007ef12990 rip=0x10004028d57d
+[JSR-PROC] event=system.task.spawned process=0x300000007 task=1024 task_obj=0x300000017 name=linux-clone
+[JSR-VULKAN-THREAD] tid=1048590 name=metal2vulkan-pi
+[JSR-LINUX-CLONE3-ARGS] flags=0x3d0f00 pidfd=0x10007f113990 child_tid=0x10007f113ce8 parent_tid=0x10007f113990 exit_signal=0x0 stack=0x10007ef13000 size=0x1ffcc0 tls=0x10007f1136c0 set_tid=0x0 set_tid_size=0 cgroup=0x0
+[JSR-LINUX-CLONE3] flags=0x3d0f00 stack=0x10007ef13000 size=0x1ffcc0 top=0x10007f112cc0 tls=0x10007f1136c0 child_tid=0x10007f113ce8 parent_tid=0x10007f113990 rip=0x10004028d57d
+[JSR-PROC] event=system.task.spawned process=0x300000007 task=1025 task_obj=0x300000019 name=linux-clone
+[JSR-VULKAN-THREAD] tid=1048591 name=metal2vulkan-pi
+metal2vulkan: a dispatch of kernel `scale_and_offset`: its grid of [1000, 1, 1] threads is not a whole number of threadgroups of [64, 1, 1]; one Vulkan dispatch per region (the interior and each partial edge, per chunk of group counts), each on its own specialized pipeline, a barrier between each two [metal2vulkan-degrade-split-dispatch]
+output[0..4] = [0.0, 3.0, 6.0, 9.0], ..., output[999] = 2997: as expected
+[JSR-LINUX-ROBUST] handled=0 tid=1048588
+[JSR-PROC] event=system.task.exit_switch task=1021 cause=linux thread exit
+[JSR-LINUX-ROBUST] handled=0 tid=1048587
+[JSR-PROC] event=system.task.exit_switch task=1020 cause=linux thread exit
+[JSR-LINUX-ROBUST] handled=0 tid=1048586
+[JSR-PROC] event=system.task.exit_switch task=1019 cause=linux thread exit
+[JSR-LINUX-ROBUST] handled=0 tid=1048589
+[JSR-PROC] event=system.task.exit_switch task=1022 cause=linux thread exit
+[JSR-LINUX-ROBUST] handled=0 tid=1048585
+[JSR-PROC] event=system.task.exit_switch task=1018 cause=linux thread exit
+[JSR-LINUX-ROBUST] handled=0 tid=1048584
+[JSR-PROC] event=system.task.exit_switch task=1017 cause=linux thread exit
+[JSR-PROC] event=system.process.exiting id=0x300000007 code=0 handles_closed=0
+[JSR-LINUX-ROBUST] handled=0 tid=7
+[JSR-PROC] event=system.task.exit_switch task=1016 cause=linux process exit
+[JSR-LINUX-ROBUST] handled=0 tid=1048590
+[JSR-PROC] event=system.task.exit_switch task=1024 cause=linux signal default action
+[JSR-LINUX-ROBUST] handled=0 tid=1048591
+[JSR-PROC] event=system.process.exited id=0x300000007 name=metal2vulkan-compute code=0 threads=9 handles_closed=0
+[JSR-PROC] event=system.task.exit_switch task=1025 cause=linux signal default action
+[JSR-COMPAT-DYNAMIC-REFS] program=metal2vulkan-compute pages=21150 references=21150 max=1
+[JSR-PROC] event=system.process.reaped id=0x300000007 frames=21150 quarantined=0 threads=9 code=0
+[JSR-LIFE] cleanup destroy type=Task id=0x100000013
+[JSR-LIFE] cleanup destroy type=Task id=0x100000011
+[JSR-LIFE] cleanup destroy type=Task id=0x10000000f
+[JSR-LIFE] cleanup destroy type=Task id=0x100000015
+[JSR-LIFE] cleanup destroy type=Task id=0x30000000d
+[JSR-LIFE] cleanup destroy type=Task id=0x30000000b
+[JSR-LIFE] cleanup destroy type=Task id=0x300000009
+[JSR-LIFE] cleanup destroy type=Task id=0x300000017
+[JSR-LIFE] cleanup destroy type=Task id=0x300000019
+[JSR-LIFE] cleanup destroy type=Process id=0x300000007
+[JSR-LIFE] cleanup destroy type=ExitState id=0x100000012
+[JSR-LIFE] cleanup destroy type=ExitState id=0x100000010
+[JSR-LIFE] cleanup destroy type=ExitState id=0x10000000e
+[JSR-LIFE] cleanup destroy type=ExitState id=0x100000014
+[JSR-LIFE] cleanup destroy type=ExitState id=0x30000000c
+[JSR-LIFE] cleanup destroy type=ExitState id=0x30000000a
+[JSR-LIFE] cleanup destroy type=ExitState id=0x300000008
+[JSR-LIFE] cleanup destroy type=ExitState id=0x300000016
+[JSR-LIFE] cleanup destroy type=ExitState id=0x300000018
+[JSR-LIFE] cleanup destroy type=ExitState id=0x300000006
+[JSR-LIFE-ROOT-DYNAMIC] program=metal2vulkan-compute path=/usr/bin/metal2vulkan-compute interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=1403 exit_zero=true frames_before=498416 resources=true failed=0
+[JSR-LIFE-ROOT] slot=A release=1 schema=1 userland=x86_64-linux-elf files=6
+[JSR-LIFE-HEALTH] result=root_execution_complete
