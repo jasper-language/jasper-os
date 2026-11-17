@@ -57,6 +57,10 @@ DAG；相关实现归入现有 LC-2、ISSUE-21 与 TERM-1 的后续验收。
   ID 冲突和协议损坏各有稳定结构化错误；
 - `service.update.status` v1 返回固定请求头加状态载荷，调用者身份、租户和域
   均由内核盖章；control/staging/archive 路径不进入 ABI；
+- LC-2 新增 `service.update.action` v1 候选结构：recover/archive 请求只含稳定
+  request ID、可选 expected generation、transaction ID、manifest SHA-256、动作和
+  platform scope；路径-free 响应绑定调用者 tenant/domain 与最终事务状态。该结构
+  当前尚未注册 syscall 或 CLI 动词，必须先接入 `UpdateService` 执行器；
 - 查询先验证当前进程的活动安全身份，再读取并恢复同一双副本 A/B 控制记录；
 - ABI 3.17.0 快照和系统接口冻结已更新。
 - 真实 UEFI 串口和 framebuffer/PS-2 原生终端均输入了无前缀

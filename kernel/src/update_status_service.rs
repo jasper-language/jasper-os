@@ -181,6 +181,9 @@ pub fn query_v1(
                 kernel_core::update_service::ServiceError::StaleGeneration { .. } => {
                     SYSTEM_UPDATE_ERROR_STALE_GENERATION
                 }
+                kernel_core::update_service::ServiceError::TransactionMismatch => {
+                    SYSTEM_UPDATE_ERROR_PROTOCOL
+                }
             };
             crate::kprintln!(
                 "[JSR-UPDATE-STATUS-V1] caller={} tenant={} request={} expected={} current={} result=reject code={}",
