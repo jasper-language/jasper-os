@@ -148,7 +148,7 @@ jobs:
       - name: 安装 QEMU / install QEMU
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 qemu-system-arm qemu-system-misc opensbi qemu-user ovmf
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 qemu-system-arm qemu-system-misc opensbi qemu-user ovmf e2fsprogs dosfstools gdisk binutils
           qemu-system-x86_64 --version | head -1
           qemu-system-aarch64 --version | head -1
           qemu-system-riscv64 --version | head -1
