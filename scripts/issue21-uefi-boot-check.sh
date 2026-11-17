@@ -20,30 +20,12 @@ if ! flock -w "${ISSUE21_UEFI_BUILD_LOCK_WAIT:-3600}" 8; then
   exit 75
 fi
 
-# Pre-lock or external jobs may still be running. Detect both their shell
-# transaction and their children, with a short grace period for either to spawn.
-foreign_uefi_transaction() {
-  local pid command
-  while read -r pid command; do
-    [ "$pid" = "$$" ] && continue
-    if [ -r "/proc/$pid/stat" ]; then
-      read -r _stat_pid _stat_comm _stat_state stat_parent _rest \
-        <"/proc/$pid/stat" || true
-      [ "${stat_parent:-}" = "$$" ] && continue
-    fi
-    case "$command" in
-      *issue21-uefi-boot-check.sh*) return 0 ;;
-    esac
-  done < <(
-    pgrep -af '^bash (scripts/|/[^ ]*/scripts/)issue21-uefi-boot-check[.]sh( |$)' ||
-      true
-  )
-  return 1
-}
-
 guest_busy() {
-  foreign_uefi_transaction ||
-    pgrep -x qemu-system-x86_64 >/dev/null 2>&1 ||
+  # The build lock above already serializes every issue21 transaction. Treating
+  # queued scripts as external work deadlocks: the lock holder waits for jobs
+  # that can only make progress after the holder exits.
+  # 上面的构建锁已串行化 issue21 事务；把排队脚本当成外部工作会形成死锁。
+  pgrep -x qemu-system-x86_64 >/dev/null 2>&1 ||
     pgrep -x cargo >/dev/null 2>&1 ||
     pgrep -x rustc >/dev/null 2>&1
 }
