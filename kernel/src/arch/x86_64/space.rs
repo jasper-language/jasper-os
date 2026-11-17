@@ -231,7 +231,7 @@ pub unsafe fn destroy(root: SpaceRoot, phys_offset: u64, frames: &mut dyn FrameA
             for entry in pd.iter_mut().skip(LOW_KERNEL_PD_ENTRIES) {
                 free_subtree(entry, 1, phys_offset, frames);
             }
-            if let Ok(frame) = PhysFrame::from_start(pd_phys) {
+            if let Some(frame) = PhysFrame::from_start(pd_phys) {
                 let _ = frames.deallocate(frame);
             }
             low[LOW_USER_PDPT_FIRST].set_unused();
