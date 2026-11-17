@@ -10,15 +10,53 @@
 use jasper_rt::{entry, ids, sys};
 use kernel_core::jucs::{self, Command, Form, Invocation};
 use kernel_core::terminal_editor::{EditEvent, LineEditor};
-use kernel_core::update_service::{
-    StatusRequest, StatusResponse, TransactionAction, TransactionActionRequest,
-    TransactionActionStatus, ACTION_RESPONSE_BYTES, RESPONSE_BYTES, SCOPE_PLATFORM,
-};
+use kernel_core::update_client::{ClientError, UpdateClient, UpdateTransport};
+use kernel_core::update_service::{ACTION_RESPONSE_BYTES, RESPONSE_BYTES};
 use kernel_core::update_status::{UpdateStatus, NO_SLOT};
 
 const PROMPT: &[u8] = b"jasper> ";
 const HELP: &[u8] =
     b"commands: help, echo <text>, system update status [--json], system update recover [--json], exit\n";
+
+struct NativeUpdateTransport;
+
+impl UpdateTransport for NativeUpdateTransport {
+    fn status(&mut self, request: &[u8], output: &mut [u8; RESPONSE_BYTES]) -> Result<(), i64> {
+        let result = unsafe {
+            sys::call3(
+                ids::SYSTEM_UPDATE_STATUS_QUERY,
+                request.as_ptr() as u64,
+                output.as_mut_ptr() as u64,
+                output.len() as u64,
+            )
+        };
+        if result == RESPONSE_BYTES as i64 {
+            Ok(())
+        } else {
+            Err(if result < 0 { -result } else { result })
+        }
+    }
+
+    fn recover(
+        &mut self,
+        request: &[u8],
+        output: &mut [u8; ACTION_RESPONSE_BYTES],
+    ) -> Result<(), i64> {
+        let result = unsafe {
+            sys::call3(
+                ids::SYSTEM_UPDATE_ACTION_RECOVER,
+                request.as_ptr() as u64,
+                output.as_mut_ptr() as u64,
+                output.len() as u64,
+            )
+        };
+        if result == ACTION_RESPONSE_BYTES as i64 {
+            Ok(())
+        } else {
+            Err(if result < 0 { -result } else { result })
+        }
+    }
+}
 
 fn write(bytes: &[u8]) -> bool {
     let result = unsafe {
@@ -179,38 +217,11 @@ fn write_update_error(code: i64, json: bool) -> bool {
 }
 
 fn write_update_status(request_id: u64, json: bool) -> bool {
-    let request = StatusRequest {
-        request_id,
-        expected_generation: 0,
-        scope: SCOPE_PLATFORM,
-    }
-    .encode();
-    let mut output = [0u8; RESPONSE_BYTES];
-    let result = unsafe {
-        sys::call3(
-            ids::SYSTEM_UPDATE_STATUS_QUERY,
-            request.as_ptr() as u64,
-            output.as_mut_ptr() as u64,
-            output.len() as u64,
-        )
+    let mut client = UpdateClient::new(NativeUpdateTransport);
+    let response = match client.status(request_id, 0) {
+        Ok(response) => response,
+        Err(error) => return write_update_error(client_error_code(error), json),
     };
-    if result != RESPONSE_BYTES as i64 {
-        return write_update_error(if result < 0 { -result } else { result }, json);
-    }
-    let Some(response) = StatusResponse::decode(&output) else {
-        return write(if json {
-            b"{\"schema\":\"jucs.result/1\",\"command\":\"system.update.status\",\"status\":\"error\",\"code\":\"protocol\"}\n"
-        } else {
-            b"jucs-error command=system.update.status code=protocol\n"
-        });
-    };
-    if response.authorization.request_id != request_id {
-        return write(if json {
-            b"{\"schema\":\"jucs.result/1\",\"command\":\"system.update.status\",\"status\":\"error\",\"code\":\"response_request\"}\n"
-        } else {
-            b"jucs-error command=system.update.status code=response_request\n"
-        });
-    }
     let status: UpdateStatus = response.status;
     if status.candidate_slot == NO_SLOT && status.candidate_release != 0 {
         return write(if json {
@@ -317,69 +328,11 @@ fn write_update_status_json(status: UpdateStatus, tenant: u64, request_id: u64) 
 }
 
 fn write_update_recovery(request_id: u64, json: bool) -> bool {
-    let status_request = StatusRequest {
-        request_id,
-        expected_generation: 0,
-        scope: SCOPE_PLATFORM,
-    }
-    .encode();
-    let mut status_output = [0u8; RESPONSE_BYTES];
-    let status_result = unsafe {
-        sys::call3(
-            ids::SYSTEM_UPDATE_STATUS_QUERY,
-            status_request.as_ptr() as u64,
-            status_output.as_mut_ptr() as u64,
-            status_output.len() as u64,
-        )
+    let mut client = UpdateClient::new(NativeUpdateTransport);
+    let response = match client.recover(request_id) {
+        Ok(response) => response,
+        Err(error) => return write_recovery_error(client_error_code(error), json),
     };
-    if status_result != RESPONSE_BYTES as i64 {
-        return write_recovery_error(if status_result < 0 {
-            -status_result
-        } else {
-            status_result
-        }, json);
-    }
-    let Some(status) = StatusResponse::decode(&status_output) else {
-        return write_recovery_text_error(b"protocol", json);
-    };
-    if status.authorization.request_id != request_id {
-        return write_recovery_text_error(b"response_request", json);
-    }
-    let manifest_sha256 = if status.status.candidate_slot != NO_SLOT {
-        status.status.candidate_digest
-    } else {
-        status.status.active_digest
-    };
-    let action_request = TransactionActionRequest {
-        request_id,
-        expected_generation: status.status.service_generation,
-        transaction_id: status.status.transaction_id,
-        manifest_sha256,
-        action: TransactionAction::Recover,
-        scope: SCOPE_PLATFORM,
-    }
-    .encode();
-    let mut output = [0u8; ACTION_RESPONSE_BYTES];
-    let result = unsafe {
-        sys::call3(
-            ids::SYSTEM_UPDATE_ACTION_RECOVER,
-            action_request.as_ptr() as u64,
-            output.as_mut_ptr() as u64,
-            output.len() as u64,
-        )
-    };
-    if result != ACTION_RESPONSE_BYTES as i64 {
-        return write_recovery_error(if result < 0 { -result } else { result }, json);
-    }
-    let Some(response) = TransactionActionStatus::decode(&output) else {
-        return write_recovery_text_error(b"protocol", json);
-    };
-    if response.request_id != request_id
-        || response.transaction_id != status.status.transaction_id
-        || response.manifest_sha256 != manifest_sha256
-    {
-        return write_recovery_text_error(b"response_binding", json);
-    }
     if json {
         let mut line = FixedText::new();
         let ok = line.push(
@@ -442,19 +395,14 @@ fn write_recovery_error(code: i64, json: bool) -> bool {
     ok && write(output.as_bytes())
 }
 
-fn write_recovery_text_error(code: &[u8], json: bool) -> bool {
-    let mut output = FixedText::new();
-    let ok = if json {
-        output.push(
-            b"{\"schema\":\"jucs.result/1\",\"command\":\"system.update.recover\",\"status\":\"error\",\"code\":\"",
-        ) && output.push(code)
-            && output.push(b"\"}\n")
-    } else {
-        output.push(b"jucs-error command=system.update.recover code=")
-            && output.push(code)
-            && output.push(b"\nsystem-update-failed\n")
-    };
-    ok && write(output.as_bytes())
+fn client_error_code(error: ClientError) -> i64 {
+    match error {
+        ClientError::Transport(code) => code,
+        ClientError::Protocol => ids::SYSTEM_UPDATE_ERROR_PROTOCOL as i64,
+        ClientError::RequestMismatch | ClientError::BindingMismatch => {
+            ids::SYSTEM_UPDATE_ERROR_TRANSACTION_MISMATCH as i64
+        }
+    }
 }
 
 fn write_jucs_parse_error(name: &str) -> bool {

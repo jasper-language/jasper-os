@@ -116,6 +116,8 @@ pub mod terminal_editor;
 pub mod update_status;
 /// Versioned update-status service identity, scope and generation contract.
 pub mod update_service;
+/// Shared CLI and structured-Agent update client contract.
+pub mod update_client;
 pub mod tick_lease;
 pub mod wake_mailbox;
 pub mod fdt;

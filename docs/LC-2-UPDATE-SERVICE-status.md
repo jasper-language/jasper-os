@@ -83,6 +83,9 @@ jasper-update-recovery cleanup <control-root> <staging-root> <manifest-sha256-he
 - JUCS 新增 `system update recover [--help|--schema|--json]`，与 status 共用 kernel
   authenticated caller/tenant/domain 与 request ledger；JSON 结果是
   `service.update.action/1`，不含路径；
+- `kernel-core::update_client` 成为 CLI 与后续结构化 Agent 共用的业务客户端：
+  transport 仅负责 syscall/消息传递，request 构造、status-to-action digest 派生、
+  response request 校验和 transaction/generation/digest 绑定校验只实现一次；
 - 服务先验证当前调用者身份/系统域，再读取并恢复同一组双副本 A/B 控制记录；
 - 返回 `service.update.status` v1 请求头与固定状态载荷，包含 generation、transaction、槽状态、
   release、回滚下限、安全纪元、Schema 范围以及调用者身份；
@@ -115,6 +118,9 @@ cargo test --locked -p kernel-core jucs::tests
 
 cargo test --locked -p kernel-core update_service::tests
 6 passed; 0 failed
+
+cargo test --locked -p kernel-core update_client::tests
+2 passed; 0 failed
 ```
 
 新增测试覆盖：
