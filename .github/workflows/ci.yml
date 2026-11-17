@@ -168,7 +168,7 @@ jobs:
       - name: LC-2 原生恢复命令真实 UEFI / native recovery UEFI
         env:
           JASPER_BUILD_CPUS: 0-1
-          ISSUE21_UEFI_MODE: terminal-session
+          ISSUE21_UEFI_MODE: terminal-recovery
           ISSUE21_QEMU_CPUS: 0-1
           ISSUE21_QEMU_SMP: "2"
           ISSUE21_QEMU_MEMORY: 1G

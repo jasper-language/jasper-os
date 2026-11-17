@@ -154,6 +154,7 @@ case "$MODE" in
   sandbox-launch) KERNEL_FEATURES=lifecycle-root-exec-verify,sandbox-launch-verify ;;
   native-install-abi) KERNEL_FEATURES=native-install-abi-verify ;;
   terminal-session) KERNEL_FEATURES=lifecycle-root-exec-verify,terminal-session-verify ;;
+  terminal-recovery) KERNEL_FEATURES=lifecycle-ab-health,terminal-session-verify ;;
   android-ecosystem) KERNEL_FEATURES=lifecycle-root-exec-verify,android-ecosystem-verify ;;
   android-art) KERNEL_FEATURES=lifecycle-root-exec-verify,android-art-verify ;;
   vulkan-metal2vulkan) KERNEL_FEATURES=lifecycle-root-exec-verify,vulkan-metal2vulkan-verify ;;
@@ -212,7 +213,7 @@ ROOT_ANDROID_TOYBOX="${JASPER_TOYBOX_BIN:-}"
 ROOT_AOSP_BINDER_TEST="${JASPER_AOSP_BINDER_TEST:-}"
 ROOT_ANDROID_TREE="${JASPER_ANDROID_TREE:-}"
 ROOT_ANDROID_LINKER_CONFIG=""
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = vulkan-metal2vulkan ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = vulkan-metal2vulkan ]; then
   ROOT_EXEC_PROBE=$(find "$TARGET/x86_64-unknown-none/release/build" \
     -path '*/out/user-target/x86_64-unknown-none/release/user-linuxprobe' \
     -type f -print | sort | tail -n 1)
@@ -289,7 +290,7 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native
     -device isa-debug-exit,iobase=0xf4,iosize=0x04)
 fi
 SERIAL_ARGS=(-serial "file:$OUT/serial.log")
-if [ "$MODE" = terminal-session ] && [ "${ISSUE21_MANUAL_INPUT:-0}" != 1 ]; then
+if { [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ]; } && [ "${ISSUE21_MANUAL_INPUT:-0}" != 1 ]; then
   rm -f -- "$OUT/serial.in" "$OUT/serial.out"
   mkfifo "$OUT/serial.in" "$OUT/serial.out"
   cat "$OUT/serial.out" >"$OUT/serial.log" &
@@ -325,12 +326,60 @@ rc=$?
 set -e
 exec 9>&-
 printf '%s\n' "$rc" >"$OUT/qemu.rc"
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = vulkan-metal2vulkan ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = vulkan-metal2vulkan ]; then
   [ "$rc" -eq 33 ]
 else
   [ "$rc" -eq 124 ]
 fi
 grep -aq 'Jasper-OS boot manager starting' "$OUT/serial.log"
+if [ "$MODE" = terminal-recovery ]; then
+  grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
+  grep -aqE $'^Jasper-OS native CLI\r?$' "$OUT/serial.log"
+  grep -aqE $'^native-help-ok\r?$' "$OUT/serial.log"
+  grep -aqE $'^system-update status=ok command=system[.]update[.]status generation=[1-9][0-9]* transaction=[1-9][0-9]* active=[AB] state=confirmed release=[1-9][0-9]* .*caller=[1-9][0-9]* domain=1 tenant=[1-9][0-9]* request=[1-9][0-9]*\r?$' "$OUT/serial.log"
+  grep -aqE $'^system-update result=ok command=system[.]update[.]recover action=recover generation=[1-9][0-9]* transaction=[1-9][0-9]* recovery_required=false tenant=[1-9][0-9]* request=[1-9][0-9]*\r?$' "$OUT/serial.log"
+  grep -aq '^\[JSR-UPDATE-ACTION\].*action=recover result=ok' "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-HEALTH\] result=confirmed ' "$OUT/serial.log"
+  python3 - "$OUT/serial.log" <<'PY'
+import json
+import sys
+
+status_records = []
+action_records = []
+with open(sys.argv[1], "rb") as stream:
+    for raw in stream:
+        line = raw.rstrip(b"\r\n")
+        if line.startswith(b'{"schema":"service.update.status/1"'):
+            status_records.append(json.loads(line))
+        if line.startswith(b'{"schema":"service.update.action/1"'):
+            action_records.append(json.loads(line))
+
+assert status_records, "missing structured update status"
+status = status_records[-1]
+assert action_records, "missing structured update action"
+action = action_records[-1]
+assert action["schema"] == "service.update.action/1"
+assert action["command"] == "system.update.recover"
+assert action["status"] == "ok"
+assert action["action"] == "recover"
+assert action["generation"] == status["generation"]
+assert action["transaction"] == status["transaction"]
+assert action["digest"] == (
+    status["candidate"]["digest"]
+    if status["candidate"] is not None
+    else status["active"]["digest"]
+)
+assert action["recovery_required"] is False
+assert action["archived"] is False
+assert action["caller"]["domain"] == 1
+PY
+  grep -aqE $'^\{"schema":"jucs.command/1","id":"system.update.recover","version":1,"effects":"write","arguments":\[\],"options":\["--help","--schema","--json"\],"service":"service.update.recover","service_version":1\}\r?$' "$OUT/serial.log"
+  grep -aqE $'^system update recover \[\-\-help\|--schema\|--json\]\r?$' "$OUT/serial.log"
+  grep -aqE $'^native-bye\r?$' "$OUT/serial.log"
+  ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
+  echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
+  exit 0
+fi
 if [ "$MODE" = block-timeout ]; then
   grep -aq '^\[JSR-BLK\] result=timeout injected=true' "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-HEALTH\] result=failed reason=block' "$OUT/serial.log"
