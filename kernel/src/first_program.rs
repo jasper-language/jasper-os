@@ -213,6 +213,7 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         abi::SYSTEM_UPDATE_STATUS_QUERY,
         abi::SYSTEM_UPDATE_ACTION_RECOVER,
         abi::SYSTEM_UPDATE_ACTION_ARCHIVE,
+        abi::SYSTEM_INSTALL_UPDATE_LIST,
     ]));
     #[cfg(not(any(
         feature = "terminal-session-verify",

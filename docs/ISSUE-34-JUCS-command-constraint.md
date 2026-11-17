@@ -74,7 +74,7 @@ DAG；相关实现归入现有 LC-2、ISSUE-21 与 TERM-1 的后续验收。
   校验结构化字段，且查询仍走同一 JUCS 命令与 `system.update.status.query`。
 
 当前已增加独立 Agent 进程与 CLI JSON 共用 `UpdateAgent`/`UpdateClient`：
-固定 status/recover/archive 封套在真实 UEFI/virtio-blk 中通过，包含 sender
+固定 status/recover/archive/list 封套在真实 UEFI/virtio-blk 中通过，包含 sender
 identity 固化、重复请求缓存和 deadline 拒绝。ABI 3.19 的正式
 `system update archive` 与 `system update recover` 均已有真实 UEFI 证据。
 仍需完成：租户过滤；完整权限、重放、旧 generation、错误摘要和并发冲突矩阵；

@@ -4,6 +4,9 @@
 //! records over a native IPC Channel. It does not reinterpret update state and
 //! cannot supply caller identity, tenant, paths or terminal outcomes.
 
+use crate::native_install_abi::{
+    UpdateListHeader, MAX_UPDATE_LIST_BYTES, UPDATE_LIST_RECORD_BYTES,
+};
 use crate::update_service::{
     StatusRequest, TransactionAction, TransactionActionRequest, ACTION_REQUEST_BYTES,
     RESPONSE_BYTES, SCOPE_PLATFORM,
@@ -14,7 +17,7 @@ pub const REQUEST_MAGIC: u32 = 0x5241_554a;
 /// Response envelope magic (`JUAP` in little-endian byte order).
 pub const RESPONSE_MAGIC: u32 = 0x5041_554a;
 /// Current Agent IPC protocol version.
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 /// Fixed request envelope header size.
 pub const REQUEST_HEADER_BYTES: usize = 32;
 /// Fixed response envelope header size.
@@ -22,7 +25,7 @@ pub const RESPONSE_HEADER_BYTES: usize = 32;
 /// Largest update-service request carried by one Agent message.
 pub const MAX_REQUEST_PAYLOAD: usize = ACTION_REQUEST_BYTES; // JASPER-HARDCODE-REVIEW: issue=34 source=update-agent-ipc-v1 reason=fixed-envelope-derived-from-versioned-service-record
 /// Largest update-service response carried by one Agent message.
-pub const MAX_RESPONSE_PAYLOAD: usize = RESPONSE_BYTES; // JASPER-HARDCODE-REVIEW: issue=34 source=update-agent-ipc-v1 reason=max-existing-versioned-service-response
+pub const MAX_RESPONSE_PAYLOAD: usize = MAX_UPDATE_LIST_BYTES; // JASPER-HARDCODE-REVIEW: issue=34 source=update-agent-ipc-v2 reason=max-bounded-list-wire-response
 /// Complete fixed request message size.
 pub const REQUEST_MESSAGE_BYTES: usize = REQUEST_HEADER_BYTES + MAX_REQUEST_PAYLOAD;
 /// Complete fixed response message size.
@@ -35,6 +38,7 @@ pub enum AgentOperation {
     Status = 1,
     Recover = 2,
     Archive = 3,
+    List = 4,
 }
 
 impl AgentOperation {
@@ -43,6 +47,7 @@ impl AgentOperation {
             1 => Some(Self::Status),
             2 => Some(Self::Recover),
             3 => Some(Self::Archive),
+            4 => Some(Self::List),
             _ => None,
         }
     }
@@ -82,12 +87,15 @@ impl AgentRequest {
                 let expected = match operation {
                     AgentOperation::Recover => TransactionAction::Recover,
                     AgentOperation::Archive => TransactionAction::Archive,
-                    AgentOperation::Status => unreachable!(),
+                    AgentOperation::Status | AgentOperation::List => unreachable!(),
                 };
                 if request.scope != SCOPE_PLATFORM || request.action != expected {
                     return None;
                 }
                 request.request_id
+            }
+            AgentOperation::List => {
+                crate::native_install_abi::UpdateListRequest::decode(payload)?.request_id
             }
         };
         if service_request_id != message_id {
@@ -168,6 +176,7 @@ impl AgentRequest {
             AgentOperation::Recover | AgentOperation::Archive => {
                 crate::update_service::ACTION_RESPONSE_BYTES
             }
+            AgentOperation::List => MAX_UPDATE_LIST_BYTES,
         }
     }
 }
@@ -185,7 +194,7 @@ pub struct AgentResponse {
 impl AgentResponse {
     /// Successful service response.
     pub fn ok(request: &AgentRequest, payload: &[u8]) -> Option<Self> {
-        if payload.len() != request.response_bytes() || payload.len() > MAX_RESPONSE_PAYLOAD {
+        if !valid_response_payload(request.operation, request.message_id, payload) {
             return None;
         }
         Self::build(request, 0, payload)
@@ -257,13 +266,13 @@ impl AgentResponse {
         {
             return None;
         }
-        let expected = match operation {
-            AgentOperation::Status => RESPONSE_BYTES,
-            AgentOperation::Recover | AgentOperation::Archive => {
-                crate::update_service::ACTION_RESPONSE_BYTES
-            }
-        };
-        if code == 0 && payload_len != expected {
+        if code == 0
+            && !valid_response_payload(
+                operation,
+                get_u64(bytes, 8),
+                &bytes[RESPONSE_HEADER_BYTES..RESPONSE_HEADER_BYTES + payload_len],
+            )
+        {
             return None;
         }
         let mut payload = [0u8; MAX_RESPONSE_PAYLOAD];
@@ -276,6 +285,36 @@ impl AgentResponse {
             payload_len: payload_len as u16,
             payload,
         })
+    }
+}
+
+fn valid_response_payload(operation: AgentOperation, request_id: u64, payload: &[u8]) -> bool {
+    match operation {
+        AgentOperation::Status => payload.len() == RESPONSE_BYTES,
+        AgentOperation::Recover | AgentOperation::Archive => {
+            payload.len() == crate::update_service::ACTION_RESPONSE_BYTES
+        }
+        AgentOperation::List => {
+            let Some(header_bytes) =
+                payload.get(..crate::native_install_abi::UPDATE_LIST_HEADER_BYTES)
+            else {
+                return false;
+            };
+            let Some(header) = UpdateListHeader::decode(header_bytes) else {
+                return false;
+            };
+            let Some(expected) = (header.record_count as usize)
+                .checked_mul(UPDATE_LIST_RECORD_BYTES)
+                .and_then(|records| {
+                    crate::native_install_abi::UPDATE_LIST_HEADER_BYTES.checked_add(records)
+                })
+            else {
+                return false;
+            };
+            header.request_id == request_id
+                && expected == payload.len()
+                && payload.len() <= MAX_RESPONSE_PAYLOAD
+        }
     }
 }
 
@@ -335,6 +374,28 @@ mod tests {
         assert_eq!(AgentRequest::decode(&status.encode()), Some(status));
         let archive = AgentRequest::new(8, 12, AgentOperation::Archive, &action_request()).unwrap();
         assert_eq!(AgentRequest::decode(&archive.encode()), Some(archive));
+        let list = crate::native_install_abi::UpdateListRequest { request_id: 9 }
+            .encode()
+            .unwrap();
+        let list = AgentRequest::new(9, 13, AgentOperation::List, &list).unwrap();
+        assert_eq!(AgentRequest::decode(&list.encode()), Some(list));
+    }
+
+    #[test]
+    fn list_response_accepts_only_a_complete_header_and_record_set() {
+        let request_bytes = crate::native_install_abi::UpdateListRequest { request_id: 9 }
+            .encode()
+            .unwrap();
+        let request = AgentRequest::new(9, 0, AgentOperation::List, &request_bytes).unwrap();
+        let mut response = [0u8; crate::native_install_abi::UPDATE_LIST_HEADER_BYTES];
+        assert!(UpdateListHeader {
+            request_id: 9,
+            record_count: 0,
+        }
+        .encode((&mut response).try_into().unwrap()));
+        assert!(AgentResponse::ok(&request, &response).is_some());
+        assert!(AgentResponse::ok(&request, &response[..response.len() - 1]).is_none());
+        assert!(AgentResponse::ok(&request, &[response.as_slice(), &[1]].concat()).is_none());
     }
 
     #[test]

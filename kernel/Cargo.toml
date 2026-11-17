@@ -228,7 +228,12 @@ lifecycle-block-timeout-verify = ["lifecycle-root-exec-verify", "fault-inject"]
 terminal-session-verify = []
 # Spawn an external structured update Agent process and compare its JSON results
 # with the native CLI over the same kernel update service.
-update-agent-verify = ["user-programs", "lifecycle-ab-health", "terminal-session-verify"]
+update-agent-verify = [
+    "user-programs",
+    "lifecycle-ab-health",
+    "terminal-session-verify",
+    "native-install-abi-verify",
+]
 # Native Sandbox launch-plan guest acceptance as the first user program.
 sandbox-launch-verify = ["user-programs"]
 # Pixel 6a (Google Tensor GS101) early-boot probe: Samsung UART only, no scheduler/IRQ start.

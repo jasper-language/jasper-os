@@ -117,9 +117,10 @@ jasper-update-recovery cleanup <control-root> <staging-root> <manifest-sha256-he
 - status 解码器现在拒绝“无候选槽却保留候选 release/state/attempts/digest”的
   矛盾记录，并要求存在候选槽时 release 与 digest 均非空；该一致性门位于共享
   协议层，文本 CLI、JSON CLI 和 Agent 前端不能产生不同判断；
-- `update_agent_ipc` 定义 112 字节固定请求和 224 字节固定响应封套：请求只允许
-  status/recover/archive，去掉消息头后仍必须通过原更新请求解码，envelope ID
-  必须与服务请求 ID 一致；响应固定绑定同一 message ID、operation 和结果形态；
+- `update_agent_ipc` v2 定义 112 字节固定请求和最多 3136 字节的固定容量响应
+  封套：请求允许 status/recover/archive/list，去掉消息头后仍必须通过原服务请求
+  解码，envelope ID 必须与服务请求 ID 一致；响应绑定同一 message ID、operation、
+  payload 长度与结果形态；
 - 独立 `user-updateagentd` broker 通过内核 Channel 接收请求，首次收到的
   kernel-stamped `sender_app` 会被固化；客户端同样固化首次响应的发送应用身份，
   身份为 0 或后续变化均失败关闭；
@@ -197,8 +198,11 @@ cargo test --locked -p kernel-core update_client::tests
 cargo test --locked -p kernel-core update_agent::tests
 4 passed; 0 failed
 
-cargo test --locked -p kernel-core update_agent_ipc::tests
+cargo test --locked -p kernel-core update_agent::tests
 4 passed; 0 failed
+
+cargo test --locked -p kernel-core update_agent_ipc::tests
+6 passed; 0 failed
 
 cargo test --locked -p kernel-core update_list_agent::tests
 2 passed; 0 failed
@@ -264,9 +268,9 @@ PASS (3.20.0)
 - 控制终态与 transaction participant 绑定正反例、Complete/RolledBack 崩溃恢复，
   以及 ABI 3.19 的 archive human/JSON/schema/help 均通过。
 - 外部 Agent 固定封套逐字节篡改、operation/ID 错配、错误 code/payload 形态被拒；
-  独立子进程的 status/recover/archive、同 ID 同 operation 但 payload 变化的缓存
-  冲突、重复请求缓存、sender identity 固化、deadline timeout 和 timeout 后继续
-  服务均通过真实 UEFI/virtio-blk。
+  独立子进程的 status/recover/archive/list、同 ID 同 operation 但 payload 变化的
+  缓存冲突、重复请求缓存、sender identity 固化、deadline timeout 和 timeout 后
+  继续服务均通过真实 UEFI/virtio-blk。
 - tenant A/B 的可见更新集合互不串租户；系统主体不隐式获得租户更新权；输出缓冲
   过小时整体返回容量错误且不写入部分 record。
 - ABI 3.20 的 `system.install.update.list` 在真实 OVMF guest 中返回当前主体的
@@ -276,7 +280,7 @@ PASS (3.20.0)
 
 ## 仍未完成
 
-- 租户更新集合的生产持久后端及外部 Agent list operation；原生 ABI/CLI 已具备；
+- 租户更新集合的生产持久后端；原生 ABI、CLI 与外部 Agent list 已具备；
 - 信任根轮换、2-of-3 门限和签名撤销快照持久化；
 - 断点续传、生产发布源高可用和跨重启审计查询；
 - 系统级在线/离线发布演练和 Pixel 6a 安装/回滚/断电矩阵。

@@ -172,6 +172,26 @@ impl AgentChannelTransport {
         output.copy_from_slice(response.payload());
         Ok(())
     }
+
+    fn call_variable(
+        &mut self,
+        operation: AgentOperation,
+        request: &[u8],
+        output: &mut [u8],
+    ) -> Result<usize, i64> {
+        let message_id = service_request_id(operation, request)
+            .ok_or(ids::SYSTEM_UPDATE_ERROR_PROTOCOL as i64)?;
+        let deadline_tick = time::now().saturating_add(self.timeout_ticks);
+        let request = AgentRequest::new(message_id, deadline_tick, operation, request)
+            .ok_or(ids::SYSTEM_UPDATE_ERROR_PROTOCOL as i64)?;
+        let response = self.exchange(request)?;
+        let payload = response.payload();
+        if payload.len() > output.len() {
+            return Err(ids::SYSTEM_UPDATE_ERROR_PROTOCOL as i64);
+        }
+        output[..payload.len()].copy_from_slice(payload);
+        Ok(payload.len())
+    }
 }
 
 impl UpdateTransport for AgentChannelTransport {
@@ -196,6 +216,16 @@ impl UpdateTransport for AgentChannelTransport {
     }
 }
 
+impl UpdateListTransport for AgentChannelTransport {
+    fn list(
+        &mut self,
+        request: &[u8; UPDATE_LIST_REQUEST_BYTES],
+        output: &mut [u8; MAX_UPDATE_LIST_BYTES],
+    ) -> Result<usize, i64> {
+        self.call_variable(AgentOperation::List, request, output)
+    }
+}
+
 fn service_request_id(operation: AgentOperation, payload: &[u8]) -> Option<u64> {
     match operation {
         AgentOperation::Status => {
@@ -207,10 +237,14 @@ fn service_request_id(operation: AgentOperation, payload: &[u8]) -> Option<u64> 
             let expected = match operation {
                 AgentOperation::Recover => TransactionAction::Recover,
                 AgentOperation::Archive => TransactionAction::Archive,
-                AgentOperation::Status => unreachable!(),
+                AgentOperation::Status | AgentOperation::List => unreachable!(),
             };
             (request.scope == SCOPE_PLATFORM && request.action == expected)
                 .then_some(request.request_id)
+        }
+        AgentOperation::List => {
+            let request = kernel_core::native_install_abi::UpdateListRequest::decode(payload)?;
+            Some(request.request_id)
         }
     }
 }
@@ -288,6 +322,17 @@ fn dispatch(
             let mut output = [0u8; ACTION_RESPONSE_BYTES];
             native.archive(request.payload(), &mut output)?;
             AgentResponse::ok(request, &output).ok_or(ids::SYSTEM_UPDATE_ERROR_PROTOCOL as i64)
+        }
+        AgentOperation::List => {
+            let payload: &[u8; UPDATE_LIST_REQUEST_BYTES] = request
+                .payload()
+                .try_into()
+                .map_err(|_| ids::SYSTEM_UPDATE_ERROR_PROTOCOL as i64)?;
+            let mut output = [0u8; MAX_UPDATE_LIST_BYTES];
+            let mut list = NativeUpdateListTransport;
+            let length = list.list(payload, &mut output)?;
+            AgentResponse::ok(request, &output[..length])
+                .ok_or(ids::SYSTEM_UPDATE_ERROR_PROTOCOL as i64)
         }
     }
 }

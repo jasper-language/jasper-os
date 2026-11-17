@@ -22,7 +22,7 @@ the kernel-stamped application identity `1430340679`; the parent pinned that
 identity from the first Channel reply. The exchange covered:
 
 ```text
-status=true recover=true archive=true replay=true
+status=true recover=true archive=true list=true replay=true
 timeout=true after_timeout=true child_exit=0 ok=true
 payload_mismatch=true
 ```

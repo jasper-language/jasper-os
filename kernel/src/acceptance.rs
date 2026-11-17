@@ -1053,7 +1053,10 @@ const DEDICATED_SELECTED: usize = cfg!(feature = "rt1-verify") as usize
     + cfg!(feature = "pex5-verify") as usize
     + cfg!(feature = "pex7-verify") as usize
     + cfg!(feature = "sec6-verify") as usize
-    + cfg!(feature = "native-install-abi-verify") as usize
+    + cfg!(all(
+        feature = "native-install-abi-verify",
+        not(feature = "update-agent-verify")
+    )) as usize
     + cfg!(feature = "update-agent-verify") as usize
     + cfg!(feature = "workload-verify") as usize
     + cfg!(feature = "s2-only") as usize
@@ -1632,7 +1635,10 @@ mod dedicated {
     pub const PLAN: &[&[Step]] = &[PREFIX, STAGES];
 }
 
-#[cfg(feature = "native-install-abi-verify")]
+#[cfg(all(
+    feature = "native-install-abi-verify",
+    not(feature = "update-agent-verify")
+))]
 mod dedicated {
     use super::*;
 

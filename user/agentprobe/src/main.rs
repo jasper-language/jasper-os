@@ -8,6 +8,7 @@ use jasper_rt::update::AgentChannelTransport;
 use jasper_rt::{entry, ids, println, task, time};
 use kernel_core::update_agent::{UpdateAgent, ACTION_JSON_BYTES, STATUS_JSON_BYTES};
 use kernel_core::update_agent_ipc::{AgentOperation, AgentRequest};
+use kernel_core::update_list_agent::{UpdateListAgent, LIST_JSON_BYTES};
 use kernel_core::update_service::{StatusRequest, REQUEST_BYTES, SCOPE_PLATFORM};
 
 entry!(main);
@@ -30,6 +31,7 @@ fn broker_calls() -> Option<CallSet> {
         ids::SYSTEM_UPDATE_STATUS_QUERY,
         ids::SYSTEM_UPDATE_ACTION_RECOVER,
         ids::SYSTEM_UPDATE_ACTION_ARCHIVE,
+        ids::SYSTEM_INSTALL_UPDATE_LIST,
     ])
     .ok()
 }
@@ -106,7 +108,11 @@ fn main(_: u64, _: u64) -> i32 {
     let recover = agent.recover_json(22, 23, &mut recover_json).is_ok();
     let mut archive_json = [0u8; ACTION_JSON_BYTES];
     let archive = agent.archive_json(24, 25, &mut archive_json).is_ok();
-    let mut transport = agent.into_inner();
+    let transport = agent.into_inner();
+    let mut list_agent = UpdateListAgent::new(transport);
+    let mut list_json = [0u8; LIST_JSON_BYTES];
+    let list = list_agent.list_json(26, &mut list_json).is_ok();
+    let mut transport = list_agent.into_inner();
 
     let expired = AgentRequest::new(31, 1, AgentOperation::Status, &status_request(31, 0)).unwrap();
     let timeout = transport.exchange(expired) == Err(ids::SYSTEM_ASYNC_ERROR_TIMED_OUT as i64);
@@ -130,16 +136,18 @@ fn main(_: u64, _: u64) -> i32 {
         && status
         && recover
         && archive
+        && list
         && timeout
         && after_timeout
         && payload_mismatch
         && server_app != 0
         && exit == 0;
     println!(
-        "[JSR-UPDATE-AGENT] transport=channel status={} recover={} archive={} replay={} timeout={} after_timeout={} server_app={} child_exit={} ok={} payload_mismatch={}",
+        "[JSR-UPDATE-AGENT] transport=channel status={} recover={} archive={} list={} replay={} timeout={} after_timeout={} server_app={} child_exit={} ok={} payload_mismatch={}",
         status,
         recover,
         archive,
+        list,
         replay_ok,
         timeout,
         after_timeout,
