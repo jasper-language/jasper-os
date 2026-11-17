@@ -96,8 +96,7 @@ impl<T: UpdateTransport> UpdateClient<T> {
         self.transport
             .recover(&request, &mut output)
             .map_err(ClientError::Transport)?;
-        let response =
-            TransactionActionStatus::decode(&output).ok_or(ClientError::Protocol)?;
+        let response = TransactionActionStatus::decode(&output).ok_or(ClientError::Protocol)?;
         if response.request_id != request_id {
             return Err(ClientError::RequestMismatch);
         }
@@ -127,11 +126,7 @@ mod tests {
     }
 
     impl UpdateTransport for Fake {
-        fn status(
-            &mut self,
-            request: &[u8],
-            output: &mut [u8; RESPONSE_BYTES],
-        ) -> Result<(), i64> {
+        fn status(&mut self, request: &[u8], output: &mut [u8; RESPONSE_BYTES]) -> Result<(), i64> {
             self.status_calls += 1;
             if let Some(code) = self.fail_status {
                 return Err(code);
