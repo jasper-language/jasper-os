@@ -104,9 +104,10 @@ jasper-update-recovery cleanup <control-root> <staging-root> <manifest-sha256-he
 - 独立 `user-updateagentd` broker 通过内核 Channel 接收请求，首次收到的
   kernel-stamped `sender_app` 会被固化；客户端同样固化首次响应的发送应用身份，
   身份为 0 或后续变化均失败关闭；
-- broker 对重复 message ID/operation 返回缓存的完全相同响应，同一 ID 改换
-  operation 被拒绝；绝对 deadline 过期由 broker 在调用服务前拒绝，之后仍可继续
-  服务。Channel 的一问一答长度有界，不存在无界排队或 Agent 私有权限通道；
+- broker 对同一 message ID、operation 和 service payload 的重试返回缓存的完全
+  相同响应；重试 deadline 可以更新，但同一 ID 改换 operation 或 payload 被拒绝；
+  绝对 deadline 过期由 broker 在调用服务前拒绝，之后仍可继续服务。Channel 的
+  一问一答长度有界，不存在无界排队或 Agent 私有权限通道；
 - 服务先验证当前调用者身份/系统域，再读取并恢复同一组双副本 A/B 控制记录；
 - 返回 `service.update.status` v1 请求头与固定状态载荷，包含 generation、transaction、槽状态、
   release、回滚下限、安全纪元、Schema 范围以及调用者身份；
@@ -235,8 +236,9 @@ PASS (3.19.0)
 - 控制终态与 transaction participant 绑定正反例、Complete/RolledBack 崩溃恢复，
   以及 ABI 3.19 的 archive human/JSON/schema/help 均通过。
 - 外部 Agent 固定封套逐字节篡改、operation/ID 错配、错误 code/payload 形态被拒；
-  独立子进程的 status/recover/archive、重复请求缓存、sender identity 固化、
-  deadline timeout 和 timeout 后继续服务均通过真实 UEFI/virtio-blk。
+  独立子进程的 status/recover/archive、同 ID 同 operation 但 payload 变化的缓存
+  冲突、重复请求缓存、sender identity 固化、deadline timeout 和 timeout 后继续
+  服务均通过真实 UEFI/virtio-blk。
 
 ## 仍未完成
 

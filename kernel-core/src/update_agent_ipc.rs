@@ -5,7 +5,8 @@
 //! cannot supply caller identity, tenant, paths or terminal outcomes.
 
 use crate::update_service::{
-    StatusRequest, TransactionAction, TransactionActionRequest, RESPONSE_BYTES, SCOPE_PLATFORM,
+    StatusRequest, TransactionAction, TransactionActionRequest, ACTION_REQUEST_BYTES,
+    RESPONSE_BYTES, SCOPE_PLATFORM,
 };
 
 /// Request envelope magic (`JUAR` in little-endian byte order).
@@ -19,9 +20,9 @@ pub const REQUEST_HEADER_BYTES: usize = 32;
 /// Fixed response envelope header size.
 pub const RESPONSE_HEADER_BYTES: usize = 32;
 /// Largest update-service request carried by one Agent message.
-pub const MAX_REQUEST_PAYLOAD: usize = 80;
+pub const MAX_REQUEST_PAYLOAD: usize = ACTION_REQUEST_BYTES; // JASPER-HARDCODE-REVIEW: issue=34 source=update-agent-ipc-v1 reason=fixed-envelope-derived-from-versioned-service-record
 /// Largest update-service response carried by one Agent message.
-pub const MAX_RESPONSE_PAYLOAD: usize = RESPONSE_BYTES;
+pub const MAX_RESPONSE_PAYLOAD: usize = RESPONSE_BYTES; // JASPER-HARDCODE-REVIEW: issue=34 source=update-agent-ipc-v1 reason=max-existing-versioned-service-response
 /// Complete fixed request message size.
 pub const REQUEST_MESSAGE_BYTES: usize = REQUEST_HEADER_BYTES + MAX_REQUEST_PAYLOAD;
 /// Complete fixed response message size.
@@ -106,6 +107,13 @@ impl AgentRequest {
     /// Immutable service request payload.
     pub fn payload(&self) -> &[u8] {
         &self.payload[..usize::from(self.payload_len)]
+    }
+
+    /// Idempotency identity excludes only the retry deadline.
+    pub fn same_service_request(&self, other: &Self) -> bool {
+        self.message_id == other.message_id
+            && self.operation == other.operation
+            && self.payload() == other.payload()
     }
 
     /// Encode one complete fixed-size request message.
@@ -343,6 +351,22 @@ mod tests {
         let mut bytes = request.encode();
         bytes[6] = AgentOperation::Recover as u8;
         assert_eq!(AgentRequest::decode(&bytes), None);
+    }
+
+    #[test]
+    fn idempotency_ignores_only_the_retry_deadline() {
+        let first = AgentRequest::new(7, 11, AgentOperation::Status, &status_request()).unwrap();
+        let retry = AgentRequest::new(7, 12, AgentOperation::Status, &status_request()).unwrap();
+        assert!(first.same_service_request(&retry));
+
+        let changed = StatusRequest {
+            request_id: 7,
+            expected_generation: 1,
+            scope: SCOPE_PLATFORM,
+        }
+        .encode();
+        let conflict = AgentRequest::new(7, 11, AgentOperation::Status, &changed).unwrap();
+        assert!(!first.same_service_request(&conflict));
     }
 
     #[test]

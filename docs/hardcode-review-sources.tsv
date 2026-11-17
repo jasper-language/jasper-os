@@ -18,3 +18,4 @@ scheduling-policy	33	policy	explicit-scheduler-policy
 storage-ABI-v1	33	spec	storage-ABI-v1
 test-fixture	33	test	unit-test-fixture
 user-probe-counter	33	runtime	user-probe-runtime-counter
+update-agent-ipc-v1	34	spec	update-Agent-IPC-v1-fixed-envelope

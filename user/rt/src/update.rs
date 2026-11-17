@@ -278,6 +278,7 @@ fn protocol_error() -> [u8; RESPONSE_MESSAGE_BYTES] {
 
 #[derive(Clone, Copy)]
 struct CacheEntry {
+    request: AgentRequest,
     response: AgentResponse,
     order: u64,
 }
@@ -297,8 +298,9 @@ impl<const N: usize> ReplyCache<N> {
 
     fn replay(&self, request: &AgentRequest) -> Option<AgentResponse> {
         self.entries.iter().flatten().find_map(|entry| {
-            (entry.response.message_id == request.message_id
-                && entry.response.operation == request.operation)
+            entry
+                .request
+                .same_service_request(request)
                 .then_some(entry.response)
         })
     }
@@ -306,7 +308,7 @@ impl<const N: usize> ReplyCache<N> {
     fn conflict(&self, request: &AgentRequest) -> bool {
         self.entries.iter().flatten().any(|entry| {
             entry.response.message_id == request.message_id
-                && entry.response.operation != request.operation
+                && !entry.request.same_service_request(request)
         })
     }
 
@@ -327,6 +329,7 @@ impl<const N: usize> ReplyCache<N> {
             });
         debug_assert_eq!(response.message_id, request.message_id);
         self.entries[slot] = Some(CacheEntry {
+            request: *request,
             response,
             order: self.next_order,
         });

@@ -340,7 +340,7 @@ fi
 grep -aq 'Jasper-OS boot manager starting' "$OUT/serial.log"
 if [ "$MODE" = update-agent ]; then
   grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
-  grep -aq 'text=\[JSR-UPDATE-AGENT\] transport=channel status=true recover=true archive=true replay=true timeout=true after_timeout=true server_app=[1-9][0-9]* child_exit=0 ok=true' "$OUT/serial.log"
+  grep -aq 'text=\[JSR-UPDATE-AGENT\] transport=channel status=true recover=true archive=true replay=true timeout=true after_timeout=true server_app=[1-9][0-9]* child_exit=0 ok=true payload_mismatch=true' "$OUT/serial.log"
   ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
   echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
   exit 0

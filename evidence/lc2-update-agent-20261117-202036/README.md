@@ -24,12 +24,15 @@ identity from the first Channel reply. The exchange covered:
 ```text
 status=true recover=true archive=true replay=true
 timeout=true after_timeout=true child_exit=0 ok=true
+payload_mismatch=true
 ```
 
 The serial log also shows the update syscalls executed by the spawned broker
 task, a repeated request returning the cached envelope, a deadline-expired
 request being rejected, and a subsequent status request still succeeding. The
-first program then exited with code 0 and all frames were reclaimed.
+replay cache ignores only a refreshed deadline; reusing one message ID and
+operation with a different service payload is rejected. The first program then
+exited with code 0 and all frames were reclaimed.
 
 This closes the external structured transport slice only. Tenant-scoped update
 sets, the complete concurrency/power-loss matrix and Pixel installation/update

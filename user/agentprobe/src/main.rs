@@ -34,10 +34,10 @@ fn broker_calls() -> Option<CallSet> {
     .ok()
 }
 
-fn status_request(id: u64) -> [u8; REQUEST_BYTES] {
+fn status_request(id: u64, expected_generation: u64) -> [u8; REQUEST_BYTES] {
     StatusRequest {
         request_id: id,
-        expected_generation: 0,
+        expected_generation,
         scope: SCOPE_PLATFORM,
     }
     .encode()
@@ -63,7 +63,7 @@ fn main(_: u64, _: u64) -> i32 {
     let process_handle = child.process;
     let mut transport = AgentChannelTransport::new(child.channel, 500);
 
-    let replay_payload = status_request(11);
+    let replay_payload = status_request(11, 0);
     let Some(replay_request) = AgentRequest::new(
         11,
         time::now().saturating_add(500),
@@ -80,7 +80,24 @@ fn main(_: u64, _: u64) -> i32 {
             return 4;
         }
     };
-    let replay_ok = transport.exchange(replay_request).ok() == Some(first);
+    let retry_request = AgentRequest::new(
+        11,
+        time::now().saturating_add(500),
+        AgentOperation::Status,
+        &replay_payload,
+    )
+    .unwrap();
+    let replay_ok = transport.exchange(retry_request).ok() == Some(first);
+    let conflicting_payload = status_request(11, 1);
+    let conflicting_request = AgentRequest::new(
+        11,
+        time::now().saturating_add(500),
+        AgentOperation::Status,
+        &conflicting_payload,
+    )
+    .unwrap();
+    let payload_mismatch =
+        transport.exchange(conflicting_request) == Err(ids::SYSTEM_USI_ERROR_REQUEST_ID as i64);
 
     let mut agent = UpdateAgent::new(transport);
     let mut status_json = [0u8; STATUS_JSON_BYTES];
@@ -91,7 +108,7 @@ fn main(_: u64, _: u64) -> i32 {
     let archive = agent.archive_json(24, 25, &mut archive_json).is_ok();
     let mut transport = agent.into_inner();
 
-    let expired = AgentRequest::new(31, 1, AgentOperation::Status, &status_request(31)).unwrap();
+    let expired = AgentRequest::new(31, 1, AgentOperation::Status, &status_request(31, 0)).unwrap();
     let timeout = transport.exchange(expired) == Err(ids::SYSTEM_ASYNC_ERROR_TIMED_OUT as i64);
     let after_timeout = transport
         .exchange(
@@ -99,7 +116,7 @@ fn main(_: u64, _: u64) -> i32 {
                 32,
                 time::now().saturating_add(500),
                 AgentOperation::Status,
-                &status_request(32),
+                &status_request(32, 0),
             )
             .unwrap(),
         )
@@ -115,11 +132,21 @@ fn main(_: u64, _: u64) -> i32 {
         && archive
         && timeout
         && after_timeout
+        && payload_mismatch
         && server_app != 0
         && exit == 0;
     println!(
-        "[JSR-UPDATE-AGENT] transport=channel status={} recover={} archive={} replay={} timeout={} after_timeout={} server_app={} child_exit={} ok={}",
-        status, recover, archive, replay_ok, timeout, after_timeout, server_app, exit, ok
+        "[JSR-UPDATE-AGENT] transport=channel status={} recover={} archive={} replay={} timeout={} after_timeout={} server_app={} child_exit={} ok={} payload_mismatch={}",
+        status,
+        recover,
+        archive,
+        replay_ok,
+        timeout,
+        after_timeout,
+        server_app,
+        exit,
+        ok,
+        payload_mismatch
     );
     if ok {
         0
