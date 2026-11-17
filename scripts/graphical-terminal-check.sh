@@ -102,7 +102,7 @@ for _ in $(seq 1 120); do
   fi
   sleep 1
 done
-grep -aqE $'^system-update status=ok command=system[.]update[.]status .*domain=1\r?$' \
+grep -aqE $'^system-update status=ok command=system[.]update[.]status .*domain=1 tenant=[1-9][0-9]* request=[1-9][0-9]*\r?$' \
   "$OUT/serial.log"
 grep -aqE $'^system-update-ok\r?$' "$OUT/serial.log"
 

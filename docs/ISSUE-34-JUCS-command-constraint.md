@@ -45,11 +45,17 @@ DAG；相关实现归入现有 LC-2、ISSUE-21 与 TERM-1 的后续验收。
 
 - JUCS 层已建立无分配的 `system.update.status` v1 命令身份、精确三段式解析、
   拒绝 `jucs`/`jasper` 工具前缀、未知参数失败关闭，并提供 `--help`/`--schema`；
-- 原生 CLI 已通过该 JUCS 路由调用 `system.update.control.get`，不复制更新执行器；
-- 内核只读机制返回固定 `service.update-status/v1` 记录，调用者身份和域由内核
-  盖章；control/staging/archive 路径不进入 ABI；
+- 原生 CLI 通过该 JUCS 路由调用版本化 `system.update.status.query`，不复制
+  更新执行器；旧 `system.update.control.get` 保留为兼容只读机制；
+- `system.update.status.query` v1 增加版本化 `service.update.status` 请求/响应：
+  请求携带非零请求 ID、可选 expected generation 和唯一平台范围；租户由内核
+  安全身份与 Workload Domain 派生，请求不能指定其他租户或内部路径；
+- 请求 ID 复用进程级幂等账本；身份缺失、未知租户范围、旧 generation、请求
+  ID 冲突和协议损坏各有稳定结构化错误；
+- `service.update.status` v1 返回固定请求头加状态载荷，调用者身份、租户和域
+  均由内核盖章；control/staging/archive 路径不进入 ABI；
 - 查询先验证当前进程的活动安全身份，再读取并恢复同一双副本 A/B 控制记录；
-- ABI 3.16.0 快照和系统接口冻结已更新。
+- ABI 3.17.0 快照和系统接口冻结已更新。
 - 真实 UEFI 串口和 framebuffer/PS-2 原生终端均输入了无前缀
   `system update status`，返回同一结构状态；首程序帧与堆资源断言保持
   `reclaimed=true`。

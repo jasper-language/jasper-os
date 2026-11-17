@@ -10,7 +10,10 @@
 use jasper_rt::{entry, ids, sys};
 use kernel_core::jucs::{self, Command, Form, Invocation};
 use kernel_core::terminal_editor::{EditEvent, LineEditor};
-use kernel_core::update_status::{UpdateStatus, BYTES, NO_SLOT};
+use kernel_core::update_service::{
+    StatusRequest, StatusResponse, RESPONSE_BYTES, SCOPE_PLATFORM,
+};
+use kernel_core::update_status::{UpdateStatus, NO_SLOT};
 
 const PROMPT: &[u8] = b"jasper> ";
 const HELP: &[u8] = b"commands: help, echo <text>, system update status, exit\n";
@@ -136,25 +139,31 @@ fn state_name(state: u8) -> &'static [u8] {
     }
 }
 
-fn dispatch_jucs(invocation: Invocation) -> bool {
+fn dispatch_jucs(invocation: Invocation, request_id: u64) -> bool {
     match (invocation.command, invocation.form) {
         (_, Form::Help) => write(jucs::UPDATE_STATUS_HELP.as_bytes()),
         (_, Form::Schema) => write(jucs::UPDATE_STATUS_SCHEMA.as_bytes()),
-        (Command::UpdateStatus, Form::Invoke) => write_update_status(),
+        (Command::UpdateStatus, Form::Invoke) => write_update_status(request_id),
     }
 }
 
-fn write_update_status() -> bool {
-    let mut output = [0u8; BYTES];
+fn write_update_status(request_id: u64) -> bool {
+    let request = StatusRequest {
+        request_id,
+        expected_generation: 0,
+        scope: SCOPE_PLATFORM,
+    }
+    .encode();
+    let mut output = [0u8; RESPONSE_BYTES];
     let result = unsafe {
         sys::call3(
-            ids::SYSTEM_UPDATE_CONTROL_GET,
+            ids::SYSTEM_UPDATE_STATUS_QUERY,
+            request.as_ptr() as u64,
             output.as_mut_ptr() as u64,
             output.len() as u64,
-            0,
         )
     };
-    if result != BYTES as i64 {
+    if result != RESPONSE_BYTES as i64 {
         let mut error = FixedText::new();
         if !error.push(b"jucs-error command=system.update.status code=")
             || !error.push_i64(if result < 0 { -result } else { result })
@@ -164,9 +173,13 @@ fn write_update_status() -> bool {
         }
         return write(error.as_bytes());
     }
-    let Some(status) = UpdateStatus::decode(&output) else {
+    let Some(response) = StatusResponse::decode(&output) else {
         return write(b"jucs-error command=system.update.status code=protocol\n");
     };
+    if response.authorization.request_id != request_id {
+        return write(b"jucs-error command=system.update.status code=response_request\n");
+    }
+    let status: UpdateStatus = response.status;
     let mut line = FixedText::new();
     let valid = line.push(b"system-update status=ok command=system.update.status generation=")
         && line.push_u64(status.service_generation)
@@ -196,6 +209,10 @@ fn write_update_status() -> bool {
         && line.push_u64(status.caller_subject)
         && line.push(b" domain=")
         && line.push_u64(status.caller_domain as u64)
+        && line.push(b" tenant=")
+        && line.push_u64(response.authorization.tenant)
+        && line.push(b" request=")
+        && line.push_u64(response.authorization.request_id)
         && line.push(b"\nsystem-update-ok\n");
     if !valid || status.candidate_slot == NO_SLOT && status.candidate_release != 0 {
         return false;
@@ -216,6 +233,7 @@ fn main(_: u64, _: u64) -> i32 {
         return 1;
     }
     let mut editor = LineEditor::<256, 16, 256>::new();
+    let mut next_status_request = 1u64;
     loop {
         if !write(PROMPT) {
             return 1;
@@ -263,7 +281,9 @@ fn main(_: u64, _: u64) -> i32 {
         {
             match jucs::parse(command) {
                 Ok(invocation) => {
-                    if !dispatch_jucs(invocation) {
+                    let request_id = next_status_request;
+                    next_status_request = next_status_request.wrapping_add(1).max(1);
+                    if !dispatch_jucs(invocation, request_id) {
                         return 3;
                     }
                 }

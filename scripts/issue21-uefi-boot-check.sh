@@ -461,9 +461,9 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native
     grep -aqE $'^Jasper-OS native CLI\r?$' "$OUT/serial.log"
     if [ "${ISSUE21_MANUAL_INPUT:-0}" != 1 ]; then
       grep -aqE $'^native-help-ok\r?$' "$OUT/serial.log"
-      grep -aqE $'^system-update status=ok command=system[.]update[.]status generation=[1-9][0-9]* transaction=[1-9][0-9]* active=[AB] state=confirmed release=[1-9][0-9]* .*caller=[1-9][0-9]* domain=1\r?$' "$OUT/serial.log"
+      grep -aqE $'^system-update status=ok command=system[.]update[.]status generation=[1-9][0-9]* transaction=[1-9][0-9]* active=[AB] state=confirmed release=[1-9][0-9]* .*caller=[1-9][0-9]* domain=1 tenant=[1-9][0-9]* request=[1-9][0-9]*\r?$' "$OUT/serial.log"
       grep -aqE $'^system-update-ok\r?$' "$OUT/serial.log"
-      grep -aqE $'^\{"schema":"jucs.command/1","id":"system.update.status","version":1,"effects":"read","arguments":\[\],"options":\["--help","--schema"\],"output":"service.update-status/v1"\}\r?$' "$OUT/serial.log"
+      grep -aqE $'^\{"schema":"jucs.command/1","id":"system.update.status","version":1,"effects":"read","arguments":\[\],"options":\["--help","--schema"\],"service":"service.update.status","service_version":1\}\r?$' "$OUT/serial.log"
       grep -aqE $'^system update status \[\-\-help\|--schema\]\r?$' "$OUT/serial.log"
       [ "$(grep -acE $'^native-echo=history\r?$' "$OUT/serial.log")" -ge 2 ]
       grep -aqE $'^\^C\r?$' "$OUT/serial.log"

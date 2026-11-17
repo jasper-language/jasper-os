@@ -113,6 +113,8 @@ pub mod terminal_session;
 pub mod terminal_editor;
 /// Structured, path-free service update status records.
 pub mod update_status;
+/// Versioned update-status service identity, scope and generation contract.
+pub mod update_service;
 pub mod tick_lease;
 pub mod wake_mailbox;
 pub mod fdt;

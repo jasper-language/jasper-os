@@ -1342,6 +1342,62 @@ pub const LAYOUTS: &[LayoutContract] = &[
             },
         ],
     },
+    LayoutContract {
+        name: "update.status.request",
+        version: crate::update_service::REQUEST_VERSION as u32,
+        size: crate::update_service::REQUEST_BYTES as u32,
+        magic: crate::update_service::REQUEST_MAGIC,
+        fields: &[
+            LayoutField {
+                name: "request_id",
+                offset: 8,
+                width: 8,
+            },
+            LayoutField {
+                name: "expected_generation",
+                offset: 16,
+                width: 8,
+            },
+            LayoutField {
+                name: "scope",
+                offset: 24,
+                width: 4,
+            },
+        ],
+    },
+    LayoutContract {
+        name: "update.status.response",
+        version: crate::update_service::RESPONSE_VERSION as u32,
+        size: crate::update_service::RESPONSE_BYTES as u32,
+        magic: crate::update_service::RESPONSE_MAGIC,
+        fields: &[
+            LayoutField {
+                name: "request_id",
+                offset: 8,
+                width: 8,
+            },
+            LayoutField {
+                name: "tenant",
+                offset: 16,
+                width: 8,
+            },
+            LayoutField {
+                name: "scope",
+                offset: 24,
+                width: 4,
+            },
+            LayoutField {
+                name: "domain",
+                offset: 28,
+                width: 4,
+            },
+            LayoutField {
+                name: "status",
+                offset: 32,
+                width: crate::update_status::BYTES as u16,
+            },
+        ],
+    },
 ];
 
 /// 可调用操作的逐个寄存器契约。名字必须与 `abi/system-ids.txt` 的操作集合完全相等。
@@ -1859,6 +1915,11 @@ pub const OPERATIONS: &[OperationContract] = &[
     OperationContract {
         name: "system.update.control.get",
         args: "u64:output_ptr,u64:capacity",
+        result: "i64:bytes_or_error",
+    },
+    OperationContract {
+        name: "system.update.status.query",
+        args: "u64:request_ptr,u64:output_ptr,u64:capacity",
         result: "i64:bytes_or_error",
     },
 ];

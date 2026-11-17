@@ -17,7 +17,7 @@ pub const UPDATE_STATUS_SCHEMA: &str = concat!(
     "{\"schema\":\"jucs.command/1\",\"id\":\"system.update.status\",",
     "\"version\":1,\"effects\":\"read\",\"arguments\":[],",
     "\"options\":[\"--help\",\"--schema\"],",
-    "\"output\":\"service.update-status/v1\"}\n"
+    "\"service\":\"service.update.status\",\"service_version\":1}\n"
 );
 
 /// A JUCS command whose identity has been frozen for this runtime generation.

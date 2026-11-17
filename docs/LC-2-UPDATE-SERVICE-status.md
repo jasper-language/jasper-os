@@ -59,12 +59,17 @@ jasper-update-recovery cleanup <control-root> <staging-root> <manifest-sha256-he
 - 原生 CLI 解析规范化 `system update status`，同时提供 `--help` 与 `--schema`；
 - JUCS 命令身份为 `system.update.status` v1，不把命令名当 syscall；
 - 内核机制 `system.update.control.get` 只接收输出缓冲与容量，不接受路径；
+- 原生 CLI 已通过版本化 `system.update.status.query` 调用
+  `service.update.status` v1：请求含稳定请求 ID、可选 expected generation 和
+  平台范围，但租户只能由内核认证身份/Workload Domain 派生；
 - 服务先验证当前调用者身份/系统域，再读取并恢复同一组双副本 A/B 控制记录；
-- 返回固定 `service.update-status/v1` 记录，包含 generation、transaction、槽状态、
+- 返回 `service.update.status` v1 请求头与固定状态载荷，包含 generation、transaction、槽状态、
   release、回滚下限、安全纪元、Schema 范围以及调用者身份；
 - 返回记录不包含 control/staging/archive 路径或任意可执行对象。
 
-真实 UEFI 验证已覆盖串口与 framebuffer/PS-2 两个原生终端前端：输入
+身份缺失、租户范围注入、旧 generation、请求 ID 冲突和协议损坏均有独立错误；
+请求 ID 复用进程级幂等账本。真实 UEFI 验证已覆盖串口与 framebuffer/PS-2
+两个原生终端前端：输入
 `system update status` 后均返回同一份 A/B 控制记录，`--help`/`--schema` 也可发现；
 首程序查询前后资源断言为 `reclaimed=true`。
 

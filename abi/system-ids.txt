@@ -194,3 +194,8 @@
 4164	error	system.update.error.unavailable	1	none	更新·控制状态不可用	Update control status unavailable
 4165	error	system.update.error.buffer_too_small	1	none	更新·状态缓冲区不足	Update status buffer too small
 4166	error	system.update.error.protocol	1	none	更新·状态协议非法	Update status protocol invalid
+111	op	system.update.status.query	1	read	更新·版本化状态查询	Query versioned update status
+4167	error	system.update.error.unauthorized	1	none	更新·调用者未授权	Update status caller unauthorized
+4168	error	system.update.error.stale_generation	1	none	更新·状态世代已过期	Update status generation stale
+4169	error	system.update.error.request_id	1	none	更新·请求标识冲突	Update status request identifier conflict
+4170	error	system.update.error.tenant_scope	1	none	更新·请求租户范围不可见	Update status tenant scope denied
