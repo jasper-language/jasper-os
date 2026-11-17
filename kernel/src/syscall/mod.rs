@@ -842,6 +842,20 @@ syscall_dispatch! {
             err(SYSTEM_UPDATE_ERROR_UNAVAILABLE)
         }
     },
+    SYSTEM_UPDATE_ACTION_RECOVER => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        let Some(pid) = crate::proc::current_process() else {
+            return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+        };
+        #[cfg(feature = "lifecycle-ab-health")]
+        {
+            crate::update_status_service::recover_v1(pid, a.args[0], a.args[1], a.args[2])
+        }
+        #[cfg(not(feature = "lifecycle-ab-health"))]
+        {
+            let _ = (pid, a);
+            err(SYSTEM_UPDATE_ERROR_UNAVAILABLE)
+        }
+    },
     SYSTEM_WORKLOAD_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
         workload_create(a.args[0])
     },

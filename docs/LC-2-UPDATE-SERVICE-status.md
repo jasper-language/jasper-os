@@ -75,6 +75,14 @@ jasper-update-recovery cleanup <control-root> <staging-root> <manifest-sha256-he
   generation、transaction ID、manifest digest 绑定当前事务；`recover_bound`
   使用服务内部 staging root，`archive_bound` 使用运维启动时配置的 archive root，
   普通 action 调用不再提交内部路径；
+- ABI 3.18 新增 `system.update.action.recover`。内核只接受固定
+  `TransactionActionRequest`，从当前双副本控制记录派生 transaction 与候选/活动
+  manifest digest，强制 request、generation、transaction、digest、platform scope
+  绑定后，重写两份控制副本、flush 并读回；调用者不能提供 control、staging 或
+  archive 路径；
+- JUCS 新增 `system update recover [--help|--schema|--json]`，与 status 共用 kernel
+  authenticated caller/tenant/domain 与 request ledger；JSON 结果是
+  `service.update.action/1`，不含路径；
 - 服务先验证当前调用者身份/系统域，再读取并恢复同一组双副本 A/B 控制记录；
 - 返回 `service.update.status` v1 请求头与固定状态载荷，包含 generation、transaction、槽状态、
   release、回滚下限、安全纪元、Schema 范围以及调用者身份；
@@ -91,15 +99,22 @@ jasper-update-recovery cleanup <control-root> <staging-root> <manifest-sha256-he
 过滤、恢复/归档正式资源动作和完整负例矩阵尚未交付。因此 LC-2 继续保持
 `core-passed`，恢复工具也不能冒充正式命令。
 
-当前新增的 recovery/archive 已具备路径-free 数据/授权契约和
-`UpdateService` managed execution，但尚未注册为内核 syscall，也尚未由原生
-Shell 或 Agent 执行器消费。后续必须完成真实 UEFI/断电负例后才能升级状态。
+recovery 已具备 path-free 数据/授权契约、`UpdateService` managed execution、
+ABI syscall 和原生 Shell 消费。archive 仍只有 host-side managed execution；
+尚无内核可写的 terminal staging/journal archive 后端，因此不注册伪造的
+`system update archive`。Agent transport、完整并发/重放和断电矩阵仍未完成。
 
 ## 验证
 
 ```text
 cargo test --locked -p jasper-lifecycle-staging
-29 passed; 0 failed
+31 passed; 0 failed
+
+cargo test --locked -p kernel-core jucs::tests
+2 passed; 0 failed
+
+cargo test --locked -p kernel-core update_service::tests
+6 passed; 0 failed
 ```
 
 新增测试覆盖：
@@ -116,7 +131,8 @@ cargo test --locked -p jasper-lifecycle-staging
 
 ## 仍未完成
 
-- `service.update.*` 的正式内核/系统服务注册、调用者身份和租户作用域；
+- 结构化 Agent transport 与租户级更新可见性过滤；
+- 内核可写的 terminal transaction archive 后端与正式 `system update archive`；
 - 信任根轮换、2-of-3 门限和签名撤销快照持久化；
 - 断点续传、生产发布源高可用和跨重启审计查询；
 - 系统级在线/离线发布演练和 Pixel 6a 安装/回滚/断电矩阵。

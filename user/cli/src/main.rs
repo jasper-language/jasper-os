@@ -10,11 +10,15 @@
 use jasper_rt::{entry, ids, sys};
 use kernel_core::jucs::{self, Command, Form, Invocation};
 use kernel_core::terminal_editor::{EditEvent, LineEditor};
-use kernel_core::update_service::{StatusRequest, StatusResponse, RESPONSE_BYTES, SCOPE_PLATFORM};
+use kernel_core::update_service::{
+    StatusRequest, StatusResponse, TransactionAction, TransactionActionRequest,
+    TransactionActionStatus, ACTION_RESPONSE_BYTES, RESPONSE_BYTES, SCOPE_PLATFORM,
+};
 use kernel_core::update_status::{UpdateStatus, NO_SLOT};
 
 const PROMPT: &[u8] = b"jasper> ";
-const HELP: &[u8] = b"commands: help, echo <text>, system update status [--json], exit\n";
+const HELP: &[u8] =
+    b"commands: help, echo <text>, system update status [--json], system update recover [--json], exit\n";
 
 fn write(bytes: &[u8]) -> bool {
     let result = unsafe {
@@ -149,10 +153,14 @@ fn state_name(state: u8) -> &'static [u8] {
 
 fn dispatch_jucs(invocation: Invocation, request_id: u64) -> bool {
     match (invocation.command, invocation.form) {
-        (_, Form::Help) => write(jucs::UPDATE_STATUS_HELP.as_bytes()),
-        (_, Form::Schema) => write(jucs::UPDATE_STATUS_SCHEMA.as_bytes()),
+        (Command::UpdateStatus, Form::Help) => write(jucs::UPDATE_STATUS_HELP.as_bytes()),
+        (Command::UpdateStatus, Form::Schema) => write(jucs::UPDATE_STATUS_SCHEMA.as_bytes()),
         (Command::UpdateStatus, Form::Invoke) => write_update_status(request_id, false),
         (Command::UpdateStatus, Form::Json) => write_update_status(request_id, true),
+        (Command::UpdateRecover, Form::Help) => write(jucs::UPDATE_RECOVER_HELP.as_bytes()),
+        (Command::UpdateRecover, Form::Schema) => write(jucs::UPDATE_RECOVER_SCHEMA.as_bytes()),
+        (Command::UpdateRecover, Form::Invoke) => write_update_recovery(request_id, false),
+        (Command::UpdateRecover, Form::Json) => write_update_recovery(request_id, true),
     }
 }
 
@@ -306,6 +314,147 @@ fn write_update_status_json(status: UpdateStatus, tenant: u64, request_id: u64) 
     ok &= line.push_u64(request_id);
     ok &= line.push(b"}\n");
     ok && write(line.as_bytes())
+}
+
+fn write_update_recovery(request_id: u64, json: bool) -> bool {
+    let status_request = StatusRequest {
+        request_id,
+        expected_generation: 0,
+        scope: SCOPE_PLATFORM,
+    }
+    .encode();
+    let mut status_output = [0u8; RESPONSE_BYTES];
+    let status_result = unsafe {
+        sys::call3(
+            ids::SYSTEM_UPDATE_STATUS_QUERY,
+            status_request.as_ptr() as u64,
+            status_output.as_mut_ptr() as u64,
+            status_output.len() as u64,
+        )
+    };
+    if status_result != RESPONSE_BYTES as i64 {
+        return write_recovery_error(if status_result < 0 {
+            -status_result
+        } else {
+            status_result
+        }, json);
+    }
+    let Some(status) = StatusResponse::decode(&status_output) else {
+        return write_recovery_text_error(b"protocol", json);
+    };
+    if status.authorization.request_id != request_id {
+        return write_recovery_text_error(b"response_request", json);
+    }
+    let manifest_sha256 = if status.status.candidate_slot != NO_SLOT {
+        status.status.candidate_digest
+    } else {
+        status.status.active_digest
+    };
+    let action_request = TransactionActionRequest {
+        request_id,
+        expected_generation: status.status.service_generation,
+        transaction_id: status.status.transaction_id,
+        manifest_sha256,
+        action: TransactionAction::Recover,
+        scope: SCOPE_PLATFORM,
+    }
+    .encode();
+    let mut output = [0u8; ACTION_RESPONSE_BYTES];
+    let result = unsafe {
+        sys::call3(
+            ids::SYSTEM_UPDATE_ACTION_RECOVER,
+            action_request.as_ptr() as u64,
+            output.as_mut_ptr() as u64,
+            output.len() as u64,
+        )
+    };
+    if result != ACTION_RESPONSE_BYTES as i64 {
+        return write_recovery_error(if result < 0 { -result } else { result }, json);
+    }
+    let Some(response) = TransactionActionStatus::decode(&output) else {
+        return write_recovery_text_error(b"protocol", json);
+    };
+    if response.request_id != request_id
+        || response.transaction_id != status.status.transaction_id
+        || response.manifest_sha256 != manifest_sha256
+    {
+        return write_recovery_text_error(b"response_binding", json);
+    }
+    if json {
+        let mut line = FixedText::new();
+        let ok = line.push(
+            b"{\"schema\":\"service.update.action/1\",\"command\":\"system.update.recover\",\"status\":\"ok\",\"action\":\"recover\",\"generation\":",
+        );
+        return ok
+            && line.push_u64(response.generation)
+            && line.push(b",\"transaction\":")
+            && line.push_u64(response.transaction_id)
+            && line.push(b",\"digest\":\"")
+            && line.push_hex(&response.manifest_sha256)
+            && line.push(b"\",\"recovery_required\":")
+            && line.push(if response.recovery_required {
+                b"true"
+            } else {
+                b"false"
+            })
+            && line.push(b",\"archived\":")
+            && line.push(if response.archived { b"true" } else { b"false" })
+            && line.push(b",\"caller\":{\"tenant\":")
+            && line.push_u64(response.tenant)
+            && line.push(b",\"domain\":")
+            && line.push_u64(response.domain as u64)
+            && line.push(b"},\"request\":")
+            && line.push_u64(response.request_id)
+            && line.push(b"}\n")
+            && write(line.as_bytes());
+    }
+    let mut line = FixedText::new();
+    let ok = line.push(b"system-update result=ok command=system.update.recover action=recover generation=")
+        && line.push_u64(response.generation)
+        && line.push(b" transaction=")
+        && line.push_u64(response.transaction_id)
+        && line.push(b" recovery_required=")
+        && line.push(if response.recovery_required {
+            b"true"
+        } else {
+            b"false"
+        })
+        && line.push(b" tenant=")
+        && line.push_u64(response.tenant)
+        && line.push(b" request=")
+        && line.push_u64(response.request_id)
+        && line.push(b"\nsystem-update-ok\n");
+    ok && write(line.as_bytes())
+}
+
+fn write_recovery_error(code: i64, json: bool) -> bool {
+    let mut output = FixedText::new();
+    let ok = if json {
+        output.push(
+            b"{\"schema\":\"jucs.result/1\",\"command\":\"system.update.recover\",\"status\":\"error\",\"code\":",
+        ) && output.push_i64(code)
+            && output.push(b"}\n")
+    } else {
+        output.push(b"jucs-error command=system.update.recover code=")
+            && output.push_i64(code)
+            && output.push(b"\nsystem-update-failed\n")
+    };
+    ok && write(output.as_bytes())
+}
+
+fn write_recovery_text_error(code: &[u8], json: bool) -> bool {
+    let mut output = FixedText::new();
+    let ok = if json {
+        output.push(
+            b"{\"schema\":\"jucs.result/1\",\"command\":\"system.update.recover\",\"status\":\"error\",\"code\":\"",
+        ) && output.push(code)
+            && output.push(b"\"}\n")
+    } else {
+        output.push(b"jucs-error command=system.update.recover code=")
+            && output.push(code)
+            && output.push(b"\nsystem-update-failed\n")
+    };
+    ok && write(output.as_bytes())
 }
 
 fn write_jucs_parse_error(name: &str) -> bool {

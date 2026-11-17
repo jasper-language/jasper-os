@@ -1398,6 +1398,87 @@ pub const LAYOUTS: &[LayoutContract] = &[
             },
         ],
     },
+    LayoutContract {
+        name: "update.action.request",
+        version: crate::update_service::ACTION_REQUEST_VERSION as u32,
+        size: crate::update_service::ACTION_REQUEST_BYTES as u32,
+        magic: crate::update_service::ACTION_REQUEST_MAGIC,
+        fields: &[
+            LayoutField {
+                name: "request_id",
+                offset: 8,
+                width: 8,
+            },
+            LayoutField {
+                name: "expected_generation",
+                offset: 16,
+                width: 8,
+            },
+            LayoutField {
+                name: "transaction_id",
+                offset: 24,
+                width: 8,
+            },
+            LayoutField {
+                name: "manifest_sha256",
+                offset: 32,
+                width: 32,
+            },
+            LayoutField {
+                name: "action",
+                offset: 64,
+                width: 4,
+            },
+            LayoutField {
+                name: "scope",
+                offset: 68,
+                width: 4,
+            },
+        ],
+    },
+    LayoutContract {
+        name: "update.action.response",
+        version: crate::update_service::ACTION_RESPONSE_VERSION as u32,
+        size: crate::update_service::ACTION_RESPONSE_BYTES as u32,
+        magic: crate::update_service::ACTION_RESPONSE_MAGIC,
+        fields: &[
+            LayoutField {
+                name: "request_id",
+                offset: 8,
+                width: 8,
+            },
+            LayoutField {
+                name: "tenant",
+                offset: 16,
+                width: 8,
+            },
+            LayoutField {
+                name: "scope",
+                offset: 24,
+                width: 4,
+            },
+            LayoutField {
+                name: "domain",
+                offset: 28,
+                width: 4,
+            },
+            LayoutField {
+                name: "generation",
+                offset: 32,
+                width: 8,
+            },
+            LayoutField {
+                name: "transaction_id",
+                offset: 40,
+                width: 8,
+            },
+            LayoutField {
+                name: "manifest_sha256",
+                offset: 48,
+                width: 32,
+            },
+        ],
+    },
 ];
 
 /// 可调用操作的逐个寄存器契约。名字必须与 `abi/system-ids.txt` 的操作集合完全相等。
@@ -1919,6 +2000,11 @@ pub const OPERATIONS: &[OperationContract] = &[
     },
     OperationContract {
         name: "system.update.status.query",
+        args: "u64:request_ptr,u64:output_ptr,u64:capacity",
+        result: "i64:bytes_or_error",
+    },
+    OperationContract {
+        name: "system.update.action.recover",
         args: "u64:request_ptr,u64:output_ptr,u64:capacity",
         result: "i64:bytes_or_error",
     },

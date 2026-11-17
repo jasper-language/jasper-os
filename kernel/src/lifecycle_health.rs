@@ -1097,6 +1097,15 @@ fn execute_root_dynamic_programs(
 /// health gate. This is a bounded kernel mechanism used by the versioned
 /// update-status service; it accepts no caller path or device selector.
 pub fn read_control_block() -> Result<ControlBlock, HealthError> {
+    recover_control_block(false)
+}
+
+/// Recover the authoritative control record, optionally repairing both copies.
+///
+/// A caller with update-recovery authority may ask this mechanism to rewrite
+/// both copies to the same highest-generation valid record, flush and read back.
+/// The operation accepts no path or device selector.
+pub fn recover_control_block(repair_durable_copies: bool) -> Result<ControlBlock, HealthError> {
     let device = control_device()?;
     let capacity = device.lock().geometry().capacity_sectors;
     let mut io = KernelControlIo {
@@ -1110,7 +1119,33 @@ pub fn read_control_block() -> Result<ControlBlock, HealthError> {
         .map_err(|_| HealthError::Block)?;
     io.read_copy(1, &mut second)
         .map_err(|_| HealthError::Block)?;
-    recover(Some(&first), Some(&second)).map_err(HealthError::Recovery)
+    let current = recover(Some(&first), Some(&second)).map_err(HealthError::Recovery)?;
+    if !repair_durable_copies {
+        return Ok(current);
+    }
+    let first_current = ControlBlock::decode(&first).ok() == Some(current);
+    let second_current = ControlBlock::decode(&second).ok() == Some(current);
+    if first_current && second_current {
+        return Ok(current);
+    }
+    let bytes = current.encode();
+    if !first_current {
+        io.write_copy(0, &bytes)
+            .map_err(|_| HealthError::Block)?;
+    }
+    if !second_current {
+        io.write_copy(1, &bytes)
+            .map_err(|_| HealthError::Block)?;
+    }
+    io.flush().map_err(|_| HealthError::Block)?;
+    io.read_copy(0, &mut first)
+        .map_err(|_| HealthError::Block)?;
+    io.read_copy(1, &mut second)
+        .map_err(|_| HealthError::Block)?;
+    if first != bytes || second != bytes {
+        return Err(HealthError::Block);
+    }
+    Ok(current)
 }
 
 /// 确认当前 A/B 槽的最小健康集合并持久提交。

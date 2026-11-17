@@ -9,9 +9,13 @@
 
 pub const UPDATE_STATUS_ID: &str = "system.update.status";
 pub const UPDATE_STATUS_VERSION: u16 = 1;
+pub const UPDATE_RECOVER_ID: &str = "system.update.recover";
+pub const UPDATE_RECOVER_VERSION: u16 = 1;
 
 pub const UPDATE_STATUS_HELP: &str =
     "system update status [--help|--schema|--json]\nShow the authenticated system update and boot-slot status.\n";
+pub const UPDATE_RECOVER_HELP: &str =
+    "system update recover [--help|--schema|--json]\nRecover the current dual-copy update control transaction.\n";
 
 pub const UPDATE_STATUS_SCHEMA: &str = concat!(
     "{\"schema\":\"jucs.command/1\",\"id\":\"system.update.status\",",
@@ -20,11 +24,20 @@ pub const UPDATE_STATUS_SCHEMA: &str = concat!(
     "\"service\":\"service.update.status\",\"service_version\":1}\n"
 );
 
+pub const UPDATE_RECOVER_SCHEMA: &str = concat!(
+    "{\"schema\":\"jucs.command/1\",\"id\":\"system.update.recover\",",
+    "\"version\":1,\"effects\":\"write\",\"arguments\":[],",
+    "\"options\":[\"--help\",\"--schema\",\"--json\"],",
+    "\"service\":\"service.update.recover\",\"service_version\":1}\n"
+);
+
 /// A JUCS command whose identity has been frozen for this runtime generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     /// Query the current A/B boot control and update-service state.
     UpdateStatus,
+    /// Recover the current control transaction without caller paths.
+    UpdateRecover,
 }
 
 impl Command {
@@ -32,6 +45,7 @@ impl Command {
     pub const fn id(self) -> &'static str {
         match self {
             Self::UpdateStatus => UPDATE_STATUS_ID,
+            Self::UpdateRecover => UPDATE_RECOVER_ID,
         }
     }
 
@@ -39,6 +53,7 @@ impl Command {
     pub const fn version(self) -> u16 {
         match self {
             Self::UpdateStatus => UPDATE_STATUS_VERSION,
+            Self::UpdateRecover => UPDATE_RECOVER_VERSION,
         }
     }
 }
@@ -101,9 +116,12 @@ pub fn parse(line: &[u8]) -> Result<Invocation, ParseError> {
     if first != b"system" || tokens.next() != Some(b"update".as_slice()) {
         return Err(ParseError::Unknown);
     }
-    if tokens.next() != Some(b"status".as_slice()) {
-        return Err(ParseError::Unknown);
-    }
+    let command = match tokens.next() {
+        Some(b"status") => Command::UpdateStatus,
+        Some(b"recover") => Command::UpdateRecover,
+        Some(_) => return Err(ParseError::Unknown),
+        None => return Err(ParseError::Unknown),
+    };
     let form = match tokens.next() {
         None => Form::Invoke,
         Some(b"--help") if tokens.next().is_none() => Form::Help,
@@ -112,7 +130,7 @@ pub fn parse(line: &[u8]) -> Result<Invocation, ParseError> {
         Some(_) => return Err(ParseError::InvalidOption),
     };
     Ok(Invocation {
-        command: Command::UpdateStatus,
+        command,
         form,
     })
 }
@@ -172,6 +190,25 @@ mod tests {
             parse(b"system update status --json").unwrap().form,
             Form::Json
         );
+        assert_eq!(
+            parse(b"system update recover"),
+            Ok(Invocation {
+                command: Command::UpdateRecover,
+                form: Form::Invoke,
+            })
+        );
+        assert_eq!(
+            parse(b"system update recover --help").unwrap().form,
+            Form::Help
+        );
+        assert_eq!(
+            parse(b"system update recover --schema").unwrap().form,
+            Form::Schema
+        );
+        assert_eq!(
+            parse(b"system update recover --json").unwrap().form,
+            Form::Json
+        );
     }
 
     #[test]
@@ -185,6 +222,7 @@ mod tests {
             Err(ParseError::ToolPrefix)
         );
         assert_eq!(parse(b"system update"), Err(ParseError::Unknown));
+        assert_eq!(parse(b"system update archive"), Err(ParseError::Unknown));
         assert_eq!(
             parse(b"system update status /control"),
             Err(ParseError::InvalidOption)

@@ -8,8 +8,9 @@
 
 use kernel_core::objtable::ObjId;
 use kernel_core::update_service::{
-    authorize, Principal, StatusRequest, StatusResponse, REQUEST_BYTES, RESPONSE_BYTES,
-    SCOPE_PLATFORM,
+    authorize, authorize_transaction_action, ActionPrincipal, Principal, StatusRequest,
+    StatusResponse, TransactionAction, TransactionActionRequest, TransactionActionStatus,
+    ACTION_REQUEST_BYTES, ACTION_RESPONSE_BYTES, REQUEST_BYTES, RESPONSE_BYTES, SCOPE_PLATFORM,
 };
 use kernel_core::update_status::{UpdateStatus, BYTES, NO_SLOT};
 use kernel_core::usi_request::Begin;
@@ -19,12 +20,14 @@ use crate::syscall::table::{
     SYSTEM_ERROR_INVALID_ARGUMENT, SYSTEM_ERROR_RIGHTS_DENIED,
     SYSTEM_UPDATE_ERROR_BUFFER_TOO_SMALL, SYSTEM_UPDATE_ERROR_PROTOCOL,
     SYSTEM_UPDATE_ERROR_REQUEST_ID, SYSTEM_UPDATE_ERROR_STALE_GENERATION,
-    SYSTEM_UPDATE_ERROR_TENANT_SCOPE, SYSTEM_UPDATE_ERROR_UNAUTHORIZED,
+    SYSTEM_UPDATE_ERROR_TENANT_SCOPE, SYSTEM_UPDATE_ERROR_TRANSACTION_MISMATCH,
+    SYSTEM_UPDATE_ERROR_UNAUTHORIZED,
     SYSTEM_UPDATE_ERROR_UNAVAILABLE,
 };
 use crate::syscall::{err, user_ptr_err};
 
 const STATUS_SERVICE_ID: u16 = 0x1101;
+const RECOVERY_SERVICE_ID: u16 = 0x1102;
 
 /// Query the authoritative update control state for one authenticated process.
 pub fn query(pid: ObjId, output_ptr: u64, capacity: u64) -> i64 {
@@ -236,6 +239,193 @@ pub fn query_v1(
         RESPONSE_BYTES
     );
     RESPONSE_BYTES as i64
+}
+
+/// Execute the path-free platform recovery action.
+///
+/// Authorization is bound to the caller's update-recovery syscall capability,
+/// authenticated principal, current generation, transaction and manifest
+/// digest. The mechanism repairs both durable control copies but accepts no
+/// caller-provided path or device selector.
+pub fn recover_v1(
+    pid: ObjId,
+    request_ptr: u64,
+    output_ptr: u64,
+    capacity: u64,
+) -> i64 {
+    if pid.raw() == 0 {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    }
+    let context = match crate::security::require_active(pid) {
+        Ok(context) => context,
+        Err(_) => return err(SYSTEM_UPDATE_ERROR_UNAUTHORIZED),
+    };
+    let Ok(capacity) = usize::try_from(capacity) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    if capacity < ACTION_RESPONSE_BYTES {
+        return err(SYSTEM_UPDATE_ERROR_BUFFER_TOO_SMALL);
+    }
+    let mut raw_request = [0u8; ACTION_REQUEST_BYTES];
+    if let Err(error) = copy_from_user(&mut raw_request, request_ptr, ACTION_REQUEST_BYTES) {
+        return user_ptr_err(error);
+    }
+    let Some(request) = TransactionActionRequest::decode(&raw_request) else {
+        return err(SYSTEM_UPDATE_ERROR_PROTOCOL);
+    };
+    if request.action != TransactionAction::Recover {
+        return err(SYSTEM_UPDATE_ERROR_PROTOCOL);
+    }
+    let current = match crate::lifecycle_health::read_control_block() {
+        Ok(current) => current,
+        Err(error) => {
+            crate::kprintln!(
+                "[JSR-UPDATE-ACTION] caller={} request={} result=unavailable reason={}",
+                pid.raw(),
+                request.request_id,
+                error.name()
+            );
+            return err(SYSTEM_UPDATE_ERROR_UNAVAILABLE);
+        }
+    };
+    let tenant = principal_tenant(pid);
+    let digest = transaction_digest(current);
+    let authorization = match authorize_transaction_action(
+        request,
+        ActionPrincipal {
+            subject: pid.raw(),
+            tenant,
+            domain: context.mac.domain.0,
+            can_recover_platform_update: true,
+            can_archive_platform_update: false,
+        },
+        current.generation(),
+        current.transaction_id(),
+        digest,
+    ) {
+        Ok(authorization) => authorization,
+        Err(error) => {
+            crate::kprintln!(
+                "[JSR-UPDATE-ACTION] caller={} tenant={} request={} transaction={} generation={} result=reject code={}",
+                pid.raw(),
+                tenant,
+                request.request_id,
+                request.transaction_id,
+                request.expected_generation,
+                error.name()
+            );
+            return err(action_error(error));
+        }
+    };
+    let slot = match crate::proc::begin_usi_request(pid, request.request_id, RECOVERY_SERVICE_ID) {
+        Ok(Begin::New(slot)) => Some(slot),
+        Ok(Begin::Retry) => None,
+        Ok(Begin::Busy | Begin::Conflict | Begin::Exhausted) | Err(_) => {
+            return err(SYSTEM_UPDATE_ERROR_REQUEST_ID);
+        }
+    };
+    let repaired = match crate::lifecycle_health::recover_control_block(true) {
+        Ok(repaired) => repaired,
+        Err(_) => {
+            if let Some(slot) = slot {
+                crate::proc::abort_usi_request(
+                    pid,
+                    slot,
+                    request.request_id,
+                    RECOVERY_SERVICE_ID,
+                );
+            }
+            return err(SYSTEM_UPDATE_ERROR_UNAVAILABLE);
+        }
+    };
+    if repaired.generation() != current.generation()
+        || repaired.transaction_id() != current.transaction_id()
+        || transaction_digest(repaired) != digest
+    {
+        if let Some(slot) = slot {
+            crate::proc::abort_usi_request(
+                pid,
+                slot,
+                request.request_id,
+                RECOVERY_SERVICE_ID,
+            );
+        }
+        return err(SYSTEM_UPDATE_ERROR_STALE_GENERATION);
+    }
+    let response = TransactionActionStatus {
+        request_id: authorization.request_id,
+        tenant: authorization.tenant,
+        scope: authorization.scope,
+        domain: authorization.domain,
+        generation: repaired.generation(),
+        transaction_id: repaired.transaction_id(),
+        manifest_sha256: digest,
+        recovery_required: false,
+        archived: false,
+    };
+    let bytes = response.encode();
+    if TransactionActionStatus::decode(&bytes) != Some(response) {
+        if let Some(slot) = slot {
+            crate::proc::abort_usi_request(
+                pid,
+                slot,
+                request.request_id,
+                RECOVERY_SERVICE_ID,
+            );
+        }
+        return err(SYSTEM_UPDATE_ERROR_PROTOCOL);
+    }
+    if let Err(error) = copy_to_user(output_ptr, &bytes, capacity) {
+        if let Some(slot) = slot {
+            crate::proc::abort_usi_request(
+                pid,
+                slot,
+                request.request_id,
+                RECOVERY_SERVICE_ID,
+            );
+        }
+        return user_ptr_err(error);
+    }
+    if let Some(slot) = slot {
+        crate::proc::complete_usi_request(pid, slot, request.request_id, RECOVERY_SERVICE_ID);
+    }
+    crate::kprintln!(
+        "[JSR-UPDATE-ACTION] caller={} tenant={} domain={} request={} generation={} transaction={} action=recover result=ok",
+        pid.raw(),
+        authorization.tenant,
+        authorization.domain,
+        authorization.request_id,
+        response.generation,
+        response.transaction_id
+    );
+    ACTION_RESPONSE_BYTES as i64
+}
+
+fn transaction_digest(current: jasper_lifecycle_boot::ControlBlock) -> [u8; 32] {
+    current
+        .candidate()
+        .map(|(_, record)| record.digest())
+        .unwrap_or_else(|| current.slot(current.active_slot()).digest())
+}
+
+fn action_error(error: kernel_core::update_service::ServiceError) -> u32 {
+    match error {
+        kernel_core::update_service::ServiceError::InvalidRequest => {
+            SYSTEM_UPDATE_ERROR_PROTOCOL
+        }
+        kernel_core::update_service::ServiceError::TransactionMismatch => {
+            SYSTEM_UPDATE_ERROR_TRANSACTION_MISMATCH
+        }
+        kernel_core::update_service::ServiceError::Unauthorized => {
+            SYSTEM_UPDATE_ERROR_UNAUTHORIZED
+        }
+        kernel_core::update_service::ServiceError::TenantScope => {
+            SYSTEM_UPDATE_ERROR_TENANT_SCOPE
+        }
+        kernel_core::update_service::ServiceError::StaleGeneration { .. } => {
+            SYSTEM_UPDATE_ERROR_STALE_GENERATION
+        }
+    }
 }
 
 fn principal_tenant(pid: ObjId) -> u64 {

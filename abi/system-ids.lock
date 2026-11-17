@@ -178,3 +178,5 @@
 4168	error	system.update.error.stale_generation	1	none	更新·状态世代已过期	Update status generation stale
 4169	error	system.update.error.request_id	1	none	更新·请求标识冲突	Update status request identifier conflict
 4170	error	system.update.error.tenant_scope	1	none	更新·请求租户范围不可见	Update status tenant scope denied
+112	op	system.update.action.recover	1	write	更新·恢复双副本控制事务	Recover update control transaction
+4171	error	system.update.error.transaction_mismatch	1	none	更新·事务或摘要绑定不符	Update transaction or digest mismatch
