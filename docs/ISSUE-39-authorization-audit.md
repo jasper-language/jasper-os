@@ -1,6 +1,6 @@
 # Issue #39：现有统一授权事实源审计
 
-更新日期：2026-11-17。
+更新日期：2026-11-18。
 
 状态：**现有机制审计，不是完整授权体系完成声明**。Issue #39 要求统一授权位于
 系统基础设施层；本文件只核对当前代码中已经存在的事实源、执行点和缺口，不新增
@@ -10,6 +10,11 @@
 `SecurityContext`、进程 SyscallSet、租户/domain、MAC policy epoch、资源 scope
 与请求条件投影为固定决策记录，当前已接入 update status/recover/archive/audit。
 它不拥有权限状态，也不会在缺少完整撤销源时用对象 generation 冒充全局撤销代际。
+
+当前决策要求 issuer 精确等于内核 PEP；主体必须是
+Process/Task/Service 的 active identity；status/audit 只能声明 Read，
+recover/archive 只能声明 Write。对象表合法的首代 `generation=0` 不会被误拒绝，
+非主体对象类、未知 issuer 和 operation/effect 错配均失败关闭。
 
 来源：<https://github.com/DarkMagier/jasper-os/issues/39>
 
@@ -61,6 +66,9 @@
 
 - LC-2 status/action 从进程安全上下文派生 caller、tenant、domain，绑定 request、
   generation、transaction、manifest digest 和独立回收入口。
+- LC-2 status/recover/archive/audit 已共享同一 `authz::Decision`，要求 exact
+  issuer、active subject class、tenant、scope、SyscallSet capability、policy
+  epoch 和固定 operation/effect；真实 OVMF/virtio-blk 四进程并发验收通过。
 - LC-4 使用 32 字节 Ed25519 signer、trusted signer、revocation 集、release/
   security floor 和设备 generation；Driver Host admission/reset/crash/recovery
   共享同一代际链。
@@ -86,8 +94,9 @@
    class/domain 获得无条件放行。
 8. **兼容适配边界未全部证明**：Linux/Android/Wine 等适配器尚无统一清单证明其
    外部身份只映射为本地资源权限，且不能绕过底层 PEP。
-9. **LC-2 capability flag 仍偏局部**：status/action principal 中的布尔能力来自
-   调用路径，尚未接入统一 owner/organization/remote-delegation 策略求值。
+9. **LC-2 策略来源仍偏局部**：共享决策已绑定 SyscallSet、tenant/domain 和
+   policy epoch，但 owner/organization/remote-delegation 策略服务及全局撤销代际
+   尚未接入。
 
 ## 后续实施边界
 

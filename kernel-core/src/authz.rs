@@ -16,7 +16,7 @@ use crate::syscall_set::SyscallSet;
 
 pub const AUTHZ_FORMAT_VERSION: u16 = 1;
 pub const KERNEL_PEP_ISSUER: u64 = 1;
-pub const MAX_DELEGATION_DEPTH: u16 = 16;
+pub const MAX_DELEGATION_DEPTH: u16 = 16; // JASPER-HARDCODE-REVIEW: issue=39 source=authz-delegation-depth-policy reason=bounded-policy-limit-not-platform-capability
 
 /// Resource scope represented by the same opaque identities as native install
 /// ownership. The adapter must map facts from the authoritative owner object;
@@ -238,12 +238,14 @@ pub fn authorize(caller: CallerFacts, request: Request) -> Decision {
     };
     let reason = if request.issuer != KERNEL_PEP_ISSUER {
         Reason::InvalidIssuer
-    } else if context.object.object_id == 0 || context.object.generation == 0 {
+    } else if !matches!(context.state, MetadataState::Active) {
+        Reason::InactiveSubject
+    } else if context.require_active().is_err() {
+        Reason::InvalidSubject
+    } else if context.subject_identity().is_none() {
         Reason::InvalidSubject
     } else if caller.tenant == 0 {
         Reason::InvalidTenant
-    } else if !matches!(context.state, MetadataState::Active) {
-        Reason::InactiveSubject
     } else if !caller.scope.is_valid() || !request.scope.is_valid() {
         Reason::InvalidScope
     } else if caller.scope != request.scope {
@@ -382,6 +384,37 @@ mod tests {
         assert_eq!(decision.executor_generation, 1);
         assert_eq!(decision.domain, context(true).mac.domain.0);
         assert_eq!(decision.reason, Reason::Allowed);
+    }
+
+    #[test]
+    fn first_object_generation_zero_is_a_valid_active_subject() {
+        let id = ObjId::from_raw(7).unwrap();
+        let context = SecurityContext::new(
+            BootId::from_words([1, 2]),
+            IdentityClass::Process,
+            id,
+            None,
+            MetadataState::Active,
+        );
+        let decision = authorize(caller(context), request());
+        assert!(decision.admitted());
+        assert_eq!(decision.executor_generation, 0);
+    }
+
+    #[test]
+    fn non_subject_identity_cannot_request_process_operations() {
+        let id = ObjId::from_raw((1u64 << 32) | 7).unwrap();
+        let context = SecurityContext::new(
+            BootId::from_words([1, 2]),
+            IdentityClass::Device,
+            id,
+            None,
+            MetadataState::Active,
+        );
+        assert_eq!(
+            authorize(caller(context), request()).reason,
+            Reason::InvalidSubject
+        );
     }
 
     #[test]

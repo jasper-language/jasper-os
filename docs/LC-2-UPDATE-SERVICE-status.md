@@ -20,6 +20,27 @@ Android；证据见 `evidence/pixel6a-runtime-20261117-233437/README.md`。该�
 不包含 Jasper UFS provisioning、原生安装服务、更新事务、回滚或断电恢复，
 因此不能作为 LC-2 的 Pixel 安装验收。
 
+## 统一授权投影
+
+status、recover、archive 和 audit 已接入 `kernel-core::authz` 的同一决策记录：
+
+- issuer 必须精确等于内核 PEP，不接受任意非零 issuer；
+- 主体必须是 active 的 Process/Task/Service，且使用
+  `SecurityContext::require_active()` 验证，不把合法首代 generation 0 误判为无效；
+- tenant、MAC domain、platform scope、SyscallSet capability 与 policy epoch 在
+  执行前重新取证；
+- status/audit 固定为 Read，recover/archive 固定为 Write，错配直接拒绝；
+- 未集成全局撤销源时显式保持 `revocation=None`，不用对象 generation 冒充；
+- 决策完整记录 subject、executor generation、tenant、domain、operation、scope、
+  effect、policy 和拒绝原因，作为后续可靠审计输入。
+
+真实 OVMF/virtio-blk 四进程并发验收中，status/recover/archive 的授权决策均为
+`decision=true reason=allowed`，首程序退出 0 且资源回收。证据见
+`evidence/issue21-uefi-boot-20261118-001049/README.md`。
+
+该切片只关闭 LC-2 消费者接入一致性，不代表 Issue #39 全系统策略、委托、撤销
+传播和所有资源域 PEP 已完成。
+
 ## 服务状态机
 
 服务对外提供以下有界操作：
