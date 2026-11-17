@@ -36,18 +36,24 @@ staging root 和 manifest digest 的 recovery 能重建权威阶段，错配目�
 `UpdateService` 没有 URL、账号、Profile、逻辑目录或本地路径授权能力。在线/离线
 来源仍只是传输方式，设备上的签名信任和 `LocalInstallGrant` 仍是准入事实源。
 
-运维入口 `jasper-update-service` 提供三个有界命令：
+受信救援环境可以携带底层路径运行独立的 `jasper-update-recovery` 维护工具：
 
 ```text
-jasper-update-service status <control-root>
-jasper-update-service recover <control-root> <staging-root> <manifest-sha256-hex>
-jasper-update-service cleanup <control-root> <staging-root> <manifest-sha256-hex> <archive-root>
+jasper-update-recovery status <control-root>
+jasper-update-recovery recover <control-root> <staging-root> <manifest-sha256-hex>
+jasper-update-recovery cleanup <control-root> <staging-root> <manifest-sha256-hex> <archive-root>
 ```
 
 `status` 只恢复并报告双副本控制记录；`recover` 根据 journal 与 control 修复
 一个已存在的更新事务；`cleanup` 只对恢复后的 Complete/RolledBack 事务执行
 归档与清理。该入口不能创建新事务、不能跳过签名，也没有注入任意 manifest 或
 执行路径的参数。
+
+按照 Issue #34，**该工具不是 Jasper 原生 Shell 的正常用户命令**。正式原生入口
+必须是无前缀的 `system update status`，通过 JUCS 命令发现、Schema、调用者身份
+与版本化更新服务执行；普通生产用户不能通过直接提供 control/staging/archive
+路径获得恢复特权。当前原生 Shell/JUCS 到该服务的调用链仍未交付，因此不能用
+`jasper-update-recovery` 或 `jucs jasper-update-recovery` 冒充正式命令完成。
 
 ## 验证
 

@@ -1,9 +1,11 @@
-//! Bounded operator entry point for the LC-2 update service.
+//! Recovery-only maintenance entry point for the LC-2 update service.
 //!
-//! This executable can inspect a dual-copy control store and recover one
-//! prepared/committed transaction from its durable journal. It never accepts an
-//! unsigned manifest, never stages new bytes and never bypasses the local install
-//! grant required by the library service.
+//! This executable is not a Jasper native shell command and must not be exposed as
+//! the normal `system update status` operation. It exists only in a trusted rescue
+//! environment with direct access to protected control/journal paths. It can inspect
+//! a dual-copy control store, recover one transaction from its durable journal and
+//! archive a terminal transaction. It never accepts an unsigned manifest, stages new
+//! bytes or bypasses the local install grant required by the library service.
 
 #![forbid(unsafe_code)]
 
@@ -14,7 +16,7 @@ use jasper_lifecycle_staging::UpdateService;
 
 fn main() {
     if let Err(error) = run(std::env::args().skip(1).collect()) {
-        eprintln!("jasper-update-service: {error}");
+        eprintln!("jasper-update-recovery: {error}");
         std::process::exit(2);
     }
 }
@@ -86,7 +88,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             );
             Ok(())
         }
-        _ => Err("usage: jasper-update-service status <control-root> | \
+        _ => Err("usage: jasper-update-recovery status <control-root> | \
              recover <control-root> <staging-root> <manifest-sha256-hex> | \
              cleanup <control-root> <staging-root> <manifest-sha256-hex> <archive-root>"
             .into()),
