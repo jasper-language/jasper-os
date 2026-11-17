@@ -8,8 +8,9 @@
 use crate::fs::journal::SectorIo;
 use crate::native_install::{
     Actor, DataKey, DataOwnerKind, DataSnapshot, GrantKey, GrantRights, GrantSpec, InstallError,
-    InstallSpec, InstallationKey, InstallationSnapshot, OwnerScope, PackageKey, PackageSpec,
-    PrincipalSpec, RuntimeKey, RuntimeSnapshot, Subject, UpdateAuthority,
+    InstallSpec, InstallationKey, InstallationSnapshot, OwnerScope, PackageKey, PackageSnapshot,
+    PackageSpec, PrincipalSpec, RuntimeKey, RuntimeSnapshot, Subject, UpdateAuthority,
+    CONTENT_BYTES,
 };
 use crate::persistent_install::{PersistentInstallError, PersistentInstallStore};
 use crate::security::{SecurityContext, SecurityError};
@@ -19,6 +20,7 @@ use crate::security_domain::DomainKey;
 pub enum InstallServiceError {
     InvalidCaller,
     Unauthorized,
+    Capacity,
     Security(SecurityError),
     Store(PersistentInstallError),
 }
@@ -28,6 +30,7 @@ impl InstallServiceError {
         match self {
             Self::InvalidCaller => "system.install.service.error.caller",
             Self::Unauthorized => "system.install.service.error.rights_denied",
+            Self::Capacity => "system.install.service.error.capacity",
             Self::Security(error) => error.name(),
             Self::Store(error) => error.name(),
         }
@@ -101,6 +104,21 @@ impl InstallServiceCaller {
 /// Authorized operations over one bounded persistent install store.
 pub struct NativeInstallService<D: SectorIo> {
     store: PersistentInstallStore<D>,
+}
+
+/// One update-visible installation and its immutable package identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VisibleUpdate {
+    /// Installation registration visible to the update principal.
+    pub installation: InstallationKey,
+    /// Immutable package identity.
+    pub package: PackageSnapshot,
+    /// Installation ownership scope.
+    pub scope: OwnerScope,
+    /// Descriptive installation source.
+    pub source: crate::native_install::PackageSource,
+    /// Whether the installation is currently enabled.
+    pub enabled: bool,
 }
 
 impl<D: SectorIo> NativeInstallService<D> {
@@ -302,6 +320,48 @@ impl<D: SectorIo> NativeInstallService<D> {
         self.store.installation(installation).map_err(Into::into)
     }
 
+    /// Fill the update set visible to the authenticated caller.
+    ///
+    /// Update visibility is derived from the installation's explicit update
+    /// authority, not from DISCOVER rights or a caller-selected tenant. The
+    /// system subject receives no implicit cross-tenant visibility. Capacity
+    /// is checked before writing, so an undersized output has no partial effect.
+    pub fn visible_updates(
+        &self,
+        caller: InstallServiceCaller,
+        output: &mut [Option<VisibleUpdate>],
+    ) -> Result<usize, InstallServiceError> {
+        let subjects = [caller.subject];
+        let actor = Actor::new(&subjects);
+        let state = self.store.state();
+        let required = state
+            .installations
+            .iter()
+            .flatten()
+            .filter(|installation| self.store.can_update(actor, installation.key))
+            .count();
+        if output.len() < required {
+            return Err(InstallServiceError::Capacity);
+        }
+
+        let mut written = 0;
+        for installation in state.installations.iter().flatten().copied() {
+            if !self.store.can_update(actor, installation.key) {
+                continue;
+            }
+            let package = self.store.package(installation.package)?;
+            output[written] = Some(VisibleUpdate {
+                installation: installation.key,
+                package,
+                scope: installation.scope,
+                source: installation.source,
+                enabled: installation.enabled,
+            });
+            written += 1;
+        }
+        Ok(written)
+    }
+
     fn require_update_authority(
         &self,
         caller: InstallServiceCaller,
@@ -461,6 +521,18 @@ mod tests {
         .unwrap()
     }
 
+    fn tenant(id: u64) -> InstallServiceCaller {
+        InstallServiceCaller::new(
+            context(id),
+            Some(DomainKey {
+                id: id as u32,
+                generation: 1,
+            }),
+            Subject::Tenant(id),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn service_separates_package_store_registration_grants_and_data() {
         let store = PersistentInstallStore::format(MemoryDisk::new(64)).unwrap();
@@ -574,5 +646,86 @@ mod tests {
             InstallServiceCaller::new(context(4), None, Subject::Workload(4)),
             Err(InstallServiceError::InvalidCaller)
         ));
+    }
+
+    #[test]
+    fn tenant_update_visibility_is_explicit_bounded_and_never_inherited() {
+        let store = PersistentInstallStore::format(MemoryDisk::new(64)).unwrap();
+        let mut service = NativeInstallService::new(store);
+        let system = system();
+        let tenant_a = tenant(7);
+        let tenant_b = tenant(8);
+        let package_a = service
+            .install_package(
+                system,
+                PackageSpec {
+                    app_id: 0x7001,
+                    publisher: 7,
+                    content: [0x71; CONTENT_BYTES],
+                    version: 1,
+                },
+                b"tenant-a",
+            )
+            .unwrap();
+        let package_b = service
+            .install_package(
+                system,
+                PackageSpec {
+                    app_id: 0x8001,
+                    publisher: 8,
+                    content: [0x81; CONTENT_BYTES],
+                    version: 1,
+                },
+                b"tenant-b",
+            )
+            .unwrap();
+        let installation_a = service
+            .register(
+                tenant_a,
+                package_a,
+                OwnerScope::Tenant(7),
+                PackageSource::Enterprise,
+                Subject::Tenant(7),
+            )
+            .unwrap();
+        let installation_b = service
+            .register(
+                tenant_b,
+                package_b,
+                OwnerScope::Tenant(8),
+                PackageSource::Enterprise,
+                Subject::Tenant(8),
+            )
+            .unwrap();
+
+        let mut visible = [None; 2];
+        assert_eq!(service.visible_updates(tenant_a, &mut visible), Ok(1));
+        let record = visible[0].unwrap();
+        assert_eq!(record.installation, installation_a);
+        assert_eq!(record.package.spec.app_id, 0x7001);
+        assert_eq!(record.scope, OwnerScope::Tenant(7));
+        assert!(visible[1].is_none());
+
+        assert_eq!(service.visible_updates(tenant_b, &mut visible), Ok(1));
+        assert_eq!(visible[0].unwrap().installation, installation_b);
+
+        let mut none = [None; 1];
+        assert_eq!(service.visible_updates(system, &mut none), Ok(0));
+        assert!(none[0].is_none());
+
+        let mut too_small = [None; 1];
+        assert_eq!(
+            service
+                .register(
+                    tenant_a,
+                    package_b,
+                    OwnerScope::Tenant(7),
+                    PackageSource::Developer,
+                    Subject::Tenant(7),
+                )
+                .map(|_| service.visible_updates(tenant_a, &mut too_small)),
+            Ok(Err(InstallServiceError::Capacity))
+        );
+        assert!(too_small[0].is_none());
     }
 }

@@ -36,6 +36,12 @@ staging root 和 manifest digest 的 recovery 能重建权威阶段，错配目�
 `UpdateService` 没有 URL、账号、Profile、逻辑目录或本地路径授权能力。在线/离线
 来源仍只是传输方式，设备上的签名信任和 `LocalInstallGrant` 仍是准入事实源。
 
+安装服务同时提供有界的 `visible_updates` 集合查询。它从持久安装记录生成当前
+authenticated subject 可更新的组件集合，只依据每条安装的显式 update authority，
+不使用 DISCOVER 权限冒充更新权，也不把系统主体当作跨租户超级用户。输出容量在
+写任何记录前检查；容量不足失败且不留下部分结果。租户 scope、更新主体与安装数据
+scope 仍保持独立。
+
 受信救援环境可以携带底层路径运行独立的 `jasper-update-recovery` 维护工具：
 
 ```text
@@ -181,6 +187,9 @@ cargo test --locked -p kernel-core update_agent::tests
 cargo test --locked -p kernel-core update_agent_ipc::tests
 4 passed; 0 failed
 
+cargo test --locked -p kernel-core native_install_service::tests
+3 passed; 0 failed
+
 cargo check --locked -p user-updateagentd --target x86_64-unknown-none
 PASS
 
@@ -239,10 +248,12 @@ PASS (3.19.0)
   独立子进程的 status/recover/archive、同 ID 同 operation 但 payload 变化的缓存
   冲突、重复请求缓存、sender identity 固化、deadline timeout 和 timeout 后继续
   服务均通过真实 UEFI/virtio-blk。
+- tenant A/B 的可见更新集合互不串租户；系统主体不隐式获得租户更新权；输出缓冲
+  过小时整体返回容量错误且不写入部分 record。
 
 ## 仍未完成
 
-- 多租户更新集合与租户级可见性过滤；
+- 租户可见更新集合的正式用户 ABI/UI 暴露；服务核心已具备隔离过滤；
 - 信任根轮换、2-of-3 门限和签名撤销快照持久化；
 - 断点续传、生产发布源高可用和跨重启审计查询；
 - 系统级在线/离线发布演练和 Pixel 6a 安装/回滚/断电矩阵。
