@@ -27,8 +27,8 @@ DAG；相关实现归入现有 LC-2、ISSUE-21 与 TERM-1 的后续验收。
 - `system update status`、受控 recovery 与 archive 动作必须复用现有
   `UpdateService`/`UpdateCoordinator` generation、journal/control 一致性、回滚和
   幂等语义。
-- recovery 的最终资源/动词组合仍须经过 JUCS 官方动词裁决；不能用当前维护工具
-  的 argv 形式替代正式命令合同。
+- recovery 使用正式无前缀 `system update recover`，不接受救援工具式路径参数；
+  archive 在获得可写 terminal staging/journal 后端前不注册伪命令。
 
 ## 分阶段交付
 
@@ -57,18 +57,23 @@ DAG；相关实现归入现有 LC-2、ISSUE-21 与 TERM-1 的后续验收。
   ID 冲突和协议损坏各有稳定结构化错误；
 - `service.update.status` v1 返回固定请求头加状态载荷，调用者身份、租户和域
   均由内核盖章；control/staging/archive 路径不进入 ABI；
-- LC-2 新增 `service.update.action` v1 候选结构：recover/archive 请求只含稳定
+- LC-2 已登记 `service.update.action` v1：recover/archive 请求只含稳定
   request ID、可选 expected generation、transaction ID、manifest SHA-256、动作和
-  platform scope；路径-free 响应绑定调用者 tenant/domain 与最终事务状态。该结构
-  当前尚未注册 syscall 或 CLI 动词，必须先接入 `UpdateService` 执行器；
+  platform scope；路径-free 响应绑定调用者 tenant/domain 与最终事务状态；
+- ABI 3.18.0 注册 `system.update.action.recover`，JUCS/原生 CLI 增加
+  `system update recover`；内核从控制记录派生稳定绑定，修复两份控制副本并
+  flush/readback，调用者不能提供 control/staging/archive 路径；
+- `kernel-core::update_client` 把 request 构造、status-to-action 绑定和响应校验
+  固定为 CLI 与后续结构化 Agent 共用的唯一业务客户端，transport 只能传递协议；
 - 查询先验证当前进程的活动安全身份，再读取并恢复同一双副本 A/B 控制记录；
-- ABI 3.17.0 快照和系统接口冻结已更新。
+- ABI 3.18.0 快照和系统接口冻结已更新。
 - 真实 UEFI 串口和 framebuffer/PS-2 原生终端均输入了无前缀
   `system update status`，返回同一结构状态；首程序帧与堆资源断言保持
   `reclaimed=true`。
 - 真实 UEFI 串口验收同时执行 `system update status --json`，以标准 JSON 解析器
   校验结构化字段，且查询仍走同一 JUCS 命令与 `system.update.status.query`。
 
-仍未完成：结构化 Agent 与 CLI 的结果对照；租户过滤；恢复/归档的正式
-资源动作；真实 UEFI 验收证据；权限、重放、旧 generation、错误摘要和并发冲突的
-完整负例矩阵。在步骤 1–6 全部完成前，Issue #34 和 LC-2 都不能标记 done。
+仍未完成：结构化 Agent 前端与 CLI 的端到端结果对照；租户过滤；archive 的
+正式资源动作；带 `system update recover` 的真实 UEFI 证据；权限、重放、旧
+generation、错误摘要和并发冲突的完整负例矩阵。在步骤 1–6 全部完成前，
+Issue #34 和 LC-2 都不能标记 done。

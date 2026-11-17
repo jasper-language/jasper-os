@@ -157,6 +157,9 @@ mod tests {
             };
             let mut response = self.action;
             response.request_id = decoded.request_id;
+            response.transaction_id = decoded.transaction_id;
+            response.manifest_sha256 = decoded.manifest_sha256;
+            response.generation = decoded.expected_generation;
             if self.corrupt_action {
                 response.generation = response.generation.saturating_add(1);
             }
@@ -257,5 +260,27 @@ mod tests {
         fake.action.transaction_id = 9;
         let mut client = UpdateClient::new(fake);
         assert_eq!(client.recover(1), Err(ClientError::BindingMismatch));
+    }
+
+    #[test]
+    fn candidate_digest_is_the_recovery_binding_when_present() {
+        let mut current = status(3);
+        current.status.candidate_slot = 1;
+        current.status.candidate_state = 1;
+        current.status.candidate_release = 5;
+        current.status.candidate_digest = [0x77; 32];
+        let fake = Fake {
+            status: current,
+            action: action(),
+            status_calls: 0,
+            recover_calls: 0,
+            fail_status: None,
+            corrupt_action: false,
+        };
+        let recovered = UpdateClient::new(fake).recover(33).unwrap();
+        assert_eq!(recovered.manifest_sha256, [0x77; 32]);
+        assert_eq!(recovered.transaction_id, 9);
+        assert_eq!(recovered.generation, 7);
+        assert_eq!(recovered.request_id, 33);
     }
 }
