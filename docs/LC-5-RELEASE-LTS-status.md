@@ -39,12 +39,31 @@ SHA-256；CI 托管运行器不再因固定的 `4-11` 亲和失败。
 离线源和至少两个更新源的强制策略。CI 验证通道唯一性、LTS 支持期、漏洞期限、
 workspace 许可证和所需供应链工具存在。
 
+新增 `scripts/release-artifact.py`、`scripts/release-source-drill.py` 和
+`scripts/release-supply-check.sh`：
+
+- release manifest 是固定 Schema 的规范 JSON，Ed25519 签名带
+  `JASPER-RELEASE-V1` 域分隔；签名者身份由公钥 DER 的 SHA-256 派生，不能由
+  调用者任意声明；
+- manifest 绑定 stable/LTS 通道、ABI、目标、完整源码 commit、内核载荷字节数/
+  SHA-256 和 SBOM 字节数/SHA-256；验证不读取主机绝对路径；
+- 信任目录只接受与签名者指纹精确匹配的唯一公钥，撤销表优先于信任根；测试已覆盖
+  撤销旧键、加入新键、撤掉旧根后的根轮换；
+- 两套独立 HTTPS loopback 源使用临时 CA 与主机名验证，逐文件比较两个在线源和
+  一个离线副本；主源对象缺失时只从镜像取得完全相同字节；
+- 载荷、SBOM、manifest 或签名任一改变都失败关闭；实际内核载荷
+  `66e6ad…c0661` 与 SBOM `59da70…90969` 通过上述完整演练。
+
+新增 `release/vulnerabilities.toml` 与 `scripts/check-vulnerabilities.py`：
+生产登记表当前为空；确定性演练数据覆盖 Critical/High 响应与修复期限、受影响范围、
+缓解、stable/LTS 两条回补通道、发布号和完整回补 commit。已回补记录必须同时具备
+两个通道，任一通道超过 24 小时响应或对应修复期限即失败。
+
+该演练使用临时测试密钥，不包含生产私钥，也不冒充真实生产发布签名。
+
 ## 仍未完成
 
-- release/LTS 通道、补丁回源和删除策略；
-- 签名 release artifact 与信任根轮换；
-- 漏洞公告扫描、受影响版本、缓解和回补跟踪；
-- 离线与多个在线更新源的真实发布演练；
+- 生产 release/LTS 通道密钥托管、签名审计与旧制品删除策略；
 - LC-2 action 执行/断电矩阵和 LC-4 真实设备矩阵。
 
 因此 LC-5 不升级状态。

@@ -51,6 +51,11 @@ def validate(policy: dict) -> None:
     assert lts["support_days"] > stable["support_days"]
     assert (ROOT / "scripts" / "release-sbom.py").is_file()
     assert (ROOT / "scripts" / "release-repro-check.sh").is_file()
+    assert (ROOT / "scripts" / "release-artifact.py").is_file()
+    assert (ROOT / "scripts" / "release-source-drill.py").is_file()
+    assert (ROOT / "scripts" / "release-supply-check.sh").is_file()
+    assert (ROOT / "scripts" / "check-vulnerabilities.py").is_file()
+    assert (ROOT / "release" / "vulnerabilities.toml").is_file()
     assert not workspace_licenses(), workspace_licenses()
 
 

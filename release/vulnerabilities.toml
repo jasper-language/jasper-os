@@ -1,0 +1,4 @@
+# Production advisory ledger for LC-5.
+# Entries use the schema exercised by release/vulnerabilities.example.toml.
+schema = 1
+cases = []

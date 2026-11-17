@@ -84,6 +84,12 @@ jobs:
       - name: LC-5 发布通道与漏洞响应策略 / release policy
         run: |
           python3 scripts/check-release-policy.py
+          python3 scripts/check-vulnerabilities.py
+          python3 scripts/check-vulnerabilities.py \
+            --file release/vulnerabilities.example.toml
+      - name: LC-5 签名发布、信任轮换与多源演练 / signed release supply drill
+        run: |
+          bash scripts/release-supply-check.sh
       - uses: actions/cache@v4
         with:
           path: |

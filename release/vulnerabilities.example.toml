@@ -1,0 +1,42 @@
+# Deterministic LC-5 drill data. These identifiers are test records, not real CVEs.
+schema = 1
+
+[[cases]]
+id = "TEST-LC5-CRITICAL"
+severity = "critical"
+discovered_at = "2026-11-01"
+acknowledged_at = "2026-11-01"
+fixed_at = "2026-11-05"
+affected = "stable<20261105, lts<20261105"
+status = "backported"
+mitigation = "disable affected optional service"
+
+[[cases.backport]]
+channel = "stable"
+release = "20261105.1"
+commit = "1111111111111111111111111111111111111111"
+
+[[cases.backport]]
+channel = "lts"
+release = "20260701.4"
+commit = "2222222222222222222222222222222222222222"
+
+[[cases]]
+id = "TEST-LC5-HIGH"
+severity = "high"
+discovered_at = "2026-10-01"
+acknowledged_at = "2026-10-02"
+fixed_at = "2026-10-20"
+affected = "stable<20261020, lts<20261020"
+status = "backported"
+mitigation = "reject malformed input before privileged handling"
+
+[[cases.backport]]
+channel = "stable"
+release = "20261020.1"
+commit = "3333333333333333333333333333333333333333"
+
+[[cases.backport]]
+channel = "lts"
+release = "20260701.5"
+commit = "4444444444444444444444444444444444444444"
