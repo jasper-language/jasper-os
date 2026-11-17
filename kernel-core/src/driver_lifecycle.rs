@@ -7,6 +7,10 @@
 //! 本模块定义 LC-4 的驱动/固件签名包生命周期状态机。它只消费 Driver Host
 //! 与 DMA 静默事实，不建立第二套设备权限，也不执行硬件访问。
 
+use crate::driver_host::{
+    self, DeviceIdentity, DriverHostBroker, HostToken, Needs, PassToken, Policy, QuiesceProof,
+};
+
 /// Signed driver or firmware package identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Package {
@@ -57,6 +61,22 @@ pub enum Error {
     NotQuiesced,
     RecoveryUnavailable,
     StaleGeneration,
+}
+
+/// Failure from the composed Driver Host and package lifecycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntegrationError {
+    /// Signed package policy rejected the request.
+    Lifecycle(Error),
+    /// Driver Host authority or generation rejected the request.
+    Host(driver_host::Error),
+}
+
+/// A pass and package authorization that belong to the same live generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Lease {
+    pub pass: PassToken,
+    pub package: Token,
 }
 
 impl Error {
@@ -119,6 +139,17 @@ impl Controller {
 
     pub const fn active(self) -> Option<Package> {
         self.active
+    }
+
+    /// Whether this controller currently owns the named device generation.
+    pub const fn owns_device(self, device_generation: u32) -> bool {
+        matches!(self.state, State::Active) && self.device_generation == device_generation
+    }
+
+    /// Whether reset may transition this controller without changing its
+    /// current package authority on a precondition failure.
+    pub const fn reset_eligible(self) -> bool {
+        matches!(self.state, State::Active | State::Quarantined)
     }
 
     /// Verify and stage one package without granting device authority.
@@ -193,6 +224,19 @@ impl Controller {
         Ok(())
     }
 
+    /// Quarantine ownership after a Driver Host crash receipt.
+    ///
+    /// Unlike an orderly hotplug removal, a crash is not conditional on the
+    /// package policy opting into hotplug support.
+    pub fn crash_device(&mut self, device_generation: u32) -> Result<(), Error> {
+        if !self.owns_device(device_generation) {
+            return Err(Error::StaleGeneration);
+        }
+        self.state = State::Quarantined;
+        self.generation = self.generation.checked_add(1).ok_or(Error::WrongState)?;
+        Ok(())
+    }
+
     /// A reset may unload only after DMA and IRQ quiescence are proven.
     pub fn finish_reset(&mut self, quiesced: bool) -> Result<(), Error> {
         if !quiesced {
@@ -245,6 +289,126 @@ impl Controller {
             .then_some(())
             .ok_or(Error::StaleGeneration)
     }
+}
+
+/// Stage a signed package, then admit and activate its device under the same
+/// Driver Host policy.
+///
+/// The pass is revoked if lifecycle activation fails after Driver Host
+/// admission, so no hidden device authority survives a failed operation.
+pub fn admit_and_activate<
+    const DEVICES: usize,
+    const HOSTS: usize,
+    const PASSES: usize,
+    const REQUESTS: usize,
+>(
+    lifecycle: &mut Controller,
+    broker: &mut DriverHostBroker<DEVICES, HOSTS, PASSES, REQUESTS>,
+    package: Package,
+    host: HostToken,
+    identity: DeviceIdentity,
+    requested: Needs,
+    policy: Policy,
+) -> Result<Lease, IntegrationError> {
+    lifecycle
+        .stage(package)
+        .map_err(IntegrationError::Lifecycle)?;
+    let pass = broker
+        .admit(host, identity, requested, policy)
+        .map_err(IntegrationError::Host)?;
+    let package_token = match lifecycle.authorize(identity.generation) {
+        Ok(token) => token,
+        Err(error) => {
+            let _ = broker.revoke(pass);
+            return Err(IntegrationError::Lifecycle(error));
+        }
+    };
+    if let Err(error) = lifecycle.activate(package_token) {
+        let _ = broker.revoke(pass);
+        return Err(IntegrationError::Lifecycle(error));
+    }
+    Ok(Lease {
+        pass,
+        package: package_token,
+    })
+}
+
+/// Reset a Driver Host and unload its package only after the same quiescence
+/// proof. A failed preflight changes neither authority surface.
+pub fn reset_and_unload<
+    const DEVICES: usize,
+    const HOSTS: usize,
+    const PASSES: usize,
+    const REQUESTS: usize,
+>(
+    lifecycle: &mut Controller,
+    broker: &mut DriverHostBroker<DEVICES, HOSTS, PASSES, REQUESTS>,
+    host: HostToken,
+    proof: QuiesceProof,
+) -> Result<(driver_host::ResetReceipt, HostToken), IntegrationError> {
+    if !lifecycle.reset_eligible() {
+        return Err(IntegrationError::Lifecycle(Error::WrongState));
+    }
+    if !proof.dma_quiesced || !proof.irq_quiesced {
+        return Err(IntegrationError::Lifecycle(Error::NotQuiesced));
+    }
+    let receipt = broker.reset(host, proof).map_err(IntegrationError::Host)?;
+    lifecycle
+        .finish_reset(true)
+        .map_err(IntegrationError::Lifecycle)?;
+    Ok((receipt, receipt.token))
+}
+
+/// Publish a Driver Host crash receipt and quarantine package ownership.
+pub fn crash_and_quarantine<
+    const DEVICES: usize,
+    const HOSTS: usize,
+    const PASSES: usize,
+    const REQUESTS: usize,
+>(
+    lifecycle: &mut Controller,
+    broker: &mut DriverHostBroker<DEVICES, HOSTS, PASSES, REQUESTS>,
+    host: HostToken,
+    device_generation: u32,
+    proof: QuiesceProof,
+) -> Result<driver_host::CrashReceipt, IntegrationError> {
+    if !lifecycle.owns_device(device_generation) {
+        return Err(IntegrationError::Lifecycle(Error::StaleGeneration));
+    }
+    let receipt = broker.crash(host, proof).map_err(IntegrationError::Host)?;
+    lifecycle
+        .crash_device(device_generation)
+        .map_err(IntegrationError::Lifecycle)?;
+    Ok(receipt)
+}
+
+/// Recover a crashed host from the explicit recovery package or known-good
+/// package, with both surfaces gated by the same clean quiescence proof.
+pub fn recover_and_reactivate<
+    const DEVICES: usize,
+    const HOSTS: usize,
+    const PASSES: usize,
+    const REQUESTS: usize,
+>(
+    lifecycle: &mut Controller,
+    broker: &mut DriverHostBroker<DEVICES, HOSTS, PASSES, REQUESTS>,
+    host: HostToken,
+    proof: QuiesceProof,
+) -> Result<HostToken, IntegrationError> {
+    if !proof.dma_quiesced || !proof.irq_quiesced {
+        return Err(IntegrationError::Lifecycle(Error::NotQuiesced));
+    }
+    let host = match broker.recover(host, proof) {
+        Ok(host) => host,
+        Err(error) => return Err(IntegrationError::Host(error)),
+    };
+    let recovery = lifecycle
+        .begin_recovery()
+        .map_err(IntegrationError::Lifecycle)?;
+    lifecycle
+        .complete_recovery(recovery, true)
+        .map_err(IntegrationError::Lifecycle)?;
+    Ok(host)
 }
 
 #[cfg(test)]
@@ -336,5 +500,112 @@ mod tests {
             Err(Error::StaleGeneration)
         ));
         lifecycle.complete_recovery(recovery, true).unwrap();
+    }
+
+    #[test]
+    fn host_admission_and_package_activation_share_one_generation() {
+        let mut lifecycle = Controller::new(policy(), None);
+        let mut broker = DriverHostBroker::<2, 2, 2, 4>::new();
+        let host = broker.register_host().unwrap();
+        let identity = DeviceIdentity {
+            identity: 0x1044,
+            generation: 11,
+        };
+        assert_eq!(
+            admit_and_activate(
+                &mut lifecycle,
+                &mut broker,
+                package(4),
+                host,
+                identity,
+                Needs::DEVICE,
+                Policy::new(Needs::DEVICE, 0, 0, 0),
+            ),
+            Err(IntegrationError::Host(
+                driver_host::Error::DeviceNotDiscovered
+            ))
+        );
+        assert_eq!(lifecycle.state(), State::Verified);
+        assert_eq!(broker.stats().active_passes, 0);
+
+        broker.discover(identity).unwrap();
+        let lease = admit_and_activate(
+            &mut lifecycle,
+            &mut broker,
+            package(4),
+            host,
+            identity,
+            Needs::DEVICE,
+            Policy::new(Needs::DEVICE, 0, 0, 0),
+        )
+        .unwrap();
+        assert_eq!(lifecycle.state(), State::Active);
+        assert!(lifecycle.owns_device(identity.generation));
+        assert_eq!(broker.stats().active_passes, 1);
+        assert_eq!(
+            lifecycle.generation(),
+            lease.package.generation.checked_add(1).unwrap()
+        );
+    }
+
+    #[test]
+    fn reset_and_crash_receipts_revoke_old_host_and_package_tokens() {
+        let mut lifecycle = Controller::new(policy(), None);
+        let mut broker = DriverHostBroker::<2, 2, 2, 4>::new();
+        let host = broker.register_host().unwrap();
+        let identity = DeviceIdentity {
+            identity: 0x1044,
+            generation: 9,
+        };
+        broker.discover(identity).unwrap();
+        let lease = admit_and_activate(
+            &mut lifecycle,
+            &mut broker,
+            package(4),
+            host,
+            identity,
+            Needs::DEVICE,
+            Policy::new(Needs::DEVICE, 0, 0, 0),
+        )
+        .unwrap();
+        let request = broker.begin(lease.pass, driver_host::RequestKind::Mmio);
+        assert_eq!(request, Err(driver_host::Error::AuthorityDenied));
+        assert_eq!(
+            reset_and_unload(
+                &mut lifecycle,
+                &mut broker,
+                host,
+                QuiesceProof {
+                    dma_quiesced: true,
+                    irq_quiesced: false,
+                },
+            ),
+            Err(IntegrationError::Lifecycle(Error::NotQuiesced))
+        );
+        assert!(lifecycle.owns_device(identity.generation));
+        assert_eq!(broker.stats().active_passes, 1);
+
+        let crash = crash_and_quarantine(
+            &mut lifecycle,
+            &mut broker,
+            host,
+            identity.generation,
+            QuiesceProof::CLEAN,
+        )
+        .unwrap();
+        assert_eq!(crash.revoked_passes, 1);
+        assert_eq!(lifecycle.state(), State::Quarantined);
+        assert_eq!(
+            broker.begin(lease.pass, driver_host::RequestKind::Dma),
+            Err(driver_host::Error::StalePass)
+        );
+        assert_eq!(
+            lifecycle.activate(lease.package),
+            Err(Error::StaleGeneration)
+        );
+        let recovered =
+            recover_and_reactivate(&mut lifecycle, &mut broker, host, QuiesceProof::CLEAN).unwrap();
+        assert!(recovered.generation() > host.generation());
+        assert_eq!(lifecycle.state(), State::Active);
     }
 }

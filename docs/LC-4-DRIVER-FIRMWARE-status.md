@@ -19,15 +19,37 @@
 
 该状态机不访问真实设备、不替换 PEP/Driver Host 授权，也不执行厂商固件格式。
 
+## Driver Host 组合层
+
+`admit_and_activate`、`reset_and_unload`、`crash_and_quarantine` 与
+`recover_and_reactivate` 把签名包生命周期和 `DriverHostBroker` 放进同一代际链：
+
+- 包先完成签名/信任/降级/security epoch 检查，再按 Driver Host 的显式最小权限
+  policy 准入；Host 准入失败不会产生包激活或设备 Pass；
+- 若后续包激活失败，刚创建的未使用 Pass 会被撤销，设备恢复为可准入而不是留下
+  隐藏租约；
+- orderly reset 和 crash receipt 都先验证 DMA/IRQ 静默事实；失败不会部分释放；
+- 成功 crash 会立即 quarantine 包所有权，旧 Host Pass、生命周期 token 和请求
+  全部失效；
+- recovery 只从显式 recovery package 或已知良好包恢复，并在 Host 和驱动两侧都
+  通过后才重新发布 Active。
+
+该组合仍使用内存中的 Host/控制器事实；真实 Driver Host 的持久 admission、
+vendor firmware 格式和设备矩阵仍未完成。
+
 ## 验证
 
 ```text
 cargo test -p kernel-core driver_lifecycle::tests
-3 passed; 0 failed
+5 passed; 0 failed
+
+cargo test -p kernel-core driver_host::tests
+7 passed; 0 failed
 ```
 
 覆盖坏签名、非信任签名者、降级、安全纪元、热插拔隔离、reset 静默失败、恢复与
-陈旧 token。
+陈旧 token，以及 Host 准入失败、激活失败 Pass 回滚、reset/crash/recovery 的
+双 generation 失效链。
 
 ## 仍需完成
 

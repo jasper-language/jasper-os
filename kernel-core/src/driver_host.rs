@@ -81,6 +81,13 @@ pub struct HostToken {
     generation: u64,
 }
 
+impl HostToken {
+    /// Monotonic generation of this host authority.
+    pub const fn generation(self) -> u64 {
+        self.generation
+    }
+}
+
 /// A revocable aggregate grant for one device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PassToken {
@@ -422,6 +429,32 @@ impl<
     /// Publish the one cancellation terminal for a request.
     pub fn cancel(&mut self, request: RequestToken) -> Result<Terminal, Error> {
         self.finish_request(request, Terminal::Cancelled)
+    }
+
+    /// Revoke one admitted pass before it is published as active.
+    ///
+    /// This is used by the lifecycle composition when a later admission step
+    /// fails. A stale token cannot revoke a newer generation.
+    pub fn revoke(&mut self, pass: PassToken) -> Result<(), Error> {
+        let admitted = self.require_pass(pass)?;
+        if self.requests.iter().flatten().any(|request| {
+            request.pass_slot == pass.slot && request.pass_generation == pass.generation
+        }) {
+            return Err(Error::DeviceBound);
+        }
+        self.passes[pass.slot] = None;
+        if let Some(device) = self.devices[admitted.device_slot].as_mut() {
+            if device.state
+                == (DeviceState::Bound {
+                    host_slot: admitted.host_slot,
+                    host_generation: admitted.host_generation,
+                })
+            {
+                device.state = DeviceState::Available;
+            }
+        }
+        self.revoked = self.revoked.saturating_add(1);
+        Ok(())
     }
 
     /// Revoke all host state and advance its generation after a proven reset.
@@ -808,6 +841,27 @@ mod tests {
         assert_eq!(broker.stats().pending_requests, 0);
         assert_eq!(broker.stats().completed, 1);
         assert_eq!(broker.stats().cancelled, 1);
+    }
+
+    #[test]
+    fn lifecycle_rollback_can_revoke_only_its_unused_pass() {
+        let mut broker = broker();
+        let host = broker.register_host().unwrap();
+        broker.discover(DEV).unwrap();
+        let pass = admit(&mut broker, host, Needs::DEVICE, Needs::DEVICE);
+        broker.revoke(pass).unwrap();
+        assert_eq!(broker.revoke(pass), Err(Error::StalePass));
+        assert_eq!(broker.stats().active_passes, 0);
+        assert_eq!(broker.stats().bound, 0);
+        assert_eq!(broker.stats().revoked, 1);
+        broker
+            .admit(
+                host,
+                DEV,
+                Needs::DEVICE,
+                Policy::new(Needs::DEVICE, 0, 0, 0),
+            )
+            .unwrap();
     }
 
     #[test]
