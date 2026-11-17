@@ -228,8 +228,9 @@ struct Request {
     host_slot: usize,
     host_generation: u64,
     device_slot: usize,
-    kind: RequestKind,
-    amount: u64,
+    mmio_regions: u16,
+    dma_pages: u64,
+    irq_routes: u16,
 }
 
 pub struct DriverHostBroker<
@@ -425,11 +426,16 @@ impl<const DEVICES: usize, const HOSTS: usize, const PASSES: usize, const REQUES
             .iter()
             .flatten()
             .filter(|request| {
-                request.pass_slot == pass.slot
-                    && request.pass_generation == pass.generation
-                    && request.kind == kind
+                request.pass_slot == pass.slot && request.pass_generation == pass.generation
             })
-            .try_fold(0u64, |total, request| total.checked_add(request.amount))
+            .try_fold(0u64, |total, request| {
+                let amount = match kind {
+                    RequestKind::Mmio => u64::from(request.mmio_regions),
+                    RequestKind::Dma => request.dma_pages,
+                    RequestKind::Irq => u64::from(request.irq_routes),
+                };
+                total.checked_add(amount)
+            })
             .ok_or(Error::Capacity)?;
         let requested = reserved.checked_add(amount).ok_or(Error::Capacity)?;
         if requested > limit {
@@ -449,8 +455,88 @@ impl<const DEVICES: usize, const HOSTS: usize, const PASSES: usize, const REQUES
             host_slot: admitted.host_slot,
             host_generation: admitted.host_generation,
             device_slot: admitted.device_slot,
-            kind,
-            amount,
+            mmio_regions: if kind == RequestKind::Mmio {
+                u16::try_from(amount).map_err(|_| Error::Capacity)?
+            } else {
+                0
+            },
+            dma_pages: if kind == RequestKind::Dma { amount } else { 0 },
+            irq_routes: if kind == RequestKind::Irq {
+                u16::try_from(amount).map_err(|_| Error::Capacity)?
+            } else {
+                0
+            },
+        });
+        Ok(RequestToken { slot, generation })
+    }
+
+    /// Reserve one real virtqueue operation across MMIO, DMA and IRQ at once.
+    ///
+    /// A queue operation is one indivisible resource unit: enabling a queue may
+    /// require a common/notify MMIO region, pinned descriptor/ring pages and an
+    /// interrupt route. Checking or charging those classes separately could
+    /// leave a partially prepared queue when the final class is exhausted.
+    /// This method therefore validates every class before publishing the single
+    /// terminal request. Hardware notification and used-ring completion remain
+    /// external facts owned by the device backend.
+    pub fn begin_queue_work(
+        &mut self,
+        pass: PassToken,
+        mmio_regions: u16,
+        dma_pages: u64,
+        irq_routes: u16,
+    ) -> Result<RequestToken, Error> {
+        let admitted = self.require_pass(pass)?;
+        let queue_rights = Needs::MMIO
+            .union(Needs::MMIO_WRITE)
+            .union(Needs::DMA)
+            .union(Needs::DMA_WRITE)
+            .union(Needs::IRQ);
+        if !admitted.rights.contains(queue_rights)
+            || mmio_regions == 0
+            || dma_pages == 0
+            || irq_routes == 0
+        {
+            return Err(Error::AuthorityDenied);
+        }
+        if mmio_regions > admitted.mmio_regions
+            || dma_pages > admitted.dma_pages
+            || irq_routes > admitted.irq_routes
+        {
+            return Err(Error::Capacity);
+        }
+        let reserved_mmio = self.reserved_for(pass, RequestKind::Mmio)?;
+        let reserved_dma = self.reserved_for(pass, RequestKind::Dma)?;
+        let reserved_irq = self.reserved_for(pass, RequestKind::Irq)?;
+        if reserved_mmio
+            .checked_add(u64::from(mmio_regions))
+            .is_none_or(|total| total > u64::from(admitted.mmio_regions))
+            || reserved_dma
+                .checked_add(dma_pages)
+                .is_none_or(|total| total > admitted.dma_pages)
+            || reserved_irq
+                .checked_add(u64::from(irq_routes))
+                .is_none_or(|total| total > u64::from(admitted.irq_routes))
+        {
+            return Err(Error::Capacity);
+        }
+        let slot = self
+            .requests
+            .iter()
+            .position(Option::is_none)
+            .ok_or(Error::Capacity)?;
+        let generation = self.next_request_generation;
+        self.next_request_generation = generation.checked_add(1).ok_or(Error::Capacity)?;
+        self.requests[slot] = Some(Request {
+            generation,
+            pass_slot: pass.slot,
+            pass_generation: pass.generation,
+            host_slot: admitted.host_slot,
+            host_generation: admitted.host_generation,
+            device_slot: admitted.device_slot,
+            mmio_regions,
+            dma_pages,
+            irq_routes,
         });
         Ok(RequestToken { slot, generation })
     }
@@ -642,6 +728,24 @@ impl<const DEVICES: usize, const HOSTS: usize, const PASSES: usize, const REQUES
             generation: pass.host_generation,
         })?;
         Ok(pass)
+    }
+
+    fn reserved_for(&self, pass: PassToken, kind: RequestKind) -> Result<u64, Error> {
+        self.requests
+            .iter()
+            .flatten()
+            .filter(|request| {
+                request.pass_slot == pass.slot && request.pass_generation == pass.generation
+            })
+            .try_fold(0u64, |total, request| {
+                let amount = match kind {
+                    RequestKind::Mmio => u64::from(request.mmio_regions),
+                    RequestKind::Dma => request.dma_pages,
+                    RequestKind::Irq => u64::from(request.irq_routes),
+                };
+                total.checked_add(amount)
+            })
+            .ok_or(Error::Capacity)
     }
 
     fn finish_request(
@@ -894,6 +998,64 @@ mod tests {
 
         assert_eq!(broker.complete(replacement), Ok(Terminal::Completed));
         assert_eq!(broker.cancel(irq), Ok(Terminal::Cancelled));
+    }
+
+    #[test]
+    fn queue_work_reserves_mmio_dma_and_irq_atomically() {
+        let mut broker = broker();
+        let host = broker.register_host().unwrap();
+        broker.discover(DEV).unwrap();
+        let allowed = Needs::DEVICE
+            .union(Needs::MMIO)
+            .union(Needs::MMIO_WRITE)
+            .union(Needs::DMA)
+            .union(Needs::DMA_WRITE)
+            .union(Needs::IRQ);
+        let pass = broker
+            .admit(host, DEV, allowed, Policy::new(allowed, 1, 4, 1))
+            .unwrap();
+
+        let queue = broker.begin_queue_work(pass, 1, 4, 1).unwrap();
+        assert_eq!(broker.stats().pending_requests, 1);
+        assert_eq!(broker.begin(pass, RequestKind::Mmio), Err(Error::Capacity));
+        assert_eq!(broker.begin(pass, RequestKind::Dma), Err(Error::Capacity));
+        assert_eq!(broker.begin(pass, RequestKind::Irq), Err(Error::Capacity));
+
+        assert_eq!(broker.complete(queue), Ok(Terminal::Completed));
+        assert!(broker.begin(pass, RequestKind::Mmio).is_ok());
+        assert!(broker.begin(pass, RequestKind::Dma).is_ok());
+        assert!(broker.begin(pass, RequestKind::Irq).is_ok());
+    }
+
+    #[test]
+    fn queue_work_failure_cannot_leave_partial_resource_reservations() {
+        let mut broker = broker();
+        let host = broker.register_host().unwrap();
+        broker.discover(DEV).unwrap();
+        let without_irq = Needs::DEVICE
+            .union(Needs::MMIO)
+            .union(Needs::MMIO_WRITE)
+            .union(Needs::DMA)
+            .union(Needs::DMA_WRITE);
+        let no_queue_pass = broker
+            .admit(host, DEV, without_irq, Policy::new(without_irq, 1, 4, 0))
+            .unwrap();
+        assert_eq!(
+            broker.begin_queue_work(no_queue_pass, 1, 1, 0),
+            Err(Error::AuthorityDenied)
+        );
+        assert_eq!(broker.stats().pending_requests, 0);
+        broker.revoke(no_queue_pass).unwrap();
+
+        let allowed = without_irq.union(Needs::IRQ);
+        let pass = broker
+            .admit(host, DEV, allowed, Policy::new(allowed, 1, 1, 1))
+            .unwrap();
+        assert_eq!(broker.begin_queue_work(pass, 1, 2, 1), Err(Error::Capacity));
+        assert_eq!(broker.stats().pending_requests, 0);
+        assert!(broker.begin(pass, RequestKind::Mmio).is_ok());
+        assert!(broker.begin(pass, RequestKind::Dma).is_ok());
+        assert!(broker.begin(pass, RequestKind::Irq).is_ok());
     }
 
     #[test]

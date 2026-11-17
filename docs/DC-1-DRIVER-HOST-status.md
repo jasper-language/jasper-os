@@ -15,11 +15,13 @@
 4. MMIO、DMA、IRQ 请求在发布前检查授权和容量，同一 pass 的 pending 请求会
    实际预留 MMIO region、DMA page 与 IRQ route 配额；完成、取消、reset 或 crash
    后释放，超配额失败不产生半发布状态；
-5. 每个请求只有一个终态：完成、取消或撤销；
-6. reset 在 DMA 与 IRQ 均确认静默前失败原子，不改变当前 grants；
-7. host 崩溃立即撤销请求和 passes；没有静默证明时设备进入 quarantine，
+5. 真实 virtqueue 工作使用单独的原子预留入口，同时检查 MMIO、DMA 和 IRQ
+   三类权限与容量；任一类不足时不会先占用另外两类，成功后才发布一个统一请求；
+6. 每个请求只有一个终态：完成、取消或撤销；
+7. reset 在 DMA 与 IRQ 均确认静默前失败原子，不改变当前 grants；
+8. host 崩溃立即撤销请求和 passes；没有静默证明时设备进入 quarantine，
    不能被新 host 重新绑定；
-8. recovery 必须提供完整静默证明并推进 generation，使崩溃前 token 全部失效。
+9. recovery 必须提供完整静默证明并推进 generation，使崩溃前 token 全部失效。
 
 该模块不访问硬件、不发现 PCI、不写 IOMMU，也不替代 `system.device.*`、
 Memory、Handle、IRQ 或 DMA 的既有强制机制。它只规定设备服务层如何在不制造第二
@@ -43,7 +45,7 @@ Memory、Handle、IRQ 或 DMA 的既有强制机制。它只规定设备服务�
 
 ```text
 cargo test --locked -p kernel-core driver_host
-9 passed; 0 failed
+11 passed; 0 failed
 
 cargo check --locked -p user-devprobe --target x86_64-unknown-none
 PASS
@@ -56,8 +58,8 @@ qemu_rc=33; ARCH-2 PASS; accept: SPOT PASS
 ```
 
 覆盖发现与准入分离、最小权限、设备独占、请求单终态、pending 请求资源预留与
-释放、零需求拒绝、reset 失败原子与 token 失效、崩溃 quarantine/recovery，以及
-容量失败不部分发布。
+释放、virtqueue 的 MMIO/DMA/IRQ 跨资源原子预留、零需求拒绝、reset 失败原子与
+token 失效、崩溃 quarantine/recovery，以及容量失败不部分发布。
 
 真实 x86_64 KVM guest 中，同一未特权 Driver Host 进程实际完成
 Device/Memory/DMA/MSI-X/Ring 组合，IRQ 等待经关闭中断句柄得到唯一
