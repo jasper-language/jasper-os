@@ -129,6 +129,12 @@ fn run_concurrency() -> bool {
         processes.push(process_handle);
         threads.push(thread);
     }
+    // Wait until every broker/client pair has reached the start gate before
+    // releasing them together. This makes the acceptance run a real overlap
+    // test instead of a sequence that only happens to finish concurrently.
+    while STRESS_READY.load(Ordering::Acquire) != STRESS_WORKERS {
+        task::yield_now();
+    }
     STRESS_GO.store(true, Ordering::Release);
 
     let mut failed = 0u64;
