@@ -72,63 +72,74 @@ extern crate alloc;
 
 pub mod abi;
 pub mod abi_contract;
+pub mod arch2;
 pub mod abi_version;
 #[cfg(any(test, feature = "acpi-dynamic"))]
 pub mod acpi;
-pub mod arbiter;
-pub mod arch2;
 pub mod argcase;
-/// 服务装配契约：模块运行时状态、依赖顺序、能力发布与审计（issue #6）。
-#[cfg(any(test, feature = "runtime-registries"))]
-pub mod assembly;
-pub mod async_ring;
-#[cfg(feature = "runtime-registries")]
-pub mod async_ring_runtime;
+pub mod arbiter;
 pub mod bench;
 pub mod block;
 pub mod boot_stage;
-pub mod capability;
+pub mod async_ring;
+#[cfg(feature = "runtime-registries")]
+pub mod async_ring_runtime;
 pub mod capacity;
+pub mod capability;
 pub mod config;
-pub mod deadline;
-pub mod deadline_forest;
 pub mod device;
-pub mod display_compositor;
-pub mod display_input;
-pub mod dma_abi;
-pub mod dma_quiesce;
-pub mod drill;
 pub mod driver_host;
 pub mod driver_lifecycle;
+pub mod display_input;
+pub mod display_compositor;
+pub mod deadline;
+pub mod drill;
+pub mod deadline_forest;
+pub mod yield_gate;
+pub mod dma_quiesce;
+pub mod dma_abi;
 pub mod elf;
-pub mod environment;
 #[cfg(feature = "ext4-view")]
 pub mod ext4_view;
 #[cfg(feature = "ext4-write")]
 pub mod ext4_write;
-pub mod fault;
+pub mod environment;
+pub mod ticket;
+pub mod task_index;
+pub mod task_hot;
+pub mod task_lifecycle;
+/// Bounded native terminal session queues and close semantics.
+pub mod terminal_session;
+/// Bounded terminal line editing and command history.
+pub mod terminal_editor;
+/// Structured, path-free service update status records.
+pub mod update_status;
+/// Versioned update-status service identity, scope and generation contract.
+pub mod update_service;
+pub mod tick_lease;
+pub mod wake_mailbox;
 pub mod fdt;
 pub mod frame;
 pub mod fs;
 pub mod fs_prod;
+pub mod fault;
 pub mod heap;
 pub mod image_header;
-pub mod inherited_mutex;
 pub mod interrupt;
-pub mod io;
 pub mod iommu;
+pub mod inherited_mutex;
+pub mod io;
 pub mod irq;
 pub mod job;
 /// Jasper Unified Command Standard command identities and parsing.
 pub mod jucs;
-pub mod kobj_type;
 pub mod l10n;
 pub mod lockorder;
 pub mod mac;
 pub mod memory;
+pub mod memory_object;
 pub mod memory_abi;
 pub mod memory_capability;
-pub mod memory_object;
 pub mod meta;
 pub mod msi;
 pub mod net;
@@ -139,62 +150,51 @@ pub mod net4_runtime;
 #[cfg(feature = "network-dynamic")]
 pub mod net4_service;
 pub mod numa;
-pub mod object;
-pub mod objtable;
-pub mod pagetable;
+pub mod profile;
+pub mod program_caps;
+/// 服务装配契约：模块运行时状态、依赖顺序、能力发布与审计（issue #6）。
+#[cfg(any(test, feature = "runtime-registries"))]
+pub mod assembly;
+/// 可撤回能力发布门：读者租约、撤位与排空（issue #6）。
+pub mod service_gate;
 pub mod paging;
+pub mod pagetable;
 pub mod pci;
 pub mod pio;
 pub mod pressure;
-pub mod profile;
-pub mod program_caps;
 pub mod psci;
-pub mod quota;
 pub mod ring_abi;
 pub mod ring_backend;
+pub mod quota;
 pub mod rt;
 pub mod sbi;
 pub mod sched;
-/// 可撤回能力发布门：读者租约、撤位与排空（issue #6）。
-pub mod service_gate;
 pub mod shard;
 pub mod smp;
 pub mod spawn_abi;
-pub mod sync;
 pub mod syscall_set;
-pub mod task_hot;
-pub mod task_index;
-pub mod task_lifecycle;
-/// Bounded terminal line editing and command history.
-pub mod terminal_editor;
-/// Bounded native terminal session queues and close semantics.
-pub mod terminal_session;
-pub mod tick_lease;
-pub mod ticket;
+pub mod object;
+pub mod kobj_type;
+pub mod objtable;
+pub mod sync;
 pub mod tickless;
 pub mod trace;
 pub mod trap;
-/// Versioned update-status service identity, scope and generation contract.
-pub mod update_service;
-/// Structured, path-free service update status records.
-pub mod update_status;
-pub mod user_layout;
 pub mod usi;
 pub mod usi_request;
+pub mod user_layout;
+pub mod vmm_device;
 pub mod virtio_fs;
 pub mod virtio_gpu;
 #[cfg(feature = "network-dynamic")]
 pub mod virtio_net;
-pub mod vmm_device;
 pub mod wait;
-pub mod wake_mailbox;
-pub mod wireguard;
 pub mod workload;
-pub mod workload_abi;
+pub mod xsave;
 #[cfg(any(test, feature = "runtime-registries"))]
 pub mod workload_recovery;
-pub mod xsave;
-pub mod yield_gate;
+pub mod workload_abi;
+pub mod wireguard;
 
 #[cfg(test)]
 mod robustness;
@@ -207,16 +207,16 @@ pub mod raw_timing;
 
 pub mod publication_credit;
 
-pub mod event_wait;
-pub mod percpu_migration;
 pub mod pi_work;
+pub mod percpu_migration;
 pub mod sync_origin;
+pub mod event_wait;
 
 pub mod extension_abi;
 
-pub mod capability_matrix;
-pub mod cpu_identity;
 pub mod cpu_time;
+pub mod cpu_identity;
+pub mod capability_matrix;
 
 pub mod subscription;
 
@@ -226,39 +226,39 @@ pub mod rt_partition;
 
 pub mod rt_abi;
 
+pub mod timer_units;
 pub mod sandbox;
-pub mod sandbox_abi;
 pub mod sandbox_image;
+pub mod sandbox_abi;
+pub mod sandbox_storage_abi;
 pub mod sandbox_launch;
 pub mod sandbox_launch_abi;
-pub mod sandbox_storage_abi;
 #[cfg(any(test, feature = "runtime-registries"))]
 pub mod sandbox_store;
-pub mod timer_units;
 
 pub mod native_install;
 pub mod native_install_abi;
 #[cfg(any(test, feature = "persistent-install"))]
+pub mod persistent_install;
+#[cfg(any(test, feature = "persistent-install"))]
 pub mod native_install_service;
 #[cfg(any(test, feature = "runtime-registries"))]
 pub mod native_module_lifecycle;
-#[cfg(any(test, feature = "persistent-install"))]
-pub mod persistent_install;
 
 // issue #3：统一定时事件契约。 / Unified timer-event contract.
-pub mod dirty_slots;
-pub mod hwv5_pep;
-pub mod hwv7;
-pub mod hwvirt;
-pub mod hwvirt_vcpu;
-pub mod hwvirt_vmm;
 pub mod timer_event;
 pub mod timer_progress;
+pub mod dirty_slots;
+pub mod hwvirt;
+pub mod hwv5_pep;
+pub mod hwv7;
+pub mod hwvirt_vcpu;
+pub mod hwvirt_vmm;
 
-pub mod ifc;
-pub mod net1b;
-pub mod net1c;
-pub mod net2;
 pub mod ns_budget;
 pub mod security;
 pub mod security_domain;
+pub mod net1b;
+pub mod net1c;
+pub mod net2;
+pub mod ifc;
