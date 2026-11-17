@@ -155,27 +155,32 @@ pub enum AdmissionDecision {
     Denied(AdmissionDeny),
 }
 
+/// Complete independent admission dimensions for one driver activation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdmissionRequest {
+    pub authorization: DriverAuthorization,
+    pub executor: Subject,
+    pub now: u64,
+    pub current_policy_epoch: u64,
+    pub current_revocation_generation: u32,
+    pub device_identity: u32,
+    pub device_generation: u32,
+    pub technical: TechnicalAdmission,
+    pub mode: OperatingMode,
+}
+
 /// Evaluate local authorization and technical safety as independent gates.
-pub fn evaluate_driver_admission(
-    authorization: DriverAuthorization,
-    executor: Subject,
-    now: u64,
-    current_policy_epoch: u64,
-    current_revocation_generation: u32,
-    device_identity: u32,
-    device_generation: u32,
-    technical: TechnicalAdmission,
-    mode: OperatingMode,
-) -> AdmissionDecision {
+pub fn evaluate_driver_admission(request: AdmissionRequest) -> AdmissionDecision {
+    let authorization = request.authorization;
     if !authorization.decision_maker.is_valid() || !authorization.executor.is_valid() {
         return AdmissionDecision::Denied(AdmissionDeny::Authorization);
     }
-    if executor != authorization.executor {
+    if request.executor != authorization.executor {
         return AdmissionDecision::Denied(AdmissionDeny::ExecutorMismatch);
     }
     let scope_matches = match authorization.scope {
         OwnerScope::System => true,
-        OwnerScope::Device(id) => id != 0 && id == u64::from(device_identity),
+        OwnerScope::Device(id) => id != 0 && id == u64::from(request.device_identity),
         OwnerScope::User(_)
         | OwnerScope::Group(_)
         | OwnerScope::Tenant(_)
@@ -184,26 +189,26 @@ pub fn evaluate_driver_admission(
     if !scope_matches {
         return AdmissionDecision::Denied(AdmissionDeny::ScopeMismatch);
     }
-    if authorization.device_identity != device_identity
-        || authorization.device_generation != device_generation
+    if authorization.device_identity != request.device_identity
+        || authorization.device_generation != request.device_generation
     {
         return AdmissionDecision::Denied(AdmissionDeny::DeviceMismatch);
     }
     if authorization
         .expires_at
-        .is_some_and(|deadline| now >= deadline)
+        .is_some_and(|deadline| request.now >= deadline)
     {
         return AdmissionDecision::Denied(AdmissionDeny::Expired);
     }
-    if current_revocation_generation != authorization.revocation_generation {
+    if request.current_revocation_generation != authorization.revocation_generation {
         return AdmissionDecision::Denied(AdmissionDeny::Revoked);
     }
-    if current_policy_epoch != authorization.policy_epoch {
+    if request.current_policy_epoch != authorization.policy_epoch {
         return AdmissionDecision::Denied(AdmissionDeny::PolicyEpoch);
     }
-    if technical.ready() {
+    if request.technical.ready() {
         AdmissionDecision::Allowed
-    } else if mode == OperatingMode::Development {
+    } else if request.mode == OperatingMode::Development {
         AdmissionDecision::DevelopmentOnly
     } else {
         AdmissionDecision::Denied(AdmissionDeny::Technical)
@@ -245,6 +250,8 @@ pub enum IntegrationError {
     Lifecycle(Error),
     /// Driver Host authority or generation rejected the request.
     Host(driver_host::Error),
+    /// Independent authorization or technical admission rejected the action.
+    Admission(AdmissionDecision),
 }
 
 /// A pass and package authorization that belong to the same live generation.
@@ -483,12 +490,17 @@ pub fn admit_and_activate<
 >(
     lifecycle: &mut Controller,
     broker: &mut DriverHostBroker<DEVICES, HOSTS, PASSES, REQUESTS>,
+    admission: AdmissionRequest,
     package: Package,
     host: HostToken,
     identity: DeviceIdentity,
     requested: Needs,
     policy: Policy,
 ) -> Result<Lease, IntegrationError> {
+    let decision = evaluate_driver_admission(admission);
+    if decision != AdmissionDecision::Allowed {
+        return Err(IntegrationError::Admission(decision));
+    }
     lifecycle
         .stage(package)
         .map_err(IntegrationError::Lifecycle)?;
@@ -634,114 +646,73 @@ mod tests {
         }
     }
 
+    fn admission_request() -> AdmissionRequest {
+        AdmissionRequest {
+            authorization: authorization(),
+            executor: Subject::Service(7),
+            now: 10,
+            current_policy_epoch: 5,
+            current_revocation_generation: 2,
+            device_identity: 11,
+            device_generation: 9,
+            technical: technical(),
+            mode: OperatingMode::Production,
+        }
+    }
+
+    fn admission_for(identity: DeviceIdentity) -> AdmissionRequest {
+        let mut admission = admission_request();
+        admission.authorization.scope = OwnerScope::Device(u64::from(identity.identity));
+        admission.authorization.device_identity = identity.identity;
+        admission.authorization.device_generation = identity.generation;
+        admission.device_identity = identity.identity;
+        admission.device_generation = identity.generation;
+        admission
+    }
+
     #[test]
     fn authorization_and_technical_admission_form_independent_dual_gates() {
         assert_eq!(
-            evaluate_driver_admission(
-                authorization(),
-                Subject::Service(7),
-                10,
-                5,
-                2,
-                11,
-                9,
-                technical(),
-                OperatingMode::Production,
-            ),
+            evaluate_driver_admission(admission_request()),
             AdmissionDecision::Allowed
         );
+        let mut missing_isolation = admission_request();
+        missing_isolation.technical.isolation_verified = false;
         assert_eq!(
-            evaluate_driver_admission(
-                authorization(),
-                Subject::Service(7),
-                10,
-                5,
-                2,
-                11,
-                9,
-                TechnicalAdmission {
-                    isolation_verified: false,
-                    ..technical()
-                },
-                OperatingMode::Production,
-            ),
+            evaluate_driver_admission(missing_isolation),
             AdmissionDecision::Denied(AdmissionDeny::Technical)
         );
+        missing_isolation.mode = OperatingMode::Development;
         assert_eq!(
-            evaluate_driver_admission(
-                authorization(),
-                Subject::Service(7),
-                10,
-                5,
-                2,
-                11,
-                9,
-                TechnicalAdmission {
-                    isolation_verified: false,
-                    ..technical()
-                },
-                OperatingMode::Development,
-            ),
+            evaluate_driver_admission(missing_isolation),
             AdmissionDecision::DevelopmentOnly
         );
     }
 
     #[test]
     fn expired_revoked_and_wrong_principal_authorization_fail_before_technical_success() {
+        let mut request = admission_request();
+        request.executor = Subject::Service(8);
         assert_eq!(
-            evaluate_driver_admission(
-                authorization(),
-                Subject::Service(8),
-                10,
-                5,
-                2,
-                11,
-                9,
-                technical(),
-                OperatingMode::Production,
-            ),
+            evaluate_driver_admission(request),
             AdmissionDecision::Denied(AdmissionDeny::ExecutorMismatch)
         );
+        let mut request = admission_request();
+        request.now = 100;
         assert_eq!(
-            evaluate_driver_admission(
-                authorization(),
-                Subject::Service(7),
-                100,
-                5,
-                2,
-                11,
-                9,
-                technical(),
-                OperatingMode::Development,
-            ),
+            evaluate_driver_admission(request),
             AdmissionDecision::Denied(AdmissionDeny::Expired)
         );
+        let mut request = admission_request();
+        request.current_revocation_generation = 3;
         assert_eq!(
-            evaluate_driver_admission(
-                authorization(),
-                Subject::Service(7),
-                10,
-                5,
-                3,
-                11,
-                9,
-                technical(),
-                OperatingMode::Production,
-            ),
+            evaluate_driver_admission(request),
             AdmissionDecision::Denied(AdmissionDeny::Revoked)
         );
+        let mut request = admission_request();
+        request.device_identity = 12;
         assert_eq!(
-            evaluate_driver_admission(
-                authorization(),
-                Subject::Service(7),
-                10,
-                5,
-                2,
-                12,
-                9,
-                technical(),
-                OperatingMode::Production,
-            ),
+            evaluate_driver_admission(request),
             AdmissionDecision::Denied(AdmissionDeny::ScopeMismatch)
         );
     }
@@ -835,6 +806,7 @@ mod tests {
             admit_and_activate(
                 &mut lifecycle,
                 &mut broker,
+                admission_for(identity),
                 package(4),
                 host,
                 identity,
@@ -852,6 +824,7 @@ mod tests {
         let lease = admit_and_activate(
             &mut lifecycle,
             &mut broker,
+            admission_for(identity),
             package(4),
             host,
             identity,
@@ -881,6 +854,7 @@ mod tests {
         let lease = admit_and_activate(
             &mut lifecycle,
             &mut broker,
+            admission_for(identity),
             package(4),
             host,
             identity,
