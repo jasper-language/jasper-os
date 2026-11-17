@@ -52,8 +52,10 @@ source 和 enabled，不包含路径或调用者可选择的身份。容量不�
 `kernel-core::update_list_agent` 对 ABI 3.20 响应执行 request、record count、
 record width、尾随字节和短输出校验；人类输出与 JSON 消费同一个
 `UpdateListClient`，JSON 的稳定 Schema 为 `service.update.list/1`。外部
-`user-updateagentd` 的 Channel 协议尚未扩展 list operation，因此该产品化门仍
-未完全关闭。
+`user-updateagentd` 的 v2 Channel 协议已支持有界 list operation，并在独立子进程
+中复用同一 `UpdateListClient`。该传输只桥接固定协议，不注入 tenant、subject、
+scope 或路径；真机/UEFI 证据见
+`evidence/issue21-uefi-boot-20261117-214003/README.md`。
 
 受信救援环境可以携带底层路径运行独立的 `jasper-update-recovery` 维护工具：
 
