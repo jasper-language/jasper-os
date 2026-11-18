@@ -74,6 +74,35 @@ fn el2_guest_stage2_fault_probe() -> bool {
     unsafe { jsr_aarch64_el2_context_probe() == 1 }
 }
 
+#[cfg(feature = "aarch64-el2-retain-verify")]
+fn el2_virtual_irq_probe() -> bool {
+    let status: u64;
+    let reply: u64;
+    // SAFETY: The EL2 handler installs an EL1 guest vector before asserting
+    // HCR_EL2.VI. The guest proves IRQ delivery and exits through HVC.
+    // 安全性：EL2 在置位 HCR_EL2.VI 前安装 EL1 guest 向量；guest 以 HVC 回报
+    // 真实 IRQ 已送达，测试不使用软件伪造的异常返回。
+    unsafe {
+        core::arch::asm!(
+            "mov x0, #0",
+            "mov x1, #0",
+            "hvc #0x4a58", // JASPER-HARDCODE-REVIEW: issue=22 source=aarch64-el2-virq-probe reason=private-hypercall-contract
+            "mov {status}, x0",
+            "mov {reply}, x1",
+            status = out(reg) status,
+            reply = out(reg) reply,
+            out("x0") _,
+            out("x1") _,
+            out("x9") _,
+            out("x10") _,
+            out("x11") _,
+            out("x12") _,
+            options(nostack),
+        );
+    }
+    status == 4 && reply == 0x4952
+}
+
 #[cfg(feature = "pixel6a-el2-observable")] // JASPER-HARDCODE-REVIEW: issue=21 source=pixel-el2-observation-window reason=physical-boot-carrier-probe-only
 pub(crate) fn wait_el2_observation_window() {
     let frequency: u64;
@@ -358,6 +387,10 @@ _start:
 #[cfg(feature = "aarch64-el2-retain-verify")]
 global_asm!(
     r#"
+    .equ JSR_EL2_HVC_VIRTUAL_IRQ_HANDLED, 0x4a57
+    .equ JSR_EL2_HVC_VIRTUAL_IRQ_ARM, 0x4a58
+    .equ JSR_EL2_HCR_VIRTUAL_IRQ, 0x80
+    .equ JSR_EL2_HCR_ROUTE_IRQ, 0x10
     .arch_extension simd
     .section .text.el2-vectors, "ax"
     .balign 2048
@@ -442,6 +475,9 @@ el2_hvc:
     mov x12, #0x4a56
     cmp x11, x12
     b.eq el2_guest_unexpected
+    mov x12, #JSR_EL2_HVC_VIRTUAL_IRQ_ARM
+    cmp x11, x12
+    b.eq el2_guest_irq_enter
     b el2_fail
 el2_stage2_enable:
     msr vtcr_el2, x1
@@ -495,9 +531,25 @@ el2_guest_exit:
     cmp x9, #0x24
     b.eq el2_guest_stage2_fault
     cmp x9, #0x16
-    b.eq el2_guest_unexpected
+    b.eq el2_guest_hvc
     mov x10, #3
     mov x11, #0
+    b el2_restore_guest
+el2_guest_hvc:
+    mrs x9, esr_el2
+    and x11, x9, #0xffff
+    mov x12, #JSR_EL2_HVC_VIRTUAL_IRQ_HANDLED
+    cmp x11, x12
+    b.eq el2_guest_irq_handled
+    b el2_guest_unexpected
+el2_guest_irq_handled:
+    mrs x9, hcr_el2
+    bic x9, x9, #JSR_EL2_HCR_VIRTUAL_IRQ
+    bic x9, x9, #JSR_EL2_HCR_ROUTE_IRQ
+    msr hcr_el2, x9
+    isb
+    mov x10, #4
+    mov x11, #0x4952
     b el2_restore_guest
 el2_guest_unexpected:
     mov x10, #3
@@ -506,6 +558,36 @@ el2_guest_unexpected:
 el2_guest_stage2_fault:
     mov x10, #2
     mov x11, #0x4654
+    b el2_restore_guest
+el2_guest_irq_enter:
+    adrp x9, jsr_aarch64_el2_guest_active
+    add x9, x9, :lo12:jsr_aarch64_el2_guest_active
+    mov x10, #1
+    str x10, [x9]
+    adrp x9, JSR_EL2_GUEST_STACK
+    add x9, x9, :lo12:JSR_EL2_GUEST_STACK
+    mov x10, #65536
+    add x10, x9, x10
+    msr sp_el1, x10
+    adrp x9, jsr_aarch64_guest_vectors
+    add x9, x9, :lo12:jsr_aarch64_guest_vectors
+    msr vbar_el1, x9
+    adrp x9, jsr_aarch64_guest_irq_target
+    add x9, x9, :lo12:jsr_aarch64_guest_irq_target
+    msr elr_el2, x9
+    // D/A/F remain masked; clearing I and setting IMO/VI makes a real virtual
+    // IRQ pending for the EL1 guest.
+    // D/A/F 保持屏蔽；清 I 并置 IMO/VI 后，EL1 guest 将收到真实虚拟 IRQ。
+    mov x9, #0x345
+    msr spsr_el2, x9
+    mrs x9, hcr_el2
+    mov x10, #1
+    lsl x10, x10, #7
+    orr x10, x10, #JSR_EL2_HCR_ROUTE_IRQ
+    orr x9, x9, x10
+    msr hcr_el2, x9
+    isb
+    eret
 el2_restore_guest:
     adrp x9, jsr_aarch64_el2_guest_active
     add x9, x9, :lo12:jsr_aarch64_el2_guest_active
@@ -652,6 +734,31 @@ jsr_aarch64_test_guest:
     ldr x9, =0x8020000000
     ldr x10, [x9]
     hvc #0x4a56
+    b .
+
+.balign 2048
+.global jsr_aarch64_guest_vectors
+jsr_aarch64_guest_vectors:
+    // AArch64 vectors: current EL with SPx IRQ is the second entry at 0x280.
+    // AArch64 向量表：当前 EL 使用 SPx 时，IRQ 是 0x280 处的第二项。
+    .space 0x280
+    b jsr_aarch64_guest_irq_handler
+
+.balign 4
+.global jsr_aarch64_guest_irq_target
+jsr_aarch64_guest_irq_target:
+    // Bounded fallback: HVC reaches the unexpected-exit path if VI is lost.
+    // 有界回退：若 VI 未送达，HVC 会进入非预期退出路径而不是无限等待。
+    mov x9, #0x1000000
+1:
+    subs x9, x9, #1
+    b.ne 1b
+    hvc #0x4a59
+    b .
+
+.balign 4
+jsr_aarch64_guest_irq_handler:
+    hvc #JSR_EL2_HVC_VIRTUAL_IRQ_HANDLED
     b .
 
 .balign 4
@@ -1243,18 +1350,25 @@ extern "C" fn jsr_aarch64_boot(
     #[cfg(feature = "aarch64-el2-retain-verify")]
     if entry_exception_level == 2 {
         let round_trip = el2_hvc_probe();
+        crate::kprintln!("[JSR-A64-EL2-STEP] hvc_round_trip={}", round_trip);
         let table = round_trip && super::el2::initialize_identity_table();
+        crate::kprintln!("[JSR-A64-EL2-STEP] stage2_table={}", table);
         let stage2 = table && super::el2::enable_current_cpu();
+        crate::kprintln!("[JSR-A64-EL2-STEP] stage2={}", stage2);
         let vm_exit = stage2 && el2_guest_stage2_fault_probe();
-        let vcpu_context = vm_exit;
+        crate::kprintln!("[JSR-A64-EL2-STEP] vm_exit={}", vm_exit);
+        let virtual_irq = vm_exit && el2_virtual_irq_probe();
+        crate::kprintln!("[JSR-A64-EL2-STEP] virtual_irq={}", virtual_irq);
+        let vcpu_context = virtual_irq;
         let system_context = vcpu_context;
         let fp_context = system_context;
         crate::kprintln!(
-            "[JSR-A64-EL2] retained=true hvc_round_trip={} stage2_table={} stage2={} vm_exit={} vcpu_context={} system_context={} fp_context={} driver_vm=false",
+            "[JSR-A64-EL2] retained=true hvc_round_trip={} stage2_table={} stage2={} vm_exit={} virtual_irq={} vcpu_context={} system_context={} fp_context={} driver_vm=false",
             round_trip,
             table,
             stage2,
             vm_exit,
+            virtual_irq,
             vcpu_context,
             system_context,
             fp_context
