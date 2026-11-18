@@ -40,13 +40,26 @@ runtime_active() {
     [ -r "$comm" ] || continue
     IFS= read -r name <"$comm" 2>/dev/null || continue
     case "$name" in
-      qemu-system*|VBoxHeadless) return 0 ;;
+      qemu-system*) return 0 ;;
     esac
   done
   return 1
 }
 if runtime_active; then
-  echo "FAIL another QEMU/VBox workload is already running" >&2
+  echo "FAIL another QEMU workload is already running" >&2
+  exit 75
+fi
+virtualbox_active() {
+  local comm name
+  for comm in /proc/[0-9]*/comm; do
+    [ -r "$comm" ] || continue
+    IFS= read -r name <"$comm" 2>/dev/null || continue
+    [ "$name" = VBoxHeadless ] && return 0
+  done
+  return 1
+}
+if [ "${NATIVE_INSTALL_ALLOW_VIRTUALBOX:-0}" != 1 ] && virtualbox_active; then
+  echo "FAIL another VirtualBox workload is already running" >&2
   exit 75
 fi
 
