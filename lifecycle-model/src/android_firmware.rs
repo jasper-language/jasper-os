@@ -22,7 +22,7 @@ const AVB_HEADER_BYTES: usize = 256;
 const AVB_FOOTER_BYTES: usize = 64;
 const BOOT_V4_HEADER_BYTES: usize = 1584;
 const BOOT_PAGE_BYTES: usize = 4096;
-const MAX_DESCRIPTORS: usize = 256;
+const MAX_DESCRIPTORS: usize = 256; // JASPER-HARDCODE-REVIEW: issue=21 source=avb-vbmeta-descriptor-bound reason=bounded-decoder-defense-in-depth
 
 /// Supported AVB signature algorithm encodings.
 /// 支持的 AVB 签名算法编号。
