@@ -15,7 +15,8 @@ use crate::native_install::{
     Actor, DataKey, DataOwnerKind, DataSnapshot, GrantKey, GrantRights, GrantSpec, InstallError,
     InstallModel, InstallSpec, InstallStateSnapshot, InstallationKey, InstallationSnapshot,
     OwnerScope, PackageKey, PackageSnapshot, PackageSource, PackageSpec, PrincipalKind,
-    PrincipalSpec, RuntimeKey, RuntimeSnapshot, Subject, UpdateAuthority, CONTENT_BYTES,
+    PrincipalSpec, PublisherKey, PublisherRotationRequest, PublisherRotationVerifier, RuntimeKey,
+    RuntimeSnapshot, Subject, UpdateAuthority, CONTENT_BYTES,
 };
 use crate::security_domain::DomainKey;
 use alloc::boxed::Box;
@@ -38,7 +39,7 @@ const FORMAT_MAGIC: &[u8; 8] = b"JSIINST1";
 const SNAPSHOT_MAGIC: &[u8; 8] = b"JSISNAP1";
 const BLOB_MAGIC: &[u8; 8] = b"JSIBLOB1";
 const LEGACY_FORMAT_VERSION: u32 = 1;
-const FORMAT_VERSION: u32 = 3;
+const FORMAT_VERSION: u32 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PersistentInstallError {
@@ -285,6 +286,27 @@ impl<D: SectorIo> PersistentInstallStore<D> {
         spec: PackageSpec,
         bytes: &[u8],
     ) -> Result<PackageKey, PersistentInstallError> {
+        self.install_package_with_key(spec, bytes, None)
+    }
+
+    /// Store a package whose publisher signature was verified at the trust
+    /// boundary. The key is committed in the same snapshot as the package
+    /// identity and cannot be changed by a later idempotent insert.
+    pub fn install_signed_package(
+        &mut self,
+        spec: PackageSpec,
+        bytes: &[u8],
+        publisher_key: PublisherKey,
+    ) -> Result<PackageKey, PersistentInstallError> {
+        self.install_package_with_key(spec, bytes, Some(publisher_key))
+    }
+
+    fn install_package_with_key(
+        &mut self,
+        spec: PackageSpec,
+        bytes: &[u8],
+        publisher_key: Option<PublisherKey>,
+    ) -> Result<PackageKey, PersistentInstallError> {
         if !valid_package(spec) || bytes.is_empty() || bytes.len() > STORAGE_UNIT_BYTES {
             return Err(PersistentInstallError::InvalidPackage);
         }
@@ -292,12 +314,25 @@ impl<D: SectorIo> PersistentInstallStore<D> {
             if !self.blob_matches(spec.content, bytes)? {
                 return Err(PersistentInstallError::DigestMismatch);
             }
+            if self
+                .model
+                .package(key)
+                .map_err(PersistentInstallError::Install)?
+                .publisher_key
+                != publisher_key
+            {
+                return Err(PersistentInstallError::Install(
+                    InstallError::PublisherKeyMismatch,
+                ));
+            }
             return Ok(key);
         }
         let mut next = self.model.clone();
-        let key = next
-            .add_package(spec)
-            .map_err(PersistentInstallError::Install)?;
+        let key = match publisher_key {
+            Some(publisher_key) => next.add_signed_package(spec, publisher_key),
+            None => next.add_package(spec),
+        }
+        .map_err(PersistentInstallError::Install)?;
         self.ensure_blob(spec.content, bytes)?;
         self.commit_model(next)?;
         Ok(key)
@@ -345,6 +380,19 @@ impl<D: SectorIo> PersistentInstallStore<D> {
     ) -> Result<(), PersistentInstallError> {
         let mut next = self.model.clone();
         next.set_update_authority(actor, installation, authority)
+            .map_err(PersistentInstallError::Install)?;
+        self.commit_model(next)
+    }
+
+    /// Persist one fully verified publisher-key rotation.
+    pub fn rotate_publisher_key(
+        &mut self,
+        actor: Actor<'_>,
+        request: PublisherRotationRequest,
+        verifier: &impl PublisherRotationVerifier,
+    ) -> Result<(), PersistentInstallError> {
+        let mut next = self.model.clone();
+        next.rotate_publisher_key(actor, request, verifier)
             .map_err(PersistentInstallError::Install)?;
         self.commit_model(next)
     }
@@ -725,6 +773,15 @@ fn encode_model<S: SnapshotSink>(
     model: &Model,
     sink: &mut S,
 ) -> Result<usize, PersistentInstallError> {
+    encode_model_version(model, sink, FORMAT_VERSION)
+}
+
+#[inline(never)]
+fn encode_model_version<S: SnapshotSink>(
+    model: &Model,
+    sink: &mut S,
+    version: u32,
+) -> Result<usize, PersistentInstallError> {
     let (
         packages,
         package_generations,
@@ -738,7 +795,7 @@ fn encode_model<S: SnapshotSink>(
         data_generations,
     ) = model.encoding_parts();
     sink.put(SNAPSHOT_MAGIC)?;
-    sink.put_u32(FORMAT_VERSION)?;
+    sink.put_u32(version)?;
     for record in packages {
         sink.put_u8(u8::from(record.is_some()))?;
         if let Some(record) = record {
@@ -747,6 +804,9 @@ fn encode_model<S: SnapshotSink>(
             sink.put_u64(record.spec.publisher)?;
             sink.put(&record.spec.content)?;
             sink.put_u32(record.spec.version)?;
+            if version >= 4 {
+                put_publisher_key(sink, record.publisher_key)?;
+            }
         }
     }
     for generation in package_generations {
@@ -760,6 +820,10 @@ fn encode_model<S: SnapshotSink>(
             put_scope(sink, record.scope)?;
             sink.put_u8(package_source_tag(record.source))?;
             put_subject(sink, record.update_authority.subject)?;
+            if version >= 4 {
+                put_publisher_key(sink, record.publisher_key)?;
+                sink.put_u32(record.publisher_key_generation)?;
+            }
             sink.put_u8(u8::from(record.enabled))?;
         }
     }
@@ -851,15 +915,21 @@ fn decode_state<R: SnapshotSource>(
             let publisher = cursor.get_u64()?;
             let mut content = [0u8; CONTENT_BYTES];
             cursor.read_exact(&mut content)?;
-            let version = cursor.get_u32()?;
+            let package_version = cursor.get_u32()?;
+            let publisher_key = if version >= 4 {
+                get_publisher_key(&mut cursor)?
+            } else {
+                None
+            };
             *record = Some(PackageSnapshot {
                 key,
                 spec: PackageSpec {
                     app_id,
                     publisher,
                     content,
-                    version,
+                    version: package_version,
                 },
+                publisher_key,
             });
         }
     }
@@ -877,6 +947,16 @@ fn decode_state<R: SnapshotSource>(
             let update_authority = UpdateAuthority {
                 subject: get_subject(&mut cursor)?,
             };
+            let (publisher_key, publisher_key_generation) = if version >= 4 {
+                let publisher_key = get_publisher_key(&mut cursor)?;
+                let generation = cursor.get_u32()?;
+                if generation == 0 {
+                    return Err(PersistentInstallError::Corrupt);
+                }
+                (publisher_key, generation)
+            } else {
+                (None, 1)
+            };
             let enabled = cursor.get_u8()? != 0;
             *record = Some(InstallationSnapshot {
                 key,
@@ -884,6 +964,8 @@ fn decode_state<R: SnapshotSource>(
                 scope,
                 source,
                 update_authority,
+                publisher_key,
+                publisher_key_generation,
                 enabled,
             });
         }
@@ -1208,6 +1290,30 @@ fn get_scope<R: SnapshotSource>(
     }
 }
 
+fn put_publisher_key<S: SnapshotSink>(
+    writer: &mut S,
+    key: Option<PublisherKey>,
+) -> Result<(), PersistentInstallError> {
+    writer.put_u8(u8::from(key.is_some()))?;
+    if let Some(key) = key {
+        writer.put(&key.to_bytes())?;
+    }
+    Ok(())
+}
+
+fn get_publisher_key<R: SnapshotSource>(
+    reader: &mut DecodeReader<'_, R>,
+) -> Result<Option<PublisherKey>, PersistentInstallError> {
+    if reader.get_u8()? == 0 {
+        return Ok(None);
+    }
+    let mut bytes = [0u8; 32];
+    reader.read_exact(&mut bytes)?;
+    PublisherKey::new(bytes)
+        .map(Some)
+        .ok_or(PersistentInstallError::Corrupt)
+}
+
 fn put_subject<S: SnapshotSink>(
     writer: &mut S,
     subject: Subject,
@@ -1319,6 +1425,14 @@ mod tests {
                 writes: 0,
                 fail_write_at: None,
             }
+        }
+    }
+
+    struct AcceptPublisherProof;
+
+    impl PublisherRotationVerifier for AcceptPublisherProof {
+        fn verify(&self, _: PublisherKey, _: &[u8], signature: &[u8; 64]) -> bool {
+            *signature == [0x5a; 64]
         }
     }
 
@@ -1553,8 +1667,13 @@ mod tests {
         let app_id = 0x3200;
         let old_spec = package_version(0x71, app_id, 7, 1);
         let new_spec = package_version(0x72, app_id, 7, 2);
-        let old_package = store.install_package(old_spec, b"app-v1").unwrap();
-        let new_package = store.install_package(new_spec, b"app-v2").unwrap();
+        let key = PublisherKey::new([0x17; 32]).unwrap();
+        let old_package = store
+            .install_signed_package(old_spec, b"app-v1", key)
+            .unwrap();
+        let new_package = store
+            .install_signed_package(new_spec, b"app-v2", key)
+            .unwrap();
         let installation = store
             .install(install_spec(old_package, 7, PackageSource::UserImport))
             .unwrap();
@@ -1619,6 +1738,86 @@ mod tests {
         assert_eq!(reopened.runtime(new_runtime).unwrap().package, new_package);
         reopened.stop_runtime(old_runtime).unwrap();
         reopened.destroy_package(old_package).unwrap();
+    }
+
+    #[test]
+    fn publisher_rotation_and_generation_survive_reopen() {
+        let disk = MemoryDisk::new(TOTAL_UNITS);
+        let mut store = PersistentInstallStore::format(disk).unwrap();
+        let old_key = PublisherKey::new([0x31; 32]).unwrap();
+        let new_key = PublisherKey::new([0x32; 32]).unwrap();
+        let package = store
+            .install_signed_package(package_spec(0x31), b"rotation-old", old_key)
+            .unwrap();
+        let installation = store
+            .install(install_spec(package, 7, PackageSource::UserImport))
+            .unwrap();
+        let actor = Actor::new(&[Subject::User(7)]);
+        let request = PublisherRotationRequest {
+            installation,
+            app_id: package_spec(0x31).app_id,
+            expected_key: Some(old_key),
+            new_key,
+            expected_generation: 1,
+            nonce: 0x7001,
+            kind: crate::native_install::PublisherRotationKind::Cooperative,
+            old_signature: Some([0x5a; 64]),
+            new_signature: [0x5a; 64],
+        };
+        store
+            .rotate_publisher_key(actor, request, &AcceptPublisherProof)
+            .unwrap();
+        assert_eq!(
+            store.installation(installation).unwrap().publisher_key,
+            Some(new_key)
+        );
+        assert_eq!(
+            store
+                .installation(installation)
+                .unwrap()
+                .publisher_key_generation,
+            2
+        );
+
+        let disk = store.into_device();
+        let reopened = PersistentInstallStore::open(disk).unwrap();
+        let installation = reopened.installation(installation).unwrap();
+        assert_eq!(installation.publisher_key, Some(new_key));
+        assert_eq!(installation.publisher_key_generation, 2);
+    }
+
+    #[test]
+    fn version_three_snapshot_migrates_without_guessing_publisher_key() {
+        let mut disk = PersistentInstallStore::format(MemoryDisk::new(TOTAL_UNITS))
+            .unwrap()
+            .into_device();
+        let mut model = Box::new(Model::new());
+        let key = PublisherKey::new([0x71; 32]).unwrap();
+        let package = model.add_signed_package(package_spec(0x71), key).unwrap();
+        let installation = model
+            .install(install_spec(package, 7, PackageSource::UserImport))
+            .unwrap();
+
+        let base = FORMAT_UNITS;
+        let mut writer = SnapshotUnitWriter::new(&mut disk, base);
+        let len = encode_model_version(&model, &mut writer, 3).unwrap();
+        let encoded_checksum = writer.finish().unwrap();
+        let mut marker = [0u8; STORAGE_UNIT_BYTES];
+        marker[..8].copy_from_slice(SNAPSHOT_MAGIC);
+        marker[8..12].copy_from_slice(&3u32.to_le_bytes());
+        marker[12..20].copy_from_slice(&2u64.to_le_bytes());
+        marker[20..24].copy_from_slice(&(len as u32).to_le_bytes());
+        marker[24..28].copy_from_slice(&encoded_checksum.to_le_bytes());
+        disk.write_unit(sector_for_unit(base + SLOT_BODY_UNITS).unwrap(), &marker)
+            .unwrap();
+        disk.flush().unwrap();
+
+        let reopened = PersistentInstallStore::open(disk).unwrap();
+        let package = reopened.package(package).unwrap();
+        let installation = reopened.installation(installation).unwrap();
+        assert_eq!(package.publisher_key, None);
+        assert_eq!(installation.publisher_key, None);
+        assert_eq!(installation.publisher_key_generation, 1);
     }
 
     #[test]

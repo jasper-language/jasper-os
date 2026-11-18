@@ -1,6 +1,7 @@
 //! Kernel-side SEC-1 bootstrap and classification helpers.
 
 use kernel_core::kobj_type::Kind;
+use kernel_core::native_install::{PublisherKey, PublisherRotationVerifier};
 use kernel_core::object::ObjectType;
 use kernel_core::objtable::ObjId;
 use kernel_core::mac::{
@@ -21,6 +22,20 @@ use crate::arch;
 use crate::kobj::{self, Table};
 use crate::kprintln;
 use crate::sync::IrqSpinLock;
+
+/// Kernel trust-boundary adapter for publisher-key rotation proofs.
+#[allow(dead_code)] // Wired by the future authenticated rotation service entry.
+pub(crate) struct Ed25519PublisherRotationVerifier;
+
+impl PublisherRotationVerifier for Ed25519PublisherRotationVerifier {
+    fn verify(&self, key: PublisherKey, message: &[u8], signature: &[u8; 64]) -> bool {
+        let Ok(key) = VerifyingKey::from_bytes(&key.to_bytes()) else {
+            return false;
+        };
+        let signature = Signature::from_bytes(signature);
+        key.verify_strict(message, &signature).is_ok()
+    }
+}
 
 static BOOT_ID: IrqSpinLock<Option<BootId>> = IrqSpinLock::new(None);
 static MAC: IrqSpinLock<MacEngine> = IrqSpinLock::new(MacEngine::new(PolicySlot::deny_all(

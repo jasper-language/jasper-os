@@ -9,7 +9,8 @@ use crate::fs::journal::SectorIo;
 use crate::native_install::{
     Actor, DataKey, DataOwnerKind, DataSnapshot, GrantKey, GrantRights, GrantSpec, InstallError,
     InstallSpec, InstallationKey, InstallationSnapshot, OwnerScope, PackageKey, PackageSnapshot,
-    PackageSpec, PrincipalSpec, RuntimeKey, RuntimeSnapshot, Subject, UpdateAuthority,
+    PackageSpec, PrincipalSpec, PublisherKey, PublisherRotationRequest, PublisherRotationVerifier,
+    RuntimeKey, RuntimeSnapshot, Subject, UpdateAuthority,
 };
 use crate::persistent_install::{PersistentInstallError, PersistentInstallStore};
 use crate::security::{SecurityContext, SecurityError};
@@ -147,6 +148,23 @@ impl<D: SectorIo> NativeInstallService<D> {
         self.store.install_package(spec, bytes).map_err(Into::into)
     }
 
+    /// Store a package only after its publisher signature was verified by the
+    /// trusted key boundary. System package-store authority is unchanged.
+    pub fn install_signed_package(
+        &mut self,
+        caller: InstallServiceCaller,
+        spec: PackageSpec,
+        bytes: &[u8],
+        publisher_key: PublisherKey,
+    ) -> Result<PackageKey, InstallServiceError> {
+        if !caller.is_system() {
+            return Err(InstallServiceError::Unauthorized);
+        }
+        self.store
+            .install_signed_package(spec, bytes, publisher_key)
+            .map_err(Into::into)
+    }
+
     /// Register one package for the caller's own scope. A system caller may
     /// register another scope, but update authority is always explicit.
     pub fn register(
@@ -187,6 +205,21 @@ impl<D: SectorIo> NativeInstallService<D> {
         let subjects = [caller.subject];
         self.store
             .upgrade(Actor::new(&subjects), installation, package)
+            .map_err(Into::into)
+    }
+
+    /// Verify and persist a publisher-key rotation without changing update
+    /// authority or any active runtime package identity.
+    pub fn rotate_publisher_key(
+        &mut self,
+        caller: InstallServiceCaller,
+        request: PublisherRotationRequest,
+        verifier: &impl PublisherRotationVerifier,
+    ) -> Result<(), InstallServiceError> {
+        self.require_update_authority(caller, request.installation)?;
+        let subjects = [caller.subject];
+        self.store
+            .rotate_publisher_key(Actor::new(&subjects), request, verifier)
             .map_err(Into::into)
     }
 
@@ -535,6 +568,18 @@ mod tests {
         .unwrap()
     }
 
+    fn publisher_key(seed: u8) -> PublisherKey {
+        PublisherKey::new([seed; 32]).unwrap()
+    }
+
+    struct AcceptPublisherProof;
+
+    impl PublisherRotationVerifier for AcceptPublisherProof {
+        fn verify(&self, _: PublisherKey, _: &[u8], signature: &[u8; 64]) -> bool {
+            *signature == [0x5a; 64]
+        }
+    }
+
     fn tenant(id: u64) -> InstallServiceCaller {
         InstallServiceCaller::new(
             context(id),
@@ -650,8 +695,9 @@ mod tests {
         let system = system();
         let owner = workload(7);
         let outsider = workload(8);
+        let key = publisher_key(0x51);
         let old_package = service
-            .install_package(
+            .install_signed_package(
                 system,
                 PackageSpec {
                     app_id: 0x5158,
@@ -660,10 +706,11 @@ mod tests {
                     version: 1,
                 },
                 b"app-v1",
+                key,
             )
             .unwrap();
         let new_package = service
-            .install_package(
+            .install_signed_package(
                 system,
                 PackageSpec {
                     app_id: 0x5158,
@@ -672,6 +719,7 @@ mod tests {
                     version: 2,
                 },
                 b"app-v2",
+                key,
             )
             .unwrap();
         let installation = service
@@ -720,6 +768,55 @@ mod tests {
             service.query(owner, installation, 11).unwrap().package,
             new_package
         );
+    }
+
+    #[test]
+    fn service_rotation_persists_only_after_bound_lookup() {
+        let store = PersistentInstallStore::format(MemoryDisk::new(64)).unwrap();
+        let mut service = NativeInstallService::new(store);
+        let system = system();
+        let owner = workload(7);
+        let old_key = publisher_key(0x61);
+        let new_key = publisher_key(0x62);
+        let old_package = service
+            .install_signed_package(
+                system,
+                PackageSpec {
+                    app_id: 0x5160,
+                    publisher: 9,
+                    content: [0x61; 32],
+                    version: 1,
+                },
+                b"rotation-v1",
+                old_key,
+            )
+            .unwrap();
+        let installation = service
+            .register(
+                owner,
+                old_package,
+                OwnerScope::Workload(7),
+                PackageSource::UserImport,
+                Subject::Workload(7),
+            )
+            .unwrap();
+        let request = PublisherRotationRequest {
+            installation,
+            app_id: 0x5160,
+            expected_key: Some(old_key),
+            new_key,
+            expected_generation: 1,
+            nonce: 0x7101,
+            kind: crate::native_install::PublisherRotationKind::Cooperative,
+            old_signature: Some([0x5a; 64]),
+            new_signature: [0x5a; 64],
+        };
+        service
+            .rotate_publisher_key(owner, request, &AcceptPublisherProof)
+            .unwrap();
+        let installation_record = service.store().installation(installation).unwrap();
+        assert_eq!(installation_record.publisher_key, Some(new_key));
+        assert_eq!(installation_record.publisher_key_generation, 2);
     }
 
     #[test]

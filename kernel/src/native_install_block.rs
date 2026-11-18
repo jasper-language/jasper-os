@@ -13,7 +13,7 @@ use kernel_core::fs::journal::{
 };
 use kernel_core::native_install::{
     Actor, DataOwnerKind, GrantRights, OwnerScope, PackageSource, PackageSpec, PrincipalKind,
-    Subject,
+    PublisherKey, Subject,
 };
 use kernel_core::native_install_service::{
     InstallServiceCaller, InstallServiceError, NativeInstallService,
@@ -42,6 +42,10 @@ const PACKAGE_V2: PackageSpec = PackageSpec {
     publisher: PACKAGE.publisher,
     content: PACKAGE_V2_CONTENT,
     version: 2,
+};
+const PUBLISHER_KEY: PublisherKey = match PublisherKey::new([0x4a; 32]) {
+    Some(key) => key,
+    None => panic!("non-zero publisher key"),
 };
 
 static FAILED: AtomicU32 = AtomicU32::new(0);
@@ -432,8 +436,10 @@ fn exercise(device: &mut BlockDevice) -> Result<(&'static str, usize), InstallSe
                 .is_err(),
             "non-system package insertion was admitted",
         );
-        let package = service.install_package(system, PACKAGE, PACKAGE_BYTES)?;
-        let package_v2 = service.install_package(system, PACKAGE_V2, PACKAGE_V2_BYTES)?;
+        let package =
+            service.install_signed_package(system, PACKAGE, PACKAGE_BYTES, PUBLISHER_KEY)?;
+        let package_v2 =
+            service.install_signed_package(system, PACKAGE_V2, PACKAGE_V2_BYTES, PUBLISHER_KEY)?;
         let first = service.register(
             system,
             package,

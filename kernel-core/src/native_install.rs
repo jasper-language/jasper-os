@@ -13,6 +13,78 @@ use crate::security_domain::DomainKey;
 
 pub const CONTENT_BYTES: usize = 32;
 
+/// Stable publisher signing-key identity.
+///
+/// The key is separate from the numeric publisher account and from local
+/// update authority. It proves publisher continuity for package updates; it
+/// never grants discovery, launch or update rights by itself.
+///
+/// 稳定的发布者签名密钥身份。该密钥与发布者数字账号、本地更新权彼此分离；
+/// 它只证明包更新的发布者连续性，本身不授予发现、启动或更新权限。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PublisherKey([u8; 32]);
+
+impl PublisherKey {
+    /// Admit a non-zero 32-byte public-key identity.
+    pub const fn new(bytes: [u8; 32]) -> Option<Self> {
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] != 0 {
+                return Some(Self(bytes));
+            }
+            index += 1;
+        }
+        None
+    }
+
+    /// Raw public-key identity used by the trust-boundary verifier.
+    pub const fn to_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+/// Publisher-key change authorization class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublisherRotationKind {
+    /// Both the old key and the new key sign the same generation-bound request.
+    Cooperative,
+    /// The local installation owner reauthorizes a replacement after key loss.
+    OwnerReauthorization,
+}
+
+/// Generation-bound publisher-key rotation request.
+///
+/// The proof is not accepted until a trust-boundary verifier validates both
+/// canonical signatures. The nonce and expected generation prevent replay of an
+/// earlier rotation or a request for a different installation/package lineage.
+///
+/// 带代际的发布者密钥轮换请求。只有信任边界验证器校验规范消息上的签名后才
+/// 接受证明；nonce 与预期代际阻止旧轮换或不同安装/包谱系请求被重放。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PublisherRotationRequest {
+    pub installation: InstallationKey,
+    pub app_id: u64,
+    pub expected_key: Option<PublisherKey>,
+    pub new_key: PublisherKey,
+    pub expected_generation: u32,
+    pub nonce: u64,
+    pub kind: PublisherRotationKind,
+    pub old_signature: Option<[u8; 64]>,
+    pub new_signature: [u8; 64],
+}
+
+/// Cryptographic verifier supplied by the trusted key/signature boundary.
+///
+/// This pure state machine never treats a Boolean supplied by an arbitrary
+/// caller as a verified signature. Implementations must verify the exact
+/// message bytes against the named public key and reject malformed signatures.
+///
+/// 由受信密钥/签名边界提供的密码学验证器。纯状态机不把调用者任意布尔值当作
+/// 已验证签名；实现必须用指定公钥验证完整消息并拒绝畸形签名。
+pub trait PublisherRotationVerifier {
+    fn verify(&self, key: PublisherKey, message: &[u8], signature: &[u8; 64]) -> bool;
+}
+
 /// Stable package identifier assigned by this registry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PackageKey {
@@ -352,6 +424,10 @@ pub enum InstallError {
     InvalidPrincipal,
     InvalidAuthority,
     PublisherMismatch,
+    PublisherKeyMismatch,
+    PublisherKeyUnproven,
+    PublisherRotationProof,
+    PublisherRotationReplay,
     VersionNotNewer,
     AmbiguousDataScope,
     StaleKey,
@@ -373,6 +449,10 @@ impl InstallError {
             Self::InvalidPrincipal => "system.install.error.principal",
             Self::InvalidAuthority => "system.install.error.authority",
             Self::PublisherMismatch => "system.install.error.publisher",
+            Self::PublisherKeyMismatch => "system.install.error.publisher_key",
+            Self::PublisherKeyUnproven => "system.install.error.publisher_key_unproven",
+            Self::PublisherRotationProof => "system.install.error.publisher_rotation_proof",
+            Self::PublisherRotationReplay => "system.install.error.publisher_rotation_replay",
             Self::VersionNotNewer => "system.install.error.version",
             Self::AmbiguousDataScope => "system.install.error.data_scope",
             Self::StaleKey => "system.install.error.stale",
@@ -391,6 +471,9 @@ impl InstallError {
 pub struct PackageSnapshot {
     pub key: PackageKey,
     pub spec: PackageSpec,
+    /// Verified publisher key bound to this package identity.
+    /// `None` is retained only for snapshots written before key binding.
+    pub publisher_key: Option<PublisherKey>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -400,6 +483,11 @@ pub struct InstallationSnapshot {
     pub scope: OwnerScope,
     pub source: PackageSource,
     pub update_authority: UpdateAuthority,
+    /// Current publisher signing key for updates to this stable installation.
+    pub publisher_key: Option<PublisherKey>,
+    /// Monotonic publisher-key generation. Starts at one and increments only
+    /// after a fully verified rotation.
+    pub publisher_key_generation: u32,
     pub enabled: bool,
 }
 
@@ -580,6 +668,7 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
                     || model.installation_generations[slot] != record.key.generation
                     || !record.scope.is_valid()
                     || !record.update_authority.subject.is_valid()
+                    || record.publisher_key_generation == 0
                     || model.package_record(record.package).is_err()
                 {
                     return Err(InstallError::StaleKey);
@@ -714,12 +803,36 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
     }
 
     pub fn add_package(&mut self, spec: PackageSpec) -> Result<PackageKey, InstallError> {
+        self.add_package_with_key(spec, None)
+    }
+
+    /// Register a package whose publisher signature was verified at the trust
+    /// boundary and bound to the package identity.
+    ///
+    /// 登记一个发布者签名已由信任边界验证并绑定到包身份的包。
+    pub fn add_signed_package(
+        &mut self,
+        spec: PackageSpec,
+        publisher_key: PublisherKey,
+    ) -> Result<PackageKey, InstallError> {
+        self.add_package_with_key(spec, Some(publisher_key))
+    }
+
+    fn add_package_with_key(
+        &mut self,
+        spec: PackageSpec,
+        publisher_key: Option<PublisherKey>,
+    ) -> Result<PackageKey, InstallError> {
         if !spec.valid() {
             return Err(InstallError::InvalidPackage);
         }
         let (slot, generation) = vacant(&self.packages, &mut self.package_generations)?;
         let key = PackageKey { slot, generation };
-        self.packages[slot as usize] = Some(PackageSnapshot { key, spec });
+        self.packages[slot as usize] = Some(PackageSnapshot {
+            key,
+            spec,
+            publisher_key,
+        });
         Ok(key)
     }
 
@@ -734,7 +847,7 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
         if !spec.update_authority.subject.is_valid() {
             return Err(InstallError::InvalidAuthority);
         }
-        self.package_record(spec.package)?;
+        let package = self.package_record(spec.package)?;
         if self.installations.iter().flatten().any(|installation| {
             installation.package == spec.package && installation.scope == spec.scope
         }) {
@@ -748,6 +861,8 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
             scope: spec.scope,
             source: spec.source,
             update_authority: spec.update_authority,
+            publisher_key: package.publisher_key,
+            publisher_key_generation: 1,
             enabled: true,
         });
         Ok(key)
@@ -827,6 +942,72 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
         Ok(())
     }
 
+    /// Verify and atomically rotate the publisher signing key of one stable
+    /// installation without changing its update authority or running sessions.
+    ///
+    /// Cooperative rotation requires signatures by both the current and the
+    /// replacement key over a canonical message bound to this installation,
+    /// package lineage, app id and generation. A lost-key reauthorization omits
+    /// the old signature but requires the installation owner (not merely an
+    /// update delegate) and still requires proof of possession by the new key.
+    ///
+    /// 验证并原子轮换稳定安装的发布者签名密钥，不改变更新权或运行中会话。
+    /// 协作轮换要求旧、新密钥签署绑定安装、包谱系、AppID 和代际的规范消息；
+    /// 丢钥恢复可省略旧签名，但要求安装所有者本人操作且仍须证明持有新密钥。
+    pub fn rotate_publisher_key(
+        &mut self,
+        actor: Actor<'_>,
+        request: PublisherRotationRequest,
+        verifier: &impl PublisherRotationVerifier,
+    ) -> Result<(), InstallError> {
+        if !self.can_update(actor, request.installation) {
+            return Err(InstallError::NotAuthorized);
+        }
+        let slot = self.installation_slot(request.installation)?;
+        let record = self.installations[slot].ok_or(InstallError::StaleKey)?;
+        let package = self.package_record(record.package)?;
+        if request.expected_generation != record.publisher_key_generation {
+            return Err(InstallError::PublisherRotationReplay);
+        }
+        if request.app_id != package.spec.app_id
+            || request.expected_key != record.publisher_key
+            || record.publisher_key == Some(request.new_key)
+        {
+            return Err(InstallError::PublisherKeyMismatch);
+        }
+        let message = publisher_rotation_message(&record, package, request);
+        if !verifier.verify(request.new_key, &message, &request.new_signature) {
+            return Err(InstallError::PublisherRotationProof);
+        }
+        match request.kind {
+            PublisherRotationKind::Cooperative => {
+                let (Some(old_key), Some(signature)) =
+                    (record.publisher_key, request.old_signature)
+                else {
+                    return Err(InstallError::PublisherKeyUnproven);
+                };
+                if !verifier.verify(old_key, &message, &signature) {
+                    return Err(InstallError::PublisherRotationProof);
+                }
+            }
+            PublisherRotationKind::OwnerReauthorization => {
+                if request.old_signature.is_some() || !actor.matches_scope(record.scope) {
+                    return Err(InstallError::NotAuthorized);
+                }
+            }
+        }
+        let next_generation = record
+            .publisher_key_generation
+            .checked_add(1)
+            .ok_or(InstallError::PublisherRotationReplay)?;
+        let updated = self.installations[slot]
+            .as_mut()
+            .ok_or(InstallError::StaleKey)?;
+        updated.publisher_key = Some(request.new_key);
+        updated.publisher_key_generation = next_generation;
+        Ok(())
+    }
+
     /// Atomically switches one stable installation to a newer package.
     ///
     /// The app and publisher identities cannot change. Existing runtimes keep
@@ -853,6 +1034,11 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
             || current_package.spec.publisher != next_package.spec.publisher
         {
             return Err(InstallError::PublisherMismatch);
+        }
+        match (current.publisher_key, next_package.publisher_key) {
+            (Some(current), Some(next)) if current == next => {}
+            (Some(_), Some(_)) => return Err(InstallError::PublisherKeyMismatch),
+            (None, _) | (Some(_), None) => return Err(InstallError::PublisherKeyUnproven),
         }
         if next_package.spec.version <= current_package.spec.version {
             return Err(InstallError::VersionNotNewer);
@@ -1142,6 +1328,39 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
     }
 }
 
+/// Canonical bytes that both publisher keys must sign for one rotation request.
+///
+/// The layout binds the stable installation key, AppID, publisher account,
+/// current package version, key generation, nonce, rotation class and old/new
+/// public keys. It is an internal protocol value, not a user ABI identifier.
+///
+/// 一次轮换中旧、新发布者密钥都必须签署的规范消息。布局绑定稳定安装键、AppID、
+/// 发布者账号、当前包版本、密钥代际、nonce、轮换类型及旧/新公钥。该值是内部
+/// 协议载荷，不是用户 ABI 标识。
+pub fn publisher_rotation_message(
+    installation: &InstallationSnapshot,
+    package: PackageSnapshot,
+    request: PublisherRotationRequest,
+) -> [u8; 113] {
+    let mut message = [0u8; 113];
+    message[..8].copy_from_slice(b"JSPUBRT1");
+    message[8..16].copy_from_slice(&package.spec.app_id.to_le_bytes());
+    message[16..24].copy_from_slice(&package.spec.publisher.to_le_bytes());
+    message[24..32].copy_from_slice(&installation.key.to_raw().to_le_bytes());
+    message[32..36].copy_from_slice(&request.expected_generation.to_le_bytes());
+    message[36] = match request.kind {
+        PublisherRotationKind::Cooperative => 1,
+        PublisherRotationKind::OwnerReauthorization => 2,
+    };
+    if let Some(old_key) = request.expected_key {
+        message[37..69].copy_from_slice(&old_key.to_bytes());
+    }
+    message[69..101].copy_from_slice(&request.new_key.to_bytes());
+    message[101..109].copy_from_slice(&request.nonce.to_le_bytes());
+    message[109..113].copy_from_slice(&package.spec.version.to_le_bytes());
+    message
+}
+
 impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: usize> Default
     for InstallModel<P, I, G, R, D>
 {
@@ -1171,6 +1390,85 @@ mod tests {
 
     fn digest(seed: u8) -> [u8; CONTENT_BYTES] {
         [seed; CONTENT_BYTES]
+    }
+
+    fn publisher_key(seed: u8) -> PublisherKey {
+        PublisherKey::new([seed; 32]).unwrap()
+    }
+
+    struct TestPublisherVerifier;
+
+    fn test_signature(key: PublisherKey, message: &[u8]) -> [u8; 64] {
+        let checksum = message
+            .iter()
+            .fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+        let mut signature = [checksum; 64];
+        signature[0] = key.to_bytes()[0];
+        signature
+    }
+
+    impl PublisherRotationVerifier for TestPublisherVerifier {
+        fn verify(&self, key: PublisherKey, message: &[u8], signature: &[u8; 64]) -> bool {
+            *signature == test_signature(key, message)
+        }
+    }
+
+    fn rotation_request(
+        model: &InstallModel<4, 2, 3, 2, 4>,
+        installation: InstallationKey,
+        new_key: PublisherKey,
+        generation: u32,
+        nonce: u64,
+        kind: PublisherRotationKind,
+    ) -> PublisherRotationRequest {
+        let record = model.installation(installation).unwrap();
+        let package = model.package(record.package).unwrap();
+        let mut request = PublisherRotationRequest {
+            installation,
+            app_id: package.spec.app_id,
+            expected_key: record.publisher_key,
+            new_key,
+            expected_generation: generation,
+            nonce,
+            kind,
+            old_signature: None,
+            new_signature: [0; 64],
+        };
+        let message = publisher_rotation_message(&record, package, request);
+        request.new_signature = test_signature(new_key, &message);
+        if let Some(old_key) = request.expected_key {
+            request.old_signature = Some(test_signature(old_key, &message));
+        }
+        request
+    }
+
+    fn publisher_lost_key_request<
+        const P: usize,
+        const I: usize,
+        const G: usize,
+        const R: usize,
+        const D: usize,
+    >(
+        model: &InstallModel<P, I, G, R, D>,
+        installation: InstallationKey,
+        new_key: PublisherKey,
+    ) -> PublisherRotationRequest {
+        let record = model.installation(installation).unwrap();
+        let package = model.package(record.package).unwrap();
+        let mut request = PublisherRotationRequest {
+            installation,
+            app_id: package.spec.app_id,
+            expected_key: record.publisher_key,
+            new_key,
+            expected_generation: record.publisher_key_generation,
+            nonce: 0x6001,
+            kind: PublisherRotationKind::OwnerReauthorization,
+            old_signature: None,
+            new_signature: [0; 64],
+        };
+        let message = publisher_rotation_message(&record, package, request);
+        request.new_signature = test_signature(new_key, &message);
+        request
     }
 
     fn package_spec(seed: u8) -> PackageSpec {
@@ -1421,37 +1719,50 @@ mod tests {
     fn application_upgrade_preserves_old_runtime_and_moves_shared_data() {
         let mut model = InstallModel::<4, 2, 3, 2, 4>::new();
         let app_id = 0x2200;
+        let key = publisher_key(0x17);
         let old_package = model
-            .add_package(PackageSpec {
-                app_id,
-                publisher: 7,
-                content: digest(0x71),
-                version: 1,
-            })
+            .add_signed_package(
+                PackageSpec {
+                    app_id,
+                    publisher: 7,
+                    content: digest(0x71),
+                    version: 1,
+                },
+                key,
+            )
             .unwrap();
         let new_package = model
-            .add_package(PackageSpec {
-                app_id,
-                publisher: 7,
-                content: digest(0x72),
-                version: 2,
-            })
+            .add_signed_package(
+                PackageSpec {
+                    app_id,
+                    publisher: 7,
+                    content: digest(0x72),
+                    version: 2,
+                },
+                key,
+            )
             .unwrap();
         let wrong_publisher = model
-            .add_package(PackageSpec {
-                app_id,
-                publisher: 8,
-                content: digest(0x73),
-                version: 3,
-            })
+            .add_signed_package(
+                PackageSpec {
+                    app_id,
+                    publisher: 8,
+                    content: digest(0x73),
+                    version: 3,
+                },
+                key,
+            )
             .unwrap();
         let downgrade = model
-            .add_package(PackageSpec {
-                app_id,
-                publisher: 7,
-                content: digest(0x74),
-                version: 1,
-            })
+            .add_signed_package(
+                PackageSpec {
+                    app_id,
+                    publisher: 7,
+                    content: digest(0x74),
+                    version: 1,
+                },
+                key,
+            )
             .unwrap();
         let installation = model
             .install(InstallSpec {
@@ -1547,16 +1858,233 @@ mod tests {
     }
 
     #[test]
+    fn cooperative_publisher_rotation_binds_both_keys_and_blocks_old_updates() {
+        let mut model = InstallModel::<4, 2, 3, 2, 4>::new();
+        let app_id = 0x2300;
+        let key_a = publisher_key(0x31);
+        let key_b = publisher_key(0x32);
+        let old_package = model
+            .add_signed_package(
+                PackageSpec {
+                    app_id,
+                    publisher: 7,
+                    content: digest(0x31),
+                    version: 1,
+                },
+                key_a,
+            )
+            .unwrap();
+        let new_key_package = model
+            .add_signed_package(
+                PackageSpec {
+                    app_id,
+                    publisher: 7,
+                    content: digest(0x32),
+                    version: 2,
+                },
+                key_b,
+            )
+            .unwrap();
+        let stale_key_package = model
+            .add_signed_package(
+                PackageSpec {
+                    app_id,
+                    publisher: 7,
+                    content: digest(0x33),
+                    version: 3,
+                },
+                key_a,
+            )
+            .unwrap();
+        let installation = model
+            .install(InstallSpec {
+                package: old_package,
+                scope: scope_user(10),
+                source: PackageSource::UserImport,
+                update_authority: UpdateAuthority {
+                    subject: Subject::User(10),
+                },
+            })
+            .unwrap();
+        let actor = [Subject::User(10)];
+        let request = rotation_request(
+            &model,
+            installation,
+            key_b,
+            1,
+            0x5001,
+            PublisherRotationKind::Cooperative,
+        );
+        let mut wrong_nonce = request;
+        wrong_nonce.nonce ^= 1;
+        assert_eq!(
+            model.rotate_publisher_key(Actor::new(&actor), wrong_nonce, &TestPublisherVerifier,),
+            Err(InstallError::PublisherRotationProof)
+        );
+        let mut missing_old_proof = request;
+        missing_old_proof.old_signature = None;
+        assert_eq!(
+            model.rotate_publisher_key(
+                Actor::new(&actor),
+                missing_old_proof,
+                &TestPublisherVerifier,
+            ),
+            Err(InstallError::PublisherKeyUnproven)
+        );
+        model
+            .rotate_publisher_key(Actor::new(&actor), request, &TestPublisherVerifier)
+            .unwrap();
+        assert_eq!(
+            model.installation(installation).unwrap().publisher_key,
+            Some(key_b)
+        );
+        assert_eq!(
+            model
+                .installation(installation)
+                .unwrap()
+                .publisher_key_generation,
+            2
+        );
+        assert_eq!(
+            model.rotate_publisher_key(Actor::new(&actor), request, &TestPublisherVerifier,),
+            Err(InstallError::PublisherRotationReplay)
+        );
+
+        model
+            .upgrade(Actor::new(&actor), installation, new_key_package)
+            .unwrap();
+        assert_eq!(
+            model.upgrade(Actor::new(&actor), installation, stale_key_package),
+            Err(InstallError::PublisherKeyMismatch)
+        );
+        assert_eq!(
+            model.installation(installation).unwrap().package,
+            new_key_package
+        );
+    }
+
+    #[test]
+    fn lost_key_reauthorization_requires_owner_and_new_key_proof() {
+        let mut model = InstallModel::<3, 2, 3, 2, 4>::new();
+        let old_key = publisher_key(0x41);
+        let new_key = publisher_key(0x42);
+        let package = model
+            .add_signed_package(package_spec(0x41), old_key)
+            .unwrap();
+        let installation = model
+            .install(InstallSpec {
+                package,
+                scope: scope_user(10),
+                source: PackageSource::UserImport,
+                update_authority: UpdateAuthority {
+                    subject: Subject::User(10),
+                },
+            })
+            .unwrap();
+        let owner = [Subject::User(10)];
+        let outsider = [Subject::User(11)];
+        let delegated = [Subject::Group(90)];
+        let request = publisher_lost_key_request(&model, installation, new_key);
+        assert_eq!(
+            model.rotate_publisher_key(Actor::new(&outsider), request, &TestPublisherVerifier,),
+            Err(InstallError::NotAuthorized)
+        );
+        model
+            .set_update_authority(
+                Actor::new(&owner),
+                installation,
+                subject_authority(Subject::Group(90)),
+            )
+            .unwrap();
+        assert_eq!(
+            model.rotate_publisher_key(Actor::new(&delegated), request, &TestPublisherVerifier,),
+            Err(InstallError::NotAuthorized)
+        );
+        model
+            .set_update_authority(
+                Actor::new(&delegated),
+                installation,
+                subject_authority(Subject::User(10)),
+            )
+            .unwrap();
+        let mut wrong_proof = request;
+        wrong_proof.new_signature = [0; 64];
+        assert_eq!(
+            model.rotate_publisher_key(Actor::new(&owner), wrong_proof, &TestPublisherVerifier,),
+            Err(InstallError::PublisherRotationProof)
+        );
+        model
+            .rotate_publisher_key(Actor::new(&owner), request, &TestPublisherVerifier)
+            .unwrap();
+        assert_eq!(
+            model.installation(installation).unwrap().publisher_key,
+            Some(new_key)
+        );
+    }
+
+    #[test]
+    fn keyless_legacy_installation_requires_reauthorization_before_update() {
+        let mut model = InstallModel::<2, 1, 1, 1, 1>::new();
+        let legacy = model.add_package(package_spec(0x51)).unwrap();
+        let replacement = model
+            .add_signed_package(
+                PackageSpec {
+                    app_id: package_spec(0x51).app_id,
+                    publisher: 7,
+                    content: digest(0x52),
+                    version: 2,
+                },
+                publisher_key(0x52),
+            )
+            .unwrap();
+        let installation = model
+            .install(InstallSpec {
+                package: legacy,
+                scope: scope_user(10),
+                source: PackageSource::UserImport,
+                update_authority: UpdateAuthority {
+                    subject: Subject::User(10),
+                },
+            })
+            .unwrap();
+        assert_eq!(
+            model.upgrade(Actor::new(&[Subject::User(10)]), installation, replacement),
+            Err(InstallError::PublisherKeyUnproven)
+        );
+        assert_eq!(model.installation(installation).unwrap().package, legacy);
+        let new_key = publisher_key(0x52);
+        let request = publisher_lost_key_request(&model, installation, new_key);
+        model
+            .rotate_publisher_key(
+                Actor::new(&[Subject::User(10)]),
+                request,
+                &TestPublisherVerifier,
+            )
+            .unwrap();
+        model
+            .upgrade(Actor::new(&[Subject::User(10)]), installation, replacement)
+            .unwrap();
+        assert_eq!(
+            model.installation(installation).unwrap().package,
+            replacement
+        );
+    }
+
+    #[test]
     fn legacy_ambiguous_data_scope_blocks_upgrade_instead_of_guessing() {
         let mut model = InstallModel::<2, 1, 1, 1, 1>::new();
-        let old_package = model.add_package(package_spec(0x75)).unwrap();
+        let key = publisher_key(0x75);
+        let old_package = model.add_signed_package(package_spec(0x75), key).unwrap();
         let new_package = model
-            .add_package(PackageSpec {
-                app_id: package_spec(0x75).app_id,
-                publisher: 7,
-                content: digest(0x76),
-                version: 2,
-            })
+            .add_signed_package(
+                PackageSpec {
+                    app_id: package_spec(0x75).app_id,
+                    publisher: 7,
+                    content: digest(0x76),
+                    version: 2,
+                },
+                key,
+            )
             .unwrap();
         let installation = model
             .install(InstallSpec {

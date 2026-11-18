@@ -46,8 +46,19 @@ v1、用户 7 数据为 v2、用户 8 安装及数据仍为 v1，且九个持久
 专项目标；首启升级后，次启仍恢复相同版本/会话/数据作用域，QEMU 退出码均为 33。
 证据见 `evidence/lc2-app-upgrade-default-20261118/`。
 
-该切片仍没有新增用户 ABI，也没有替代 Issue #38 要求的多用户策略、企业策略、
-依赖求解、可逆 Schema 迁移、发布者密钥轮换和真实整机闭环。
+该切片没有新增用户 ABI，也未完成 Issue #38 的企业策略、自动批量依赖安装/降级、
+可逆 Schema 迁移、受权轮换 CLI/服务审计和真实整机闭环。
+
+## 发布者密钥代际
+
+安装状态现在为每个稳定安装保存 publisher signing key 与单调 key generation。
+协作轮换必须由旧、新 key 对同一代际绑定消息签名；丢钥恢复要求安装所有者与本地
+更新主体同时匹配，并证明持有新 key。轮换后旧 key 签发的更新失败，活动 runtime
+保持启动时包身份。快照格式升级到 v4 并保留 v1-v3 读取兼容。
+
+详见 `docs/LC-2-PUBLISHER-ROTATION-status.md`。内核提供 Ed25519 验证适配器，但
+尚未接入受权 CLI/服务调用与审计，也没有物理设备断电矩阵，因此不改变 LC-2 的
+core-passed 状态。
 
 Pixel 6a 的只读 LUN/GPT 审计没有发现 Jasper 专用持久范围。现有 AOSP/Linux
 UFS 后端为 GPL-2.0 系列并依赖 Linux 内核 API，upstream U-Boot 也缺少
