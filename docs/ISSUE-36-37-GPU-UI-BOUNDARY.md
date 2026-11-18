@@ -24,8 +24,11 @@
   生命周期设计再登记。
 - 当前内核和 `kernel-core` 不链接 `ash`、`vulkano`、`wgpu`、Blitz、Vello、Parley、
   Jasper UI Engine 或 Jasper UI Framework。
-- Jasper UI Engine 的用户态宿主、真实 IPC、Surface/输入和更新闭环尚未交付；CPU
-  compositor/framebuffer 不能冒充正式 UI Service。
+- `kernel-core/src/ui_service.rs` 已形成后端中立的 UI service 前置契约：复用
+  DisplayInputSession、Compositor、帧票据、统一 authz 与 generation token，
+  多客户端焦点/输入/帧票据隔离已有测试；
+- Jasper UI Engine 用户态进程、真实 IPC/Ring 服务入口、系统镜像首帧与更新闭环
+  尚未交付；本契约和 CPU compositor/framebuffer 不能冒充正式 UI Service。
 
 ## 可执行门禁
 

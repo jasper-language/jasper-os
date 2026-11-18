@@ -69,6 +69,11 @@ pub enum Operation {
     SystemUpdateAudit,
     SystemInstallPublisherRotate,
     SystemInstallPublisherRecover,
+    ServiceUiSessionCreate,
+    ServiceUiSessionClose,
+    ServiceUiFocusSet,
+    ServiceUiFramePresent,
+    ServiceUiInputRead,
 }
 
 impl Operation {
@@ -80,6 +85,11 @@ impl Operation {
             Self::SystemUpdateAudit => "system.update.audit",
             Self::SystemInstallPublisherRotate => "system.install.publisher.rotate",
             Self::SystemInstallPublisherRecover => "system.install.publisher.recover",
+            Self::ServiceUiSessionCreate => "service.ui.session.create",
+            Self::ServiceUiSessionClose => "service.ui.session.close",
+            Self::ServiceUiFocusSet => "service.ui.focus.set",
+            Self::ServiceUiFramePresent => "service.ui.frame.present",
+            Self::ServiceUiInputRead => "service.ui.input.read",
         }
     }
 
@@ -89,11 +99,17 @@ impl Operation {
     /// 每个生命周期操作只有一个安全效果，适配器不能把写操作伪装成读操作。
     const fn expected_effect(self) -> Effect {
         match self {
-            Self::SystemUpdateStatus | Self::SystemUpdateAudit => Effect::Read,
+            Self::SystemUpdateStatus | Self::SystemUpdateAudit | Self::ServiceUiInputRead => {
+                Effect::Read
+            }
             Self::SystemUpdateRecover
             | Self::SystemUpdateArchive
             | Self::SystemInstallPublisherRotate
-            | Self::SystemInstallPublisherRecover => Effect::Write,
+            | Self::SystemInstallPublisherRecover
+            | Self::ServiceUiSessionCreate
+            | Self::ServiceUiSessionClose
+            | Self::ServiceUiFocusSet
+            | Self::ServiceUiFramePresent => Effect::Write,
         }
     }
 }
