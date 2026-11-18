@@ -64,6 +64,13 @@ read/write/flush/reset/quiesce；Jasper 仍以 Handle/Rights、PEP、DMA/IOMMU �
 范围。`metadata` 属于 Android metadata encryption，不得挪用；`userdata` 不得被
 当作 Jasper P0。若不存在专用范围，必须先完成可恢复分区方案和 Android 重装演练。
 
+2026-11-18 的无写权限只读枚举确认设备有四个 UFS LUN（`sda`–`sdd`）。主 LUN
+暴露的唯一大型范围是 `userdata`，另有 Android 管理的 `super`、`metadata`、
+boot/vendor-boot/vbmeta A/B、modem、EFS、persist、firmware 和 `mfg_data`；
+未发现已命名的 Jasper 专用大分区。`/sys/block/sd*/size` 对 shell 用户不可读，
+因此“GPT 中不存在未命名空洞”仍需在恢复/root 环境使用只读工具确认，不能根据
+当前枚举猜测并重分区。
+
 ## 后续允许的安装切片
 
 1. 优先复用 AOSP/Linux 公共 UFS 驱动，以独立 Driver Host 提供受控块设备；
