@@ -6,7 +6,10 @@
 `--inventory-baseline` 用“路径 + 规则 + 规范化源码行”的 SHA-256 多重集与
 `docs/hardcode-inventory-baseline.json` 比较；新增指纹失败，消除条目允许基线
 自然下降，避免只检查总数时用“删一加一”绕过治理。基线文件只是待分类审计快照，
-不表示 437 个命中已经全部证实为缺陷。
+不表示 428 个命中已经全部证实为缺陷。
+`docs/hardcode-inventory-ledger.json` 为每个基线指纹保存唯一的分类、理由和当前
+源码位置；`check-hardcode-inventory-ledger.py` 会拒绝漏项、重复项、类别缺失和
+基线漂移。分类本身仍是审计输入，只有 `confirmed-defect` 表示已有调用链证据。
 
 覆盖范围包括 `boot-manager`、`compat-*`、`jaso`、`kernel`、`kernel-core`、
 `lifecycle-*`、`modules`、`netd`、`tools`、`user`、`xtask` 和 `arch-probes`。
@@ -65,6 +68,9 @@ python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
 python3 scripts/check-hardcode-gate.py --inventory \
   --write-inventory-baseline docs/hardcode-inventory-baseline.json
+python3 scripts/check-hardcode-inventory-ledger.py --self-test
+python3 scripts/check-hardcode-inventory-ledger.py --check \
+  docs/hardcode-inventory-ledger.json
 ```
 
 第一条输出当前生产树的规则计数；第二条列出逐文件、逐行证据。存量审计独立于增量
