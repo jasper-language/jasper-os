@@ -23,6 +23,19 @@
 
 该状态机不访问真实设备、不替换 PEP/Driver Host 授权，也不执行厂商固件格式。
 
+## Android boot image / AVB 格式预检
+
+`jasper-lifecycle-model::android_firmware` 新增 Android boot image v4 与 AVB
+vbmeta 的只读验证，支持 AVB 公钥编码、SHA-256/SHA-512、RSA PKCS#1 v1.5
+签名、rollback index 和分区哈希描述符。signer 指纹和内容摘要作为输入映射到
+Jasper 自己的生命周期/Driver Host 策略，AVB 本身不成为授权根。
+
+匹配 Pixel 6a factory `boot.img` 的 RSA-4096、header hash、签名和 `boot`
+描述符已验证；篡改内核、篡改签名和错误分区请求均失败关闭。详见
+`docs/LC4-ANDROID-AVB-status.md` 与 `evidence/lc4-pixel6a-avb-20261118/`。
+该切片仍不包含 AVB chain-partition 递归、Jasper 公钥/rollback 持久化、
+真实固件写入和失败恢复。
+
 ## Driver Host 组合层
 
 `admit_and_activate`、`reset_and_unload`、`crash_and_quarantine` 与
