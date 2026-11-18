@@ -16,6 +16,6 @@ exit_failures=pci_failed:3,krn0_failed:1
 The two nonzero failure counters are the pre-existing AArch64 x86-only baseline.
 They are not EL2, SMP, HVC, or host-residency failures.
 
-This proves only EL2 vector residency and BSP/AP HVC round trips. Stage-2
-translation, VM exits, device capability injection and the Linux Driver VM remain
-unimplemented.
+This proves only EL2 vector residency and BSP/AP HVC round trips. Stage-2 was not
+enabled in this run; later identity-stage-2 evidence is in
+`evidence/aarch64-el2-stage2-20261118-r2/`.

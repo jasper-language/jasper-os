@@ -248,8 +248,8 @@ pub unsafe fn start(req: &CpuStart<space::SpaceRoot>) -> Result<(), SmpError> {
 extern "C" fn jsr_a64_secondary_main(index: u64) -> ! {
     let index = index as usize;
     #[cfg(feature = "aarch64-el2-retain-verify")]
-    if !super::boot::el2_hvc_probe() {
-        crate::console::write_str("[JSR-A64-EL2] secondary_retained=false\n");
+    if !(super::boot::el2_hvc_probe() && super::el2::enable_current_cpu()) {
+        crate::console::write_str("[JSR-A64-EL2] secondary_resident=false\n");
         crate::arch::halt_forever();
     }
     if !mmu::extensions_disabled() {

@@ -12,3 +12,5 @@ exit_failures=pci_failed:3,krn0_failed:1
 ```
 
 The failure baseline is unchanged from the registered AArch64 x86-only tests.
+This run predates stage-2; the later identity-stage-2 evidence is in
+`evidence/aarch64-el2-stage2-20261118-r2/`.

@@ -341,7 +341,23 @@ jsr_aarch64_el2_sync:
     and x11, x9, #0xffff
     mov x12, #0x4a53
     cmp x11, x12
+    b.eq 2f
+    mov x12, #0x4a54
+    cmp x11, x12
     b.ne 1f
+    msr vtcr_el2, x1
+    msr vttbr_el2, x2
+    mrs x9, hcr_el2
+    orr x9, x9, #1
+    msr hcr_el2, x9
+    isb
+    tlbi vmalls12e1
+    dsb nsh
+    isb
+    mov x0, #1
+    mov x1, #0x5354
+    eret
+2:
     mov x0, #1
     mov x1, #0x4a54
     eret
@@ -784,11 +800,15 @@ extern "C" fn jsr_aarch64_boot(
     #[cfg(feature = "aarch64-el2-retain-verify")]
     if entry_exception_level == 2 {
         let round_trip = el2_hvc_probe();
+        let table = round_trip && super::el2::initialize_identity_table();
+        let stage2 = table && super::el2::enable_current_cpu();
         crate::kprintln!(
-            "[JSR-A64-EL2] retained=true hvc_round_trip={} stage2=false driver_vm=false",
-            round_trip
+            "[JSR-A64-EL2] retained=true hvc_round_trip={} stage2_table={} stage2={} driver_vm=false",
+            round_trip,
+            table,
+            stage2
         );
-        if !round_trip {
+        if !stage2 {
             semihost::exit(EXIT_FAILURE);
         }
     }

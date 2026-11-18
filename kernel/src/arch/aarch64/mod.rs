@@ -25,6 +25,8 @@ pub(crate) mod boot;
 mod context;
 mod cpu;
 mod devirq;
+#[cfg(feature = "aarch64-el2-retain-verify")]
+mod el2;
 mod gic;
 mod mmu;
 mod paging;
