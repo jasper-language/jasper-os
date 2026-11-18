@@ -107,6 +107,142 @@ def signature_name(release_name: str, signer: str) -> str:
     return f"{release_name}.{signer}.manifest.sig"
 
 
+def build_manifest(
+    payload: Path,
+    sbom: Path,
+    fingerprints: list[str],
+    args: argparse.Namespace,
+) -> tuple[dict[str, Any], bytes]:
+    threshold, required_signers = signing_policy()
+    if len(fingerprints) != required_signers:
+        fail(
+            f"release policy requires {required_signers} signer keys, "
+            f"got {len(fingerprints)}"
+        )
+    if len(fingerprints) != len(set(fingerprints)):
+        fail("release signer keys must be distinct")
+    fingerprints = sorted(fingerprints)
+    if args.channel not in CHANNELS:
+        fail(f"unsupported channel: {args.channel}")
+    if not COMMIT_RE.fullmatch(args.source_commit):
+        fail("--source-commit must be a full lowercase SHA-1")
+    if not ABI_RE.fullmatch(args.abi):
+        fail("--abi must be major.minor.patch")
+    if not args.target or any(char.isspace() for char in args.target):
+        fail("--target must be one non-empty token")
+    payload_sha256, payload_size = digest(payload)
+    sbom_sha256, sbom_size = digest(sbom)
+    manifest_value = {
+        "schema": SCHEMA,
+        "release": {
+            "abi": args.abi,
+            "channel": args.channel,
+            "source_commit": args.source_commit,
+            "target": args.target,
+        },
+        "payload": {
+            "name": payload.name,
+            "sha256": payload_sha256,
+            "size": payload_size,
+        },
+        "sbom": {
+            "name": sbom.name,
+            "sha256": sbom_sha256,
+            "size": sbom_size,
+        },
+        "signing": {
+            "threshold": threshold,
+            "signers": [
+                {
+                    "fingerprint": fingerprint,
+                    "signature": signature_name(args.name, fingerprint),
+                }
+                for fingerprint in fingerprints
+            ],
+        },
+    }
+    manifest = canonical_json(manifest_value)
+    if len(manifest) > MAX_MANIFEST_BYTES:
+        fail("release manifest exceeds bounded size")
+    return manifest_value, manifest
+
+
+def write_new(path: Path, contents: bytes) -> None:
+    try:
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o644,
+        )
+    except FileExistsError:
+        fail(f"refusing to overwrite an existing file: {path}")
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(contents)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def public_fingerprints(keys: list[Path]) -> list[str]:
+    fingerprints = []
+    with tempfile.TemporaryDirectory(prefix="jasper-release-key-") as temporary:
+        for index, key in enumerate(keys):
+            public_key = Path(temporary) / f"signer-{index}.pem"
+            openssl("pkey", "-in", str(key), "-pubout", "-out", str(public_key))
+            fingerprints.append(public_fingerprint(public_key))
+    return fingerprints
+
+
+def prepare(args: argparse.Namespace) -> None:
+    payload = data_file(args.payload, "--payload")
+    sbom = data_file(args.sbom, "--sbom")
+    keys = [data_file(value, "--public-key") for value in args.public_key]
+    _, manifest = build_manifest(
+        payload,
+        sbom,
+        [public_fingerprint(key) for key in keys],
+        args,
+    )
+    output = Path(args.output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    manifest_path = output / f"{args.name}.manifest.json"
+    write_new(manifest_path, manifest)
+    print(
+        f"release-artifact: PREPARED threshold={signing_policy()[0]} "
+        f"signers={len(keys)} manifest_sha256={hashlib.sha256(manifest).hexdigest()}"
+    )
+
+
+def sign(args: argparse.Namespace) -> None:
+    manifest_path = data_file(args.manifest, "--manifest")
+    key = data_file(args.private_key, "--private-key")
+    _, manifest = load_manifest(manifest_path)
+    value = json.loads(manifest)
+    fingerprint = public_fingerprints([key])[0]
+    if fingerprint not in {
+        signer["fingerprint"] for signer in value["signing"]["signers"]
+    }:
+        fail(f"private key is not a declared release signer: {fingerprint}")
+    with tempfile.NamedTemporaryFile(prefix="jasper-release-message-") as message:
+        message.write(signing_message(manifest))
+        message.flush()
+        signature = openssl(
+            "pkeyutl",
+            "-sign",
+            "-rawin",
+            "-inkey",
+            str(key),
+            "-in",
+            message.name,
+        )
+    if len(signature) != 64:
+        fail(f"unexpected Ed25519 signature length: {len(signature)}")
+    write_new(Path(args.output), signature)
+    print(
+        f"release-artifact: SIGNED signer={fingerprint} "
+        f"manifest_sha256={hashlib.sha256(manifest).hexdigest()}"
+    )
+
+
 def data_file(value: str, option: str) -> Path:
     path = Path(value)
     if not path.is_file() or path.is_symlink():
@@ -443,6 +579,24 @@ def main() -> int:
     create_parser.add_argument("--target", required=True)
     create_parser.add_argument("--abi", required=True)
     create_parser.set_defaults(run=create)
+
+    prepare_parser = commands.add_parser("prepare")
+    prepare_parser.add_argument("--payload", required=True)
+    prepare_parser.add_argument("--sbom", required=True)
+    prepare_parser.add_argument("--public-key", action="append", required=True)
+    prepare_parser.add_argument("--output-dir", required=True)
+    prepare_parser.add_argument("--name", required=True)
+    prepare_parser.add_argument("--channel", required=True)
+    prepare_parser.add_argument("--source-commit", required=True)
+    prepare_parser.add_argument("--target", required=True)
+    prepare_parser.add_argument("--abi", required=True)
+    prepare_parser.set_defaults(run=prepare)
+
+    sign_parser = commands.add_parser("sign")
+    sign_parser.add_argument("--manifest", required=True)
+    sign_parser.add_argument("--private-key", required=True)
+    sign_parser.add_argument("--output", required=True)
+    sign_parser.set_defaults(run=sign)
 
     verify_parser = commands.add_parser("verify")
     verify_parser.add_argument("--manifest", required=True)

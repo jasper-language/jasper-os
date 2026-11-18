@@ -70,19 +70,44 @@ python3 scripts/release-revocations.py accept \
   --state-dir "$work/revocation-state" \
   "${software_anchor[@]}"
 
-python3 scripts/release-artifact.py create \
+python3 scripts/release-artifact.py prepare \
   --payload "$bundle/jasper-kernel" \
   --sbom "$bundle/sbom.json" \
-  --private-key "$keys/a.private.pem" \
-  --private-key "$keys/b.private.pem" \
-  --private-key "$keys/c.private.pem" \
-  --threshold 2 \
+  --public-key "$keys/a.public.pem" \
+  --public-key "$keys/b.public.pem" \
+  --public-key "$keys/c.public.pem" \
   --output-dir "$bundle" \
   --name release \
   --channel stable \
   --source-commit "$commit" \
   --target x86_64-unknown-none \
   --abi "$abi"
+for signer in a b c; do
+  fingerprint="$(python3 scripts/release-artifact.py fingerprint \
+    --public-key "$keys/$signer.public.pem" | cut -d= -f2)"
+  python3 scripts/release-artifact.py sign \
+    --manifest "$bundle/release.manifest.json" \
+    --private-key "$keys/$signer.private.pem" \
+    --output "$bundle/release.$fingerprint.manifest.sig"
+done
+if python3 scripts/release-artifact.py sign \
+  --manifest "$bundle/release.manifest.json" \
+  --private-key "$keys/d.private.pem" \
+  --output "$bundle/undeclared.manifest.sig" 2>"$work/undeclared-signer.err"; then
+  echo "release-supply-check: undeclared signer key was accepted" >&2
+  exit 1
+fi
+grep -q 'not a declared release signer' "$work/undeclared-signer.err"
+[[ ! -e "$bundle/undeclared.manifest.sig" ]]
+if python3 scripts/release-artifact.py sign \
+  --manifest "$bundle/release.manifest.json" \
+  --private-key "$keys/a.private.pem" \
+  --output "$bundle/release.$fp_a.manifest.sig" \
+  2>"$work/overwrite-signature.err"; then
+  echo "release-supply-check: signer overwrote an existing signature" >&2
+  exit 1
+fi
+grep -q 'refusing to overwrite' "$work/overwrite-signature.err"
 
 verify() {
   local manifest=$1 payload=$2 sbom=$3
@@ -257,5 +282,7 @@ verify \
   "$download/jasper-kernel" \
   "$download/sbom.json" \
   "${rotated_sigs[@]}"
+
+python3 scripts/release-remote-audit-check.py
 
 echo "release-supply-check: PASS threshold=2 signers=3 revocation=true revocation_snapshot_epoch=2 rotation=true https_sources=2 offline_sources=1 tamper_rejected=true"

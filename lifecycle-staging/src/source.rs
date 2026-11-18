@@ -12,9 +12,13 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use jasper_lifecycle_model::manifest::{TrustPolicy, UpdateTarget};
+use jasper_lifecycle_model::manifest::{
+    SignatureSet, ThresholdError, ThresholdTrustPolicy, TrustPolicy, UpdateTarget,
+    MAX_SIGNATURE_SET_BYTES,
+};
 use jasper_lifecycle_model::manifest_cbor::{
-    verify_cbor_manifest, CborManifestError, VerifiedCborManifest, MAX_MANIFEST_CBOR_BYTES,
+    verify_cbor_manifest, verify_cbor_manifest_threshold, CborManifestError,
+    VerifiedCborManifest, MAX_MANIFEST_CBOR_BYTES,
 };
 
 use crate::ArtifactSource;
@@ -23,6 +27,8 @@ use crate::ArtifactSource;
 pub const SOURCE_MANIFEST_FILE: &str = "manifest.cbor";
 /// Signature file name in an offline bundle or at an HTTPS bundle root.
 pub const SOURCE_SIGNATURE_FILE: &str = "manifest.sig";
+/// Canonical threshold signature-set file name.
+pub const SOURCE_SIGNATURE_SET_FILE: &str = "manifest.sigset";
 /// Artifact directory in an offline bundle or below an HTTPS bundle root.
 pub const SOURCE_ARTIFACT_DIR: &str = "artifacts";
 
@@ -35,6 +41,10 @@ pub trait UpdateBundleSource {
     fn read_manifest(&self) -> Result<Vec<u8>, SourceError>;
     /// Returns exactly one detached 64-byte signature candidate.
     fn read_signature(&self) -> Result<[u8; SIGNATURE_BYTES], SourceError>;
+    /// Returns one canonical threshold signature set when the transport supports it.
+    fn read_signature_set(&self) -> Result<SignatureSet, SourceError> {
+        Err(SourceError::SignatureSetUnsupported)
+    }
     /// Copies one manifest-named artifact into a fresh destination.
     fn copy_artifact(
         &self,
@@ -75,6 +85,13 @@ impl UpdateBundleSource for DirectoryBundle {
         read_signature_path(
             &self.root.join(SOURCE_SIGNATURE_FILE),
             "read offline signature",
+        )
+    }
+
+    fn read_signature_set(&self) -> Result<SignatureSet, SourceError> {
+        read_signature_set_path(
+            &self.root.join(SOURCE_SIGNATURE_SET_FILE),
+            "read offline signature set",
         )
     }
 
@@ -270,6 +287,16 @@ impl UpdateBundleSource for HttpBundle {
         signature_array(bytes)
     }
 
+    fn read_signature_set(&self) -> Result<SignatureSet, SourceError> {
+        let mut bytes = Vec::new();
+        self.run_curl(
+            SOURCE_SIGNATURE_SET_FILE,
+            MAX_SIGNATURE_SET_BYTES as u64,
+            &mut bytes,
+        )?;
+        SignatureSet::decode(&bytes).map_err(SourceError::SignatureSet)
+    }
+
     fn copy_artifact(
         &self,
         name: &str,
@@ -408,6 +435,62 @@ pub fn materialize_verified<S: UpdateBundleSource + ?Sized>(
     result
 }
 
+/// Authenticate and materialize one bundle through a production threshold policy.
+pub fn materialize_verified_threshold<S: UpdateBundleSource + ?Sized>(
+    source: &S,
+    policy: ThresholdTrustPolicy<'_>,
+    target: UpdateTarget,
+    spool_root: &Path,
+) -> Result<MaterializedUpdate, SourceError> {
+    match fs::symlink_metadata(spool_root) {
+        Ok(_) => return Err(SourceError::SpoolExists(spool_root.to_path_buf())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(SourceError::Io {
+                operation: "inspect source spool",
+                path: spool_root.to_path_buf(),
+                source,
+            })
+        }
+    }
+    fs::create_dir(spool_root).map_err(|source| SourceError::Io {
+        operation: "create source spool",
+        path: spool_root.to_path_buf(),
+        source,
+    })?;
+    let result = (|| {
+        let manifest_bytes = source.read_manifest()?;
+        let signatures = source.read_signature_set()?;
+        let manifest = verify_cbor_manifest_threshold(policy, target, &manifest_bytes, signatures)
+            .map_err(SourceError::Manifest)?;
+        let artifact_root = spool_root.join(SOURCE_ARTIFACT_DIR);
+        fs::create_dir(&artifact_root).map_err(|source| SourceError::Io {
+            operation: "create materialized artifact directory",
+            path: artifact_root.clone(),
+            source,
+        })?;
+        let mut artifacts = Vec::with_capacity(manifest.artifacts.len());
+        for artifact in &manifest.artifacts {
+            let path = artifact_root.join(&artifact.name);
+            source.copy_artifact(&artifact.name, &path, artifact.size)?;
+            artifacts.push(OwnedArtifactSource {
+                name: artifact.name.clone(),
+                path,
+            });
+        }
+        Ok(MaterializedUpdate {
+            manifest,
+            manifest_bytes,
+            sources: artifacts,
+            root: spool_root.to_path_buf(),
+        })
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(spool_root);
+    }
+    result
+}
+
 /// Update-source failure.
 #[derive(Debug)]
 pub enum SourceError {
@@ -442,6 +525,10 @@ pub enum SourceError {
     },
     /// Detached signature length is not 64 bytes.
     InvalidSignatureLength(usize),
+    /// Transport cannot provide a canonical threshold signature set.
+    SignatureSetUnsupported,
+    /// Threshold signature-set decoding failed.
+    SignatureSet(ThresholdError),
     /// The source spool path already exists.
     SpoolExists(PathBuf),
     /// The requested spool has no usable parent.
@@ -486,6 +573,12 @@ impl fmt::Display for SourceError {
             ),
             Self::InvalidSignatureLength(length) => {
                 write!(formatter, "update signature is {length} bytes; expected 64")
+            }
+            Self::SignatureSetUnsupported => {
+                write!(formatter, "update source does not support threshold signatures")
+            }
+            Self::SignatureSet(error) => {
+                write!(formatter, "threshold signature set rejected: {error:?}")
             }
             Self::SpoolExists(path) => {
                 write!(formatter, "source spool already exists: {}", path.display())
@@ -598,6 +691,11 @@ fn signature_array(bytes: Vec<u8>) -> Result<[u8; SIGNATURE_BYTES], SourceError>
     bytes
         .try_into()
         .map_err(|bytes: Vec<u8>| SourceError::InvalidSignatureLength(bytes.len()))
+}
+
+fn read_signature_set_path(path: &Path, operation: &'static str) -> Result<SignatureSet, SourceError> {
+    let bytes = read_bounded_regular(path, MAX_SIGNATURE_SET_BYTES as u64, operation)?;
+    SignatureSet::decode(&bytes).map_err(SourceError::SignatureSet)
 }
 
 fn copy_regular_bounded(

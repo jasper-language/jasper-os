@@ -15,7 +15,8 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use crate::manifest::{
-    verify_manifest, ManifestEnvelope, ManifestError, TrustPolicy, UpdateTarget, VerifiedManifest,
+    verify_manifest, verify_manifest_threshold, ManifestEnvelope, ManifestError, SignatureSet,
+    ThresholdError, ThresholdTrustPolicy, TrustPolicy, UpdateTarget, VerifiedManifest,
 };
 
 /// 单个清单的最大 CBOR 字节数。Maximum CBOR bytes in one manifest.
@@ -139,6 +140,8 @@ pub enum CborManifestError {
     InvalidPolicy,
     /// 签名、信任、反回滚或 Profile 验证失败。Signature, trust, anti-rollback, or profile failure.
     Manifest(ManifestError),
+    /// Production threshold or signature-set verification failed.
+    Threshold(ThresholdError),
 }
 
 /// 已通过规范编码和完整性字段检查的工件。
@@ -192,6 +195,82 @@ pub fn verify_cbor_manifest(
     bytes: &[u8],
     signature: [u8; 64],
 ) -> Result<VerifiedCborManifest, CborManifestError> {
+    let parsed = parse_cbor_manifest(bytes)?;
+    let manifest = verify_manifest(
+        policy,
+        target,
+        ManifestEnvelope {
+            schema_version: parsed.wire.schema_version,
+            release_sequence: parsed.wire.release_sequence,
+            security_epoch: parsed.wire.security_epoch,
+            target_profile: parsed.wire.target_profile,
+            canonical_cbor: bytes,
+            signer: parsed.wire.signer,
+            signature,
+        },
+    )
+    .map_err(CborManifestError::Manifest)?;
+    Ok(parsed.verified(manifest))
+}
+
+/// Verify canonical CBOR with a production 2-of-3 threshold signature set.
+pub fn verify_cbor_manifest_threshold(
+    policy: ThresholdTrustPolicy<'_>,
+    target: UpdateTarget,
+    bytes: &[u8],
+    signatures: SignatureSet,
+) -> Result<VerifiedCborManifest, CborManifestError> {
+    let parsed = parse_cbor_manifest(bytes)?;
+    let embedded = signatures
+        .entries()
+        .find(|entry| entry.signer == parsed.wire.signer)
+        .ok_or(CborManifestError::Threshold(
+            ThresholdError::Manifest(ManifestError::Signature),
+        ))?;
+    let manifest = verify_manifest_threshold(
+        policy,
+        target,
+        ManifestEnvelope {
+            schema_version: parsed.wire.schema_version,
+            release_sequence: parsed.wire.release_sequence,
+            security_epoch: parsed.wire.security_epoch,
+            target_profile: parsed.wire.target_profile,
+            canonical_cbor: bytes,
+            signer: parsed.wire.signer,
+            signature: embedded.signature,
+        },
+        signatures,
+    )
+    .map_err(CborManifestError::Threshold)?;
+    Ok(parsed.verified(manifest))
+}
+
+struct ParsedCborManifest {
+    wire: ManifestWire,
+    channel: Channel,
+    artifacts: Vec<VerifiedArtifact>,
+    artifact_bytes: u64,
+}
+
+impl ParsedCborManifest {
+    fn verified(self, manifest: VerifiedManifest) -> VerifiedCborManifest {
+        VerifiedCborManifest {
+            manifest,
+            channel: self.channel,
+            target_abi: (self.wire.target_abi_min, self.wire.target_abi_max),
+            data_schema: (self.wire.data_schema_min, self.wire.data_schema_max),
+            created_at: self.wire.created_at,
+            expires_at: self.wire.expires_at,
+            migration_reversible: self.wire.migration_reversible,
+            rollback_allowed: self.wire.rollback_allowed,
+            dependencies: self.wire.dependencies,
+            artifacts: self.artifacts,
+            artifact_bytes: self.artifact_bytes,
+        }
+    }
+}
+
+fn parse_cbor_manifest(bytes: &[u8]) -> Result<ParsedCborManifest, CborManifestError> {
     if bytes.is_empty() || bytes.len() > MAX_MANIFEST_CBOR_BYTES {
         return Err(CborManifestError::TooLarge);
     }
@@ -213,30 +292,9 @@ pub fn verify_cbor_manifest(
     if canonical != bytes {
         return Err(CborManifestError::NonCanonical);
     }
-    let manifest = verify_manifest(
-        policy,
-        target,
-        ManifestEnvelope {
-            schema_version: wire.schema_version,
-            release_sequence: wire.release_sequence,
-            security_epoch: wire.security_epoch,
-            target_profile: wire.target_profile,
-            canonical_cbor: bytes,
-            signer: wire.signer,
-            signature,
-        },
-    )
-    .map_err(CborManifestError::Manifest)?;
-    Ok(VerifiedCborManifest {
-        manifest,
+    Ok(ParsedCborManifest {
+        wire,
         channel,
-        target_abi: (wire.target_abi_min, wire.target_abi_max),
-        data_schema: (wire.data_schema_min, wire.data_schema_max),
-        created_at: wire.created_at,
-        expires_at: wire.expires_at,
-        migration_reversible: wire.migration_reversible,
-        rollback_allowed: wire.rollback_allowed,
-        dependencies: wire.dependencies,
         artifacts,
         artifact_bytes,
     })
@@ -303,7 +361,9 @@ fn validate_artifacts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::{signing_message, LocalInstallGrant, MANIFEST_SCHEMA_VERSION};
+    use crate::manifest::{
+        signing_message, LocalInstallGrant, ThresholdSignature, MANIFEST_SCHEMA_VERSION,
+    };
     use ed25519_dalek::{Signer, SigningKey};
 
     const PROFILE: [u8; 32] = [0x42; 32];
@@ -395,6 +455,57 @@ mod tests {
             crate::manifest::authorize_install(verified.manifest, grant, 9),
             Ok(verified.manifest)
         );
+    }
+
+    #[test]
+    fn threshold_cbor_reuses_canonical_manifest_and_requires_two_signers() {
+        let (key, bytes, signature) = fixture();
+        let second = SigningKey::from_bytes(&[8; 32]);
+        let third = SigningKey::from_bytes(&[9; 32]);
+        let wire: ManifestWire = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let envelope = ManifestEnvelope {
+            schema_version: wire.schema_version,
+            release_sequence: wire.release_sequence,
+            security_epoch: wire.security_epoch,
+            target_profile: wire.target_profile,
+            canonical_cbor: &bytes,
+            signer: wire.signer,
+            signature,
+        };
+        let (message, message_len) = signing_message(&envelope).unwrap();
+        let trusted = [
+            key.verifying_key().to_bytes(),
+            second.verifying_key().to_bytes(),
+            third.verifying_key().to_bytes(),
+        ];
+        let set = SignatureSet::new(&[
+            ThresholdSignature {
+                signer: key.verifying_key().to_bytes(),
+                signature,
+            },
+            ThresholdSignature {
+                signer: second.verifying_key().to_bytes(),
+                signature: second.sign(&message[..message_len]).to_bytes(),
+            },
+        ])
+        .unwrap();
+        let verified = verify_cbor_manifest_threshold(
+            ThresholdTrustPolicy {
+                trusted_keys: &trusted,
+                revoked_keys: &[[0; 32]],
+                minimum_security_epoch: 3,
+                threshold: 2,
+            },
+            UpdateTarget {
+                rollback_floor: 8,
+                profile: PROFILE,
+            },
+            &bytes,
+            set,
+        )
+        .unwrap();
+        assert_eq!(verified.manifest.release_sequence, 9);
+        assert_eq!(verified.artifacts[0].name, "jasper-system");
     }
 
     #[test]

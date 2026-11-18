@@ -15,6 +15,15 @@ pub const SIGNATURE_DOMAIN: &[u8] = b"JASPER-UPDATE-V1\0";
 pub const MANIFEST_SCHEMA_VERSION: u16 = 1;
 /// 单个确定性 CBOR 清单的最大长度。Maximum length of one deterministic CBOR manifest.
 pub const MAX_CANONICAL_MANIFEST_BYTES: usize = 8192;
+/// Maximum signatures admitted in one threshold set.
+pub const MAX_THRESHOLD_SIGNATURES: usize = 3;
+/// Domain separator for a canonical threshold signature set.
+pub const SIGNATURE_SET_DOMAIN: &[u8] = b"JASPER-UPDATE-SIGSET-V1\0";
+/// Encoded bytes per threshold signature entry.
+pub const THRESHOLD_SIGNATURE_BYTES: usize = 32 + 64;
+/// Maximum encoded threshold signature set.
+pub const MAX_SIGNATURE_SET_BYTES: usize =
+    SIGNATURE_SET_DOMAIN.len() + 1 + MAX_THRESHOLD_SIGNATURES * THRESHOLD_SIGNATURE_BYTES;
 
 /// 已由确定性 CBOR 解码器得到的清单声明和原始签名。
 /// Manifest claims produced by a canonical-CBOR decoder, together with the detached signature.
@@ -46,6 +55,175 @@ pub struct TrustPolicy<'a> {
     pub revoked_keys: &'a [[u8; 32]],
     /// 持久最小安全纪元。Persistent minimum security epoch.
     pub minimum_security_epoch: u64,
+}
+
+/// Threshold trust snapshot for production update admission.
+#[derive(Clone, Copy, Debug)]
+pub struct ThresholdTrustPolicy<'a> {
+    /// Current trusted publisher keys.
+    pub trusted_keys: &'a [[u8; 32]],
+    /// Revoked publisher keys; revocation takes precedence over trust.
+    pub revoked_keys: &'a [[u8; 32]],
+    /// Persistent minimum security epoch.
+    pub minimum_security_epoch: u64,
+    /// Minimum number of distinct valid signatures.
+    pub threshold: u8,
+}
+
+/// One detached signer and signature in a canonical threshold set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThresholdSignature {
+    /// Ed25519 public key identifying this signer.
+    pub signer: [u8; 32],
+    /// Detached Ed25519 signature over the canonical signature-set message.
+    pub signature: [u8; 64],
+}
+
+/// Bounded canonical signature set carried beside the unchanged CBOR manifest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SignatureSet {
+    entries: [Option<ThresholdSignature>; MAX_THRESHOLD_SIGNATURES],
+    len: u8,
+}
+
+/// Signature-set encoding or threshold-verification failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThresholdError {
+    /// The signature set has an invalid length or domain prefix.
+    SignatureSetFormat,
+    /// Entries are unsorted, zero, or otherwise non-canonical.
+    SignatureSetNonCanonical,
+    /// The same signer appears more than once.
+    DuplicateSigner,
+    /// More signatures were supplied than the bounded set admits.
+    TooManySignatures,
+    /// The required threshold is zero or exceeds the admitted signature count.
+    InvalidThreshold,
+    /// Fewer independent valid signatures were supplied than required.
+    InsufficientSignatures,
+    /// The underlying manifest signature validation failed.
+    Manifest(ManifestError),
+}
+
+impl SignatureSet {
+    /// Construct an empty, non-publishable signature set.
+    pub const fn empty() -> Self {
+        Self {
+            entries: [None; MAX_THRESHOLD_SIGNATURES],
+            len: 0,
+        }
+    }
+
+    /// Build a canonical set sorted by signer public key.
+    pub fn new(entries: &[ThresholdSignature]) -> Result<Self, ThresholdError> {
+        if entries.is_empty() || entries.len() > MAX_THRESHOLD_SIGNATURES {
+            return Err(ThresholdError::TooManySignatures);
+        }
+        let mut set = Self::empty();
+        for entry in entries {
+            if entry.signer.iter().all(|byte| *byte == 0) {
+                return Err(ThresholdError::SignatureSetFormat);
+            }
+            set.entries[set.len as usize] = Some(*entry);
+            set.len += 1;
+        }
+        set.sort_and_check()
+    }
+
+    /// Number of signature entries currently retained.
+    pub const fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// Whether the set contains no entries.
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Iterate over retained signatures in canonical signer order.
+    pub fn entries(&self) -> impl Iterator<Item = ThresholdSignature> + '_ {
+        self.entries[..self.len as usize].iter().filter_map(|entry| *entry)
+    }
+
+    /// Encode the canonical fixed-layout signature set.
+    pub fn encode(&self) -> Result<([u8; MAX_SIGNATURE_SET_BYTES], usize), ThresholdError> {
+        if self.len < 2 {
+            return Err(ThresholdError::InsufficientSignatures);
+        }
+        let mut out = [0u8; MAX_SIGNATURE_SET_BYTES];
+        let mut at = SIGNATURE_SET_DOMAIN.len();
+        out[..at].copy_from_slice(SIGNATURE_SET_DOMAIN);
+        out[at] = self.len;
+        at += 1;
+        for entry in self.entries() {
+            out[at..at + 32].copy_from_slice(&entry.signer);
+            out[at + 32..at + 96].copy_from_slice(&entry.signature);
+            at += THRESHOLD_SIGNATURE_BYTES;
+        }
+        Ok((out, at))
+    }
+
+    /// Decode and reject duplicates, non-canonical order and trailing bytes.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ThresholdError> {
+        if bytes.len() <= SIGNATURE_SET_DOMAIN.len()
+            || !bytes.starts_with(SIGNATURE_SET_DOMAIN)
+        {
+            return Err(ThresholdError::SignatureSetFormat);
+        }
+        let count = bytes[SIGNATURE_SET_DOMAIN.len()] as usize;
+        if !(2..=MAX_THRESHOLD_SIGNATURES).contains(&count) {
+            return Err(ThresholdError::SignatureSetFormat);
+        }
+        let expected = SIGNATURE_SET_DOMAIN.len() + 1 + count * THRESHOLD_SIGNATURE_BYTES;
+        if bytes.len() != expected {
+            return Err(ThresholdError::SignatureSetFormat);
+        }
+        let mut set = Self::empty();
+        let mut at = SIGNATURE_SET_DOMAIN.len() + 1;
+        for slot in 0..count {
+            let mut signer = [0u8; 32];
+            let mut signature = [0u8; 64];
+            signer.copy_from_slice(&bytes[at..at + 32]);
+            signature.copy_from_slice(&bytes[at + 32..at + 96]);
+            if signer.iter().all(|byte| *byte == 0) {
+                return Err(ThresholdError::SignatureSetFormat);
+            }
+            if slot != 0 {
+                let previous = set.entries[slot - 1].expect("previous threshold entry");
+                if previous.signer >= signer {
+                    return Err(if previous.signer == signer {
+                        ThresholdError::DuplicateSigner
+                    } else {
+                        ThresholdError::SignatureSetNonCanonical
+                    });
+                }
+            }
+            set.entries[slot] = Some(ThresholdSignature { signer, signature });
+            at += THRESHOLD_SIGNATURE_BYTES;
+        }
+        set.len = count as u8;
+        Ok(set)
+    }
+
+    fn sort_and_check(mut self) -> Result<Self, ThresholdError> {
+        for index in 1..self.len as usize {
+            let mut cursor = index;
+            while cursor > 0 {
+                let left = self.entries[cursor - 1].expect("threshold left entry");
+                let right = self.entries[cursor].expect("threshold right entry");
+                if left.signer < right.signer {
+                    break;
+                }
+                if left.signer == right.signer {
+                    return Err(ThresholdError::DuplicateSigner);
+                }
+                self.entries[cursor - 1] = Some(right);
+                self.entries[cursor] = Some(left);
+                cursor -= 1;
+            }
+        }
+        Ok(self)
+    }
 }
 
 /// 调用方要求的目标状态。
@@ -153,6 +331,64 @@ pub fn verify_manifest(
         signer: envelope.signer,
         manifest_sha256: Sha256::digest(envelope.canonical_cbor).into(),
     })
+}
+
+/// Verify an unchanged CBOR manifest against a production threshold policy.
+///
+/// Every supplied signature is authenticated. A revoked or unknown signer
+/// invalidates the whole set even if the numeric threshold could otherwise be
+/// met; revocation always takes precedence.
+pub fn verify_manifest_threshold(
+    policy: ThresholdTrustPolicy<'_>,
+    target: UpdateTarget,
+    envelope: ManifestEnvelope<'_>,
+    signatures: SignatureSet,
+) -> Result<VerifiedManifest, ThresholdError> {
+    let trusted = policy.trusted_keys.len();
+    if policy.threshold < 2
+        || usize::from(policy.threshold) > trusted
+        || trusted > MAX_THRESHOLD_SIGNATURES
+    {
+        return Err(ThresholdError::InvalidThreshold);
+    }
+    if signatures.is_empty() || signatures.len() < usize::from(policy.threshold) {
+        return Err(ThresholdError::InsufficientSignatures);
+    }
+    let mut embedded = None;
+    for entry in signatures.entries() {
+        if entry.signer == envelope.signer {
+            embedded = Some(entry.signature);
+        }
+        if policy.revoked_keys.contains(&entry.signer) {
+            return Err(ThresholdError::Manifest(ManifestError::RevokedSigner));
+        }
+        if !policy.trusted_keys.contains(&entry.signer) {
+            return Err(ThresholdError::Manifest(ManifestError::UnknownSigner));
+        }
+    }
+    if embedded != Some(envelope.signature) {
+        return Err(ThresholdError::Manifest(ManifestError::Signature));
+    }
+    let verified = verify_manifest(
+        TrustPolicy {
+            trusted_keys: policy.trusted_keys,
+            revoked_keys: policy.revoked_keys,
+            minimum_security_epoch: policy.minimum_security_epoch,
+        },
+        target,
+        envelope,
+    )
+    .map_err(ThresholdError::Manifest)?;
+    let (message, message_len) = signing_message(&envelope)
+        .map_err(ThresholdError::Manifest)?;
+    for entry in signatures.entries() {
+        let key = VerifyingKey::from_bytes(&entry.signer)
+            .map_err(|_| ThresholdError::Manifest(ManifestError::Encoding))?;
+        let signature = Signature::from_bytes(&entry.signature);
+        key.verify_strict(&message[..message_len], &signature)
+            .map_err(|_| ThresholdError::Manifest(ManifestError::Signature))?;
+    }
+    Ok(verified)
 }
 
 /// 验证本地安装授权；不产生下载、提交或网络副作用。
@@ -462,6 +698,204 @@ mod tests {
         assert_eq!(
             verify_manifest(policy, target(), envelope),
             Err(ManifestError::ManifestTooLarge)
+        );
+    }
+
+    #[test]
+    fn threshold_access_requires_two_distinct_valid_signers() {
+        let primary = Fixture::new();
+        let second = SigningKey::from_bytes(&[8; 32]);
+        let third = SigningKey::from_bytes(&[9; 32]);
+        let envelope = primary.envelope();
+        let (message, message_len) = signing_message(&envelope).unwrap();
+        let second_signature = second.sign(&message[..message_len]).to_bytes();
+        let trusted = [
+            primary.key.verifying_key().to_bytes(),
+            second.verifying_key().to_bytes(),
+            third.verifying_key().to_bytes(),
+        ];
+        let revoked = [[0u8; 32]];
+        let policy = ThresholdTrustPolicy {
+            trusted_keys: &trusted,
+            revoked_keys: &revoked,
+            minimum_security_epoch: 3,
+            threshold: 2,
+        };
+        let set = SignatureSet::new(&[
+            ThresholdSignature {
+                signer: second.verifying_key().to_bytes(),
+                signature: second_signature,
+            },
+            ThresholdSignature {
+                signer: primary.key.verifying_key().to_bytes(),
+                signature: envelope.signature,
+            },
+        ])
+        .unwrap();
+        assert_eq!(
+            verify_manifest_threshold(policy, target(), envelope, set),
+            Ok(VerifiedManifest {
+                release_sequence: 9,
+                security_epoch: 4,
+                target_profile: PROFILE,
+                signer: primary.key.verifying_key().to_bytes(),
+                manifest_sha256: Sha256::digest(primary.bytes).into(),
+            })
+        );
+
+        let insufficient = SignatureSet::new(&[ThresholdSignature {
+            signer: primary.key.verifying_key().to_bytes(),
+            signature: envelope.signature,
+        }])
+        .unwrap();
+        assert_eq!(
+            verify_manifest_threshold(policy, target(), envelope, insufficient),
+            Err(ThresholdError::InsufficientSignatures)
+        );
+
+        let invalid_policy = ThresholdTrustPolicy {
+            threshold: 1,
+            ..policy
+        };
+        assert_eq!(
+            verify_manifest_threshold(invalid_policy, target(), envelope, set),
+            Err(ThresholdError::InvalidThreshold)
+        );
+    }
+
+    #[test]
+    fn threshold_rejects_revocation_unknown_bad_and_duplicate_signers() {
+        let primary = Fixture::new();
+        let second = SigningKey::from_bytes(&[8; 32]);
+        let third = SigningKey::from_bytes(&[9; 32]);
+        let envelope = primary.envelope();
+        let (message, message_len) = signing_message(&envelope).unwrap();
+        let trusted = [
+            primary.key.verifying_key().to_bytes(),
+            second.verifying_key().to_bytes(),
+            third.verifying_key().to_bytes(),
+        ];
+        let second_signature = second.sign(&message[..message_len]).to_bytes();
+        let set = SignatureSet::new(&[
+            ThresholdSignature {
+                signer: primary.key.verifying_key().to_bytes(),
+                signature: envelope.signature,
+            },
+            ThresholdSignature {
+                signer: second.verifying_key().to_bytes(),
+                signature: second_signature,
+            },
+        ])
+        .unwrap();
+        let revoked = [second.verifying_key().to_bytes()];
+        let policy = ThresholdTrustPolicy {
+            trusted_keys: &trusted,
+            revoked_keys: &revoked,
+            minimum_security_epoch: 3,
+            threshold: 2,
+        };
+        assert_eq!(
+            verify_manifest_threshold(policy, target(), envelope, set),
+            Err(ThresholdError::Manifest(ManifestError::RevokedSigner))
+        );
+
+        let unknown_key = SigningKey::from_bytes(&[0x33; 32]);
+        let unknown = SignatureSet::new(&[
+            ThresholdSignature {
+                signer: primary.key.verifying_key().to_bytes(),
+                signature: envelope.signature,
+            },
+            ThresholdSignature {
+                signer: unknown_key.verifying_key().to_bytes(),
+                signature: unknown_key.sign(&message[..message_len]).to_bytes(),
+            },
+        ])
+        .unwrap();
+        let clean = ThresholdTrustPolicy {
+            revoked_keys: &[[0u8; 32]],
+            ..policy
+        };
+        assert_eq!(
+            verify_manifest_threshold(clean, target(), envelope, unknown),
+            Err(ThresholdError::Manifest(ManifestError::UnknownSigner))
+        );
+
+        let bad = SignatureSet::new(&[
+            ThresholdSignature {
+                signer: primary.key.verifying_key().to_bytes(),
+                signature: envelope.signature,
+            },
+            ThresholdSignature {
+                signer: second.verifying_key().to_bytes(),
+                signature: [0x55; 64],
+            },
+        ])
+        .unwrap();
+        assert_eq!(
+            verify_manifest_threshold(clean, target(), envelope, bad),
+            Err(ThresholdError::Manifest(ManifestError::Signature))
+        );
+        assert_eq!(
+            SignatureSet::new(&[
+                ThresholdSignature {
+                    signer: primary.key.verifying_key().to_bytes(),
+                    signature: envelope.signature,
+                },
+                ThresholdSignature {
+                    signer: primary.key.verifying_key().to_bytes(),
+                    signature: envelope.signature,
+                },
+            ]),
+            Err(ThresholdError::DuplicateSigner)
+        );
+    }
+
+    #[test]
+    fn signature_set_wire_is_bounded_canonical_and_round_trips() {
+        let primary = Fixture::new();
+        let second = SigningKey::from_bytes(&[8; 32]);
+        let envelope = primary.envelope();
+        let (message, message_len) = signing_message(&envelope).unwrap();
+        let set = SignatureSet::new(&[
+            ThresholdSignature {
+                signer: second.verifying_key().to_bytes(),
+                signature: second.sign(&message[..message_len]).to_bytes(),
+            },
+            ThresholdSignature {
+                signer: primary.key.verifying_key().to_bytes(),
+                signature: envelope.signature,
+            },
+        ])
+        .unwrap();
+        let (wire, length) = set.encode().unwrap();
+        assert_eq!(SignatureSet::decode(&wire[..length]), Ok(set));
+        let mut noncanonical = wire;
+        let first = SIGNATURE_SET_DOMAIN.len() + 1;
+        let second = first + THRESHOLD_SIGNATURE_BYTES;
+        let mut temporary = [0u8; THRESHOLD_SIGNATURE_BYTES];
+        temporary.copy_from_slice(&noncanonical[first..second]);
+        noncanonical.copy_within(second..second + THRESHOLD_SIGNATURE_BYTES, first);
+        noncanonical[second..second + THRESHOLD_SIGNATURE_BYTES].copy_from_slice(&temporary);
+        assert_eq!(
+            SignatureSet::decode(&noncanonical[..length]),
+            Err(ThresholdError::SignatureSetNonCanonical)
+        );
+        assert_eq!(
+            SignatureSet::decode(&wire[..length - 1]),
+            Err(ThresholdError::SignatureSetFormat)
+        );
+        assert_eq!(
+            SignatureSet::new(&[
+                ThresholdSignature {
+                    signer: [0; 32],
+                    signature: envelope.signature,
+                },
+                ThresholdSignature {
+                    signer: primary.key.verifying_key().to_bytes(),
+                    signature: envelope.signature,
+                },
+            ]),
+            Err(ThresholdError::SignatureSetFormat)
         );
     }
 }

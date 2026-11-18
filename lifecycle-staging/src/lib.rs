@@ -31,7 +31,8 @@ use jasper_lifecycle_model::boot::{
     BootControlError, BootDecision, BootReason, Candidate, ControlBlock, Slot, SlotState,
 };
 use jasper_lifecycle_model::manifest::{
-    authorize_install, LocalInstallGrant, ManifestError, TrustPolicy, UpdateTarget,
+    authorize_install, LocalInstallGrant, ManifestError, ThresholdTrustPolicy, TrustPolicy,
+    UpdateTarget,
 };
 use jasper_lifecycle_model::manifest_cbor::{
     ArtifactKind, VerifiedArtifact, VerifiedCborManifest, MAX_MANIFEST_CBOR_BYTES,
@@ -42,7 +43,10 @@ use sha2::{Digest, Sha256};
 
 use crate::archive_store::FileArchiveStore;
 use crate::control::{ControlStoreError, FileControlStore};
-use crate::source::{materialize_verified, MaterializedUpdate, SourceError, UpdateBundleSource};
+use crate::source::{
+    materialize_verified, materialize_verified_threshold, MaterializedUpdate, SourceError,
+    UpdateBundleSource,
+};
 
 const MANIFEST_FILE: &str = "manifest.cbor";
 const ARTIFACT_DIR: &str = "artifacts";
@@ -270,18 +274,66 @@ impl UpdateCoordinator {
         staging_root: &Path,
         metadata_headroom: u64,
     ) -> Result<PreparedUpdate, CoordinatorError> {
-        let mut next = self.machine;
-        next.apply(UpdateEvent::Discover)
-            .map_err(CoordinatorError::Transition)?;
-        let spool_name = format!(".source-{}", uuid::Uuid::new_v4());
-        let spool = staging_root
+        let spool = Self::source_spool(staging_root)?;
+        let materialized: MaterializedUpdate = materialize_verified(source, policy, target, &spool)
+            .map_err(CoordinatorError::Source)?;
+        self.prepare_materialized_source(
+            materialized,
+            grant,
+            now,
+            installed_dependencies,
+            staging_root,
+            metadata_headroom,
+        )
+    }
+
+    /// Acquire and stage one bundle through a production threshold policy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_from_source_threshold<S: UpdateBundleSource + ?Sized>(
+        &mut self,
+        policy: ThresholdTrustPolicy<'_>,
+        target: UpdateTarget,
+        source: &S,
+        grant: LocalInstallGrant,
+        now: u64,
+        installed_dependencies: &[String],
+        staging_root: &Path,
+        metadata_headroom: u64,
+    ) -> Result<PreparedUpdate, CoordinatorError> {
+        let spool = Self::source_spool(staging_root)?;
+        let materialized = materialize_verified_threshold(source, policy, target, &spool)
+            .map_err(CoordinatorError::Source)?;
+        self.prepare_materialized_source(
+            materialized,
+            grant,
+            now,
+            installed_dependencies,
+            staging_root,
+            metadata_headroom,
+        )
+    }
+
+    fn source_spool(staging_root: &Path) -> Result<PathBuf, CoordinatorError> {
+        staging_root
             .parent()
             .ok_or(CoordinatorError::Source(SourceError::InvalidSpoolPath(
                 staging_root.to_path_buf(),
-            )))?
-            .join(spool_name);
-        let materialized: MaterializedUpdate = materialize_verified(source, policy, target, &spool)
-            .map_err(CoordinatorError::Source)?;
+            )))
+            .map(|parent| parent.join(format!(".source-{}", uuid::Uuid::new_v4())))
+    }
+
+    fn prepare_materialized_source(
+        &mut self,
+        materialized: MaterializedUpdate,
+        grant: LocalInstallGrant,
+        now: u64,
+        installed_dependencies: &[String],
+        staging_root: &Path,
+        metadata_headroom: u64,
+    ) -> Result<PreparedUpdate, CoordinatorError> {
+        let mut next = self.machine;
+        next.apply(UpdateEvent::Discover)
+            .map_err(CoordinatorError::Transition)?;
         next.apply(UpdateEvent::Verify)
             .map_err(CoordinatorError::Transition)?;
         next.apply(UpdateEvent::Prepare)
@@ -2063,7 +2115,8 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use jasper_lifecycle_model::boot::SlotState;
     use jasper_lifecycle_model::manifest::{
-        VerifiedManifest, MANIFEST_SCHEMA_VERSION, SIGNATURE_DOMAIN,
+        SignatureSet, ThresholdSignature, ThresholdTrustPolicy, VerifiedManifest,
+        MANIFEST_SCHEMA_VERSION, SIGNATURE_DOMAIN,
     };
     use jasper_lifecycle_model::manifest_cbor::{Channel, MAX_MANIFEST_CBOR_BYTES};
     use sha2::{Digest, Sha256};
@@ -2132,7 +2185,9 @@ mod tests {
         }
     }
 
-    fn signed_cbor_bundle(artifact_bytes: &[u8]) -> (Vec<u8>, [u8; 64], [u8; 32]) {
+    fn signed_cbor_bundle(
+        artifact_bytes: &[u8],
+    ) -> (Vec<u8>, [u8; 64], [u8; 32], Vec<u8>) {
         let key = SigningKey::from_bytes(&[7; 32]);
         let signer = key.verifying_key().to_bytes();
         let profile = [0x42; 32];
@@ -2217,7 +2272,7 @@ mod tests {
         message.extend_from_slice(&(manifest_bytes.len() as u64).to_le_bytes());
         message.extend_from_slice(&manifest_bytes);
         let signature = key.sign(&message).to_bytes();
-        (manifest_bytes, signature, signer)
+        (manifest_bytes, signature, signer, message)
     }
 
     struct MemoryBundle {
@@ -2258,7 +2313,7 @@ mod tests {
     fn online_and_offline_sources_share_authentication_and_staging() {
         let temp = TestDir::new("source-parity");
         let artifact_bytes = b"identical-kernel-bytes";
-        let (manifest_bytes, signature, signer) = signed_cbor_bundle(artifact_bytes);
+        let (manifest_bytes, signature, signer, _) = signed_cbor_bundle(artifact_bytes);
         let profile = [0x42; 32];
 
         let offline_root = temp.path().join("offline-bundle");
@@ -2360,6 +2415,94 @@ mod tests {
                 .filter_map(Result::ok)
                 .all(|entry| !entry.file_name().to_string_lossy().starts_with(".source-")),
             "source spools must be removed after staging completes"
+        );
+    }
+
+    #[test]
+    fn threshold_source_stages_two_distinct_signatures() {
+        let temp = TestDir::new("threshold-source");
+        let artifact_bytes = b"threshold-kernel-bytes";
+        let (manifest_bytes, signature, signer, message) =
+            signed_cbor_bundle(artifact_bytes);
+        let second = SigningKey::from_bytes(&[8; 32]);
+        let third = SigningKey::from_bytes(&[9; 32]);
+        let trusted = [
+            signer,
+            second.verifying_key().to_bytes(),
+            third.verifying_key().to_bytes(),
+        ];
+        let signatures = SignatureSet::new(&[
+            ThresholdSignature {
+                signer,
+                signature,
+            },
+            ThresholdSignature {
+                signer: second.verifying_key().to_bytes(),
+                signature: second.sign(&message).to_bytes(),
+            },
+        ])
+        .unwrap();
+        let (signature_set, signature_set_len) = signatures.encode().unwrap();
+
+        let bundle_root = temp.path().join("threshold-bundle");
+        fs::create_dir_all(bundle_root.join(crate::source::SOURCE_ARTIFACT_DIR)).unwrap();
+        fs::write(
+            bundle_root.join(crate::source::SOURCE_MANIFEST_FILE),
+            &manifest_bytes,
+        )
+        .unwrap();
+        fs::write(
+            bundle_root.join(crate::source::SOURCE_SIGNATURE_SET_FILE),
+            &signature_set[..signature_set_len],
+        )
+        .unwrap();
+        fs::write(
+            bundle_root
+                .join(crate::source::SOURCE_ARTIFACT_DIR)
+                .join("kernel"),
+            artifact_bytes,
+        )
+        .unwrap();
+
+        let profile = [0x42; 32];
+        let revoked = [[0u8; 32]];
+        let policy = ThresholdTrustPolicy {
+            trusted_keys: &trusted,
+            revoked_keys: &revoked,
+            minimum_security_epoch: 3,
+            threshold: 2,
+        };
+        let target = UpdateTarget {
+            rollback_floor: 8,
+            profile,
+        };
+        let manifest_sha256: [u8; 32] = Sha256::digest(&manifest_bytes).into();
+        let grant = LocalInstallGrant {
+            locally_authenticated: true,
+            purpose: 1,
+            manifest_sha256,
+            profile,
+            expires_at: 200,
+        };
+        let staging_root = temp.path().join("threshold-staging");
+        let mut coordinator = UpdateCoordinator::idle();
+        let prepared = coordinator
+            .prepare_from_source_threshold(
+                policy,
+                target,
+                &DirectoryBundle::new(&bundle_root),
+                grant,
+                150,
+                &[],
+                &staging_root,
+                4096,
+            )
+            .unwrap();
+        assert_eq!(coordinator.stage(), UpdateStage::Prepared);
+        assert_eq!(prepared.manifest.manifest.manifest_sha256, manifest_sha256);
+        assert_eq!(
+            fs::read(staging_root.join(ARTIFACT_DIR).join("kernel")).unwrap(),
+            artifact_bytes
         );
     }
 
@@ -3327,7 +3470,7 @@ mod tests {
     fn service_online_and_offline_sources_keep_the_same_trust_and_staging_result() {
         let temp = TestDir::new("service-source-parity");
         let artifact_bytes = b"service-identical-kernel";
-        let (manifest_bytes, signature, signer) = signed_cbor_bundle(artifact_bytes);
+        let (manifest_bytes, signature, signer, _) = signed_cbor_bundle(artifact_bytes);
         let profile = [0x42; 32];
         let manifest_sha256: [u8; 32] = Sha256::digest(&manifest_bytes).into();
         let trusted = [signer];

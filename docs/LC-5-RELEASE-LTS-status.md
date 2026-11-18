@@ -107,6 +107,49 @@ python3 scripts/release-revocations.py accept \
 实际 NV index、owner/NV auth、TPM 资源管理器和 salted session 必须由发布环境
 提供；当前宿主未安装 `tpm2-tools`，因此尚无真实 TPM 计数器证据。
 
+新增 `scripts/release-production-preflight.py`，在任何发布签名前失败关闭地检查：
+
+- `release/release-policy.toml` 固定为 2-of-3、硬件单调锚、离线源和签名撤销；
+- Git 跟踪文件不包含 PEM 私钥或语义上伪装为私钥的材料；
+- 真实 TPM 2.0 设备可读、tpm2-tools 完整、指定 NV 索引确实存在，并且是
+  8 字节 counter；
+- 发布信任目录恰好包含三个互异公钥，治理信任目录恰好包含一个且与所有发布
+  键独立；
+- 远端审计端点为不含内嵌凭据或 fragment 的 HTTPS URL。
+
+2026-11-18 对当前宿主的只读盘点确认存在 Intel fTPM 2.0，并能看到若干已有的
+8 字节 NV counter；这些索引属于现有平台/系统服务，不能挪作 Jasper 发布锚。
+当前 `auth` 账号不属于 `tss` 组，宿主也没有安装到 PATH 的 tpm2-tools，因此
+预检保持 `NOT READY`。临时容器只用于确认硬件事实，不构成生产授权路径。
+
+宿主应在最小权限的发布账号上授予 `/dev/tpmrm0` 访问，并创建独立的 Jasper NV
+counter、三把隔离发布公钥、一把独立治理公钥和不可变远端审计端点后，再运行：
+
+```text
+python3 scripts/release-production-preflight.py \
+  --tpm-nv-index 0x... \
+  --release-trusted-dir /secure/release-trust \
+  --governance-trusted-dir /secure/governance-trust \
+  --remote-audit-endpoint https://audit.example.invalid/immutable
+```
+
+工具校验保留 tpm2-tools 的原始符号链接调用名，避免 `tpm2_nvreadpublic` 被解析
+成多调用二进制 `tpm2` 后丢失子命令。预检通过只表示生产环境形状完整；真实
+递增、断电恢复、远端确认和双人签名仪式仍须单独留存证据。
+
+新增 `scripts/release-remote-audit.py` 和确定性 loopback 测试。远端协议要求：
+
+- 先验证本地 `audit.jsonl` 是连续、规范的 epoch 链；
+- 将选中事件按 SHA-256 写入 `PUT /objects/<digest>`，并携带
+  `If-None-Match: *`；新对象必须是 201，已有对象必须是 409/412；
+- 随后 GET 同一对象，要求字节与本地事件完全一致，远端篡改不能生成 receipt；
+- receipt 只记录 endpoint、event index、epoch 和 SHA-256，不记录 bearer token；
+- 默认只接受 HTTPS、禁止重定向和嵌入凭据；仅 loopback 测试可显式开启 HTTP。
+
+CI 覆盖首次写入、幂等重放、远端篡改、认证失败、越界 epoch 和明文 endpoint
+拒绝。该客户端的“append-only”取决于远端实际执行 create-only 策略；生产 sink
+的对象锁、保留期、双区域复制和访问审计仍需在真实服务上验收。
+
 ## 2-of-3 发布门限
 
 `jasper.release-artifact/v2` 将以下事实纳入同一签名消息：
@@ -127,6 +170,18 @@ python3 scripts/release-revocations.py accept \
 `scripts/release-supply-check.sh` 使用三个测试发布密钥完成正反例：3-of-3 和
 2-of-3 成功、1-of-3 拒绝、重复签名拒绝、撤销密钥拒绝、轮换到新的 B/C/D
 三密钥集合后 2-of-3 成功，并从两个认证 HTTPS 源和一个离线副本得到相同字节。
+
+发布清单现在支持真正的分离签名流程：
+
+1. `release-artifact prepare` 只接收三个公钥，生成完整的规范 manifest；
+2. 每把私钥在独立环境执行 `release-artifact sign`，签署完全相同的 manifest
+   字节；密钥不属于 manifest 声明集合时在写签名前失败；
+3. 发布端收集至少两个签名后交给 `verify`，由固定 2-of-3 策略、撤销表和
+   信任根共同验证。
+
+供应演练已切换到该流程，并额外证明未声明的第四把私钥不能生成有效签名。
+两阶段命令消除了“一个进程必须同时读取三把私钥”的需求；生产环境仍必须用
+相互隔离的 HSM/离线签名机和双人授权完成实际仪式。
 
 ```text
 release-policy: PASS channels=stable,lts sources>=2 signatures=2-of-3
