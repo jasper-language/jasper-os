@@ -1,5 +1,5 @@
 {
-  "baseline_total": 428,
+  "baseline_total": 423,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,10 +10,10 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 98,
+    "explicit-safety-policy": 96,
     "platform-adapter": 27,
     "protocol-abi": 18,
-    "runtime-resource-capacity": 58,
+    "runtime-resource-capacity": 57,
     "unclassified": 139
   },
   "entries": [
@@ -2941,7 +2941,7 @@
       "category": "runtime-resource-capacity",
       "count": 1,
       "fingerprint": "1562f97b588ab42e1ec366faf866a95330c895c26c7b2bbe904b59afe7c77358",
-      "line": 7286,
+      "line": 7271,
       "path": "kernel/src/proc/mod.rs",
       "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
       "rules": "HC-G1",
@@ -2951,7 +2951,7 @@
       "category": "runtime-resource-capacity",
       "count": 1,
       "fingerprint": "17860804d04d51495f65f64dbd30cbe086ddc80d75818ceaf68fd4996241a826",
-      "line": 7277,
+      "line": 7262,
       "path": "kernel/src/proc/mod.rs",
       "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
       "rules": "HC-G1",
@@ -2960,42 +2960,12 @@
     {
       "category": "runtime-resource-capacity",
       "count": 1,
-      "fingerprint": "1a779d36fb1a120c12f8b83309c17f961c438c61c9866ca6b6d63fc7bc15a69f",
-      "line": 7291,
-      "path": "kernel/src/proc/mod.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
-      "rules": "HC-G1",
-      "source": "pub const MAX_DEVICE_MAP_PAGES: u64 = 1024;"
-    },
-    {
-      "category": "runtime-resource-capacity",
-      "count": 1,
       "fingerprint": "39cd2ed3cd72fa0a31a0fa19987bb5474b6d90c89aa2077cae0c583e317ed5c1",
-      "line": 7288,
+      "line": 7273,
       "path": "kernel/src/proc/mod.rs",
       "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
       "rules": "HC-G1",
       "source": "pub const MAX_MAP_PAGES: u64 = crate::config::ACTIVE.memory.max_map_pages;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 3,
-      "fingerprint": "483195978e390296f26b88da81408743ceef8dc4d815adbf1d5a4db2f3a59169",
-      "line": 3937,
-      "path": "kernel/src/proc/mod.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_BYTES: u64 = 16 * 1024 * 1024;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "fe241f440f6e9b2aad2b7e9925447dc8c3439436a1bb190bd07c730457fdbd23",
-      "line": 2418,
-      "path": "kernel/src/proc/mod.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_BYTES: u64 = 64 * 1024 * 1024;"
     },
     {
       "category": "runtime-resource-capacity",
@@ -3420,10 +3390,10 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 105,
+    "explicit-safety-policy": 101,
     "platform-adapter": 43,
     "protocol-abi": 21,
-    "runtime-resource-capacity": 98,
+    "runtime-resource-capacity": 97,
     "unclassified": 161
   }
 }

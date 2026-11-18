@@ -235,12 +235,6 @@
       "rules": "HC-G1"
     },
     {
-      "count": 1,
-      "fingerprint": "1a779d36fb1a120c12f8b83309c17f961c438c61c9866ca6b6d63fc7bc15a69f",
-      "path": "kernel/src/proc/mod.rs",
-      "rules": "HC-G1"
-    },
-    {
       "count": 2,
       "fingerprint": "1beb406fbd6bb56d3d776aae8ae0a323d34407881daa789f83f764c6ad9e9c2a",
       "path": "jaso/src/manifest.rs",
@@ -592,12 +586,6 @@
       "count": 2,
       "fingerprint": "47d2967ab2aaec530ba3d1fb18587b852faeb50af6cc9ca27292e404e4119618",
       "path": "kernel-core/src/virtio_fs.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 3,
-      "fingerprint": "483195978e390296f26b88da81408743ceef8dc4d815adbf1d5a4db2f3a59169",
-      "path": "kernel/src/proc/mod.rs",
       "rules": "HC-G1"
     },
     {
@@ -2030,12 +2018,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "fe241f440f6e9b2aad2b7e9925447dc8c3439436a1bb190bd07c730457fdbd23",
-      "path": "kernel/src/proc/mod.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "ffe7b14d4bdcec1fb16b3d97c5bba8be19d95f0f564a1c6b0fe3040eca8cc9b1",
       "path": "kernel-core/src/hwvirt_vcpu.rs",
       "rules": "HC-G1"
@@ -2061,5 +2043,5 @@
     "user",
     "xtask"
   ],
-  "total": 428
+  "total": 423
 }

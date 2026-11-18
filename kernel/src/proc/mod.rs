@@ -2415,8 +2415,7 @@ pub(crate) fn linux_create_shared_memory(
     pid: ObjId,
     size: u64,
 ) -> Option<LinuxSharedMemoryObject> {
-    const MAX_BYTES: u64 = 64 * 1024 * 1024;
-    if size == 0 || size > MAX_BYTES {
+    if size == 0 {
         return None;
     }
     let pages_count = usize::try_from(size.div_ceil(FRAME_SIZE)).ok()?;
@@ -2467,9 +2466,6 @@ fn linux_open_ashmem_kind(
 ) -> Option<u32> {
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
-        if linux.ashmem.len() >= 32 {
-            return Err(ProcError::NoTaskSlot);
-        }
         linux
             .ashmem
             .try_reserve(1)
@@ -3934,9 +3930,7 @@ pub(crate) fn linux_ion_alloc(
     flags: u32,
 ) -> Result<u32, LinuxAshmemError> {
     const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
-    const MAX_BYTES: u64 = 16 * 1024 * 1024;
     if size == 0
-        || size > MAX_BYTES
         || alignment > PAGE
         || heap_mask & 1 == 0
         || flags & !3 != 0
@@ -3946,9 +3940,6 @@ pub(crate) fn linux_ion_alloc(
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
         let linux_pid = linux.pid;
-        if linux.ion_allocations.len() >= 32 {
-            return Err(ProcError::NoTaskSlot);
-        }
         linux
             .ion_allocations
             .try_reserve(1)
@@ -3958,11 +3949,12 @@ pub(crate) fn linux_ion_alloc(
             .checked_add(1)
             .ok_or(ProcError::NoTaskSlot)?;
         let current = linux.next_ion_user_handle;
-        let pages_count = size.div_ceil(PAGE);
+        let pages_count =
+            usize::try_from(size.div_ceil(PAGE)).map_err(|_| ProcError::OutOfFrames)?;
         let mut charge = p
             .memory_account
             .reserve(
-                pages_count,
+                pages_count as u64,
                 0,
                 p.memory_owned_limit,
                 p.memory_pin_limit,
@@ -3970,7 +3962,7 @@ pub(crate) fn linux_ion_alloc(
             .ok_or(ProcError::MemoryQuota)?;
         let mut pages = Vec::new();
         pages
-            .try_reserve_exact(pages_count as usize)
+            .try_reserve_exact(pages_count)
             .map_err(|_| ProcError::OutOfFrames)?;
         for _ in 0..pages_count {
             let page_charge = charge.take_page().ok_or(ProcError::OutOfFrames)?;
@@ -4162,11 +4154,8 @@ pub(crate) fn linux_ashmem_set_size(
     size: u64,
 ) -> Result<(), LinuxAshmemError> {
     const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
-    const MAX_BYTES: u64 = 16 * 1024 * 1024;
-    if size > MAX_BYTES {
-        return Err(LinuxAshmemError::Invalid);
-    }
-    let pages_count = size.div_ceil(PAGE);
+    let pages_count =
+        usize::try_from(size.div_ceil(PAGE)).map_err(|_| LinuxAshmemError::NoMemory)?;
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
         let buffer = linux
@@ -4184,13 +4173,13 @@ pub(crate) fn linux_ashmem_set_size(
             .transpose()
             .map_err(|_| ProcError::Handle(HandleError::RightsDenied))?;
         let mut pages = buffer.pages.lock();
-        let current_pages = pages.len() as u64;
+        let current_pages = pages.len();
         if pages_count > current_pages {
             let additional = pages_count - current_pages;
             let mut charge = p
                 .memory_account
                 .reserve(
-                    additional,
+                    additional as u64,
                     0,
                     p.memory_owned_limit,
                     p.memory_pin_limit,
@@ -4198,7 +4187,7 @@ pub(crate) fn linux_ashmem_set_size(
                 .ok_or(ProcError::MemoryQuota)?;
             let mut allocated = Vec::new();
             allocated
-                .try_reserve_exact(additional as usize)
+                .try_reserve_exact(additional)
                 .map_err(|_| ProcError::OutOfFrames)?;
             for _ in 0..additional {
                 let page_charge = charge.take_page().ok_or(ProcError::OutOfFrames)?;
@@ -4208,16 +4197,16 @@ pub(crate) fn linux_ashmem_set_size(
                 );
             }
             pages
-                .try_reserve_exact(additional as usize)
+                .try_reserve_exact(additional)
                 .map_err(|_| ProcError::OutOfFrames)?;
             pages.append(&mut allocated);
             if let Some(cipher) = cipher {
                 let mut data_unit = [0u8; FRAME_SIZE as usize];
                 for index in current_pages..pages_count {
                     let page = pages
-                        .get(index as usize)
+                        .get(index)
                         .ok_or(ProcError::OutOfFrames)?;
-                    cipher.encrypt(index, &mut data_unit);
+                    cipher.encrypt(index as u64, &mut data_unit);
                     let pointer = crate::mm::phys_to_virt(page.frame().start())
                         .ok_or(ProcError::OutOfFrames)?;
                     // SAFETY: the retained page owns one writable frame.
@@ -4231,7 +4220,7 @@ pub(crate) fn linux_ashmem_set_size(
                 }
             }
         } else {
-            pages.truncate(pages_count as usize);
+            pages.truncate(pages_count);
         }
         buffer.size.store(size, Ordering::Release);
         Ok(())
@@ -4329,7 +4318,6 @@ pub(crate) fn linux_ashmem_write_from(
     offset: u64,
     input: &[u8],
 ) -> Result<usize, LinuxAshmemError> {
-    const MAX_BYTES: u64 = 16 * 1024 * 1024;
     if input.is_empty() {
         return Ok(0);
     }
@@ -4362,9 +4350,6 @@ pub(crate) fn linux_ashmem_write_from(
     let end = offset
         .checked_add(length)
         .ok_or(LinuxAshmemError::Invalid)?;
-    if end > MAX_BYTES {
-        return Err(LinuxAshmemError::NoMemory);
-    }
     if end > buffer.size.load(Ordering::Acquire) {
         if seals & 4 != 0 {
             return Err(LinuxAshmemError::Permission);
@@ -7286,10 +7271,6 @@ pub const MAX_PROCESS_FRAMES: usize = {
 pub const MAX_VM_GUEST_FRAMES: u64 = crate::config::ACTIVE.memory.max_vm_guest_frames as u64;
 /// 单次 `system.memory.map` / `unmap` 最多涉及的页数。
 pub const MAX_MAP_PAGES: u64 = crate::config::ACTIVE.memory.max_map_pages;
-/// 单个设备 BAR 映射最多涉及的页数（4 MiB；QEMU 的 virtio BAR 远小于此）。
-/// Upper bound on pages in one device BAR mapping (4 MiB).
-pub const MAX_DEVICE_MAP_PAGES: u64 = 1024;
-
 /// 匿名映射 / 取消映射的失败原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemError {
@@ -7828,7 +7809,7 @@ pub fn unmap_memory(pid: ObjId, va: u64, pages: u64) -> Result<(), MemError> {
 ///
 /// 页属性固定为 `USER | WRITE | NO_CACHE`，且**不含 EXECUTE**；BAR 不是 RAM，映射与撤销都不经过
 /// 页帧分配器（只有建立中间页表时才可能分配页表帧，随地址空间销毁回收）。`size` 必须页对齐、
-/// 非零且不超过 [`MAX_DEVICE_MAP_PAGES`] 页。同一进程内同一物理 BAR 范围只允许一个映射（重复请求
+/// 非零且落在用户地址空间及 MMIO capability 预算内。同一进程内同一物理 BAR 范围只允许一个映射（重复请求
 /// 返回 [`MemError::AlreadyMapped`]）；目标虚拟区间已有任何映射也返回同一错误。失败时撤销本次已建立
 /// 的映射，不留残留。
 /// Maps a device BAR window into `pid` with uncached, non-executable user pages (writable for drivers).
@@ -7847,7 +7828,7 @@ pub fn map_device_bar(
         return Err(MemError::InvalidRange);
     }
     let pages = size / FRAME_SIZE;
-    if pages == 0 || pages > MAX_DEVICE_MAP_PAGES || phys.checked_add(size).is_none() {
+    if pages == 0 || phys.checked_add(size).is_none() {
         return Err(MemError::InvalidRange);
     }
     let end = pages
@@ -7867,6 +7848,9 @@ pub fn map_device_bar(
         if p.state != ProcState::Running {
             return Err(MemError::NoSuchProcess);
         }
+        if !p.memory_caps.can_grant(va, pages, MemoryKind::DeviceMmio) {
+            return Err(MemError::Quota);
+        }
         for i in 0..pages {
             if p.space
                 .translate(VirtPage::containing(va + i * FRAME_SIZE))
@@ -7883,9 +7867,6 @@ pub fn map_device_bar(
         }
         if p.device_maps.try_reserve(1).is_err() {
             return Err(MemError::OutOfMemory);
-        }
-        if !p.memory_caps.can_grant(va, pages, MemoryKind::DeviceMmio) {
-            return Err(MemError::Quota);
         }
         if !p.space.begin_shootdown() {
             return Err(MemError::Busy);
