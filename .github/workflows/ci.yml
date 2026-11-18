@@ -187,6 +187,11 @@ jobs:
             target
           key: accept-${{ env.RUST_NIGHTLY }}-${{ hashFiles('Cargo.lock') }}
       - name: LC-2 原生恢复命令真实 UEFI / native recovery UEFI
+        # QEMU itself has a 360-second guest budget.  This outer bound catches
+        # inherited pipe/child-process leaks that would otherwise hold the step
+        # open until the 90-minute job timeout.
+        # QEMU 客户机预算为 360 秒；外层上限捕获可能继承管道的子进程泄漏。
+        timeout-minutes: 20
         env:
           JASPER_BUILD_CPUS: 0-1
           ISSUE21_UEFI_MODE: terminal-recovery
