@@ -1644,6 +1644,11 @@ pub const OPERATIONS: &[OperationContract] = &[
         result: "i64:required_or_written",
     },
     OperationContract {
+        name: "system.device.virtio.submit",
+        args: "device_handle,u32:notify_off",
+        result: "0_or_error",
+    },
+    OperationContract {
         name: "system.device.interrupt.create",
         args: "device_handle,u32:entry,u32:cpu",
         result: "handle_or_error",

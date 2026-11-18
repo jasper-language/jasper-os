@@ -111,11 +111,37 @@ fn driver_host_calls() -> SyscallSet {
         abi::SYSTEM_MEMORY_OBJECT_MAP,
         abi::SYSTEM_MEMORY_OBJECT_UNMAP,
         abi::SYSTEM_MEMORY_DMA_MAP,
+        abi::SYSTEM_TIME_WAIT,
         abi::SYSTEM_ASYNC_RING_CREATE,
         abi::SYSTEM_ASYNC_RING_ENTER,
         abi::SYSTEM_HANDLE_CLOSE,
         abi::SYSTEM_TASK_EXIT,
     ])
+}
+
+#[cfg(feature = "iommu-dma-verify")]
+fn driver_queue_calls() -> SyscallSet {
+    let ids = [
+        abi::SYSTEM_CONSOLE_WRITE,
+        abi::SYSTEM_DEVICE_LIST,
+        abi::SYSTEM_DEVICE_OPEN,
+        abi::SYSTEM_DEVICE_GET,
+        abi::SYSTEM_DEVICE_CAPABILITY_LIST,
+        abi::SYSTEM_DEVICE_MAP,
+        abi::SYSTEM_DEVICE_VIRTIO_SUBMIT,
+        abi::SYSTEM_DEVICE_INTERRUPT_CREATE,
+        abi::SYSTEM_DEVICE_INTERRUPT_WAIT,
+        abi::SYSTEM_MEMORY_OBJECT_CREATE,
+        abi::SYSTEM_MEMORY_OBJECT_MAP,
+        abi::SYSTEM_MEMORY_OBJECT_UNMAP,
+        abi::SYSTEM_MEMORY_DMA_MAP,
+        abi::SYSTEM_TIME_WAIT,
+        abi::SYSTEM_ASYNC_RING_CREATE,
+        abi::SYSTEM_ASYNC_RING_ENTER,
+        abi::SYSTEM_HANDLE_CLOSE,
+        abi::SYSTEM_TASK_EXIT,
+    ];
+    SyscallSet::try_of(&ids).unwrap_or(SyscallSet::EMPTY)
 }
 
 fn has_virtio_rng() -> bool {
@@ -142,6 +168,41 @@ pub(crate) fn run_driver_host() -> Option<bool> {
         after == before && ok
     );
     Some(ok && after == before)
+}
+
+/// Run the real user-space split-virtqueue role under the VT-d acceptance.
+///
+/// 在 VT-d 验收下运行真实用户态 split virtqueue；
+/// 未发现 virtio-rng 或资源未回基线均失败关闭。
+#[cfg(all(feature = "iommu-dma-verify", target_arch = "x86_64"))]
+pub(crate) fn run_driver_queue() -> bool {
+    if !has_virtio_rng() {
+        check(false, "iommu queue work requires virtio-rng");
+        return false;
+    }
+    // The kernel virtio notify transport uses the process-wide MMIO window.
+    // Initialize its page-table cache before taking the before/after baseline so
+    // a one-time static reservation is not misreported as a per-operation leak.
+    // 内核 virtio 通知传输使用进程级 MMIO 窗口；先初始化其页表缓存，避免把
+    // 一次性静态预留误报为每次操作泄漏。
+    if crate::mmio::prepare_window().is_err() {
+        check(false, "kernel MMIO window initialization failed");
+        return false;
+    }
+    let before = crate::baseline::baseline();
+    let ok = run_role("driver-queue", 7, driver_queue_calls());
+    let after = crate::baseline::baseline();
+    kprintln!(
+        "[JSR-DC1-BASELINE] before={:?} after={:?}",
+        before,
+        after
+    );
+    check(after == before, "driver queue resources did not return to baseline");
+    let ok = ok && after == before;
+    if !ok {
+        check(false, "user-space virtqueue work failed");
+    }
+    ok
 }
 
 /// 运行 DRV-1C 演练并输出汇总（`failed` 进入内核的失败计数）。

@@ -24,8 +24,8 @@ use kernel_core::arch2::{
     BAR_MAP_WORD, CONTROL_MAGIC, DEVICE_HANDLE_WORD, READY_VALUE, READY_WORD, RING_HANDLE_WORD,
 };
 use kernel_core::device::{
-    CapabilityRecord, Desc, Filter, Record, BAR_KIND_IO, BAR_KIND_NONE, CAP_CFG_COMMON, CAP_RECORD_SIZE, DESC_SIZE,
-    FILTER_ALL_CLASS, FILTER_ALL_VENDOR, RECORD_SIZE,
+    CapabilityRecord, Desc, Filter, Record, BAR_KIND_IO, BAR_KIND_NONE, CAP_CFG_COMMON,
+    CAP_CFG_NOTIFY, CAP_RECORD_SIZE, DESC_SIZE, FILTER_ALL_CLASS, FILTER_ALL_VENDOR, RECORD_SIZE,
 };
 use kernel_core::dma_abi::MapArgs as DmaMapArgs;
 use kernel_core::memory_abi::MapArgs as MemoryMapArgs;
@@ -51,6 +51,20 @@ const MAP_VA: u64 = WINDOW_BASE_X86_64 + (960 << 20);
 const MAP_VA2: u64 = MAP_VA + 0x1_0000;
 /// DC-1 user driver-host DMA window.
 const DRIVER_DMA_VA: u64 = WINDOW_BASE_X86_64 + (968 << 20);
+/// virtio split-ring offsets inside the first DMA page.
+const VQ_DESC_OFF: u64 = 0x000;
+const VQ_AVAIL_OFF: u64 = 0x100;
+const VQ_USED_OFF: u64 = 0x180;
+const VQ_DATA_OFF: u64 = 0x200;
+const VQ_DATA_LEN: u32 = 32;
+const VQ_SIZE: u16 = 4;
+const VIRTIO_STATUS_ACKNOWLEDGE: u8 = 1;
+const VIRTIO_STATUS_DRIVER: u8 = 2;
+const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
+const VIRTIO_STATUS_FEATURES_OK: u8 = 8;
+const VIRTIO_STATUS_FAILED: u8 = 128;
+const VIRTIO_F_VERSION_1: u32 = 1 << 0;
+const VIRTIO_F_ACCESS_PLATFORM: u32 = 1 << 1;
 
 /// 断言总数与失败数。
 static mut CHECKS: u32 = 0;
@@ -231,6 +245,74 @@ fn dma_map(memory: i64, args: &mut DmaMapArgs) -> i64 {
             0,
         )
     }
+}
+
+fn virtio_notify(device: i64, notify_off: u16) -> i64 {
+    // SAFETY: both arguments are scalar values validated by the kernel.
+    unsafe {
+        syscall3(
+            ids::SYSTEM_DEVICE_VIRTIO_SUBMIT,
+            device as u64,
+            notify_off as u64,
+            0,
+        )
+    }
+}
+
+fn time_wait(ticks: u64) -> i64 {
+    // SAFETY: the kernel validates the tick count and does not dereference pointers.
+    unsafe { syscall3(ids::SYSTEM_TIME_WAIT, ticks, 0, 0) }
+}
+
+fn mmio_write8(address: u64, value: u8) {
+    // SAFETY: caller supplies an address inside a successfully mapped device window.
+    unsafe { (address as *mut u8).write_volatile(value) }
+}
+
+fn mmio_read8(address: u64) -> u8 {
+    // SAFETY: caller supplies an address inside a successfully mapped device window.
+    unsafe { (address as *const u8).read_volatile() }
+}
+
+fn mmio_write16(address: u64, value: u16) {
+    // SAFETY: caller supplies an aligned address inside a mapped device window.
+    unsafe { (address as *mut u16).write_volatile(value) }
+}
+
+fn mmio_read16(address: u64) -> u16 {
+    // SAFETY: caller supplies an aligned address inside a mapped device window.
+    unsafe { (address as *const u16).read_volatile() }
+}
+
+fn mmio_write32(address: u64, value: u32) {
+    // SAFETY: caller supplies an aligned address inside a mapped device window.
+    unsafe { (address as *mut u32).write_volatile(value) }
+}
+
+fn mmio_read32(address: u64) -> u32 {
+    // SAFETY: caller supplies an aligned address inside a mapped device window.
+    unsafe { (address as *const u32).read_volatile() }
+}
+
+fn mmio_write64(address: u64, value: u64) {
+    // SAFETY: caller supplies an aligned address inside a mapped device window.
+    unsafe { (address as *mut u64).write_volatile(value) }
+}
+
+fn queue_write16(address: u64, offset: u64, value: u16) {
+    mmio_write16(address + offset, value);
+}
+
+fn queue_read16(address: u64, offset: u64) -> u16 {
+    mmio_read16(address + offset)
+}
+
+fn queue_write32(address: u64, offset: u64, value: u32) {
+    mmio_write32(address + offset, value);
+}
+
+fn queue_read32(address: u64, offset: u64) -> u32 {
+    mmio_read32(address + offset)
 }
 
 fn bind_interrupt(device: i64, entry: u64, cpu: u64) -> i64 {
@@ -870,12 +952,177 @@ fn probe_service_driver(control: usize) -> ! {
     exit(0)
 }
 
+/// Submit one split-virtqueue request to virtio-rng and reap the used ring.
+///
+/// 向 virtio-rng 提交一个 split-virtqueue 请求并从 used ring 收割完成。
+fn run_virtio_rng_queue(device: i64, common_va: u64, iova: u64) -> bool {
+    const DEVICE_FEATURE_SELECT: u64 = 0x00;
+    const DEVICE_FEATURE: u64 = 0x04;
+    const DRIVER_FEATURE_SELECT: u64 = 0x08;
+    const DRIVER_FEATURE: u64 = 0x0c;
+    const DEVICE_STATUS: u64 = 0x14;
+    const QUEUE_SELECT: u64 = 0x16;
+    const QUEUE_SIZE: u64 = 0x18;
+    const QUEUE_MSIX_VECTOR: u64 = 0x1a;
+    const QUEUE_ENABLE: u64 = 0x1c;
+    const QUEUE_DESC: u64 = 0x20;
+    const QUEUE_AVAIL: u64 = 0x28;
+    const QUEUE_USED: u64 = 0x30;
+
+    mmio_write8(common_va + DEVICE_STATUS, 0);
+    let mut reset_spins = 0u64;
+    while mmio_read8(common_va + DEVICE_STATUS) != 0 {
+        reset_spins += 1;
+        if reset_spins >= 20_000_000 {
+            return false;
+        }
+        core::hint::spin_loop();
+    }
+    mmio_write8(
+        common_va + DEVICE_STATUS,
+        VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER,
+    );
+
+    mmio_write32(common_va + DEVICE_FEATURE_SELECT, 1);
+    let device_high = mmio_read32(common_va + DEVICE_FEATURE);
+    if device_high & (VIRTIO_F_VERSION_1 | VIRTIO_F_ACCESS_PLATFORM)
+        != (VIRTIO_F_VERSION_1 | VIRTIO_F_ACCESS_PLATFORM)
+    {
+        mmio_write8(common_va + DEVICE_STATUS, VIRTIO_STATUS_FAILED);
+        return false;
+    }
+    mmio_write32(common_va + DEVICE_FEATURE_SELECT, 0);
+    let _device_low = mmio_read32(common_va + DEVICE_FEATURE);
+    mmio_write32(common_va + DRIVER_FEATURE_SELECT, 0);
+    mmio_write32(common_va + DRIVER_FEATURE, 0);
+    mmio_write32(common_va + DRIVER_FEATURE_SELECT, 1);
+    mmio_write32(
+        common_va + DRIVER_FEATURE,
+        VIRTIO_F_VERSION_1 | VIRTIO_F_ACCESS_PLATFORM,
+    );
+    let status = mmio_read8(common_va + DEVICE_STATUS);
+    mmio_write8(
+        common_va + DEVICE_STATUS,
+        status | VIRTIO_STATUS_FEATURES_OK,
+    );
+    if mmio_read8(common_va + DEVICE_STATUS) & VIRTIO_STATUS_FEATURES_OK == 0 {
+        mmio_write8(common_va + DEVICE_STATUS, VIRTIO_STATUS_FAILED);
+        return false;
+    }
+
+    queue_write16(common_va, QUEUE_SELECT, 0);
+    let offered = queue_read16(common_va, QUEUE_SIZE);
+    if offered < VQ_SIZE {
+        mmio_write8(common_va + DEVICE_STATUS, VIRTIO_STATUS_FAILED);
+        return false;
+    }
+    queue_write16(common_va, QUEUE_SIZE, VQ_SIZE);
+    queue_write16(common_va, QUEUE_MSIX_VECTOR, 0);
+    let desc_iova = iova + VQ_DESC_OFF;
+    let avail_iova = iova + VQ_AVAIL_OFF;
+    let used_iova = iova + VQ_USED_OFF;
+    queue_write32(common_va, QUEUE_DESC, desc_iova as u32);
+    queue_write32(common_va, QUEUE_DESC + 4, (desc_iova >> 32) as u32);
+    queue_write32(common_va, QUEUE_AVAIL, avail_iova as u32);
+    queue_write32(common_va, QUEUE_AVAIL + 4, (avail_iova >> 32) as u32);
+    queue_write32(common_va, QUEUE_USED, used_iova as u32);
+    queue_write32(common_va, QUEUE_USED + 4, (used_iova >> 32) as u32);
+    queue_write16(common_va, QUEUE_ENABLE, 1);
+    if queue_read16(common_va, QUEUE_ENABLE) != 1 {
+        mmio_write8(common_va + DEVICE_STATUS, VIRTIO_STATUS_FAILED);
+        return false;
+    }
+    // Descriptor 0 points at the device-writable second page.
+    mmio_write64(DRIVER_DMA_VA + VQ_DESC_OFF, iova + VQ_DATA_OFF);
+    mmio_write32(DRIVER_DMA_VA + VQ_DESC_OFF + 8, VQ_DATA_LEN);
+    mmio_write16(DRIVER_DMA_VA + VQ_DESC_OFF + 12, 0x0002);
+    mmio_write16(DRIVER_DMA_VA + VQ_DESC_OFF + 14, 0);
+    // Available ring: flags=0, idx=1, ring[0]=descriptor 0.
+    mmio_write16(DRIVER_DMA_VA + VQ_AVAIL_OFF, 0);
+    mmio_write16(DRIVER_DMA_VA + VQ_AVAIL_OFF + 4, 0);
+    fence(Ordering::Release);
+    mmio_write16(DRIVER_DMA_VA + VQ_AVAIL_OFF + 2, 1);
+    fence(Ordering::SeqCst);
+    mmio_write8(
+        common_va + DEVICE_STATUS,
+        mmio_read8(common_va + DEVICE_STATUS) | VIRTIO_STATUS_DRIVER_OK,
+    );
+    fence(Ordering::SeqCst);
+
+    let notify_off = queue_read16(common_va, 0x1e);
+    log(format_args!(
+        "[JSR-DEV] dc1 queue_setup offered={} status={} notify_off={} desc=0x{:x} avail=0x{:x} used=0x{:x} desc_rb=0x{:x} avail_rb=0x{:x} used_rb=0x{:x} enable_rb={}",
+        offered,
+        mmio_read8(common_va + DEVICE_STATUS),
+        notify_off,
+        desc_iova,
+        avail_iova,
+        used_iova,
+        u64::from(queue_read32(common_va, QUEUE_DESC))
+            | (u64::from(queue_read32(common_va, QUEUE_DESC + 4)) << 32),
+        u64::from(queue_read32(common_va, QUEUE_AVAIL))
+            | (u64::from(queue_read32(common_va, QUEUE_AVAIL + 4)) << 32),
+        u64::from(queue_read32(common_va, QUEUE_USED))
+            | (u64::from(queue_read32(common_va, QUEUE_USED + 4)) << 32),
+        queue_read16(common_va, QUEUE_ENABLE),
+    ));
+    if virtio_notify(device, 0) != 0 {
+        mmio_write8(common_va + DEVICE_STATUS, 0);
+        return false;
+    }
+    let mut spins = 0u64;
+    while mmio_read16(DRIVER_DMA_VA + VQ_USED_OFF + 2) == 0 {
+        spins += 1;
+        if spins >= 1024 {
+            let mut nonzero = 0u32;
+            let mut index = 0u64;
+            while index < u64::from(VQ_DATA_LEN) {
+                nonzero += u32::from(mmio_read8(DRIVER_DMA_VA + VQ_DATA_OFF + index) != 0);
+                index += 1;
+            }
+            log(format_args!(
+                "[JSR-DEV] dc1 queue_timeout status={} notify_off={} avail_idx={} used_idx={} used_flags={} used_id={} used_len={} data_nonzero={}",
+                mmio_read8(common_va + DEVICE_STATUS),
+                notify_off,
+                mmio_read16(DRIVER_DMA_VA + VQ_AVAIL_OFF + 2),
+                mmio_read16(DRIVER_DMA_VA + VQ_USED_OFF + 2),
+                mmio_read16(DRIVER_DMA_VA + VQ_USED_OFF),
+                mmio_read32(DRIVER_DMA_VA + VQ_USED_OFF + 4),
+                mmio_read32(DRIVER_DMA_VA + VQ_USED_OFF + 8),
+                nonzero,
+            ));
+            mmio_write8(common_va + DEVICE_STATUS, 0);
+            return false;
+        }
+        if spins % 8 == 0 {
+            let _ = time_wait(1);
+        }
+    }
+    fence(Ordering::Acquire);
+    let descriptor = mmio_read32(DRIVER_DMA_VA + VQ_USED_OFF + 4);
+    let used_len = mmio_read32(DRIVER_DMA_VA + VQ_USED_OFF + 8);
+    let mut nonzero = 0u32;
+    let mut index = 0u64;
+    while index < u64::from(used_len.min(VQ_DATA_LEN)) {
+        nonzero += u32::from(mmio_read8(DRIVER_DMA_VA + VQ_DATA_OFF + index) != 0);
+        index += 1;
+    }
+    mmio_write8(common_va + DEVICE_STATUS, 0);
+    log(format_args!(
+        "[JSR-DEV] dc1 queue_complete desc_id={} used_len={} data_nonzero={}",
+        descriptor,
+        used_len,
+        nonzero
+    ));
+    descriptor == 0 && used_len == VQ_DATA_LEN && nonzero != 0
+}
+
 /// DC-1: combine Device/MMIO, Memory/DMA and IRQ/Ring in one unprivileged process.
 ///
 /// This is the capability-composition slice. It intentionally does not claim a
 /// completed virtqueue: user-visible DMA mappings return opaque IOVA values, so
 /// an actual device request still requires an admitted IOMMU translation backend.
-fn probe_driver_host() -> ! {
+fn probe_driver_host(queue_work: bool) -> ! {
     let mut live = 0i32;
     // SAFETY: single-threaded probe owns LIST.
     let list: &mut [u8] = unsafe { &mut *core::ptr::addr_of_mut!(LIST) };
@@ -922,13 +1169,15 @@ fn probe_driver_host() -> ! {
     let caps_got = capability_list(device, caps.as_mut_ptr() as u64, caps.len() as u64);
     let cap_count = if caps_got > 0 { caps_got as usize / CAP_RECORD_SIZE } else { 0 };
     let mut common = CapabilityRecord::NONE;
+    let mut notify = CapabilityRecord::NONE;
     for index in 0..cap_count {
         let mut raw = [0u8; CAP_RECORD_SIZE];
         raw.copy_from_slice(&caps[index * CAP_RECORD_SIZE..(index + 1) * CAP_RECORD_SIZE]);
         let cap = CapabilityRecord::decode(&raw);
         if cap.cfg_type == CAP_CFG_COMMON {
             common = cap;
-            break;
+        } else if cap.cfg_type == CAP_CFG_NOTIFY {
+            notify = cap;
         }
     }
     emit!(
@@ -943,6 +1192,11 @@ fn probe_driver_host() -> ! {
     let mapped = map_bar(device, common.bar as u32, MAP_VA);
     emit!(mapped == 0, "dc1 case=mmio ret={}", mapped);
     let common_va = MAP_VA + common.bar_offset as u64;
+    let notify_va = if notify.bar == common.bar {
+        MAP_VA + notify.bar_offset as u64
+    } else {
+        0
+    };
     let status = if mapped == 0 {
         unsafe { core::ptr::read_volatile((common_va + 0x14) as *const u8) }
     } else {
@@ -950,11 +1204,12 @@ fn probe_driver_host() -> ! {
     };
     emit!(mapped == 0 && status != 0xff, "dc1 case=mmio_read status={}", status);
 
-    let memory = memory_create(1);
+    let memory_pages = 1;
+    let memory = memory_create(memory_pages);
     if memory > 0 {
         live += 1;
     }
-    let mut memory_args = MemoryMapArgs::new(DRIVER_DMA_VA, 0, 1, true);
+    let mut memory_args = MemoryMapArgs::new(DRIVER_DMA_VA, 0, memory_pages, true);
     let mapped_memory = if memory > 0 {
         memory_map(memory, &mut memory_args)
     } else {
@@ -970,7 +1225,7 @@ fn probe_driver_host() -> ! {
         // SAFETY: the kernel mapped exactly one writable page at this VA.
         unsafe { core::ptr::write_volatile(DRIVER_DMA_VA as *mut u64, 0x4443_315f_444d4155) };
     }
-    let mut dma_args = DmaMapArgs::new(device as u64, 0, 1, true);
+    let mut dma_args = DmaMapArgs::new(device as u64, 0, memory_pages, true);
     let dma = if mapped_memory == 0 {
         dma_map(memory, &mut dma_args)
     } else {
@@ -989,8 +1244,7 @@ fn probe_driver_host() -> ! {
         dma,
         iova
     );
-
-    let interrupt = bind_interrupt(device, 0, 0);
+    let interrupt = if queue_work { -1 } else { bind_interrupt(device, 0, 0) };
     if interrupt > 0 {
         live += 1;
     }
@@ -998,13 +1252,28 @@ fn probe_driver_host() -> ! {
     if ring > 0 {
         live += 1;
     }
-    emit!(
-        interrupt > 0 && ring > 0,
-        "dc1 case=irq_ring interrupt={} ring={}",
-        interrupt,
-        ring
-    );
-    if interrupt > 0 && ring > 0 {
+    if !queue_work {
+        emit!(
+            interrupt > 0 && ring > 0,
+            "dc1 case=irq_ring interrupt={} ring={}",
+            interrupt,
+            ring
+        );
+    }
+    let queue_ok = if queue_work
+        && dma > 0
+        && mapped == 0
+        && notify_va != 0
+        && ring > 0
+    {
+        run_virtio_rng_queue(device, common_va, iova)
+    } else {
+        false
+    };
+    if queue_work {
+        emit!(queue_ok, "dc1 case=virtqueue notify=true used_ring=true");
+    }
+    if !queue_work && interrupt > 0 && ring > 0 {
         let wait = [Sqe {
             op: ids::SYSTEM_DEVICE_INTERRUPT_WAIT as u32,
             flags: 0,
@@ -1046,7 +1315,7 @@ fn probe_driver_host() -> ! {
     if dma > 0 && close(dma) == 0 {
         live -= 1;
     }
-    if mapped_memory == 0 && memory_unmap(DRIVER_DMA_VA, 1) == 0 {
+    if mapped_memory == 0 && memory_unmap(DRIVER_DMA_VA, memory_pages) == 0 {
         // no handle count changes; mapping is revoked independently
     }
     if memory > 0 && close(memory) == 0 {
@@ -1057,8 +1326,10 @@ fn probe_driver_host() -> ! {
     }
     emit!(live == 0, "dc1 case=handles_closed live={}", live);
     log(format_args!(
-        "[JSR-DC1] summary device=true mmio=true dma=true irq=true ring=true queue_work=false failed={}",
-        failed()
+        "[JSR-DC1] summary device=true mmio=true dma={} irq=true ring=true queue_work={} failed={}",
+        dma > 0,
+        queue_ok,
+        failed(),
     ));
     exit(if failed() == 0 && live == 0 { 0 } else { 1 });
 }
@@ -1102,7 +1373,8 @@ pub extern "C" fn _start(role: usize, arg: usize) -> ! {
         2 => probe_map(),
         3 => probe_map_no_capability(),
         5 => probe_service_driver(arg),
-        6 => probe_driver_host(),
+        6 => probe_driver_host(false),
+        7 => probe_driver_host(true),
         _ => exit(100),
     }
 }

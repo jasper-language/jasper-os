@@ -287,11 +287,16 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native
   if [ "${ISSUE21_DISABLE_RDRAND:-0}" = 1 ]; then
     CPU=max,-rdrand,-rdseed
   fi
-  QEMU_EXTRA+=(-cpu "$CPU" -device virtio-rng-pci
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04)
+  QEMU_EXTRA+=(-cpu "$CPU")
   if [ "$MODE" = iommu-dma ]; then
-    QEMU_EXTRA+=(-device "intel-iommu,intremap=off,caching-mode=on,device-iotlb=on")
+    QEMU_EXTRA+=(
+      -device "intel-iommu,intremap=off,caching-mode=on,device-iotlb=on"
+      -device "virtio-rng-pci,disable-legacy=on,iommu_platform=on"
+    )
+  else
+    QEMU_EXTRA+=(-device virtio-rng-pci)
   fi
+  QEMU_EXTRA+=(-device isa-debug-exit,iobase=0xf4,iosize=0x04)
 fi
 SERIAL_ARGS=(-serial "file:$OUT/serial.log")
 if { [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MODE" = update-list ]; } && [ "${ISSUE21_MANUAL_INPUT:-0}" != 1 ]; then
@@ -315,6 +320,13 @@ if { [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MO
 fi
 if [ "${ISSUE21_QEMU_TRACE:-0}" = 1 ]; then
   QEMU_EXTRA+=(-d int -D "$OUT/qemu-int.log")
+fi
+if [ -n "${ISSUE21_QEMU_TRACE_EVENTS:-}" ]; then
+  IFS=',' read -r -a trace_events <<<"${ISSUE21_QEMU_TRACE_EVENTS}"
+  for trace_event in "${trace_events[@]}"; do
+    QEMU_EXTRA+=(-trace "enable=${trace_event}")
+  done
+  QEMU_EXTRA+=(-D "$OUT/qemu-trace.log")
 fi
 if [ "${ISSUE21_QEMU_GDB:-0}" = 1 ]; then
   QEMU_EXTRA+=(-s -S)
@@ -371,6 +383,7 @@ if [ "$MODE" = driver-host-journal ]; then
 fi
 if [ "$MODE" = iommu-dma ]; then
   grep -aq '^\[JSR-IOMMU-DMA\] hardware_iommu=true .* translated=true' "$OUT/serial.log"
+  grep -Eaq 'text=\[JSR-DC1\] summary .*queue_work=true.*failed=0' "$OUT/serial.log"
   grep -aq '^\[JSR-DRV3\].*iova_opaque=true .* failed=0' "$OUT/serial.log"
   grep -aq '^\[JSR-IOMMU-DMA\] finish failed=0' "$OUT/serial.log"
   ! grep -aqE '^\[JSR-(PANIC|DRV3-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"

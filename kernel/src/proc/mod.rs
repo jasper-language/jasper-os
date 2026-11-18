@@ -7559,6 +7559,14 @@ fn is_shared_page(p: &Process, va: u64) -> bool {
     p.shared_maps.iter().any(|m| m.va == va - va % FRAME_SIZE)
 }
 
+/// Normalize a valid object generation for the memory-capability layer.
+///
+/// 对象首代 generation 0 合法，而内存能力层把 0 保留为无效哨兵，因此映射为 1。
+fn memory_backing_identity(id: ObjId) -> BackingIdentity {
+    BackingIdentity::new(id.raw(), id.generation().max(1))
+        .expect("normalized object generation is always nonzero")
+}
+
 /// Maps retained Memory pages; failed partial publication waits for TLB acknowledgement before dropping refs.
 pub fn map_memory(
     pid: ObjId,
@@ -7604,6 +7612,15 @@ pub fn map_memory(
             return Err(MemError::InvalidRange);
         };
         retained = memory.retain_range(range).ok_or(MemError::OutOfMemory)?;
+        #[cfg(all(target_arch = "x86_64", feature = "iommu-dma-verify"))]
+        if writable && pages <= 4 {
+            crate::kprintln!(
+                "[JSR-QUEUE] memory_map va=0x{:x} pages={} frame=0x{:x}",
+                va,
+                pages,
+                retained.first().map(|page| page.frame().start()).unwrap_or(0)
+            );
+        }
         let Ok(KObject::Process(p)) = t.get_mut(pid) else {
             return Err(MemError::NoSuchProcess);
         };
@@ -7674,8 +7691,7 @@ pub fn map_memory(
             p.shared_maps.push(SharedMapping {
                 va: va + i as u64 * FRAME_SIZE,
                 page: Arc::clone(page),
-                source: BackingIdentity::new(id.raw(), id.generation())
-                    .expect("live object has a valid generation"),
+                source: memory_backing_identity(id),
                 flags,
             });
         }
@@ -7691,8 +7707,7 @@ pub fn map_memory(
                         MemoryRights::NONE
                     }),
                 MemoryKind::Shared,
-                BackingIdentity::new(id.raw(), id.generation())
-                    .expect("live object has a valid generation"),
+                memory_backing_identity(id),
             )
             .map_err(|_| MemError::Quota)?;
         p.space.end_shootdown();

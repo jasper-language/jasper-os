@@ -91,9 +91,40 @@ P0 集成切片使用与 lifecycle 服务相同的已验证 virtio-blk 设备，
 qemu_rc=33
 ```
 
-证据：`evidence/issue21-uefi-boot-20261118-010301/README.md`。该切片只证明
-DMA 映射翻译与撤销；用户态 Driver Host 仍未完成真实
-descriptor → notify → used-ring completion，因此 DC-1/LC-4 不能据此升级。
+证据：`evidence/issue21-uefi-boot-20261118-010301/README.md`。
+
+### 用户态 split virtqueue 完成
+
+`iommu-dma-verify` 的 Driver Host 角色现在由未特权用户进程建立真实
+virtio-rng split queue：
+
+- 在 DMA-backed Memory 中初始化 descriptor table、available ring 和 used ring；
+- 协商 `VIRTIO_F_VERSION_1` 与 `VIRTIO_F_ACCESS_PLATFORM`，队列地址全部使用
+  opaque IOVA；
+- ABI 3.22 的 `system.device.virtio.submit(device, queue_index)` 由内核查找
+  QueueNotifyOff 与倍率，用户不提交内核 MMIO 地址；
+- 向 device-writable descriptor 提交 32 字节接收缓冲，轮询真实 used ring 并校验
+  descriptor ID、used length 和非零随机字节；
+- IOMMU 第二级 PDPT/PD/PTE 每层都具备写权限，修复了设备能读描述符但无法写
+  used ring/数据缓冲区的问题；
+- queue 完成后重置设备、关闭 DMA，bus-master 状态恢复，PTE 与 IOMMU 临时页表
+  回收，用户进程资源基线完全一致。
+
+真实 OVMF/QEMU Intel IOMMU 证据：
+
+```text
+queue_complete desc_id=0 used_len=32 data_nonzero=32
+[JSR-DC1] summary ... queue_work=true failed=0
+[JSR-DC1-BASELINE] before free_frames=123988 ... after free_frames=123988
+qemu_rc=33
+```
+
+证据：`evidence/issue21-uefi-boot-20261118-022643/README.md`。
+
+这关闭 QEMU/受控 VT-d 环境下的用户态 descriptor/notify/used-ring 最小闭环。
+Pixel 6a 上的真实 UFS/GPU 驱动复用、物理 IOMMU 故障注入、多 IOMMU unit 生产
+接管、vendor firmware 和 reset/hotplug 矩阵仍未完成，因此 DC-1/LC-4 仍不能
+标为 done。
 
 ## 验证
 
@@ -123,9 +154,8 @@ Device/Memory/DMA/MSI-X/Ring 组合，IRQ 等待经关闭中断句柄得到唯�
 
 ## 未完成
 
-- 真实 virtio 用户态 Driver Host 完成 queue notify、used-ring completion 和 timeout；
-  当前 DMA capability 只向用户暴露 opaque IOVA，实际设备 queue 仍需经准入的
-  IOMMU translation backend，不能把 capability 组合通过冒充 queue 完成；
+- 多 IOMMU unit、既有 firmware 根表接管、其他设备 pass-through/隔离、热插拔与
+  crash/reset 后的全局 DMA 安全；
 - host crash、设备 reset、驱动进程退出后的硬件级静默与资源回基线；
 - Pixel 6a 物理验收。
 

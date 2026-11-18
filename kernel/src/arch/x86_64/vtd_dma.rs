@@ -219,7 +219,14 @@ impl Domain {
             let flags = if writable { 0x3 } else { 0x1 };
             // The PT page is exclusively owned and this PTE was verified empty
             // before any modification.
-            write64(pointer, (index * 8) as u64, frame.start() | flags);
+            let entry = frame.start() | flags;
+            write64(pointer, (index * 8) as u64, entry);
+            crate::kprintln!(
+                "[JSR-IOMMU-DMA] pte iova=0x{:x} index={} entry=0x{:x}",
+                address,
+                index,
+                entry
+            );
         }
         self.pages = self
             .pages
@@ -400,7 +407,10 @@ impl Vtd {
             u64::from(sid) * 16 + 8,
             (u64::from(domain.id) << 8) | 1,
         );
-        write64(table(domain.pdpt)?, 0, domain.pd.start() | 1);
+        // Write permission must be present on every second-level table entry.
+        // 第二级页表的每一层都必须具备写权限，否则设备能读描述符但不能写
+        // used ring 或数据缓冲区。
+        write64(table(domain.pdpt)?, 0, domain.pd.start() | 0x3);
         Ok(index)
     }
 
@@ -422,6 +432,12 @@ impl Vtd {
         frames: &[PhysFrame],
         writable: bool,
     ) -> Result<(), Error> {
+        crate::kprintln!(
+            "[JSR-IOMMU-DMA] map iova=0x{:x} pages={} writable={}",
+            iova,
+            frames.len(),
+            writable
+        );
         let bytes = (frames.len() as u64)
             .checked_mul(FRAME_SIZE)
             .ok_or(Error::Range)?;

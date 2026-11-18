@@ -782,6 +782,9 @@ syscall_dispatch! {
     SYSTEM_DEVICE_GET => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { device_get(a.args[0], a.args[1], a.args[2]) },
     SYSTEM_DEVICE_MAP => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { device_map(a.args[0], a.args[1], a.args[2]) },
     SYSTEM_DEVICE_CAPABILITY_LIST => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { device_capability_list(a.args[0], a.args[1], a.args[2]) },
+    SYSTEM_DEVICE_VIRTIO_SUBMIT => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| {
+        device_virtio_notify(a.args[0], a.args[1])
+    },
     SYSTEM_DEVICE_INTERRUPT_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::interrupt::sys_bind(a.args[0], a.args[1], a.args[2]) },
     // 等待中断只有异步形式：结果作为完成记录交付，同步调用没有可以阻塞的语义
     SYSTEM_DEVICE_INTERRUPT_WAIT => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| { err(SYSTEM_ASYNC_ERROR_RING_ONLY) },
@@ -1198,6 +1201,64 @@ fn device_capability_list(handle: u64, ptr: u64, cap: u64) -> i64 {
         return user_ptr_err(e);
     }
     required as i64
+}
+
+/// `system.device.virtio.submit(handle, queue_index)`：通知一个已启用的 virtio 队列。
+///
+/// PCI 能力倍率由内核按需读取；用户态只提交受设备 CONTROL 权限约束的队列号。
+/// Notifies an enabled virtio queue while keeping the capability multiplier
+/// inside the kernel.
+fn device_virtio_notify(handle: u64, queue_index: u64) -> i64 {
+    let Ok(queue_index) = u16::try_from(queue_index) else {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    };
+    let Some(pid) = proc::current_process() else {
+        return err(SYSTEM_ERROR_RIGHTS_DENIED);
+    };
+    let resolved = kobj::with(|t| -> Result<Bdf, ProcError> {
+        let id =
+            proc::resolve_in(t, pid, handle_arg(handle), ObjectType::Device, Rights::CONTROL)?;
+        match t.get(id) {
+            Ok(KObject::Device(device)) => Ok(device.bdf),
+            _ => Err(ProcError::Handle(HandleError::Invalid)),
+        }
+    });
+    let bdf = match resolved {
+        Ok(bdf) => bdf,
+        Err(error) => return proc_err(error),
+    };
+    let Some(device) = crate::pci::table().find(bdf) else {
+        return err(SYSTEM_DEVICE_ERROR_NOT_FOUND);
+    };
+    if crate::mmio::prepare_window().is_err() {
+        return err(SYSTEM_DEVICE_ERROR_BAD_CAPABILITY);
+    }
+    let transport = match crate::virtio::VirtioPci::new(device) {
+        Ok(transport) => transport,
+        Err(error) => {
+            kprintln!(
+                "[JSR-VIRTIO-SUBMIT] stage=transport bdf={:?} reason={}",
+                bdf,
+                error.name()
+            );
+            return err(SYSTEM_DEVICE_ERROR_BAD_CAPABILITY);
+        }
+    };
+    match transport.notify_queue(queue_index) {
+        Ok(()) => 0,
+        Err(crate::virtio::VirtioError::BadQueueIndex) => {
+            err(SYSTEM_ERROR_INVALID_ARGUMENT)
+        }
+        Err(error) => {
+            kprintln!(
+                "[JSR-VIRTIO-SUBMIT] stage=notify bdf={:?} queue={} reason={}",
+                bdf,
+                queue_index,
+                error.name()
+            );
+            err(SYSTEM_DEVICE_ERROR_BAD_CAPABILITY)
+        }
+    }
 }
 
 /// `system.device.map(handle, bar_index, va)`：把一个内存型 BAR 映射进调用者进程的私有窗口，成功返回 0。

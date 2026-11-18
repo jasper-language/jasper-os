@@ -132,6 +132,9 @@ pub enum VirtioError {
     /// 通知地址超出已映射的通知窗口。
     /// The notification address falls outside the mapped window.
     NotifyOutOfWindow,
+    /// 队列索引没有有效的通知偏移。
+    /// The queue index has no valid notification offset.
+    BadQueueIndex,
 }
 
 impl VirtioError {
@@ -150,6 +153,7 @@ impl VirtioError {
             VirtioError::NoContiguousFrames => "system.memory.error.out_of_frames",
             VirtioError::NoPhysMap => "system.device.error.virtio_no_phys_map",
             VirtioError::NotifyOutOfWindow => "system.device.error.virtio_notify_out_of_window",
+            VirtioError::BadQueueIndex => "system.device.error.virtio_bad_queue_index",
         }
     }
 }
@@ -395,6 +399,22 @@ impl VirtioPci {
         // SAFETY：通知地址已校验在映射内；写入的队列号 0 是唯一的队列。
         unsafe { self.notify.write16(offset, 0) };
         Ok(())
+    }
+
+    /// Notify an already enabled queue without exposing the capability multiplier
+    /// to user space.
+    ///
+    /// 通知一个已经启用的队列；倍率仍由内核从 PCI 能力读取，不向用户泄漏。
+    pub fn notify_queue(&self, queue_index: u16) -> Result<(), VirtioError> {
+        // SAFETY: both registers are inside the mapped common configuration.
+        let notify_off = unsafe {
+            self.common.write16(COMMON_QUEUE_SELECT, queue_index);
+            self.common.read16(COMMON_QUEUE_NOTIFY_OFF)
+        };
+        if notify_off == u16::MAX {
+            return Err(VirtioError::BadQueueIndex);
+        }
+        self.notify(notify_off)
     }
 
     /// 读取并清除设备 ISR 状态字节。

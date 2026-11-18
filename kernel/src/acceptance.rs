@@ -1688,7 +1688,8 @@ mod dedicated {
 
     #[cfg(target_arch = "x86_64")]
     fn finish(_: &mut BootCtx) {
-        let failed = crate::drv3_demo::failed();
+        let failed = crate::drv3_demo::failed()
+            .saturating_add(crate::device_demo::failed());
         kprintln!("[JSR-IOMMU-DMA] finish failed={}", failed);
         exit_on(u64::from(failed));
     }
@@ -1699,11 +1700,18 @@ mod dedicated {
         exit_on(1);
     }
 
+    #[cfg(target_arch = "x86_64")]
+    fn user_driver_queue(_: &mut BootCtx) {
+        let _ = crate::device_demo::run_driver_queue();
+    }
+
     const STAGES: &[Step] = &[
         st(Stage::Space),
         case("mm-space", Stage::Space, "mm", mm_space),
         st(Stage::Smp),
         case("smp-checks", Stage::Smp, "smp", smp_checks),
+        #[cfg(target_arch = "x86_64")]
+        case("user-driver-queue", Stage::Smp, "drv1c", user_driver_queue),
         #[cfg(target_arch = "x86_64")]
         case("drv3-dma", Stage::Smp, "drv3", drv3_dma),
     ];

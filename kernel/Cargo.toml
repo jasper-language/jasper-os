@@ -80,7 +80,7 @@ jaso1-verify = []
 # DRV-3 DMA mapping lifecycle drill.
 drv3-verify = []
 # Hardware IOMMU programming of an opaque DMA IOVA.
-iommu-dma-verify = []
+iommu-dma-verify = ["user-programs"]
 # Dedicated PEX-0 workload: existing low/medium/high drills plus parallel
 # multi-process, multi-Ring throughput measurements.
 pex0-verify = ["user-programs"]

@@ -31,6 +31,63 @@ const IOVA_PAGE: u64 = kernel_core::memory_object::PAGE_BYTES;
 
 static NEXT_IOVA: IrqSpinLock<u64> = IrqSpinLock::new(IOVA_BASE);
 
+struct BusMasterLease {
+    bdf: Bdf,
+    users: u32,
+    was_on: bool,
+}
+
+static BUS_MASTER_LEASES: IrqSpinLock<Vec<BusMasterLease>> =
+    IrqSpinLock::new(Vec::new());
+
+/// Acquire one reference to a device's bus-master capability.
+///
+/// 取得设备 bus-master 能力的一次引用；最后一个引用释放时恢复进入前状态。
+fn acquire_bus_master(bdf: Bdf) -> Result<(), DmaError> {
+    let mut leases = BUS_MASTER_LEASES.lock();
+    if let Some(lease) = leases.iter_mut().find(|lease| lease.bdf == bdf) {
+        lease.users = lease.users.checked_add(1).ok_or(DmaError::Quota)?;
+        return Ok(());
+    }
+    if leases.try_reserve(1).is_err() {
+        return Err(DmaError::Quota);
+    }
+    let was_on = crate::pci::set_bus_master(bdf, true).map_err(|_| DmaError::Iommu)?;
+    if !matches!(crate::pci::bus_master_enabled(bdf), Ok(true)) {
+        let _ = crate::pci::set_bus_master(bdf, was_on);
+        return Err(DmaError::Iommu);
+    }
+    leases.push(BusMasterLease {
+        bdf,
+        users: 1,
+        was_on,
+    });
+    Ok(())
+}
+
+/// Release one bus-master reference and restore the prior state at zero.
+///
+/// 释放一次 bus-master 引用；最后一个引用关闭时恢复设备原状态并读回确认。
+fn release_bus_master(bdf: Bdf) -> Result<(), DmaError> {
+    let mut leases = BUS_MASTER_LEASES.lock();
+    let index = leases
+        .iter()
+        .position(|lease| lease.bdf == bdf)
+        .ok_or(DmaError::Closed)?;
+    if leases[index].users > 1 {
+        leases[index].users -= 1;
+        return Ok(());
+    }
+    let was_on = leases[index].was_on;
+    leases.swap_remove(index);
+    crate::pci::set_bus_master(bdf, was_on).map_err(|_| DmaError::Iommu)?;
+    if matches!(crate::pci::bus_master_enabled(bdf), Ok(actual) if actual == was_on) {
+        Ok(())
+    } else {
+        Err(DmaError::Iommu)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DmaError {
     Process(ProcError),
@@ -53,6 +110,7 @@ pub struct DmaMapping {
     iova: u64,
     writable: bool,
     hardware_iommu: bool,
+    bus_master_lease: bool,
     closing: bool,
     _pin_charge: crate::mm::memory_quota::Charge,
 }
@@ -167,6 +225,7 @@ pub fn create_for(
             iova,
             writable: range.writable,
             hardware_iommu: false,
+            bus_master_lease: false,
             closing: false,
             _pin_charge: charge,
         };
@@ -209,6 +268,24 @@ pub fn create_for(
             let _ = proc::close_handle_for(pid, handle);
             return Err(DmaError::Iommu);
         }
+    }
+    if acquire_bus_master(bdf).is_err() {
+        let _ = proc::close_handle_for(pid, handle);
+        return Err(DmaError::Iommu);
+    }
+    if kobj::with(|t| {
+        let id = proc::resolve_in(t, pid, handle, ObjectType::DmaMapping, Rights::READ)
+            .map_err(DmaError::Process)?;
+        if let Some(mapping) = mapping_mut(t, id) {
+            mapping.bus_master_lease = true;
+        }
+        Ok::<(), DmaError>(())
+    })
+    .is_err()
+    {
+        let _ = release_bus_master(bdf);
+        let _ = proc::close_handle_for(pid, handle);
+        return Err(DmaError::Iommu);
     }
     Ok((handle, iova))
 }
@@ -288,7 +365,7 @@ pub fn translate_iova(
 }
 
 pub fn close_in(t: &mut Table, id: ObjId) {
-    let (memory, device, bdf, offset_pages, pages, iova, hardware_iommu) = {
+    let (memory, device, bdf, offset_pages, pages, iova, hardware_iommu, bus_master_lease) = {
         let Some(mapping) = mapping_mut(t, id) else {
             return;
         };
@@ -304,10 +381,10 @@ pub fn close_in(t: &mut Table, id: ObjId) {
             mapping.pages,
             mapping.iova,
             mapping.hardware_iommu,
+            mapping.bus_master_lease,
         )
     };
-    let quiesced = crate::pci::set_bus_master(bdf, false).is_ok()
-        && matches!(crate::pci::bus_master_enabled(bdf), Ok(false));
+    let quiesced = !bus_master_lease || release_bus_master(bdf).is_ok();
     let iommu_revoked =
         !hardware_iommu || crate::arch::dma_iommu_unmap(bdf, iova, pages).is_ok();
     if !quiesced || !iommu_revoked {

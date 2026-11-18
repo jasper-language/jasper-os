@@ -199,6 +199,7 @@
 113	op	system.update.action.archive	1	write	更新·归档已验证终态事务	Archive verified terminal update transaction
 114	op	system.install.update.list	1	read	安装·查询当前主体可更新集合	List update-visible installations for authenticated caller
 115	op	system.update.audit.query	1	read	更新·查询持久终态归档审计	Query durable terminal update audit
+116	op	system.device.virtio.submit	1	write	设备·提交已启用的 virtio 队列通知	Submit an enabled virtio queue notification
 4167	error	system.update.error.unauthorized	1	none	更新·调用者未授权	Update status caller unauthorized
 4168	error	system.update.error.stale_generation	1	none	更新·状态世代已过期	Update status generation stale
 4169	error	system.update.error.request_id	1	none	更新·请求标识冲突	Update status request identifier conflict
