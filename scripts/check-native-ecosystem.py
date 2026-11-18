@@ -177,6 +177,7 @@ def main() -> int:
             '#[cfg(all(feature = "compat-elf", target_arch = "x86_64"))]\npub mod compat_elf;',
             '#[cfg(all(\n'
             '    any(\n'
+            '        feature = "compat-syscall-verify",\n'
             '        feature = "compat-dynamic-libc-verify",\n'
             '        feature = "lifecycle-root-exec-verify",\n'
             '        feature = "workload-io-verify"\n'

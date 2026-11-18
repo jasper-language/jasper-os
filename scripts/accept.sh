@@ -937,7 +937,7 @@ check_m43() {   # 用户态异步环：用户程序端到端（ID 单调、cq_fu
      && has 'closing abortable_quiesced=true nonabortable_finished=true ring_destroyed_after_last_request=true quota_returned=true' \
      && has 'backend accounting after_close_running=2 after_abort_running=1 created=5 started=4 released=4 started_released=3 accounted=true' \
      && has 'transfer result=Ok\(Err\(Handle\(RightsDenied\)\)\)' \
-     && has "quota rings=${ring_limit:-0} ninth=Some\\(-4111\\) in_flight=${ring_inflight:-0} over=Some\\(-4111\\) unchanged_on_reject=true returned=true" \
+     && has "quota rings=${ring_limit:-0} over_ring=Some\\(-4111\\) in_flight=${ring_inflight:-0} over=Some\\(-4111\\) unchanged_on_reject=true returned=true" \
      && has '^\[JSR-RING\] objects_live=([0-9]+)/\1 pending=0 reclaimed=true timer_live=0 timer_armed=0 timer_budget=0/[0-9]+ checks=[0-9]+ failed=0' \
      && ! has '\[JSR-LOCK-ORDER\]'; then
     record M4.3 PASS "用户态 ring 提交→完成；Wait 由每 Ring 期限堆推进且收尾扫描为 0；取消交换后的自然到期、cq_full、信用、closing、逐后端记账与配额均通过；回到基线"

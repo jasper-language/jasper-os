@@ -257,7 +257,7 @@ def parse_serial(path: Path, smp: int, round_no: int) -> list[dict]:
         )
 
     ring_quota = re.search(
-        r"\[JSR-RING\] quota rings=(?P<rings>\d+) ninth=Some\((?P<ninth>-?\d+)\) "
+        r"\[JSR-RING\] quota rings=(?P<rings>\d+) over_ring=Some\((?P<over_ring>-?\d+)\) "
         r"in_flight=(?P<in_flight>\d+) over=Some\((?P<over>-?\d+)\) "
         r"unchanged_on_reject=(?P<unchanged>true|false) "
         r"returned=(?P<returned>true|false)",
