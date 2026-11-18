@@ -29,6 +29,8 @@ use crate::boot::{self, BootSpec, FrameBufferFormat, FrameBufferInfo, PsciBoot, 
 
 /// 启动栈大小。
 const BOOT_STACK_BYTES: usize = 64 * 1024;
+pub(crate) const EL2_STACK_BYTES: usize = 64 * 1024;
+const GUEST_STACK_BYTES: usize = 64 * 1024;
 static ENTRY_EXCEPTION_LEVEL: AtomicU8 = AtomicU8::new(0);
 
 /// Exception level observed at the architecture entry.
@@ -64,28 +66,12 @@ pub(crate) fn el2_hvc_probe() -> bool {
 
 #[cfg(feature = "aarch64-el2-retain-verify")]
 fn el2_guest_stage2_fault_probe() -> bool {
-    let status: u64;
-    let reply: u64;
-    // SAFETY: EL2 saves the host ELR/SPSR, enters a bounded test guest, and
-    // returns after classifying the guest's stage-2 data abort.
-    unsafe {
-        core::arch::asm!(
-            "mov x0, #0",
-            "hvc #0x4a55",
-            "mov {status}, x0",
-            "mov {reply}, x1",
-            status = out(reg) status,
-            reply = out(reg) reply,
-            out("x0") _,
-            out("x1") _,
-            out("x9") _,
-            out("x10") _,
-            out("x11") _,
-            out("x12") _,
-            options(nostack),
-        );
+    unsafe extern "C" {
+        fn jsr_aarch64_el2_context_probe() -> u64;
     }
-    status == 2 && reply == 0x4654
+    // SAFETY: The assembly probe saves all callee registers it rewrites, checks
+    // the EL2-restored sentinels and preserves the AArch64 C ABI on return.
+    unsafe { jsr_aarch64_el2_context_probe() == 1 }
 }
 
 #[cfg(feature = "pixel6a-el2-observable")] // JASPER-HARDCODE-REVIEW: issue=21 source=pixel-el2-observation-window reason=physical-boot-carrier-probe-only
@@ -117,6 +103,18 @@ struct BootStack([u8; BOOT_STACK_BYTES]);
 
 #[no_mangle]
 static mut JSR_BOOT_STACK: BootStack = BootStack([0; BOOT_STACK_BYTES]);
+
+#[repr(C, align(16))]
+struct HypervisorStack([u8; EL2_STACK_BYTES]);
+
+#[no_mangle]
+static mut JSR_EL2_STACK: HypervisorStack = HypervisorStack([0; EL2_STACK_BYTES]);
+
+#[repr(C, align(16))]
+struct GuestStack([u8; GUEST_STACK_BYTES]);
+
+#[no_mangle]
+static mut JSR_EL2_GUEST_STACK: GuestStack = GuestStack([0; GUEST_STACK_BYTES]);
 
 /// Explicit Pixel verification firmware-table window.
 ///
@@ -305,6 +303,11 @@ _start:
     mov x9, #3
     msr cnthctl_el2, x9
     msr cntvoff_el2, xzr
+    adrp x9, JSR_EL2_STACK
+    add x9, x9, :lo12:JSR_EL2_STACK
+    mov sp, x9
+    mov x10, #{el2_stack}
+    add sp, sp, x10
 .if {retain_el2} != 0
     adrp x9, jsr_aarch64_el2_vectors
     add x9, x9, :lo12:jsr_aarch64_el2_vectors
@@ -345,6 +348,7 @@ _start:
     .previous
     "#,
     stack = const BOOT_STACK_BYTES,
+    el2_stack = const EL2_STACK_BYTES,
     skip_mpidr_gate = const cfg!(feature = "pixel6a-runtime-verify") as u64, // JASPER-HARDCODE-REVIEW: issue=33 source=physical-runtime-plan reason=pixel-selected-boot-cpu-verification-only
     retain_el2 = const cfg!(feature = "aarch64-el2-retain-verify") as u64, // JASPER-HARDCODE-REVIEW: issue=22 source=aarch64-el2-retain-probe reason=hypervisor-residency-verification-only
 );
@@ -360,12 +364,38 @@ jsr_aarch64_el2_vectors:
     b jsr_aarch64_el2_sync
     .space 0x3fc
 jsr_aarch64_el2_sync:
+    sub sp, sp, #272
+    stp x0, x1, [sp, #0]
+    stp x2, x3, [sp, #16]
+    stp x4, x5, [sp, #32]
+    stp x6, x7, [sp, #48]
+    stp x8, x9, [sp, #64]
+    stp x10, x11, [sp, #80]
+    stp x12, x13, [sp, #96]
+    stp x14, x15, [sp, #112]
+    stp x16, x17, [sp, #128]
+    stp x18, x19, [sp, #144]
+    stp x20, x21, [sp, #160]
+    stp x22, x23, [sp, #176]
+    stp x24, x25, [sp, #192]
+    stp x26, x27, [sp, #208]
+    stp x28, x29, [sp, #224]
+    str x30, [sp, #240]
+    mrs x9, sp_el1
+    mrs x10, elr_el2
+    mrs x11, spsr_el2
+    stp x9, x10, [sp, #248]
+    str x11, [sp, #264]
+    adrp x9, jsr_aarch64_el2_guest_active
+    add x9, x9, :lo12:jsr_aarch64_el2_guest_active
+    ldr x10, [x9]
+    cbnz x10, el2_guest_exit
     mrs x9, esr_el2
     lsr x10, x9, #26
     cmp x10, #0x16
     b.eq el2_hvc
     cmp x10, #0x24
-    b.eq el2_stage2_fault
+    b.eq el2_fail
     b el2_fail
 el2_hvc:
     and x11, x9, #0xffff
@@ -392,37 +422,87 @@ el2_stage2_enable:
     tlbi vmalls12e1
     dsb nsh
     isb
-    mov x0, #1
-    mov x1, #0x5354
-    eret
+    mov x10, #1
+    mov x11, #0x5354
+    b el2_restore_host_with_reply
 el2_hvc_probe:
-    mov x0, #1
-    mov x1, #0x4a54
-    eret
+    mov x10, #1
+    mov x11, #0x4a54
+    b el2_restore_host_with_reply
 el2_guest_enter:
-    adrp x9, jsr_aarch64_el2_host_return
-    add x9, x9, :lo12:jsr_aarch64_el2_host_return
-    mrs x10, elr_el2
-    mrs x11, spsr_el2
-    stp x10, x11, [x9]
+    adrp x9, jsr_aarch64_el2_guest_active
+    add x9, x9, :lo12:jsr_aarch64_el2_guest_active
+    mov x10, #1
+    str x10, [x9]
+    adrp x9, JSR_EL2_GUEST_STACK
+    add x9, x9, :lo12:JSR_EL2_GUEST_STACK
+    mov x10, #65536
+    add x10, x9, x10
+    msr sp_el1, x10
     adrp x9, jsr_aarch64_test_guest
     add x9, x9, :lo12:jsr_aarch64_test_guest
     msr elr_el2, x9
     mov x9, #0x3c5
     msr spsr_el2, x9
     eret
+el2_guest_exit:
+    mrs x9, esr_el2
+    lsr x9, x9, #26
+    cmp x9, #0x24
+    b.eq el2_guest_stage2_fault
+    cmp x9, #0x16
+    b.eq el2_guest_unexpected
+    mov x10, #3
+    mov x11, #0
+    b el2_restore_guest
 el2_guest_unexpected:
-    mov x0, #3
-    b el2_return_host
-el2_stage2_fault:
-    mov x0, #2
-el2_return_host:
-    adrp x9, jsr_aarch64_el2_host_return
-    add x9, x9, :lo12:jsr_aarch64_el2_host_return
-    ldp x10, x11, [x9]
-    msr elr_el2, x10
-    msr spsr_el2, x11
-    mov x1, #0x4654
+    mov x10, #3
+    mov x11, #0x4655
+    b el2_restore_guest
+el2_guest_stage2_fault:
+    mov x10, #2
+    mov x11, #0x4654
+el2_restore_guest:
+    adrp x9, jsr_aarch64_el2_guest_active
+    add x9, x9, :lo12:jsr_aarch64_el2_guest_active
+    str xzr, [x9]
+    add sp, sp, #272
+el2_restore_host_with_reply:
+    adrp x9, jsr_aarch64_el2_return_status
+    add x9, x9, :lo12:jsr_aarch64_el2_return_status
+    str x10, [x9]
+    adrp x9, jsr_aarch64_el2_return_reply
+    add x9, x9, :lo12:jsr_aarch64_el2_return_reply
+    str x11, [x9]
+el2_restore_host:
+    ldr x9, [sp, #248]
+    msr sp_el1, x9
+    ldr x9, [sp, #256]
+    msr elr_el2, x9
+    ldr x9, [sp, #264]
+    msr spsr_el2, x9
+    ldp x2, x3, [sp, #16]
+    ldp x4, x5, [sp, #32]
+    ldp x6, x7, [sp, #48]
+    ldp x8, x9, [sp, #64]
+    ldp x10, x11, [sp, #80]
+    ldp x12, x13, [sp, #96]
+    ldp x14, x15, [sp, #112]
+    ldp x16, x17, [sp, #128]
+    ldr x18, [sp, #144]
+    ldp x19, x20, [sp, #152]
+    ldp x21, x22, [sp, #168]
+    ldp x23, x24, [sp, #184]
+    ldp x25, x26, [sp, #200]
+    ldp x27, x28, [sp, #216]
+    ldp x29, x30, [sp, #232]
+    adrp x9, jsr_aarch64_el2_return_status
+    add x9, x9, :lo12:jsr_aarch64_el2_return_status
+    ldr x0, [x9]
+    adrp x9, jsr_aarch64_el2_return_reply
+    add x9, x9, :lo12:jsr_aarch64_el2_return_reply
+    ldr x1, [x9]
+    add sp, sp, #272
     eret
 el2_fail:
     wfe
@@ -431,15 +511,162 @@ el2_fail:
 .balign 4
 .global jsr_aarch64_test_guest
 jsr_aarch64_test_guest:
+    mov x0, #16
+    mov x1, #17
+    mov x2, #18
+    mov x3, #19
+    mov x4, #20
+    mov x5, #21
+    mov x6, #22
+    mov x7, #23
+    mov x8, #24
+    mov x9, #25
+    mov x10, #26
+    mov x11, #27
+    mov x12, #28
+    mov x13, #29
+    mov x14, #30
+    mov x15, #31
+    mov x16, #32
+    mov x17, #33
+    mov x18, #34
+    mov x19, #35
+    mov x20, #36
+    mov x21, #37
+    mov x22, #38
+    mov x23, #39
+    mov x24, #40
+    mov x25, #41
+    mov x26, #42
+    mov x27, #43
+    mov x28, #44
+    mov x29, #45
+    mov x30, #46
+    sub sp, sp, #16
+    str x0, [sp]
     ldr x9, =0x8020000000
     ldr x10, [x9]
     hvc #0x4a56
     b .
 
+.balign 4
+.global jsr_aarch64_el2_context_probe
+jsr_aarch64_el2_context_probe:
+    sub sp, sp, #96
+    stp x18, x19, [sp, #0]
+    stp x20, x21, [sp, #16]
+    stp x22, x23, [sp, #32]
+    stp x24, x25, [sp, #48]
+    stp x26, x27, [sp, #64]
+    stp x28, x29, [sp, #80]
+    mov x2, #2
+    mov x3, #3
+    mov x4, #4
+    mov x5, #5
+    mov x6, #6
+    mov x7, #7
+    mov x8, #8
+    mov x11, #11
+    mov x12, #12
+    mov x13, #13
+    mov x14, #14
+    mov x15, #15
+    mov x16, #16
+    mov x17, #17
+    mov x18, #18
+    mov x19, #19
+    mov x20, #20
+    mov x21, #21
+    mov x22, #22
+    mov x23, #23
+    mov x24, #24
+    mov x25, #25
+    mov x26, #26
+    mov x27, #27
+    mov x28, #28
+    mov x29, #29
+    mov x0, #0
+    hvc #0x4a55
+    cmp x0, #2
+    b.ne el2_context_failed
+    mov x9, #0x4654
+    cmp x1, x9
+    b.ne el2_context_failed
+    cmp x2, #2
+    b.ne el2_context_failed
+    cmp x3, #3
+    b.ne el2_context_failed
+    cmp x4, #4
+    b.ne el2_context_failed
+    cmp x5, #5
+    b.ne el2_context_failed
+    cmp x6, #6
+    b.ne el2_context_failed
+    cmp x7, #7
+    b.ne el2_context_failed
+    cmp x8, #8
+    b.ne el2_context_failed
+    cmp x11, #11
+    b.ne el2_context_failed
+    cmp x12, #12
+    b.ne el2_context_failed
+    cmp x13, #13
+    b.ne el2_context_failed
+    cmp x14, #14
+    b.ne el2_context_failed
+    cmp x15, #15
+    b.ne el2_context_failed
+    cmp x16, #16
+    b.ne el2_context_failed
+    cmp x17, #17
+    b.ne el2_context_failed
+    cmp x18, #18
+    b.ne el2_context_failed
+    cmp x19, #19
+    b.ne el2_context_failed
+    cmp x20, #20
+    b.ne el2_context_failed
+    cmp x21, #21
+    b.ne el2_context_failed
+    cmp x22, #22
+    b.ne el2_context_failed
+    cmp x23, #23
+    b.ne el2_context_failed
+    cmp x24, #24
+    b.ne el2_context_failed
+    cmp x25, #25
+    b.ne el2_context_failed
+    cmp x26, #26
+    b.ne el2_context_failed
+    cmp x27, #27
+    b.ne el2_context_failed
+    cmp x28, #28
+    b.ne el2_context_failed
+    cmp x29, #29
+    b.ne el2_context_failed
+    mov x9, #1
+    b el2_context_restore
+el2_context_failed:
+    mov x9, #0
+el2_context_restore:
+    ldp x18, x19, [sp, #0]
+    ldp x20, x21, [sp, #16]
+    ldp x22, x23, [sp, #32]
+    ldp x24, x25, [sp, #48]
+    ldp x26, x27, [sp, #64]
+    ldp x28, x29, [sp, #80]
+    mov x0, x9
+    add sp, sp, #96
+    ret
+
 .section .bss.jsr_aarch64_el2_test, "aw", %nobits
 .balign 16
-jsr_aarch64_el2_host_return:
-    .space 16
+jsr_aarch64_el2_guest_active:
+    .quad 0
+jsr_aarch64_el2_return_status:
+    .quad 0
+jsr_aarch64_el2_return_reply:
+    .quad 0
 
     .previous
     "#
@@ -880,14 +1107,16 @@ extern "C" fn jsr_aarch64_boot(
         let table = round_trip && super::el2::initialize_identity_table();
         let stage2 = table && super::el2::enable_current_cpu();
         let vm_exit = stage2 && el2_guest_stage2_fault_probe();
+        let vcpu_context = vm_exit;
         crate::kprintln!(
-            "[JSR-A64-EL2] retained=true hvc_round_trip={} stage2_table={} stage2={} vm_exit={} driver_vm=false",
+            "[JSR-A64-EL2] retained=true hvc_round_trip={} stage2_table={} stage2={} vm_exit={} vcpu_context={} driver_vm=false",
             round_trip,
             table,
             stage2,
-            vm_exit
+            vm_exit,
+            vcpu_context
         );
-        if !vm_exit {
+        if !vcpu_context {
             semihost::exit(EXIT_FAILURE);
         }
     }

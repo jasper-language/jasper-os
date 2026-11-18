@@ -2,7 +2,8 @@
 
 更新时间：2026-11-18。
 
-状态：**proof-only；EL2 驻留、stage-2 和最小 VM exit 已验证，Driver VM 未实现**。
+状态：**proof-only；EL2 驻留、stage-2、最小 VM exit 和通用 vCPU 上下文恢复已验证，
+Driver VM 未实现**。
 
 ## 当前切片
 
@@ -18,19 +19,23 @@ EL1 前完成 EL2 驻留准备。
 
 验证构建还进入一个临时 EL1 测试 guest，并访问 stage-1 已映射但 stage-2 明确拒绝的
 2 MiB IPA。EL2 数据异常入口恢复保存的宿主 ELR/SPSR，确认该路径是 stage-2
-fault-to-host exit。这验证的是最小世界切换和退出分类，不是完整 vCPU 保存恢复或
-设备虚拟化。
+fault-to-host exit；下一节把该最小世界切换扩展为通用寄存器上下文恢复。
+
+EL2 入口现在使用独立 64 KiB EL2 栈保存完整 x0–x30、SP_EL1、ELR_EL2 和 SPSR_EL2。
+测试 guest 使用独立 64 KiB EL1 栈并把全部通用寄存器改写成不同哨兵；stage-2 fault
+返回后，宿主 x2–x8、x11–x29、x18 及 x30 返回地址全部恢复，完整内核继续通过。
 
 QEMU `virt,virtualization=on` 的真实串口结果：
 
 ```text
 [JSR-A64-EL] entry=2 execution=1 el2_available=true el2_retained=true
-[JSR-A64-EL2] retained=true hvc_round_trip=true stage2_table=true stage2=true vm_exit=true driver_vm=false
+[JSR-A64-EL2] retained=true hvc_round_trip=true stage2_table=true stage2=true
+vm_exit=true vcpu_context=true driver_vm=false
 [JSR-SMP] start present=2 online=2 failed=0 source=fdt.cpus dropped=0 disabled=0
 ```
 
 该运行退出 35 仅含既有 AArch64 x86-only `pci_failed=3`、`krn0_failed=1` 基线；
-没有新增失败。证据见 `evidence/aarch64-el2-vmexit-20261118-r3/`。
+没有新增失败。证据见 `evidence/aarch64-el2-context-20261118-r4/`。
 
 ## 边界
 
@@ -38,6 +43,8 @@ QEMU `virt,virtualization=on` 的真实串口结果：
   身份翻译；
 - stage-2 除一个负例块外仍是宽松身份映射；已分类最小 stage-2 data abort，但尚未
   实现按 capability 的最小映射、完整 VE/VM exit 分类及 vCPU/IRQ/定时器上下文切换；
+- 已保存恢复通用寄存器、SP_EL1、ELR 和 SPSR；尚未保存 FP/SIMD/SVE、系统寄存器、
+  GIC/定时器虚拟状态或支持多 vCPU 调度；
 - 尚未实现 Device/MMIO/DMA/IOMMU capability 注入或 Linux Driver VM；
 - 不改变 LC-4、DC-1 或 Pixel Driver VM 节点状态。
 
@@ -47,7 +54,7 @@ EL2 保留启动链，才能在实物上继续 Driver VM 验收。
 ## 复现
 
 ```text
-AARCH64_EL2_OUT="$PWD/evidence/aarch64-el2-vmexit-20261118-r3" \
+AARCH64_EL2_OUT="$PWD/evidence/aarch64-el2-context-20261118-r4" \
 AARCH64_EL2_TARGET="$PWD/target/aarch64-el2-stage2" \
 AARCH64_EL2_QEMU_CPUS=6-7 \
 JASPER_BUILD_CPUS=4-5 \

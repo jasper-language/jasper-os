@@ -62,6 +62,11 @@ jsr_a64_secondary:
     mov x9, #3
     msr cnthctl_el2, x9
     msr cntvoff_el2, xzr
+    adrp x9, JSR_EL2_STACK
+    add x9, x9, :lo12:JSR_EL2_STACK
+    mov sp, x9
+    mov x10, #{el2_stack}
+    add sp, sp, x10
 .if {retain_el2} != 0
     adrp x9, jsr_aarch64_el2_vectors
     add x9, x9, :lo12:jsr_aarch64_el2_vectors
@@ -107,6 +112,7 @@ jsr_a64_secondary:
     .previous
     "#,
     retain_el2 = const cfg!(feature = "aarch64-el2-retain-verify") as u64, // JASPER-HARDCODE-REVIEW: issue=22 source=aarch64-el2-retain-probe reason=secondary-hypervisor-residency-verification-only
+    el2_stack = const super::boot::EL2_STACK_BYTES,
 );
 
 extern "C" {

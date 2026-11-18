@@ -44,7 +44,7 @@ grep -aFq \
   '[JSR-A64-EL] entry=2 execution=1 el2_available=true el2_retained=true' \
   "$OUT/serial.log"
 grep -aFq \
-  '[JSR-A64-EL2] retained=true hvc_round_trip=true stage2_table=true stage2=true vm_exit=true driver_vm=false' \
+  '[JSR-A64-EL2] retained=true hvc_round_trip=true stage2_table=true stage2=true vm_exit=true vcpu_context=true driver_vm=false' \
   "$OUT/serial.log"
 grep -aFq \
   '[JSR-SMP] start present=2 online=2 failed=0 source=fdt.cpus dropped=0 disabled=0' \
@@ -68,4 +68,4 @@ if {name: value for name, value in failed.items() if value} != expected:
     raise SystemExit(f"aarch64-el2-retain: unexpected failure baseline: {failed}")
 PY
 
-echo "aarch64-el2-retain: PASS bsp=true ap=true hvc=true stage2=true vm_exit=true driver_vm=false evidence=$OUT"
+echo "aarch64-el2-retain: PASS bsp=true ap=true hvc=true stage2=true vm_exit=true vcpu_context=true driver_vm=false evidence=$OUT"
