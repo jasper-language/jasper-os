@@ -172,24 +172,32 @@ impl PhysRead for PhysWindow {
 /// 引导处理器：启用本地 APIC、校准本地定时器、解析 MADT。没有物理映射或 APIC 不可用时只报告引导处理器。
 pub fn init_boot(boot: &BootSpec) -> CpuDiscovery {
     let Some(offset) = boot.phys_offset else {
-        return CpuDiscovery { topology: Topology::boot_only(0), source: "system.firmware.error.unreadable" };
+        return CpuDiscovery {
+            topology: Topology::boot_only(0),
+            source: "system.firmware.error.unreadable",
+            inventory_complete: false,
+        };
     };
     if apic::init_base(offset).is_none() {
-        return CpuDiscovery { topology: Topology::boot_only(0), source: "system.firmware.error.unreadable" };
+        return CpuDiscovery {
+            topology: Topology::boot_only(0),
+            source: "system.firmware.error.unreadable",
+            inventory_complete: false,
+        };
     }
     apic::enable_local(true);
     let boot_id = apic::id();
     BOOTSTRAP_ID.store(boot_id, Ordering::Release);
     apic::calibrate_timer();
-    let (topology, source) = match boot.acpi_rsdp {
+    let (topology, source, inventory_complete) = match boot.acpi_rsdp {
         Some(rsdp) => match acpi::parse_madt(&PhysWindow(offset), rsdp, boot_id) {
             Ok(m) => {
                 super::ioapic::configure(&m, offset, boot_id);
-                (m.topology, "acpi.madt")
+                (m.topology, "acpi.madt", true)
             }
-            Err(e) => (Topology::boot_only(boot_id), e.name()),
+            Err(e) => (Topology::boot_only(boot_id), e.name(), false),
         },
-        None => (Topology::boot_only(boot_id), "boot_only"),
+        None => (Topology::boot_only(boot_id), "boot_only", false),
     };
     if topology.count() <= MAX_CPUS {
         for (i, id) in topology.iter().enumerate() {
@@ -200,7 +208,11 @@ pub fn init_boot(boot: &BootSpec) -> CpuDiscovery {
         }
         TOPOLOGY_READY.store(true, Ordering::Release);
     }
-    CpuDiscovery { topology, source }
+    CpuDiscovery {
+        topology,
+        source,
+        inventory_complete,
+    }
 }
 
 /// 启动一个处理器（见模块文档）。

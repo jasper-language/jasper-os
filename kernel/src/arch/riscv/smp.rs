@@ -33,7 +33,7 @@ use crate::arch::{CpuDiscovery, CpuStart};
 use crate::irq::{self, IrqLine};
 
 /// 设备树给出的拓扑与来源（引导适配层写入一次）。
-static FIRMWARE: Once<(Topology, &'static str)> = Once::new();
+static FIRMWARE: Once<(Topology, &'static str, bool)> = Once::new();
 /// 其他处理器本地定时器的频率（启动前写入）。
 static AP_TIMER_HZ: AtomicU32 = AtomicU32::new(0);
 /// 每个处理器一格的核间中断信箱（下标 = 逻辑下标）。
@@ -104,33 +104,47 @@ pub fn configure(fdt: Fdt<'static>, boot_hart: u32) {
 /// 引导处理器：确认固件实现了 HSM 与 IPI 扩展、打开本处理器的软件中断，返回拓扑。缺少扩展时只报告引导处理器。
 pub fn init_boot(boot_hart: u32) -> CpuDiscovery {
     cpu::enable_sources(cpu::SIE_SSIE);
-    let found = FIRMWARE_FDT
-        .get()
-        .map(|(fdt, configured_hart)| {
+    let firmware = FIRMWARE_FDT.get();
+    let found = match firmware {
+        Some((fdt, configured_hart)) => {
             let hart = *configured_hart;
             match fdt.cpu_topology(hart, hart_id) {
-                Err(error) => (Topology::boot_only(hart), error.name()),
+                Err(error) => (Topology::boot_only(hart), error.name(), false),
                 Ok(cpus) if !cpus.boot_listed => (
                     Topology::boot_only(hart),
                     "system.firmware.error.boot_cpu_unlisted",
+                    false,
                 ),
-                Ok(cpus) if cpus.topology.count() > 1 => (cpus.topology, "fdt.cpus"),
-                Ok(cpus) => (cpus.topology, "boot_only"),
+                Ok(cpus) if cpus.topology.count() > 1 => (cpus.topology, "fdt.cpus", true),
+                Ok(cpus) => (cpus.topology, "boot_only", true),
             }
-        })
-        .unwrap_or((Topology::boot_only(boot_hart), "boot_only"));
-    let (topology, source) = FIRMWARE
+        }
+        None => (Topology::boot_only(boot_hart), "boot_only", false),
+    };
+    let (topology, source, inventory_complete) = FIRMWARE
         .call_once(|| found)
         .clone(); // JASPER-HARDCODE-REVIEW: issue=33 source=boot-handshake reason=boot-hart-identity-is-an-architectural-fact-and-admission-fails-closed
     if topology.count() > 1 {
         if !fw::has_extension(sbi::EID_HSM) {
-            return CpuDiscovery { topology: Topology::boot_only(boot_hart), source: "system.firmware.sbi.error.no_hsm" };
+            return CpuDiscovery {
+                topology: Topology::boot_only(boot_hart),
+                source: "system.firmware.sbi.error.no_hsm",
+                inventory_complete: false,
+            };
         }
         if !fw::has_extension(sbi::EID_IPI) {
-            return CpuDiscovery { topology: Topology::boot_only(boot_hart), source: "system.firmware.sbi.error.no_ipi" };
+            return CpuDiscovery {
+                topology: Topology::boot_only(boot_hart),
+                source: "system.firmware.sbi.error.no_ipi",
+                inventory_complete: false,
+            };
         }
     }
-    CpuDiscovery { topology, source }
+    CpuDiscovery {
+        topology,
+        source,
+        inventory_complete,
+    }
 }
 
 /// 启动一个处理器（见模块文档）。参数非法或目标不处于「已停止」时不写启动块、不发出启动调用。
@@ -187,7 +201,7 @@ extern "C" fn jsr_rv_secondary_main(index: usize) -> ! {
 
 /// 逻辑下标 `index` 的 hart 号（设备树拓扑中没有时为 `None`）。
 pub fn hart_of(index: usize) -> Option<u32> {
-    FIRMWARE.get().and_then(|(t, _)| t.hw_id(index))
+    FIRMWARE.get().and_then(|(t, _, _)| t.hw_id(index))
 }
 
 /// 当前处理器的逻辑下标（`tp`；引导处理器在入口处置 0）。

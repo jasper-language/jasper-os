@@ -165,6 +165,13 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
         };
     };
     let discovery = arch::cpu_init_boot(boot);
+    if !discovery.inventory_complete {
+        crate::kprintln!(
+            "[JSR-SMP] reject=topology_incomplete source={}",
+            discovery.source
+        );
+        arch::halt_forever();
+    }
     let topo = TOPOLOGY.call_once(|| discovery.topology);
     if topo.dropped > 0 {
         crate::kprintln!(
@@ -194,7 +201,11 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
         arch::halt_forever();
     }
     let me = percpu::get(0).expect("引导处理器的每核数据");
-    me.set_hw_id(topo.hw_id(0).unwrap_or(0));
+    let Some(boot_hw_id) = topo.hw_id(0) else {
+        crate::kprintln!("[JSR-SMP] reject=boot_cpu_identity_missing");
+        arch::halt_forever();
+    };
+    me.set_hw_id(boot_hw_id);
     if me.state.get() == CpuState::Absent {
         let _ = me.state.begin_start().and_then(|_| me.state.mark_online());
     }
@@ -211,8 +222,14 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
     };
     let space = arch::current_space();
     for cpu in 1..topo.count() {
-        let Some(pc) = percpu::get(cpu) else { break };
-        let hw_id = topo.hw_id(cpu).unwrap_or(u32::MAX);
+        let Some(pc) = percpu::get(cpu) else {
+            crate::kprintln!("[JSR-SMP] reject=percpu_missing cpu={}", cpu);
+            arch::halt_forever();
+        };
+        let Some(hw_id) = topo.hw_id(cpu) else {
+            crate::kprintln!("[JSR-SMP] reject=cpu_identity_missing cpu={}", cpu);
+            arch::halt_forever();
+        };
         pc.set_hw_id(hw_id);
         if !mapped || pc.state.begin_start().is_err() {
             failed += 1;

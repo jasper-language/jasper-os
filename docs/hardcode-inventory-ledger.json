@@ -1,5 +1,5 @@
 {
-  "baseline_total": 382,
+  "baseline_total": 374,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -14,7 +14,7 @@
     "platform-adapter": 27,
     "protocol-abi": 24,
     "runtime-resource-capacity": 57,
-    "unclassified": 94
+    "unclassified": 86
   },
   "entries": [
     {
@@ -1861,7 +1861,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "3b92c87b7e0e7c5b0f3cb7eaaa987cc6aceba2ae50fb56e022d444f0f01b3a3d",
-      "line": 145,
+      "line": 146,
       "path": "kernel/src/arch/loongarch64/smp.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G2,HC-G6",
@@ -1871,7 +1871,7 @@
       "category": "platform-adapter",
       "count": 1,
       "fingerprint": "04ec57a2fc944f41fc3ad27795c72b2c1c949d56600b108ffc553e35a0e2b512",
-      "line": 135,
+      "line": 136,
       "path": "kernel/src/arch/loongarch64/smp.rs",
       "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
       "rules": "HC-G3",
@@ -1881,7 +1881,7 @@
       "category": "platform-adapter",
       "count": 1,
       "fingerprint": "3df9866394ee7023f08ca80cc41d9c16b1092952bb2275c68618311bf2c7c274",
-      "line": 138,
+      "line": 139,
       "path": "kernel/src/arch/loongarch64/smp.rs",
       "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
       "rules": "HC-G3",
@@ -1891,7 +1891,7 @@
       "category": "platform-adapter",
       "count": 1,
       "fingerprint": "50439cff51e58600c84598fd317009b536a6e1d4161521cc99b9eb939ba9e631",
-      "line": 127,
+      "line": 128,
       "path": "kernel/src/arch/loongarch64/smp.rs",
       "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
       "rules": "HC-G3",
@@ -1901,7 +1901,7 @@
       "category": "platform-adapter",
       "count": 1,
       "fingerprint": "5dd9e61aae20cc48f44a5f965e1d26c833903f8b59ef23b811d3358a445392ac",
-      "line": 241,
+      "line": 246,
       "path": "kernel/src/arch/loongarch64/smp.rs",
       "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
       "rules": "HC-G3",
@@ -1911,7 +1911,7 @@
       "category": "platform-adapter",
       "count": 1,
       "fingerprint": "633d4b3e1dd9609927e0abcb039cc71c886f6f599c87f8dde63c8cf7787feb65",
-      "line": 121,
+      "line": 122,
       "path": "kernel/src/arch/loongarch64/smp.rs",
       "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
       "rules": "HC-G3",
@@ -1921,7 +1921,7 @@
       "category": "platform-adapter",
       "count": 1,
       "fingerprint": "a04a872c2d74511c5b57acb16f5ce8bf65dec2777aa60cb2964369f66fda1027",
-      "line": 141,
+      "line": 142,
       "path": "kernel/src/arch/loongarch64/smp.rs",
       "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
       "rules": "HC-G3",
@@ -1931,21 +1931,11 @@
       "category": "platform-adapter",
       "count": 1,
       "fingerprint": "b43e20246a77b5db2c53925bb18b236ed6f6e4ddbba01f26d08349a1aa1a8851",
-      "line": 118,
+      "line": 119,
       "path": "kernel/src/arch/loongarch64/smp.rs",
       "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
       "rules": "HC-G3",
       "source": "return Err(\"qemu-fdt-missing\");"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "8c132135e212fa7be9fffbbbd8f5a9e3f6596d00dd4872935424b1f4375bfa35",
-      "line": 173,
-      "path": "kernel/src/arch/loongarch64/smp.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "HW_IDS[index].store(topology.hw_id(index).unwrap_or(0), Ordering::Release);"
     },
     {
       "category": "unclassified",
@@ -1971,21 +1961,11 @@
       "category": "unclassified",
       "count": 1,
       "fingerprint": "851d07bef48da61dd28029fb24cdf5f4e6913e256a9fa3cd4e18ed1f9c9ea3e2",
-      "line": 146,
+      "line": 160,
       "path": "kernel/src/arch/riscv/smp.rs",
       "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
       "rules": "HC-G7",
       "source": "Err(e) => return Err(sbi::decode(e).err().unwrap_or(SbiError::Failed).to_smp()),"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "cf03b81b96976aaffb9a5b8e0360d04b7dcf9857d12f5ed07c2156ac6e0afccf",
-      "line": 121,
-      "path": "kernel/src/arch/riscv/smp.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": ".unwrap_or((Topology::boot_only(boot_hart), \"boot_only\"));"
     },
     {
       "category": "unclassified",
@@ -2080,36 +2060,6 @@
     {
       "category": "unclassified",
       "count": 1,
-      "fingerprint": "1e3139f0fd8a912428d561ded9992d7b105ac3703445bebb5dc3fcf9453b4333",
-      "line": 275,
-      "path": "kernel/src/arch/x86_64/space.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let _ = frames.deallocate(PhysFrame::from_start(phys - phys % FRAME_SIZE).unwrap_or(PhysFrame::from_number(0)));"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "2989926a21303cb2f1d9124cd3add27a5e90fcac5c3a3502d187742e535e5f55",
-      "line": 246,
-      "path": "kernel/src/arch/x86_64/space.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "PhysFrame::from_start(low_phys).unwrap_or(PhysFrame::from_number(0)),"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "a86b8900073c9ee59950c0c4a144587219210108e0ee440d2578a1bf0dbe6773",
-      "line": 253,
-      "path": "kernel/src/arch/x86_64/space.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let _ = frames.deallocate(PhysFrame::from_start(root.0).unwrap_or(PhysFrame::from_number(0)));"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
       "fingerprint": "836de41f2cf1e48ad94a8e0a9985bf4e1135e22a851b042d90e549b7a583702f",
       "line": 1290,
       "path": "kernel/src/arch/x86_64/vmx.rs",
@@ -2136,16 +2086,6 @@
       "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
       "rules": "HC-G7",
       "source": ".unwrap_or(0);"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "b1e5df02f25b477da88a6b0a8ce649aa3e9bd43ceb2582155c81bfb23bbeccc2",
-      "line": 30,
-      "path": "kernel/src/arch/x86_64/xstate.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "usize::try_from(leaf.ebx).unwrap_or(0)"
     },
     {
       "category": "explicit-safety-policy",
@@ -2720,18 +2660,8 @@
     {
       "category": "unclassified",
       "count": 1,
-      "fingerprint": "42d30be7bbc8e3e88d228e161a896fcc6e12ff706e60faf270b3fa42ae2ad171",
-      "line": 215,
-      "path": "kernel/src/smp/mod.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let hw_id = topo.hw_id(cpu).unwrap_or(u32::MAX);"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
       "fingerprint": "7bcd4200c22252c9bf2426c6f9edead43b01b620d9d1f5629d193382eb4cf82e",
-      "line": 313,
+      "line": 330,
       "path": "kernel/src/smp/mod.rs",
       "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
       "rules": "HC-G7",
@@ -2740,18 +2670,8 @@
     {
       "category": "unclassified",
       "count": 1,
-      "fingerprint": "b56bf110b39424b93c79001067e4d7f4110a6884c2236019d57f5c4298f0b72c",
-      "line": 197,
-      "path": "kernel/src/smp/mod.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "me.set_hw_id(topo.hw_id(0).unwrap_or(0));"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
       "fingerprint": "fca6f98fa46283421e2e18f9c06bca44e4a6c32a88f8f7e31a87796e539b6a4d",
-      "line": 209,
+      "line": 220,
       "path": "kernel/src/smp/mod.rs",
       "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
       "rules": "HC-G7",
@@ -3054,6 +2974,6 @@
     "platform-adapter": 43,
     "protocol-abi": 27,
     "runtime-resource-capacity": 96,
-    "unclassified": 98
+    "unclassified": 90
   }
 }

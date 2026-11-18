@@ -28,7 +28,7 @@ use super::{gic, mmu, space, timer, vectors};
 use crate::arch::{CpuDiscovery, CpuStart};
 
 /// 设备树给出的拓扑与来源（引导适配层写入一次）。
-static FIRMWARE: Once<(Topology, &'static str)> = Once::new();
+static FIRMWARE: Once<(Topology, &'static str, bool)> = Once::new();
 /// PSCI 调用途径：0 = 没有，1 = hvc，2 = smc。
 static CONDUIT: AtomicU8 = AtomicU8::new(0);
 /// 其他处理器本地定时器的频率（启动前写入）。
@@ -144,13 +144,21 @@ pub fn configure(fdt: &Fdt<'_>) {
         Ordering::Relaxed,
     );
     let found = match fdt.cpu_topology(boot, affinity_id) {
-        Err(e) => (Topology::boot_only(boot), e.name()),
-        Ok(c) if !c.boot_listed => (Topology::boot_only(boot), "system.firmware.error.boot_cpu_unlisted"),
+        Err(e) => (Topology::boot_only(boot), e.name(), false),
+        Ok(c) if !c.boot_listed => (
+            Topology::boot_only(boot),
+            "system.firmware.error.boot_cpu_unlisted",
+            false,
+        ),
         Ok(c) if c.topology.count() > 1 && conduit.is_none() => {
-            (Topology::boot_only(boot), "system.firmware.psci.error.no_conduit")
+            (
+                Topology::boot_only(boot),
+                "system.firmware.psci.error.no_conduit",
+                false,
+            )
         }
-        Ok(c) if c.topology.count() > 1 => (c.topology, "fdt.cpus"),
-        Ok(c) => (c.topology, "boot_only"),
+        Ok(c) if c.topology.count() > 1 => (c.topology, "fdt.cpus", true),
+        Ok(c) => (c.topology, "boot_only", true),
     };
     FIRMWARE.call_once(|| found);
 }
@@ -195,14 +203,25 @@ fn conduit() -> Option<Conduit> {
 pub fn init_boot() -> CpuDiscovery {
     let boot = cpu::boot_affinity();
     gic::record_interface(0);
-    let (topology, source) = FIRMWARE.get().cloned().unwrap_or((Topology::boot_only(boot), "boot_only")); // JASPER-HARDCODE-REVIEW: issue=33 source=boot-handshake reason=boot-CPU-identity-is-architectural-fact-and-admission-fails-closed
+    let (topology, source, inventory_complete) = FIRMWARE
+        .get()
+        .cloned()
+        .unwrap_or((Topology::boot_only(boot), "boot_only", false)); // JASPER-HARDCODE-REVIEW: issue=33 source=boot-handshake reason=boot-CPU-identity-is-architectural-fact-and-admission-fails-closed
     if topology.count() > 1 {
         let supported = conduit().is_some_and(|c| psci::version_supported(call(c, psci::FN_VERSION, 0, 0, 0)));
         if !supported {
-            return CpuDiscovery { topology: Topology::boot_only(boot), source: PsciError::NotSupported.name() };
+            return CpuDiscovery {
+                topology: Topology::boot_only(boot),
+                source: PsciError::NotSupported.name(),
+                inventory_complete: false,
+            };
         }
     }
-    CpuDiscovery { topology, source }
+    CpuDiscovery {
+        topology,
+        source,
+        inventory_complete,
+    }
 }
 
 /// 把 `[va, va + len)` 的数据缓存清到一致点并作废（被启动的处理器在 MMU 关闭时不经缓存读取）。

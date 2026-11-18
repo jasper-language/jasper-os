@@ -27,7 +27,10 @@ pub(crate) fn configure(mask: u64) -> bool {
         FXSAVE_BYTES
     } else {
         let leaf = core::arch::x86_64::__cpuid_count(0xD, 0);
-        usize::try_from(leaf.ebx).unwrap_or(0)
+        let Ok(size) = usize::try_from(leaf.ebx) else {
+            return false;
+        };
+        size
     };
     if size < FXSAVE_BYTES {
         return false;

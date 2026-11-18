@@ -5,7 +5,7 @@
 //! the LoongArch IOCSR IPI device.
 
 use core::arch::global_asm;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use kernel_core::fdt::Fdt;
 use kernel_core::smp::{CpuSet, IpiKind, SmpError, Topology, MAX_CPUS};
@@ -30,6 +30,7 @@ static CPU_DROPPED: AtomicU32 = AtomicU32::new(0);
 static CPU_DISCOVERED: AtomicU32 = AtomicU32::new(1);
 static CPU_CONVERSION_FAILURES: AtomicU32 = AtomicU32::new(0);
 static CPU_DISABLED: AtomicU32 = AtomicU32::new(0);
+static CPU_INVENTORY_COMPLETE: AtomicBool = AtomicBool::new(false);
 static TIMER_HZ: AtomicU32 = AtomicU32::new(100);
 static HW_IDS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 
@@ -170,8 +171,12 @@ pub fn discover_fdt(efi_boot: bool, system_table: u64) -> Result<FirmwareFdt, &'
         Ordering::Release,
     );
     for index in 0..admitted {
-        HW_IDS[index].store(topology.hw_id(index).unwrap_or(0), Ordering::Release);
+        let hw_id = topology
+            .hw_id(index)
+            .ok_or("fdt-cpu-identity-missing")?;
+        HW_IDS[index].store(hw_id, Ordering::Release);
     }
+    CPU_INVENTORY_COMPLETE.store(true, Ordering::Release);
     Ok(FirmwareFdt {
         physical: fdt_physical,
         length: total,
@@ -239,6 +244,7 @@ pub fn init_boot() -> super::CpuDiscovery {
     super::CpuDiscovery {
         topology: topology(),
         source: "qemu-fdt-cpu-map",
+        inventory_complete: CPU_INVENTORY_COMPLETE.load(Ordering::Acquire),
     }
 }
 

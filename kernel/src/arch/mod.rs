@@ -194,6 +194,11 @@ pub struct CpuDiscovery {
     pub topology: kernel_core::smp::Topology,
     /// 信息来源或失败原因的规范名（例如固件表名、解析错误名）。
     pub source: &'static str,
+    /// Whether the firmware topology was actually read and validated.
+    ///
+    /// 是否真实读取并验证了固件拓扑；false 表示只能使用引导处理器，调用方必须
+    /// 失败关闭而不是把未知 SMP 库存发布成完整的单处理器机器。
+    pub inventory_complete: bool,
 }
 
 /// PCI 配置空间的访问机制（诊断输出与验收判据用）。

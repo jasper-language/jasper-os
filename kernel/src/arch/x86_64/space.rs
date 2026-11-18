@@ -242,15 +242,20 @@ pub unsafe fn destroy(root: SpaceRoot, phys_offset: u64, frames: &mut dyn FrameA
             phys_offset,
             frames,
         );
-        let _ = frames.deallocate(
-            PhysFrame::from_start(low_phys).unwrap_or(PhysFrame::from_number(0)),
-        );
+        deallocate_aligned_frame(frames, low_phys);
         pml4[0].set_unused();
     }
     for i in USER_FIRST..USER_LAST {
         free_subtree(&mut pml4[i], 3, phys_offset, frames);
     }
-    let _ = frames.deallocate(PhysFrame::from_start(root.0).unwrap_or(PhysFrame::from_number(0)));
+    deallocate_aligned_frame(frames, root.0);
+}
+
+fn deallocate_aligned_frame(frames: &mut dyn FrameAllocator, phys: u64) {
+    let aligned = phys - phys % FRAME_SIZE;
+    if let Some(frame) = PhysFrame::from_start(aligned) {
+        let _ = frames.deallocate(frame);
+    }
 }
 
 /// 递归释放一个表项指向的下级页表。`level` = 该表项所指表的层级（3=PDPT, 2=PD, 1=PT）。
@@ -272,6 +277,6 @@ unsafe fn free_subtree(
         }
     }
     // level == 1：这是一张 PT，它的表项指向数据帧（不由我们释放），只释放 PT 本身
-    let _ = frames.deallocate(PhysFrame::from_start(phys - phys % FRAME_SIZE).unwrap_or(PhysFrame::from_number(0)));
+    deallocate_aligned_frame(frames, phys);
     entry.set_unused();
 }
