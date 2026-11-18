@@ -111,6 +111,9 @@ jobs:
             -p jasper-compat-graphics \
             -p jasper-lifecycle-model \
             -p jasper-lifecycle-staging
+      - name: LC-2 断点续传与多源高可用 / resume and source HA
+        run: |
+          cargo test --locked -p jasper-lifecycle-staging --lib resume -- --nocapture
       - name: 真实上游兼容组件安装 / real upstream component install
         run: CARGO_BUILD_JOBS=2 bash scripts/compat-package-real.sh
         env:

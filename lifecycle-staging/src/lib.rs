@@ -44,8 +44,8 @@ use sha2::{Digest, Sha256};
 use crate::archive_store::FileArchiveStore;
 use crate::control::{ControlStoreError, FileControlStore};
 use crate::source::{
-    materialize_verified, materialize_verified_threshold, MaterializedUpdate, SourceError,
-    UpdateBundleSource,
+    materialize_verified, materialize_verified_resumable, materialize_verified_threshold,
+    materialize_verified_threshold_resumable, MaterializedUpdate, SourceError, UpdateBundleSource,
 };
 
 const MANIFEST_FILE: &str = "manifest.cbor";
@@ -303,6 +303,61 @@ impl UpdateCoordinator {
         let spool = Self::source_spool(staging_root)?;
         let materialized = materialize_verified_threshold(source, policy, target, &spool)
             .map_err(CoordinatorError::Source)?;
+        self.prepare_materialized_source(
+            materialized,
+            grant,
+            now,
+            installed_dependencies,
+            staging_root,
+            metadata_headroom,
+        )
+    }
+
+    /// Acquire one bundle from an ordered authenticated mirror set into a
+    /// durable resume spool, then stage it through the normal coordinator.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_from_sources(
+        &mut self,
+        policy: TrustPolicy<'_>,
+        target: UpdateTarget,
+        sources: &[&dyn UpdateBundleSource],
+        source_spool: &Path,
+        grant: LocalInstallGrant,
+        now: u64,
+        installed_dependencies: &[String],
+        staging_root: &Path,
+        metadata_headroom: u64,
+    ) -> Result<PreparedUpdate, CoordinatorError> {
+        let materialized = materialize_verified_resumable(sources, policy, target, source_spool)
+            .map_err(CoordinatorError::Source)?;
+        self.prepare_materialized_source(
+            materialized,
+            grant,
+            now,
+            installed_dependencies,
+            staging_root,
+            metadata_headroom,
+        )
+    }
+
+    /// Threshold-authenticated ordered mirror variant of
+    /// [`Self::prepare_from_sources`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_from_sources_threshold(
+        &mut self,
+        policy: ThresholdTrustPolicy<'_>,
+        target: UpdateTarget,
+        sources: &[&dyn UpdateBundleSource],
+        source_spool: &Path,
+        grant: LocalInstallGrant,
+        now: u64,
+        installed_dependencies: &[String],
+        staging_root: &Path,
+        metadata_headroom: u64,
+    ) -> Result<PreparedUpdate, CoordinatorError> {
+        let materialized =
+            materialize_verified_threshold_resumable(sources, policy, target, source_spool)
+                .map_err(CoordinatorError::Source)?;
         self.prepare_materialized_source(
             materialized,
             grant,
@@ -1741,6 +1796,86 @@ impl UpdateService {
         Ok(self.status())
     }
 
+    /// Acquire an authenticated bundle from ordered mirrors into a durable
+    /// resume spool and publish the resulting `Prepared` service generation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_from_sources(
+        &mut self,
+        policy: TrustPolicy<'_>,
+        target: UpdateTarget,
+        sources: &[&dyn UpdateBundleSource],
+        source_spool: &Path,
+        grant: LocalInstallGrant,
+        now: u64,
+        installed_dependencies: &[String],
+        staging_root: &Path,
+        metadata_headroom: u64,
+    ) -> Result<ServiceStatus, ServiceError> {
+        self.require_idle()?;
+        let generation = self.peek_generation()?;
+        let mut coordinator = UpdateCoordinator::idle();
+        let prepared = coordinator.prepare_from_sources(
+            policy,
+            target,
+            sources,
+            source_spool,
+            grant,
+            now,
+            installed_dependencies,
+            staging_root,
+            metadata_headroom,
+        )?;
+        let manifest_sha256 = prepared.manifest.manifest.manifest_sha256;
+        self.publish_active(
+            generation,
+            coordinator,
+            prepared,
+            staging_root,
+            manifest_sha256,
+        )?;
+        Ok(self.status())
+    }
+
+    /// Threshold-authenticated ordered mirror variant of
+    /// [`Self::prepare_from_sources`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_from_sources_threshold(
+        &mut self,
+        policy: ThresholdTrustPolicy<'_>,
+        target: UpdateTarget,
+        sources: &[&dyn UpdateBundleSource],
+        source_spool: &Path,
+        grant: LocalInstallGrant,
+        now: u64,
+        installed_dependencies: &[String],
+        staging_root: &Path,
+        metadata_headroom: u64,
+    ) -> Result<ServiceStatus, ServiceError> {
+        self.require_idle()?;
+        let generation = self.peek_generation()?;
+        let mut coordinator = UpdateCoordinator::idle();
+        let prepared = coordinator.prepare_from_sources_threshold(
+            policy,
+            target,
+            sources,
+            source_spool,
+            grant,
+            now,
+            installed_dependencies,
+            staging_root,
+            metadata_headroom,
+        )?;
+        let manifest_sha256 = prepared.manifest.manifest.manifest_sha256;
+        self.publish_active(
+            generation,
+            coordinator,
+            prepared,
+            staging_root,
+            manifest_sha256,
+        )?;
+        Ok(self.status())
+    }
+
     /// Commit the prepared candidate into the inactive slot and dual-copy control store.
     pub fn commit(
         &mut self,
@@ -2108,6 +2243,7 @@ fn advance_update_machine(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2151,6 +2287,98 @@ mod tests {
     impl Drop for TestDir {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct HttpRangeServer {
+        child: std::process::Child,
+    }
+
+    impl HttpRangeServer {
+        fn start(root: &Path, state: &Path, port_file: &Path) -> (Self, u16) {
+            let script = r#"
+import http.server
+import os
+import pathlib
+import socketserver
+import sys
+
+root, state, port_file = map(pathlib.Path, sys.argv[1:])
+prefix = 7
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def log_message(self, *_):
+        pass
+    def send_bytes(self, status, body, extra=None):
+        self.send_response(status)
+        self.send_header("Content-Length", str(len(body)))
+        if extra:
+            for key, value in extra.items():
+                self.send_header(key, value)
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        relative = self.path.lstrip("/")
+        path = root / relative
+        if not path.is_file():
+            self.send_bytes(404, b"")
+            return
+        body = path.read_bytes()
+        if relative == "artifacts/kernel" and not state.exists():
+            state.write_bytes(b"started")
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body[:prefix])
+            self.wfile.flush()
+            self.connection.shutdown(2)
+            self.connection.close()
+            return
+        requested = self.headers.get("Range")
+        if relative == "artifacts/kernel" and requested == f"bytes={prefix}-":
+            remaining = body[prefix:]
+            self.send_bytes(
+                206,
+                remaining,
+                {"Content-Range": f"bytes {prefix}-{len(body)-1}/{len(body)}"},
+            )
+            return
+        self.send_bytes(200, body)
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+port_file.write_text(str(server.server_address[1]))
+server.serve_forever()
+"#;
+            let child = std::process::Command::new("python3")
+                .arg("-c")
+                .arg(script)
+                .arg(root)
+                .arg(state)
+                .arg(port_file)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut port = None;
+            for _ in 0..200 {
+                if let Ok(text) = fs::read_to_string(port_file) {
+                    port = text.parse::<u16>().ok();
+                    if port.is_some() {
+                        break;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let port = port.expect("HTTP range test server did not publish a port");
+            (Self { child }, port)
+        }
+    }
+
+    impl Drop for HttpRangeServer {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
         }
     }
 
@@ -2309,6 +2537,156 @@ mod tests {
         }
     }
 
+    struct InterruptingBundle {
+        manifest: Vec<u8>,
+        signature: [u8; 64],
+        artifact: Vec<u8>,
+        offsets: RefCell<Vec<u64>>,
+    }
+
+    impl InterruptingBundle {
+        fn new(manifest: Vec<u8>, signature: [u8; 64], artifact: &[u8]) -> Self {
+            Self {
+                manifest,
+                signature,
+                artifact: artifact.to_vec(),
+                offsets: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl UpdateBundleSource for InterruptingBundle {
+        fn read_manifest(&self) -> Result<Vec<u8>, crate::source::SourceError> {
+            Ok(self.manifest.clone())
+        }
+
+        fn read_signature(&self) -> Result<[u8; 64], crate::source::SourceError> {
+            Ok(self.signature)
+        }
+
+        fn copy_artifact(
+            &self,
+            name: &str,
+            destination: &Path,
+            max_bytes: u64,
+        ) -> Result<(), crate::source::SourceError> {
+            self.resume_artifact(name, destination, max_bytes, 0)
+        }
+
+        fn resume_artifact(
+            &self,
+            name: &str,
+            destination: &Path,
+            max_bytes: u64,
+            offset: u64,
+        ) -> Result<(), crate::source::SourceError> {
+            if name != "kernel" || self.artifact.len() as u64 != max_bytes {
+                return Err(crate::source::SourceError::InvalidArtifactName);
+            }
+            self.offsets.borrow_mut().push(offset);
+            let first = self.offsets.borrow().len() == 1;
+            let end = if first {
+                (offset as usize + 7).min(self.artifact.len())
+            } else {
+                self.artifact.len()
+            };
+            let mut output = fs::OpenOptions::new()
+                .append(true)
+                .create(offset == 0)
+                .open(destination)
+                .map_err(|source| crate::source::SourceError::Io {
+                    operation: "write interrupted test artifact",
+                    path: destination.to_path_buf(),
+                    source,
+                })?;
+            output
+                .write_all(&self.artifact[offset as usize..end])
+                .map_err(|source| crate::source::SourceError::Io {
+                    operation: "write interrupted test artifact",
+                    path: destination.to_path_buf(),
+                    source,
+                })?;
+            if first {
+                return Err(crate::source::SourceError::Transport {
+                    operation: "simulated interrupted mirror",
+                    status: None,
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "simulated transfer interruption",
+                    ),
+                });
+            }
+            Ok(())
+        }
+    }
+
+    struct WrongArtifactBundle {
+        manifest: Vec<u8>,
+        signature: [u8; 64],
+        size: usize,
+    }
+
+    impl UpdateBundleSource for WrongArtifactBundle {
+        fn read_manifest(&self) -> Result<Vec<u8>, crate::source::SourceError> {
+            Ok(self.manifest.clone())
+        }
+
+        fn read_signature(&self) -> Result<[u8; 64], crate::source::SourceError> {
+            Ok(self.signature)
+        }
+
+        fn copy_artifact(
+            &self,
+            name: &str,
+            destination: &Path,
+            max_bytes: u64,
+        ) -> Result<(), crate::source::SourceError> {
+            if name != "kernel" || max_bytes as usize != self.size {
+                return Err(crate::source::SourceError::InvalidArtifactName);
+            }
+            fs::write(destination, vec![0xff; self.size]).map_err(|source| {
+                crate::source::SourceError::Io {
+                    operation: "write corrupt test artifact",
+                    path: destination.to_path_buf(),
+                    source,
+                }
+            })
+        }
+    }
+
+    struct InvalidSignatureBundle {
+        manifest: Vec<u8>,
+        artifact: Vec<u8>,
+    }
+
+    impl UpdateBundleSource for InvalidSignatureBundle {
+        fn read_manifest(&self) -> Result<Vec<u8>, crate::source::SourceError> {
+            Ok(self.manifest.clone())
+        }
+
+        fn read_signature(&self) -> Result<[u8; 64], crate::source::SourceError> {
+            Ok([0; 64])
+        }
+
+        fn copy_artifact(
+            &self,
+            name: &str,
+            destination: &Path,
+            max_bytes: u64,
+        ) -> Result<(), crate::source::SourceError> {
+            if name != "kernel" || self.artifact.len() as u64 != max_bytes {
+                return Err(crate::source::SourceError::InvalidArtifactName);
+            }
+            fs::write(destination, &self.artifact).map_err(|source| {
+                crate::source::SourceError::Io {
+                    operation: "write invalid-signature test artifact",
+                    path: destination.to_path_buf(),
+                    source,
+                }
+            })
+        }
+    }
+
     #[test]
     fn online_and_offline_sources_share_authentication_and_staging() {
         let temp = TestDir::new("source-parity");
@@ -2416,6 +2794,336 @@ mod tests {
                 .all(|entry| !entry.file_name().to_string_lossy().starts_with(".source-")),
             "source spools must be removed after staging completes"
         );
+    }
+
+    #[test]
+    fn interrupted_download_resumes_from_authenticated_mirror_prefix() {
+        let temp = TestDir::new("resume-mirror");
+        let artifact_bytes = b"resumable-kernel-bytes-with-stable-prefix";
+        let (manifest_bytes, signature, signer, _) = signed_cbor_bundle(artifact_bytes);
+        let profile = [0x42; 32];
+        let good_root = temp.path().join("good");
+        fs::create_dir_all(good_root.join(crate::source::SOURCE_ARTIFACT_DIR)).unwrap();
+        fs::write(
+            good_root.join(crate::source::SOURCE_MANIFEST_FILE),
+            &manifest_bytes,
+        )
+        .unwrap();
+        fs::write(
+            good_root.join(crate::source::SOURCE_SIGNATURE_FILE),
+            signature,
+        )
+        .unwrap();
+        fs::write(
+            good_root
+                .join(crate::source::SOURCE_ARTIFACT_DIR)
+                .join("kernel"),
+            artifact_bytes,
+        )
+        .unwrap();
+        let interrupted = InterruptingBundle::new(
+            manifest_bytes.clone(),
+            signature,
+            artifact_bytes,
+        );
+        let trusted = [signer];
+        let revoked = [[0u8; 32]];
+        let policy = TrustPolicy {
+            trusted_keys: &trusted,
+            revoked_keys: &revoked,
+            minimum_security_epoch: 3,
+        };
+        let target = UpdateTarget {
+            rollback_floor: 8,
+            profile,
+        };
+        let spool = temp.path().join("resume-spool");
+        let good = DirectoryBundle::new(&good_root);
+        let mirrors: [&dyn UpdateBundleSource; 2] = [&interrupted, &good];
+        let materialized =
+            crate::source::materialize_verified_resumable(&mirrors, policy, target, &spool)
+                .unwrap();
+        assert_eq!(interrupted.offsets.borrow().as_slice(), &[0]);
+        let sources = materialized.artifact_sources();
+        assert_eq!(fs::read(sources[0].path).unwrap(), artifact_bytes);
+        assert_eq!(
+            fs::read(spool.join(crate::source::SOURCE_ARTIFACT_DIR).join("kernel")).unwrap(),
+            artifact_bytes
+        );
+    }
+
+    #[test]
+    fn loopback_http_range_transport_resumes_partial_artifact() {
+        let temp = TestDir::new("http-range-resume");
+        let artifact_bytes = b"http-range-resumable-kernel-bytes";
+        let (manifest_bytes, signature, signer, _) = signed_cbor_bundle(artifact_bytes);
+        let root = temp.path().join("served");
+        fs::create_dir_all(root.join(crate::source::SOURCE_ARTIFACT_DIR)).unwrap();
+        fs::write(
+            root.join(crate::source::SOURCE_MANIFEST_FILE),
+            &manifest_bytes,
+        )
+        .unwrap();
+        fs::write(
+            root.join(crate::source::SOURCE_SIGNATURE_FILE),
+            signature,
+        )
+        .unwrap();
+        fs::write(
+            root.join(crate::source::SOURCE_ARTIFACT_DIR).join("kernel"),
+            artifact_bytes,
+        )
+        .unwrap();
+        let state = temp.path().join("interrupted-once");
+        let port_file = temp.path().join("port");
+        let (_server, port) = HttpRangeServer::start(&root, &state, &port_file);
+        let source = crate::source::HttpBundle::new(
+            format!("http://127.0.0.1:{port}"),
+            "curl",
+        )
+        .allow_http(true);
+        let trusted = [signer];
+        let revoked = [[0u8; 32]];
+        let policy = TrustPolicy {
+            trusted_keys: &trusted,
+            revoked_keys: &revoked,
+            minimum_security_epoch: 3,
+        };
+        let target = UpdateTarget {
+            rollback_floor: 8,
+            profile: [0x42; 32],
+        };
+        let spool = temp.path().join("http-spool");
+        let first_sources: [&dyn UpdateBundleSource; 1] = [&source];
+        assert!(matches!(
+            crate::source::materialize_verified_resumable(&first_sources, policy, target, &spool),
+            Err(crate::source::SourceError::Transport { .. })
+        ));
+        assert_eq!(
+            fs::read(
+                spool
+                    .join(crate::source::SOURCE_ARTIFACT_DIR)
+                    .join("kernel")
+            )
+            .unwrap()
+            .len(),
+            7
+        );
+
+        let resumed =
+            crate::source::materialize_verified_resumable(&first_sources, policy, target, &spool)
+                .unwrap();
+        assert_eq!(
+            fs::read(resumed.artifact_sources()[0].path).unwrap(),
+            artifact_bytes
+        );
+    }
+
+    #[test]
+    fn mirror_failover_rejects_invalid_signature_and_wrong_artifact_bytes() {
+        let temp = TestDir::new("mirror-failover");
+        let artifact_bytes = b"mirror-owned-kernel-bytes";
+        let (manifest_bytes, signature, signer, _) = signed_cbor_bundle(artifact_bytes);
+        let profile = [0x42; 32];
+        let good_root = temp.path().join("good");
+        fs::create_dir_all(good_root.join(crate::source::SOURCE_ARTIFACT_DIR)).unwrap();
+        fs::write(
+            good_root.join(crate::source::SOURCE_MANIFEST_FILE),
+            &manifest_bytes,
+        )
+        .unwrap();
+        fs::write(
+            good_root.join(crate::source::SOURCE_SIGNATURE_FILE),
+            signature,
+        )
+        .unwrap();
+        fs::write(
+            good_root
+                .join(crate::source::SOURCE_ARTIFACT_DIR)
+                .join("kernel"),
+            artifact_bytes,
+        )
+        .unwrap();
+        let bad_signature = InvalidSignatureBundle {
+            manifest: manifest_bytes.clone(),
+            artifact: b"different-but-untrusted".to_vec(),
+        };
+        let wrong_artifact = WrongArtifactBundle {
+            manifest: manifest_bytes.clone(),
+            signature,
+            size: artifact_bytes.len(),
+        };
+        let good = DirectoryBundle::new(&good_root);
+        let trusted = [signer];
+        let revoked = [[0u8; 32]];
+        let policy = TrustPolicy {
+            trusted_keys: &trusted,
+            revoked_keys: &revoked,
+            minimum_security_epoch: 3,
+        };
+        let target = UpdateTarget {
+            rollback_floor: 8,
+            profile,
+        };
+
+        let signature_spool = temp.path().join("signature-spool");
+        let with_bad_signature: [&dyn UpdateBundleSource; 2] = [&bad_signature, &good];
+        let first = crate::source::materialize_verified_resumable(
+            &with_bad_signature,
+            policy,
+            target,
+            &signature_spool,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(first.artifact_sources()[0].path).unwrap(),
+            artifact_bytes
+        );
+        drop(first);
+
+        let digest_spool = temp.path().join("digest-spool");
+        let with_wrong_bytes: [&dyn UpdateBundleSource; 2] = [&wrong_artifact, &good];
+        let second = crate::source::materialize_verified_resumable(
+            &with_wrong_bytes,
+            policy,
+            target,
+            &digest_spool,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(second.artifact_sources()[0].path).unwrap(),
+            artifact_bytes
+        );
+    }
+
+    #[test]
+    fn resume_spool_cannot_mix_different_authenticated_manifests() {
+        let temp = TestDir::new("resume-manifest-binding");
+        let first_bytes = b"first-signed-kernel";
+        let (first_manifest, first_signature, signer, _) = signed_cbor_bundle(first_bytes);
+        let second_bytes = b"second-signed-kernel";
+        let (second_manifest, second_signature, second_signer, _) =
+            signed_cbor_bundle(second_bytes);
+        assert_eq!(signer, second_signer);
+        let profile = [0x42; 32];
+        let interrupted =
+            InterruptingBundle::new(first_manifest.clone(), first_signature, first_bytes);
+        let replacement = MemoryBundle {
+            manifest: second_manifest,
+            signature: second_signature,
+            artifact: second_bytes.to_vec(),
+        };
+        let trusted = [signer];
+        let revoked = [[0u8; 32]];
+        let policy = TrustPolicy {
+            trusted_keys: &trusted,
+            revoked_keys: &revoked,
+            minimum_security_epoch: 3,
+        };
+        let target = UpdateTarget {
+            rollback_floor: 8,
+            profile,
+        };
+        let spool = temp.path().join("bound-spool");
+        let first_sources: [&dyn UpdateBundleSource; 1] = [&interrupted];
+        assert!(matches!(
+            crate::source::materialize_verified_resumable(
+                &first_sources,
+                policy,
+                target,
+                &spool
+            ),
+            Err(crate::source::SourceError::Transport { .. })
+        ));
+        assert_eq!(
+            fs::read(spool.join(crate::source::SOURCE_ARTIFACT_DIR).join("kernel"))
+                .unwrap()
+                .len(),
+            7
+        );
+
+        let second_sources: [&dyn UpdateBundleSource; 1] = [&replacement];
+        assert!(matches!(
+            crate::source::materialize_verified_resumable(
+                &second_sources,
+                policy,
+                target,
+                &spool
+            ),
+            Err(crate::source::SourceError::CheckpointMismatch)
+        ));
+    }
+
+    #[test]
+    fn service_stages_from_resumed_mirror_set() {
+        let temp = TestDir::new("service-resume-mirrors");
+        let artifact_bytes = b"service-resumable-kernel";
+        let (manifest_bytes, signature, signer, _) = signed_cbor_bundle(artifact_bytes);
+        let root = temp.path().join("mirror");
+        fs::create_dir_all(root.join(crate::source::SOURCE_ARTIFACT_DIR)).unwrap();
+        fs::write(
+            root.join(crate::source::SOURCE_MANIFEST_FILE),
+            &manifest_bytes,
+        )
+        .unwrap();
+        fs::write(
+            root.join(crate::source::SOURCE_SIGNATURE_FILE),
+            signature,
+        )
+        .unwrap();
+        fs::write(
+            root.join(crate::source::SOURCE_ARTIFACT_DIR).join("kernel"),
+            artifact_bytes,
+        )
+        .unwrap();
+        let interrupted =
+            InterruptingBundle::new(manifest_bytes.clone(), signature, artifact_bytes);
+        let good = DirectoryBundle::new(&root);
+        let mirrors: [&dyn UpdateBundleSource; 2] = [&interrupted, &good];
+        let manifest_sha256: [u8; 32] = Sha256::digest(&manifest_bytes).into();
+        let trusted = [signer];
+        let revoked = [[0u8; 32]];
+        let policy = TrustPolicy {
+            trusted_keys: &trusted,
+            revoked_keys: &revoked,
+            minimum_security_epoch: 3,
+        };
+        let target = UpdateTarget {
+            rollback_floor: 8,
+            profile: [0x42; 32],
+        };
+        let grant = LocalInstallGrant {
+            locally_authenticated: true,
+            purpose: 1,
+            manifest_sha256,
+            profile: [0x42; 32],
+            expires_at: 200,
+        };
+        let initial = ControlBlock::initialize(Slot::A, 1, [1; 32], 1, 1, 1, 2).unwrap();
+        let mut service =
+            UpdateService::initialize(temp.path().join("resume-control"), initial).unwrap();
+        let spool = temp.path().join("service-resume-spool");
+        let staging = temp.path().join("service-resume-staging");
+        let status = service
+            .prepare_from_sources(
+                policy,
+                target,
+                &mirrors,
+                &spool,
+                grant,
+                150,
+                &[],
+                &staging,
+                4096,
+            )
+            .unwrap();
+        assert_eq!(status.stage, Some(UpdateStage::Prepared));
+        assert_eq!(status.manifest_sha256, Some(manifest_sha256));
+        assert_eq!(
+            fs::read(staging.join(ARTIFACT_DIR).join("kernel")).unwrap(),
+            artifact_bytes
+        );
+        assert!(!spool.exists(), "completed source spool must be removed");
     }
 
     #[test]
