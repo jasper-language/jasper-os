@@ -4,10 +4,13 @@
 //! services, but addresses only the explicitly reserved installation region.
 
 use alloc::sync::Arc;
+use kernel_core::authz;
 use kernel_core::block::{self, Request, Terminal};
 use kernel_core::fs::journal::{JournalError, SectorIo, STORAGE_UNIT_BYTES};
 use kernel_core::native_install::{
-    GrantKey, InstallationKey, InstallationSnapshot, PackageKey, PackageSpec, Subject,
+    authorize_publisher_rotation, publisher_rotation_scope, GrantKey, InstallationKey,
+    InstallationSnapshot, PackageKey, PackageSpec, PublisherRotationAuditSink,
+    PublisherRotationRequest, Subject,
 };
 use kernel_core::native_install_abi::{GrantArgs, RegisterArgs, MAX_VISIBLE_UPDATES};
 use kernel_core::native_install_service::{
@@ -157,6 +160,45 @@ fn current_caller() -> Result<InstallServiceCaller, InstallServiceError> {
     InstallServiceCaller::new(context, domain, subject)
 }
 
+struct KernelRotationAudit;
+
+impl PublisherRotationAuditSink for KernelRotationAudit {
+    fn commit(&mut self, _: &PublisherRotationRequest, decision: authz::Decision) -> bool {
+        let (
+            version,
+            issuer,
+            subject,
+            executor_generation,
+            tenant,
+            domain,
+            operation,
+            scope,
+            effect,
+            policy,
+            revocation,
+            allowed,
+            reason,
+        ) = authz::diagnostic_fields(decision);
+        crate::kprintln!(
+            "[JSR-AUTHZ] version={} issuer={} subject={} executor_generation={} tenant={} domain={} operation={} scope={} effect={} policy={} revocation={:?} decision={} reason={}",
+            version,
+            issuer,
+            subject,
+            executor_generation,
+            tenant,
+            domain,
+            operation,
+            scope,
+            effect,
+            policy,
+            revocation,
+            allowed,
+            reason
+        );
+        true
+    }
+}
+
 pub fn package_put(spec: PackageSpec, bytes: &[u8]) -> Result<PackageKey, InstallServiceError> {
     let caller = current_caller()?;
     ensure_initialized()?;
@@ -165,6 +207,56 @@ pub fn package_put(spec: PackageSpec, bytes: &[u8]) -> Result<PackageKey, Instal
         .as_mut()
         .ok_or(InstallServiceError::InvalidCaller)?
         .install_package(caller, spec, bytes)
+}
+
+/// Project an authenticated process into the shared PEP decision, commit that
+/// decision to the kernel audit stream and only then mutate publisher identity.
+///
+/// This remains an internal service entry until a dedicated versioned ABI is
+/// frozen. Callers cannot provide subject, tenant, domain or authorization
+/// facts.
+pub fn rotate_publisher_key(request: PublisherRotationRequest) -> Result<(), InstallServiceError> {
+    let caller = current_caller()?;
+    let pid = proc::current_process().ok_or(InstallServiceError::InvalidCaller)?;
+    ensure_initialized()?;
+    let scope = {
+        let backend = BACKEND.lock();
+        let installation = backend
+            .as_ref()
+            .ok_or(InstallServiceError::InvalidCaller)?
+            .store()
+            .installation(request.installation)?;
+        publisher_rotation_scope(installation.scope)
+    };
+    let syscalls = crate::kobj::with(|table| crate::proc::syscalls_in(table, pid))
+        .map_err(|_| InstallServiceError::InvalidCaller)?;
+    let tenant = caller.domain().map_or(1, |domain| u64::from(domain.id));
+    let policy_epoch = crate::security::policy_epoch();
+    let authorization = authorize_publisher_rotation(
+        authz::CallerFacts {
+            context: caller.context(),
+            tenant,
+            scope,
+            syscalls,
+            policy_epoch,
+            revocation_generation: None,
+            now: crate::sched::now_ns(),
+            clock_trusted: false,
+        },
+        request,
+        crate::syscall::table::SYSTEM_INSTALL_PACKAGE_WRITE,
+        &mut KernelRotationAudit,
+    )
+    .map_err(|_| InstallServiceError::Unauthorized)?;
+    let mut backend = BACKEND.lock();
+    backend
+        .as_mut()
+        .ok_or(InstallServiceError::InvalidCaller)?
+        .rotate_publisher_key(
+            caller,
+            authorization,
+            &security::Ed25519PublisherRotationVerifier,
+        )
 }
 
 pub fn register(args: RegisterArgs) -> Result<InstallationKey, InstallServiceError> {

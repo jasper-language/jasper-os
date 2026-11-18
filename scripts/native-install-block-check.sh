@@ -96,13 +96,13 @@ for round in 1 2 3; do
   ! grep -aqE '^\[JSR-(PANIC|NATIVE-INSTALL-FAIL)\]|KERNEL PANIC|panicked at' "$serial"
 done
 
-grep -aq '^\[JSR-NATIVE-INSTALL\] stage=format upgrade=true runtime_old=true data_new=true packages=2 installations=2 grants=1 runtimes=1 data=1 failed=0' \
+grep -aq '^\[JSR-NATIVE-INSTALL\] stage=format upgrade=true runtime_old=true data_new=true publisher_rotation=true packages=2 installations=2 grants=1 runtimes=1 data=1 failed=0' \
   "$OUT/round-1.serial"
 ! grep -aq 'stage=format' "$OUT/round-2.serial"
 ! grep -aq 'stage=format' "$OUT/round-3.serial"
-grep -aq '^\[JSR-NATIVE-INSTALL\] stage=reopen upgrade=true runtime_old=true data_new=true packages=2 installations=2 grants=1 runtimes=1 data=1 bytes=26 faults=9 failed=0' \
+grep -aq '^\[JSR-NATIVE-INSTALL\] stage=reopen upgrade=true runtime_old=true data_new=true publisher_rotation=true packages=2 installations=2 grants=1 runtimes=1 data=1 bytes=26 faults=9 failed=0' \
   "$OUT/round-2.serial"
-grep -aq '^\[JSR-NATIVE-INSTALL\] stage=reopen upgrade=true runtime_old=true data_new=true packages=2 installations=2 grants=1 runtimes=1 data=1 bytes=26 faults=9 failed=0' \
+grep -aq '^\[JSR-NATIVE-INSTALL\] stage=reopen upgrade=true runtime_old=true data_new=true publisher_rotation=true packages=2 installations=2 grants=1 runtimes=1 data=1 bytes=26 faults=9 failed=0' \
   "$OUT/round-3.serial"
 
 echo "native-install-block: PASS rounds=3 faults=9 evidence=$OUT"

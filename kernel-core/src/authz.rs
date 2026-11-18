@@ -67,6 +67,8 @@ pub enum Operation {
     SystemUpdateRecover,
     SystemUpdateArchive,
     SystemUpdateAudit,
+    SystemInstallPublisherRotate,
+    SystemInstallPublisherRecover,
 }
 
 impl Operation {
@@ -76,6 +78,8 @@ impl Operation {
             Self::SystemUpdateRecover => "system.update.recover",
             Self::SystemUpdateArchive => "system.update.archive",
             Self::SystemUpdateAudit => "system.update.audit",
+            Self::SystemInstallPublisherRotate => "system.install.publisher.rotate",
+            Self::SystemInstallPublisherRecover => "system.install.publisher.recover",
         }
     }
 
@@ -86,7 +90,10 @@ impl Operation {
     const fn expected_effect(self) -> Effect {
         match self {
             Self::SystemUpdateStatus | Self::SystemUpdateAudit => Effect::Read,
-            Self::SystemUpdateRecover | Self::SystemUpdateArchive => Effect::Write,
+            Self::SystemUpdateRecover
+            | Self::SystemUpdateArchive
+            | Self::SystemInstallPublisherRotate
+            | Self::SystemInstallPublisherRecover => Effect::Write,
         }
     }
 }

@@ -15,8 +15,8 @@ use crate::native_install::{
     Actor, DataKey, DataOwnerKind, DataSnapshot, GrantKey, GrantRights, GrantSpec, InstallError,
     InstallModel, InstallSpec, InstallStateSnapshot, InstallationKey, InstallationSnapshot,
     OwnerScope, PackageKey, PackageSnapshot, PackageSource, PackageSpec, PrincipalKind,
-    PrincipalSpec, PublisherKey, PublisherRotationRequest, PublisherRotationVerifier, RuntimeKey,
-    RuntimeSnapshot, Subject, UpdateAuthority, CONTENT_BYTES,
+    PrincipalSpec, PublisherKey, PublisherRotationAuthorization, PublisherRotationVerifier,
+    RuntimeKey, RuntimeSnapshot, Subject, UpdateAuthority, CONTENT_BYTES,
 };
 use crate::security_domain::DomainKey;
 use alloc::boxed::Box;
@@ -171,9 +171,9 @@ impl<D: SectorIo> PersistentInstallStore<D> {
 
     #[inline(never)]
     pub fn open(mut device: D) -> Result<Self, PersistentInstallError> {
-        let mut header = [0u8; STORAGE_UNIT_BYTES];
+        let mut header = Box::new([0u8; STORAGE_UNIT_BYTES]);
         device
-            .read_unit(0, &mut header)
+            .read_unit(0, &mut *header)
             .map_err(|_| PersistentInstallError::Io)?;
         let header_version = u32::from_le_bytes(header[8..12].try_into().unwrap());
         if &header[..8] != FORMAT_MAGIC
@@ -203,10 +203,10 @@ impl<D: SectorIo> PersistentInstallStore<D> {
         store.scan_blobs()?;
         store.reclaim_orphan_blobs()?;
         if header_version != FORMAT_VERSION {
-            let mut migrated = [0u8; STORAGE_UNIT_BYTES];
-            migrated[..8].copy_from_slice(FORMAT_MAGIC);
-            migrated[8..12].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
-            store.write_unit(0, &migrated)?;
+            header.fill(0);
+            header[..8].copy_from_slice(FORMAT_MAGIC);
+            header[8..12].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+            store.write_unit(0, &header)?;
             store.flush()?;
         }
         Ok(store)
@@ -388,11 +388,11 @@ impl<D: SectorIo> PersistentInstallStore<D> {
     pub fn rotate_publisher_key(
         &mut self,
         actor: Actor<'_>,
-        request: PublisherRotationRequest,
+        authorization: PublisherRotationAuthorization,
         verifier: &impl PublisherRotationVerifier,
     ) -> Result<(), PersistentInstallError> {
         let mut next = self.model.clone();
-        next.rotate_publisher_key(actor, request, verifier)
+        next.rotate_publisher_key(actor, authorization, verifier)
             .map_err(PersistentInstallError::Install)?;
         self.commit_model(next)
     }
@@ -717,9 +717,9 @@ fn read_slot<D: SectorIo>(
     slot: usize,
 ) -> Result<Option<(u64, Box<State>)>, PersistentInstallError> {
     let base = FORMAT_UNITS + slot * SLOT_UNITS;
-    let mut marker = [0u8; STORAGE_UNIT_BYTES];
+    let mut marker = Box::new([0u8; STORAGE_UNIT_BYTES]);
     device
-        .read_unit(sector_for_unit(base + SLOT_BODY_UNITS)?, &mut marker)
+        .read_unit(sector_for_unit(base + SLOT_BODY_UNITS)?, &mut *marker)
         .map_err(|_| PersistentInstallError::Io)?;
     let version = u32::from_le_bytes(marker[8..12].try_into().unwrap());
     if &marker[..8] != SNAPSHOT_MAGIC
@@ -736,9 +736,9 @@ fn read_slot<D: SectorIo>(
     let mut hash = 0x811c_9dc5u32;
     let mut remaining = len;
     for unit in 0..SLOT_BODY_UNITS {
-        let mut bytes = [0u8; STORAGE_UNIT_BYTES];
+        let mut bytes = Box::new([0u8; STORAGE_UNIT_BYTES]);
         device
-            .read_unit(sector_for_unit(base + unit)?, &mut bytes)
+            .read_unit(sector_for_unit(base + unit)?, &mut *bytes)
             .map_err(|_| PersistentInstallError::Io)?;
         let take = remaining.min(STORAGE_UNIT_BYTES);
         for byte in &bytes[..take] {
@@ -1174,7 +1174,7 @@ struct SnapshotUnitReader<'a, D: SectorIo> {
     base: usize,
     remaining: usize,
     unit_index: usize,
-    unit: [u8; STORAGE_UNIT_BYTES],
+    unit: Box<[u8; STORAGE_UNIT_BYTES]>,
     unit_len: usize,
     unit_at: usize,
 }
@@ -1186,7 +1186,7 @@ impl<'a, D: SectorIo> SnapshotUnitReader<'a, D> {
             base,
             remaining: len,
             unit_index: 0,
-            unit: [0u8; STORAGE_UNIT_BYTES],
+            unit: Box::new([0u8; STORAGE_UNIT_BYTES]),
             unit_len: 0,
             unit_at: 0,
         }
@@ -1215,7 +1215,7 @@ impl<D: SectorIo> SnapshotSource for SnapshotUnitReader<'_, D> {
                 self.device
                     .read_unit(
                         sector_for_unit(self.base + self.unit_index)?,
-                        &mut self.unit,
+                        &mut *self.unit,
                     )
                     .map_err(|_| PersistentInstallError::Io)?;
                 self.unit_len = self.remaining.min(STORAGE_UNIT_BYTES);
@@ -1411,6 +1411,10 @@ fn get_data_kind(tag: u8) -> Result<DataOwnerKind, PersistentInstallError> {
 mod tests {
     use super::*;
     use crate::fs::journal::JournalError;
+    use crate::native_install::{PublisherRotationAuditSink, PublisherRotationRequest};
+    use crate::objtable::ObjId;
+    use crate::security::{BootId, IdentityClass, MetadataState, SecurityContext};
+    use crate::syscall_set::SyscallSet;
 
     struct MemoryDisk {
         bytes: Vec<u8>,
@@ -1434,6 +1438,44 @@ mod tests {
         fn verify(&self, _: PublisherKey, _: &[u8], signature: &[u8; 64]) -> bool {
             *signature == [0x5a; 64]
         }
+    }
+
+    struct AcceptRotationAudit;
+
+    impl PublisherRotationAuditSink for AcceptRotationAudit {
+        fn commit(&mut self, _: &PublisherRotationRequest, _: crate::authz::Decision) -> bool {
+            true
+        }
+    }
+
+    fn authorize_rotation<D: SectorIo>(
+        store: &PersistentInstallStore<D>,
+        request: PublisherRotationRequest,
+    ) -> PublisherRotationAuthorization {
+        let installation = store.installation(request.installation).unwrap();
+        let context = SecurityContext::new(
+            BootId::from_words([1, 2]),
+            IdentityClass::Process,
+            ObjId::from_raw((1u64 << 32) | 7).unwrap(),
+            None,
+            MetadataState::Active,
+        );
+        crate::native_install::authorize_publisher_rotation(
+            crate::authz::CallerFacts {
+                context,
+                tenant: 1,
+                scope: crate::native_install::publisher_rotation_scope(installation.scope),
+                syscalls: SyscallSet::of(&[102]),
+                policy_epoch: 1,
+                revocation_generation: None,
+                now: 0,
+                clock_trusted: false,
+            },
+            request,
+            102,
+            &mut AcceptRotationAudit,
+        )
+        .unwrap()
     }
 
     impl SectorIo for MemoryDisk {
@@ -1764,8 +1806,9 @@ mod tests {
             old_signature: Some([0x5a; 64]),
             new_signature: [0x5a; 64],
         };
+        let authorization = authorize_rotation(&store, request);
         store
-            .rotate_publisher_key(actor, request, &AcceptPublisherProof)
+            .rotate_publisher_key(actor, authorization, &AcceptPublisherProof)
             .unwrap();
         assert_eq!(
             store.installation(installation).unwrap().publisher_key,

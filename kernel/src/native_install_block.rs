@@ -7,13 +7,16 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use ed25519_dalek::{Signer, SigningKey};
 use kernel_core::block::{self, Request, Terminal};
 use kernel_core::fs::journal::{
     JournalError, SectorIo, SECTORS_PER_STORAGE_UNIT, STORAGE_UNIT_BYTES,
 };
 use kernel_core::native_install::{
-    Actor, DataOwnerKind, GrantRights, OwnerScope, PackageSource, PackageSpec, PrincipalKind,
-    PublisherKey, Subject,
+    authorize_publisher_rotation, publisher_rotation_message, publisher_rotation_scope, Actor,
+    DataOwnerKind, GrantRights, InstallationKey, OwnerScope, PackageSource, PackageSpec,
+    PrincipalKind, PublisherKey, PublisherRotationAuditSink, PublisherRotationKind,
+    PublisherRotationRequest, Subject,
 };
 use kernel_core::native_install_service::{
     InstallServiceCaller, InstallServiceError, NativeInstallService,
@@ -21,6 +24,7 @@ use kernel_core::native_install_service::{
 use kernel_core::persistent_install::{PersistentInstallError, PersistentInstallStore};
 use kernel_core::security::{BootId, IdentityClass, MetadataState, SecurityContext};
 use kernel_core::security_domain::DomainKey;
+use kernel_core::syscall_set::SyscallSet;
 
 use crate::blk::BlockDevice;
 use crate::{baseline, kprintln, mmio, pci, virtio};
@@ -43,10 +47,8 @@ const PACKAGE_V2: PackageSpec = PackageSpec {
     content: PACKAGE_V2_CONTENT,
     version: 2,
 };
-const PUBLISHER_KEY: PublisherKey = match PublisherKey::new([0x4a; 32]) {
-    Some(key) => key,
-    None => panic!("non-zero publisher key"),
-};
+const PUBLISHER_SIGNING_SEED: [u8; 32] = [0x4a; 32];
+const NEXT_PUBLISHER_SIGNING_SEED: [u8; 32] = [0x4b; 32];
 
 static FAILED: AtomicU32 = AtomicU32::new(0);
 
@@ -85,6 +87,193 @@ fn user_caller(user: u64) -> InstallServiceCaller {
         Subject::User(user),
     )
     .unwrap()
+}
+
+fn publisher_signing_key(seed: [u8; 32]) -> SigningKey {
+    SigningKey::from_bytes(&seed)
+}
+
+fn publisher_public_key(seed: [u8; 32]) -> PublisherKey {
+    PublisherKey::new(publisher_signing_key(seed).verifying_key().to_bytes())
+        .expect("verification seed must produce a non-zero public key")
+}
+
+#[inline(never)]
+fn rotate_test_publisher(
+    service: &mut NativeInstallService<VirtioSectorIo<'_>>,
+    installation: InstallationKey,
+    user: InstallServiceCaller,
+) -> Result<(), InstallServiceError> {
+    let current = service.store().installation(installation)?;
+    let current_package = service.store().package(current.package)?;
+    let old_signer = publisher_signing_key(PUBLISHER_SIGNING_SEED);
+    let new_signer = publisher_signing_key(NEXT_PUBLISHER_SIGNING_SEED);
+    let mut rotation = PublisherRotationRequest {
+        installation,
+        app_id: current_package.spec.app_id,
+        expected_key: current.publisher_key,
+        new_key: publisher_public_key(NEXT_PUBLISHER_SIGNING_SEED),
+        expected_generation: current.publisher_key_generation,
+        nonce: 0x5254_0001,
+        kind: PublisherRotationKind::Cooperative,
+        old_signature: None,
+        new_signature: [0; 64],
+    };
+    let message = publisher_rotation_message(&current, current_package, rotation);
+    rotation.old_signature = Some(old_signer.sign(&message).to_bytes());
+    rotation.new_signature = new_signer.sign(&message).to_bytes();
+    let mut audit = BootRotationAudit;
+    let authorization = authorize_publisher_rotation(
+        kernel_core::authz::CallerFacts {
+            context: user.context(),
+            tenant: 7,
+            scope: publisher_rotation_scope(current.scope),
+            syscalls: SyscallSet::of(&[crate::syscall::table::SYSTEM_INSTALL_PACKAGE_WRITE]),
+            policy_epoch: 1,
+            revocation_generation: None,
+            now: 0,
+            clock_trusted: false,
+        },
+        rotation,
+        crate::syscall::table::SYSTEM_INSTALL_PACKAGE_WRITE,
+        &mut audit,
+    )
+    .map_err(|_| InstallServiceError::Unauthorized)?;
+    service.rotate_publisher_key(
+        user,
+        authorization,
+        &crate::security::Ed25519PublisherRotationVerifier,
+    )?;
+    let rotated = service.store().installation(installation)?;
+    check(
+        rotated.publisher_key == Some(rotation.new_key) && rotated.publisher_key_generation == 2,
+        "publisher rotation was not committed",
+    );
+    Ok(())
+}
+
+#[inline(never)]
+fn format_and_upgrade<'a>(
+    mut service: NativeInstallService<VirtioSectorIo<'a>>,
+) -> Result<PersistentInstallStore<VirtioSectorIo<'a>>, InstallServiceError> {
+    kprintln!("[JSR-NATIVE-INSTALL] step=write-begin");
+    let system = system_caller();
+    let user = user_caller(7);
+    let other = user_caller(8);
+    let publisher_key = publisher_public_key(PUBLISHER_SIGNING_SEED);
+    check(
+        service
+            .install_package(user, PACKAGE, PACKAGE_BYTES)
+            .is_err(),
+        "non-system package insertion was admitted",
+    );
+    let package = service.install_signed_package(system, PACKAGE, PACKAGE_BYTES, publisher_key)?;
+    let package_v2 =
+        service.install_signed_package(system, PACKAGE_V2, PACKAGE_V2_BYTES, publisher_key)?;
+    let first = service.register(
+        system,
+        package,
+        OwnerScope::User(7),
+        PackageSource::Store,
+        Subject::User(7),
+    )?;
+    service.register(
+        system,
+        package,
+        OwnerScope::User(8),
+        PackageSource::Store,
+        Subject::User(8),
+    )?;
+    check(
+        service
+            .register(
+                user,
+                package,
+                OwnerScope::User(8),
+                PackageSource::Store,
+                Subject::User(8),
+            )
+            .is_err(),
+        "cross-scope registration was admitted",
+    );
+    service.add_grant(
+        system,
+        first,
+        Subject::User(7),
+        GrantRights::DISCOVER.union(GrantRights::START),
+        None,
+    )?;
+    let runtime = service.start(user, first, PrincipalKind::User, 1, 11)?;
+    let data = service.create_data(user, first, Subject::User(7), DataOwnerKind::PrivateUser)?;
+    check(
+        service.query(other, first, 12).is_err(),
+        "cross-user query was admitted",
+    );
+    service.upgrade_application(user, first, package_v2)?;
+    check(
+        service.store().runtime(runtime)?.package == package,
+        "application update retargeted an active runtime",
+    );
+    check(
+        service.store().data(data)?.package == package_v2,
+        "application update did not move the owned data scope",
+    );
+    check(
+        service.query(user, first, 12)?.package == package_v2,
+        "application update did not activate the new package",
+    );
+    rotate_test_publisher(&mut service, first, user)?;
+    service.query(user, first, 12)?;
+    kprintln!(
+        "[JSR-NATIVE-INSTALL] service-auth=true package_system_only=true cross_scope_denied=true cross_user_denied=true publisher_rotation=true"
+    );
+    kprintln!(
+        "[JSR-NATIVE-INSTALL] stage=format upgrade=true runtime_old=true data_new=true publisher_rotation=true packages=2 installations=2 grants=1 runtimes=1 data=1 failed=0"
+    );
+    Ok(service.into_store())
+}
+
+struct BootRotationAudit;
+
+impl PublisherRotationAuditSink for BootRotationAudit {
+    fn commit(
+        &mut self,
+        _: &PublisherRotationRequest,
+        decision: kernel_core::authz::Decision,
+    ) -> bool {
+        let (
+            version,
+            issuer,
+            subject,
+            executor_generation,
+            tenant,
+            domain,
+            operation,
+            scope,
+            effect,
+            policy,
+            revocation,
+            allowed,
+            reason,
+        ) = kernel_core::authz::diagnostic_fields(decision);
+        kprintln!(
+            "[JSR-AUTHZ] version={} issuer={} subject={} executor_generation={} tenant={} domain={} operation={} scope={} effect={} policy={} revocation={:?} decision={} reason={}",
+            version,
+            issuer,
+            subject,
+            executor_generation,
+            tenant,
+            domain,
+            operation,
+            scope,
+            effect,
+            policy,
+            revocation,
+            allowed,
+            reason
+        );
+        true
+    }
 }
 
 struct VirtioSectorIo<'a> {
@@ -329,6 +518,16 @@ fn verify_baseline(
     };
     let state = store.state();
     let packages = state.packages.iter().flatten().count();
+    let first = state
+        .installations
+        .iter()
+        .flatten()
+        .find(|installation| installation.scope == OwnerScope::User(7));
+    let second = state
+        .installations
+        .iter()
+        .flatten()
+        .find(|installation| installation.scope == OwnerScope::User(8));
     length == PACKAGE_BYTES.len()
         && &bytes[..length] == PACKAGE_BYTES
         && packages == if extra_package { 3 } else { 2 }
@@ -338,6 +537,14 @@ fn verify_baseline(
         && state.grants.iter().flatten().count() == 1
         && state.runtimes.iter().flatten().count() == 1
         && state.data.iter().flatten().count() == 1
+        && first.is_some_and(|installation| {
+            installation.publisher_key == Some(publisher_public_key(NEXT_PUBLISHER_SIGNING_SEED))
+                && installation.publisher_key_generation == 2
+        })
+        && second.is_some_and(|installation| {
+            installation.publisher_key == Some(publisher_public_key(PUBLISHER_SIGNING_SEED))
+                && installation.publisher_key_generation == 1
+        })
 }
 
 fn run_fault_matrix(
@@ -425,81 +632,7 @@ fn exercise(device: &mut BlockDevice) -> Result<(&'static str, usize), InstallSe
     kprintln!("[JSR-NATIVE-INSTALL] step=open phase={}", phase);
 
     if phase == "format" {
-        kprintln!("[JSR-NATIVE-INSTALL] step=write-begin");
-        let mut service = NativeInstallService::new(store);
-        let system = system_caller();
-        let user = user_caller(7);
-        let other = user_caller(8);
-        check(
-            service
-                .install_package(user, PACKAGE, PACKAGE_BYTES)
-                .is_err(),
-            "non-system package insertion was admitted",
-        );
-        let package =
-            service.install_signed_package(system, PACKAGE, PACKAGE_BYTES, PUBLISHER_KEY)?;
-        let package_v2 =
-            service.install_signed_package(system, PACKAGE_V2, PACKAGE_V2_BYTES, PUBLISHER_KEY)?;
-        let first = service.register(
-            system,
-            package,
-            OwnerScope::User(7),
-            PackageSource::Store,
-            Subject::User(7),
-        )?;
-        service.register(
-            system,
-            package,
-            OwnerScope::User(8),
-            PackageSource::Store,
-            Subject::User(8),
-        )?;
-        check(
-            service
-                .register(
-                    user,
-                    package,
-                    OwnerScope::User(8),
-                    PackageSource::Store,
-                    Subject::User(8),
-                )
-                .is_err(),
-            "cross-scope registration was admitted",
-        );
-        service.add_grant(
-            system,
-            first,
-            Subject::User(7),
-            GrantRights::DISCOVER.union(GrantRights::START),
-            None,
-        )?;
-        let runtime = service.start(user, first, PrincipalKind::User, 1, 11)?;
-        let data =
-            service.create_data(user, first, Subject::User(7), DataOwnerKind::PrivateUser)?;
-        check(
-            service.query(other, first, 12).is_err(),
-            "cross-user query was admitted",
-        );
-        service.upgrade_application(user, first, package_v2)?;
-        check(
-            service.store().runtime(runtime)?.package == package,
-            "application update retargeted an active runtime",
-        );
-        check(
-            service.store().data(data)?.package == package_v2,
-            "application update did not move the owned data scope",
-        );
-        check(
-            service.query(user, first, 12)?.package == package_v2,
-            "application update did not activate the new package",
-        );
-        service.query(user, first, 12)?;
-        kprintln!(
-            "[JSR-NATIVE-INSTALL] service-auth=true package_system_only=true cross_scope_denied=true cross_user_denied=true"
-        );
-        kprintln!(
-            "[JSR-NATIVE-INSTALL] stage=format upgrade=true runtime_old=true data_new=true packages=2 installations=2 grants=1 runtimes=1 data=1 failed=0"
-        );
+        format_and_upgrade(NativeInstallService::new(store))?;
         return Ok((phase, PACKAGE_BYTES.len()));
     }
 
@@ -559,6 +692,10 @@ fn exercise(device: &mut BlockDevice) -> Result<(&'static str, usize), InstallSe
         || runtime.package != package
         || data.package != package_v2
         || data.installation != Some(first.key)
+        || first.publisher_key != Some(publisher_public_key(NEXT_PUBLISHER_SIGNING_SEED))
+        || first.publisher_key_generation != 2
+        || second.publisher_key != Some(publisher_public_key(PUBLISHER_SIGNING_SEED))
+        || second.publisher_key_generation != 1
     {
         return Err(PersistentInstallError::Corrupt.into());
     }
@@ -591,7 +728,7 @@ fn exercise(device: &mut BlockDevice) -> Result<(&'static str, usize), InstallSe
     };
     let _ = io;
     kprintln!(
-        "[JSR-NATIVE-INSTALL] stage=reopen upgrade=true runtime_old=true data_new=true packages=2 installations=2 grants=1 runtimes=1 data=1 bytes={} faults={} failed=0",
+        "[JSR-NATIVE-INSTALL] stage=reopen upgrade=true runtime_old=true data_new=true publisher_rotation=true packages=2 installations=2 grants=1 runtimes=1 data=1 bytes={} faults={} failed=0",
         bytes_len,
         faults
     );

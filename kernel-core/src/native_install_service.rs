@@ -9,8 +9,8 @@ use crate::fs::journal::SectorIo;
 use crate::native_install::{
     Actor, DataKey, DataOwnerKind, DataSnapshot, GrantKey, GrantRights, GrantSpec, InstallError,
     InstallSpec, InstallationKey, InstallationSnapshot, OwnerScope, PackageKey, PackageSnapshot,
-    PackageSpec, PrincipalSpec, PublisherKey, PublisherRotationRequest, PublisherRotationVerifier,
-    RuntimeKey, RuntimeSnapshot, Subject, UpdateAuthority,
+    PackageSpec, PrincipalSpec, PublisherKey, PublisherRotationAuthorization,
+    PublisherRotationVerifier, RuntimeKey, RuntimeSnapshot, Subject, UpdateAuthority,
 };
 use crate::persistent_install::{PersistentInstallError, PersistentInstallStore};
 use crate::security::{SecurityContext, SecurityError};
@@ -213,13 +213,13 @@ impl<D: SectorIo> NativeInstallService<D> {
     pub fn rotate_publisher_key(
         &mut self,
         caller: InstallServiceCaller,
-        request: PublisherRotationRequest,
+        authorization: PublisherRotationAuthorization,
         verifier: &impl PublisherRotationVerifier,
     ) -> Result<(), InstallServiceError> {
-        self.require_update_authority(caller, request.installation)?;
+        self.require_update_authority(caller, authorization.request().installation)?;
         let subjects = [caller.subject];
         self.store
-            .rotate_publisher_key(Actor::new(&subjects), request, verifier)
+            .rotate_publisher_key(Actor::new(&subjects), authorization, verifier)
             .map_err(Into::into)
     }
 
@@ -483,8 +483,12 @@ const fn subject_id(subject: Subject) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::fs::journal::{JournalError, STORAGE_UNIT_BYTES};
-    use crate::native_install::{PackageSource, PrincipalKind, CONTENT_BYTES};
+    use crate::native_install::{
+        PackageSource, PrincipalKind, PublisherRotationAuditSink, PublisherRotationRequest,
+        CONTENT_BYTES,
+    };
     use crate::security::{BootId, IdentityClass, MetadataState};
+    use crate::syscall_set::SyscallSet;
 
     struct MemoryDisk {
         bytes: Vec<u8>,
@@ -578,6 +582,43 @@ mod tests {
         fn verify(&self, _: PublisherKey, _: &[u8], signature: &[u8; 64]) -> bool {
             *signature == [0x5a; 64]
         }
+    }
+
+    struct AcceptRotationAudit;
+
+    impl PublisherRotationAuditSink for AcceptRotationAudit {
+        fn commit(
+            &mut self,
+            _: &crate::native_install::PublisherRotationRequest,
+            _: crate::authz::Decision,
+        ) -> bool {
+            true
+        }
+    }
+
+    fn authorize_rotation<D: SectorIo>(
+        service: &NativeInstallService<D>,
+        caller: InstallServiceCaller,
+        request: PublisherRotationRequest,
+    ) -> PublisherRotationAuthorization {
+        let installation = service.store().installation(request.installation).unwrap();
+        let tenant = caller.domain().map_or(1, |domain| u64::from(domain.id));
+        crate::native_install::authorize_publisher_rotation(
+            crate::authz::CallerFacts {
+                context: caller.context(),
+                tenant,
+                scope: crate::native_install::publisher_rotation_scope(installation.scope),
+                syscalls: SyscallSet::of(&[102]),
+                policy_epoch: 1,
+                revocation_generation: None,
+                now: 0,
+                clock_trusted: false,
+            },
+            request,
+            102,
+            &mut AcceptRotationAudit,
+        )
+        .unwrap()
     }
 
     fn tenant(id: u64) -> InstallServiceCaller {
@@ -811,8 +852,9 @@ mod tests {
             old_signature: Some([0x5a; 64]),
             new_signature: [0x5a; 64],
         };
+        let authorization = authorize_rotation(&service, owner, request);
         service
-            .rotate_publisher_key(owner, request, &AcceptPublisherProof)
+            .rotate_publisher_key(owner, authorization, &AcceptPublisherProof)
             .unwrap();
         let installation_record = service.store().installation(installation).unwrap();
         assert_eq!(installation_record.publisher_key, Some(new_key));

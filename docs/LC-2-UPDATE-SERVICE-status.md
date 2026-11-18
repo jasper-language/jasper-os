@@ -52,7 +52,7 @@ v1、用户 7 数据为 v2、用户 8 安装及数据仍为 v1，且九个持久
 详见 `docs/LC-2-RESUME-SOURCE-HA-status.md`。
 
 该切片没有新增用户 ABI，也未完成 Issue #38 的企业策略、自动批量依赖安装/降级、
-可逆 Schema 迁移、受权轮换 CLI/服务审计和真实整机闭环。
+可逆 Schema 迁移、轮换用户 ABI/CLI 和真实整机闭环。
 
 ## 发布者密钥代际
 
@@ -61,9 +61,10 @@ v1、用户 7 数据为 v2、用户 8 安装及数据仍为 v1，且九个持久
 更新主体同时匹配，并证明持有新 key。轮换后旧 key 签发的更新失败，活动 runtime
 保持启动时包身份。快照格式升级到 v4 并保留 v1-v3 读取兼容。
 
-详见 `docs/LC-2-PUBLISHER-ROTATION-status.md`。内核提供 Ed25519 验证适配器，但
-尚未接入受权 CLI/服务调用与审计，也没有物理设备断电矩阵，因此不改变 LC-2 的
-core-passed 状态。
+详见 `docs/LC-2-PUBLISHER-ROTATION-status.md`。内核当前进程授权、统一
+`authz::Decision`、审计 token 和 Ed25519 验证已接入同一服务/store 路径；真实
+OVMF 三轮和九个持久化故障点通过。用户 ABI/CLI、LC-5 单调锚和 Pixel 物理断电矩阵
+仍未完成，因此不改变 LC-2 的 core-passed 状态。
 
 Pixel 6a 的只读 LUN/GPT 审计没有发现 Jasper 专用持久范围。现有 AOSP/Linux
 UFS 后端为 GPL-2.0 系列并依赖 Linux 内核 API，upstream U-Boot 也缺少

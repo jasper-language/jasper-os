@@ -9,6 +9,7 @@
 //! 运行主体、数据所有权和更新权；逻辑路径与 AppID 只表达事实，不能作为权限
 //! 凭证。所有表固定容量，失败路径不产生部分写入。
 
+use crate::authz;
 use crate::security_domain::DomainKey;
 
 pub const CONTENT_BYTES: usize = 32;
@@ -83,6 +84,100 @@ pub struct PublisherRotationRequest {
 /// 已验证签名；实现必须用指定公钥验证完整消息并拒绝畸形签名。
 pub trait PublisherRotationVerifier {
     fn verify(&self, key: PublisherKey, message: &[u8], signature: &[u8; 64]) -> bool;
+}
+
+/// Trusted audit boundary for one publisher-rotation authorization decision.
+///
+/// The authorization constructor commits exactly one decision before it can
+/// produce a mutation token. Returning `false` means the decision was not
+/// retained, so the rotation must not proceed.
+pub trait PublisherRotationAuditSink {
+    fn commit(&mut self, request: &PublisherRotationRequest, decision: authz::Decision) -> bool;
+}
+
+/// Failure to obtain an auditable publisher-rotation authorization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublisherRotationAuthorizationError {
+    /// The audit boundary could not retain the decision.
+    AuditUnavailable,
+    /// The authoritative authorization projection denied the operation.
+    Denied(authz::Decision),
+}
+
+/// Non-forgeable capability for one exact, already-audited rotation request.
+///
+/// Fields stay private so package mutation paths cannot accept a caller-built
+/// Boolean or reuse a token for a different installation/request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PublisherRotationAuthorization {
+    request: PublisherRotationRequest,
+    decision: authz::Decision,
+}
+
+impl PublisherRotationAuthorization {
+    pub const fn request(self) -> PublisherRotationRequest {
+        self.request
+    }
+
+    pub const fn decision(self) -> authz::Decision {
+        self.decision
+    }
+}
+
+/// Map native installation ownership to the shared authorization scope.
+pub const fn publisher_rotation_scope(scope: OwnerScope) -> authz::AccessScope {
+    match scope {
+        OwnerScope::System => authz::AccessScope::Platform,
+        OwnerScope::Device(id) => authz::AccessScope::Device(id),
+        OwnerScope::User(id) => authz::AccessScope::User(id),
+        OwnerScope::Group(id) => authz::AccessScope::Group(id),
+        OwnerScope::Tenant(id) => authz::AccessScope::Tenant(id),
+        OwnerScope::Workload(id) => authz::AccessScope::Workload(id),
+    }
+}
+
+/// Authorize one exact rotation request and commit the complete decision.
+///
+/// The caller facts and required syscall are derived by the trusted service
+/// adapter, never by a user request. The token is emitted only after the audit
+/// sink retained the decision; an unavailable audit path fails closed.
+pub fn authorize_publisher_rotation(
+    caller: authz::CallerFacts,
+    request: PublisherRotationRequest,
+    required_syscall: u32,
+    audit: &mut impl PublisherRotationAuditSink,
+) -> Result<PublisherRotationAuthorization, PublisherRotationAuthorizationError> {
+    let operation = match request.kind {
+        PublisherRotationKind::Cooperative => authz::Operation::SystemInstallPublisherRotate,
+        PublisherRotationKind::OwnerReauthorization => {
+            authz::Operation::SystemInstallPublisherRecover
+        }
+    };
+    let scope = caller.scope;
+    let policy_epoch = caller.policy_epoch;
+    let decision = authz::authorize(
+        caller,
+        authz::Request {
+            issuer: authz::KERNEL_PEP_ISSUER,
+            operation,
+            scope,
+            required_syscall,
+            effect: authz::Effect::Write,
+            not_before: 0,
+            expires_at: None,
+            delegation_depth: 0,
+            max_delegation_depth: authz::MAX_DELEGATION_DEPTH,
+            required_policy_epoch: policy_epoch,
+            required_revocation_generation: None,
+        },
+    );
+    if !audit.commit(&request, decision) {
+        return Err(PublisherRotationAuthorizationError::AuditUnavailable);
+    }
+    if !decision.admitted() {
+        return Err(PublisherRotationAuthorizationError::Denied(decision));
+    }
+    Ok(PublisherRotationAuthorization { request, decision })
 }
 
 /// Stable package identifier assigned by this registry.
@@ -957,14 +1052,21 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
     pub fn rotate_publisher_key(
         &mut self,
         actor: Actor<'_>,
-        request: PublisherRotationRequest,
+        authorization: PublisherRotationAuthorization,
         verifier: &impl PublisherRotationVerifier,
     ) -> Result<(), InstallError> {
+        let request = authorization.request();
+        if !authorization.decision().admitted() {
+            return Err(InstallError::NotAuthorized);
+        }
         if !self.can_update(actor, request.installation) {
             return Err(InstallError::NotAuthorized);
         }
         let slot = self.installation_slot(request.installation)?;
         let record = self.installations[slot].ok_or(InstallError::StaleKey)?;
+        if authorization.decision().scope != publisher_rotation_scope(record.scope) {
+            return Err(InstallError::NotAuthorized);
+        }
         let package = self.package_record(record.package)?;
         if request.expected_generation != record.publisher_key_generation {
             return Err(InstallError::PublisherRotationReplay);
@@ -1387,6 +1489,9 @@ fn vacant<T>(slots: &[Option<T>], generations: &mut [u32]) -> Result<(u16, u32),
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::objtable::ObjId;
+    use crate::security::{BootId, IdentityClass, MetadataState, SecurityContext};
+    use crate::syscall_set::SyscallSet;
 
     fn digest(seed: u8) -> [u8; CONTENT_BYTES] {
         [seed; CONTENT_BYTES]
@@ -1413,8 +1518,147 @@ mod tests {
         }
     }
 
-    fn rotation_request(
-        model: &InstallModel<4, 2, 3, 2, 4>,
+    struct TestAudit;
+
+    impl PublisherRotationAuditSink for TestAudit {
+        fn commit(&mut self, _: &PublisherRotationRequest, _: authz::Decision) -> bool {
+            true
+        }
+    }
+
+    struct CountingAudit {
+        retained: bool,
+        commits: usize,
+        last_decision: Option<authz::Decision>,
+    }
+
+    impl PublisherRotationAuditSink for CountingAudit {
+        fn commit(&mut self, _: &PublisherRotationRequest, decision: authz::Decision) -> bool {
+            self.commits += 1;
+            self.last_decision = Some(decision);
+            self.retained
+        }
+    }
+
+    fn authorize_test_rotation<
+        const P: usize,
+        const I: usize,
+        const G: usize,
+        const R: usize,
+        const D: usize,
+    >(
+        model: &InstallModel<P, I, G, R, D>,
+        installation: InstallationKey,
+        request: PublisherRotationRequest,
+    ) -> PublisherRotationAuthorization {
+        let record = model.installation(installation).unwrap();
+        let context = SecurityContext::new(
+            BootId::from_words([1, 2]),
+            IdentityClass::Process,
+            ObjId::from_raw((1u64 << 32) | 7).unwrap(),
+            None,
+            MetadataState::Active,
+        );
+        authorize_publisher_rotation(
+            authz::CallerFacts {
+                context,
+                tenant: 1,
+                scope: publisher_rotation_scope(record.scope),
+                syscalls: SyscallSet::of(&[102]),
+                policy_epoch: 1,
+                revocation_generation: None,
+                now: 0,
+                clock_trusted: false,
+            },
+            request,
+            102,
+            &mut TestAudit,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn rotation_token_requires_admitted_authority_and_retained_audit() {
+        let mut model = InstallModel::<2, 1, 1, 1, 1>::new();
+        let old_key = publisher_key(0x21);
+        let new_key = publisher_key(0x22);
+        let package = model
+            .add_signed_package(package_spec(0x21), old_key)
+            .unwrap();
+        let installation = model
+            .install(InstallSpec {
+                package,
+                scope: scope_user(10),
+                source: PackageSource::UserImport,
+                update_authority: UpdateAuthority {
+                    subject: Subject::User(10),
+                },
+            })
+            .unwrap();
+        let request = rotation_request(
+            &model,
+            installation,
+            new_key,
+            1,
+            0x4101,
+            PublisherRotationKind::Cooperative,
+        );
+        let context = SecurityContext::new(
+            BootId::from_words([1, 2]),
+            IdentityClass::Process,
+            ObjId::from_raw((1u64 << 32) | 7).unwrap(),
+            None,
+            MetadataState::Active,
+        );
+        let allowed_facts = authz::CallerFacts {
+            context,
+            tenant: 1,
+            scope: authz::AccessScope::User(10),
+            syscalls: SyscallSet::of(&[102]),
+            policy_epoch: 1,
+            revocation_generation: None,
+            now: 0,
+            clock_trusted: false,
+        };
+        let mut unavailable = CountingAudit {
+            retained: false,
+            commits: 0,
+            last_decision: None,
+        };
+        assert_eq!(
+            authorize_publisher_rotation(allowed_facts, request, 102, &mut unavailable),
+            Err(PublisherRotationAuthorizationError::AuditUnavailable)
+        );
+        assert_eq!(unavailable.commits, 1);
+
+        let mut denied = CountingAudit {
+            retained: true,
+            commits: 0,
+            last_decision: None,
+        };
+        let mut missing_capability = allowed_facts;
+        missing_capability.syscalls = SyscallSet::EMPTY;
+        assert!(matches!(
+            authorize_publisher_rotation(missing_capability, request, 102, &mut denied),
+            Err(PublisherRotationAuthorizationError::Denied(decision))
+                if decision.reason == authz::Reason::MissingCapability
+        ));
+        assert_eq!(denied.commits, 1);
+        assert_eq!(
+            denied.last_decision.unwrap().allowed,
+            false,
+            "denied decisions must still be audited"
+        );
+    }
+
+    fn rotation_request<
+        const P: usize,
+        const I: usize,
+        const G: usize,
+        const R: usize,
+        const D: usize,
+    >(
+        model: &InstallModel<P, I, G, R, D>,
         installation: InstallationKey,
         new_key: PublisherKey,
         generation: u32,
@@ -1917,22 +2161,30 @@ mod tests {
         );
         let mut wrong_nonce = request;
         wrong_nonce.nonce ^= 1;
+        let wrong_nonce_authorization = authorize_test_rotation(&model, installation, wrong_nonce);
         assert_eq!(
-            model.rotate_publisher_key(Actor::new(&actor), wrong_nonce, &TestPublisherVerifier,),
+            model.rotate_publisher_key(
+                Actor::new(&actor),
+                wrong_nonce_authorization,
+                &TestPublisherVerifier,
+            ),
             Err(InstallError::PublisherRotationProof)
         );
         let mut missing_old_proof = request;
         missing_old_proof.old_signature = None;
+        let missing_old_authorization =
+            authorize_test_rotation(&model, installation, missing_old_proof);
         assert_eq!(
             model.rotate_publisher_key(
                 Actor::new(&actor),
-                missing_old_proof,
+                missing_old_authorization,
                 &TestPublisherVerifier,
             ),
             Err(InstallError::PublisherKeyUnproven)
         );
+        let authorization = authorize_test_rotation(&model, installation, request);
         model
-            .rotate_publisher_key(Actor::new(&actor), request, &TestPublisherVerifier)
+            .rotate_publisher_key(Actor::new(&actor), authorization, &TestPublisherVerifier)
             .unwrap();
         assert_eq!(
             model.installation(installation).unwrap().publisher_key,
@@ -1946,7 +2198,11 @@ mod tests {
             2
         );
         assert_eq!(
-            model.rotate_publisher_key(Actor::new(&actor), request, &TestPublisherVerifier,),
+            model.rotate_publisher_key(
+                Actor::new(&actor),
+                authorize_test_rotation(&model, installation, request),
+                &TestPublisherVerifier,
+            ),
             Err(InstallError::PublisherRotationReplay)
         );
 
@@ -1986,7 +2242,11 @@ mod tests {
         let delegated = [Subject::Group(90)];
         let request = publisher_lost_key_request(&model, installation, new_key);
         assert_eq!(
-            model.rotate_publisher_key(Actor::new(&outsider), request, &TestPublisherVerifier,),
+            model.rotate_publisher_key(
+                Actor::new(&outsider),
+                authorize_test_rotation(&model, installation, request),
+                &TestPublisherVerifier,
+            ),
             Err(InstallError::NotAuthorized)
         );
         model
@@ -1997,7 +2257,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            model.rotate_publisher_key(Actor::new(&delegated), request, &TestPublisherVerifier,),
+            model.rotate_publisher_key(
+                Actor::new(&delegated),
+                authorize_test_rotation(&model, installation, request),
+                &TestPublisherVerifier,
+            ),
             Err(InstallError::NotAuthorized)
         );
         model
@@ -2010,11 +2274,16 @@ mod tests {
         let mut wrong_proof = request;
         wrong_proof.new_signature = [0; 64];
         assert_eq!(
-            model.rotate_publisher_key(Actor::new(&owner), wrong_proof, &TestPublisherVerifier,),
+            model.rotate_publisher_key(
+                Actor::new(&owner),
+                authorize_test_rotation(&model, installation, wrong_proof),
+                &TestPublisherVerifier,
+            ),
             Err(InstallError::PublisherRotationProof)
         );
+        let authorization = authorize_test_rotation(&model, installation, request);
         model
-            .rotate_publisher_key(Actor::new(&owner), request, &TestPublisherVerifier)
+            .rotate_publisher_key(Actor::new(&owner), authorization, &TestPublisherVerifier)
             .unwrap();
         assert_eq!(
             model.installation(installation).unwrap().publisher_key,
@@ -2057,7 +2326,7 @@ mod tests {
         model
             .rotate_publisher_key(
                 Actor::new(&[Subject::User(10)]),
-                request,
+                authorize_test_rotation(&model, installation, request),
                 &TestPublisherVerifier,
             )
             .unwrap();

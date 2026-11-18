@@ -21,13 +21,14 @@ mod bios {
         let mut config = BootloaderConfig::new_default();
         config.mappings.physical_memory = Some(Mapping::Dynamic);
         #[cfg(any(
+            feature = "native-install-block-verify",
             feature = "native-install-fault-verify",
             feature = "lifecycle-diagnostic-block-verify"
         ))]
         {
             // Fault matrices retain a larger verification stack until their
             // multi-store harness is split into independent frames as well.
-            config.kernel_stack_size = 512 * 1024;
+            config.kernel_stack_size = 512 * 1024; // JASPER-HARDCODE-REVIEW: issue=21 source=native-install-verification-stack reason=explicit-full-harness-stack-policy
         }
         config
     };
