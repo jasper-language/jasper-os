@@ -79,5 +79,10 @@ fn finish(ctx: &mut BootCtx) {
         ctx.frames.map(|stats| stats.usable).unwrap_or(0),
         crate::mm::heap::limit()
     );
+    #[cfg(feature = "pixel6a-el2-observable")] // JASPER-HARDCODE-REVIEW: issue=21 source=pixel-el2-observation-window reason=physical-boot-carrier-probe-only
+    if crate::arch::aarch64::boot::entry_exception_level() == 2 {
+        kprintln!("[JSR-PIXEL6A] el2-observation=available delay_seconds=5"); // JASPER-HARDCODE-REVIEW: issue=21 source=pixel-el2-observation-window reason=host-observable-five-second-delay-probe
+        crate::arch::aarch64::boot::wait_el2_observation_window();
+    }
     crate::arch::aarch64::boot::pixel6a_reset_now()
 }

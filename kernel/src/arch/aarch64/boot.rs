@@ -11,6 +11,7 @@
 //! 在 EL3 进入的情形不支持（停在入口，不做任何事）。
 
 use core::arch::global_asm;
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use kernel_core::fdt::{self, BootSummary, Fdt, PixelFormat};
 #[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))]
@@ -28,6 +29,35 @@ use crate::boot::{self, BootSpec, FrameBufferFormat, FrameBufferInfo, PsciBoot, 
 
 /// 启动栈大小。
 const BOOT_STACK_BYTES: usize = 64 * 1024;
+static ENTRY_EXCEPTION_LEVEL: AtomicU8 = AtomicU8::new(0);
+
+/// Exception level observed at the architecture entry.
+pub fn entry_exception_level() -> u8 {
+    ENTRY_EXCEPTION_LEVEL.load(Ordering::Relaxed)
+}
+
+#[cfg(feature = "pixel6a-el2-observable")] // JASPER-HARDCODE-REVIEW: issue=21 source=pixel-el2-observation-window reason=physical-boot-carrier-probe-only
+pub(crate) fn wait_el2_observation_window() {
+    let frequency: u64;
+    let start: u64;
+    // SAFETY: The AArch64 entry contract enables the physical counter.
+    unsafe {
+        core::arch::asm!("mrs {}, cntfrq_el0", out(reg) frequency, options(nomem, nostack));
+        core::arch::asm!("mrs {}, cntpct_el0", out(reg) start, options(nomem, nostack));
+    }
+    let delay = frequency.saturating_mul(5);
+    loop {
+        let now: u64;
+        // SAFETY: Reading the physical counter has no side effects.
+        unsafe {
+            core::arch::asm!("mrs {}, cntpct_el0", out(reg) now, options(nomem, nostack));
+        }
+        if now.wrapping_sub(start) >= delay {
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
 
 /// 启动栈（任务系统建立之前的唯一执行流使用）。
 #[repr(C, align(16))]
@@ -203,12 +233,16 @@ global_asm!(
     .section .text.boot, "ax"
     .global _start
 _start:
+.if {skip_mpidr_gate} == 0
     mrs x9, mpidr_el1
     and x9, x9, #0xff
     cbnz x9, 8f
+.endif
     msr tpidr_el1, xzr
     mov x19, x0
     mov x20, x1
+    mrs x21, CurrentEL
+    lsr x21, x21, #2
     mrs x9, CurrentEL
     lsr x9, x9, #2
     cmp x9, #2
@@ -245,6 +279,7 @@ _start:
     add sp, x9, x10
     mov x0, x19
     mov x1, x20
+    mov x2, x21
     bl jsr_aarch64_boot
 8:
     wfe
@@ -252,6 +287,7 @@ _start:
     .previous
     "#,
     stack = const BOOT_STACK_BYTES,
+    skip_mpidr_gate = const cfg!(feature = "pixel6a-runtime-verify") as u64, // JASPER-HARDCODE-REVIEW: issue=33 source=physical-runtime-plan reason=pixel-selected-boot-cpu-verification-only
 );
 
 /// 在 MMU 已打开后，按物理地址取设备树：头部魔数正确且整棵树都在已映射的范围内才接受。
@@ -584,7 +620,12 @@ fn framebuffer_of(fb: &kernel_core::fdt::FramebufferInfo) -> FrameBufferInfo {
 
 /// 汇编入口之后的第一段 Rust 代码（MMU 关闭、启动栈、单执行流）。
 #[no_mangle]
-extern "C" fn jsr_aarch64_boot(dtb_hint: u64, uefi_system_table: u64) -> ! {
+extern "C" fn jsr_aarch64_boot(
+    dtb_hint: u64,
+    uefi_system_table: u64,
+    entry_exception_level: u64,
+) -> ! {
+    ENTRY_EXCEPTION_LEVEL.store(entry_exception_level as u8, Ordering::Relaxed);
     #[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
     unsafe {
         uefi_console_line(
@@ -672,6 +713,11 @@ extern "C" fn jsr_aarch64_boot(dtb_hint: u64, uefi_system_table: u64) -> ! {
             semihost::exit(EXIT_FAILURE);
         }
     }
+    crate::kprintln!(
+        "[JSR-A64-EL] entry={} execution=1 el2_available={} el2_retained=false",
+        entry_exception_level,
+        entry_exception_level == 2
+    );
 
     // 严格校验：截断、越界、重复属性/节点、非法结构都在这里被拒绝。
     if let Err(error) = fdt.validate_strict() {

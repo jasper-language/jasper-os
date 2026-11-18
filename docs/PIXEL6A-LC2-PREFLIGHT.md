@@ -60,6 +60,19 @@ read/write/flush/reset/quiesce；Jasper 仍以 Handle/Rights、PEP、DMA/IOMMU �
 资源世代作为唯一准入边界。也可等待稳定的公开用户态 UFS 接口，但不能自造私有
 驱动或 shim。
 
+2026-11-18 的物理异常级探针进一步确认，当前 stock AVB/PE 载体把 Jasper 入口交在
+EL1，而不是 EL2。普通 Pixel runtime 从 fastboot boot 到 PSCI reset 为 4.59 秒；
+编译了“入口为 EL2 时额外等待 5 秒”的诊断构建为 4.60 秒。两次都运行同一八核/
+Ring 3/syscall/user-pointer 路径并自动恢复 Android，因此 EL2 延迟分支没有执行。
+证据见 `evidence/pixel6a-entry-el-20261118-r3/` 与
+`evidence/pixel6a-entry-el-20261118-r4/`；QEMU AArch64 串口同时明确记录
+`entry=1`。
+
+这意味着当前载体本身没有保留可安装 Driver VM 的 EL2 宿主。后续若要使用隔离
+Linux Driver VM，必须先设计并验证公开、可恢复的启动链/EL2 保留适配；不能把
+“现有 Pixel 内核里再写一个 UFS 驱动”当作替代路径。该启动链变更仍需保持 Android
+slot、AVB 和恢复路径不变，并单独通过物理验收。
+
 在接入该后端前还需只读审计全部 LUN/GPT，确认是否存在未使用且足够大的专用持久
 范围。`metadata` 属于 Android metadata encryption，不得挪用；`userdata` 不得被
 当作 Jasper P0。若不存在专用范围，必须先完成可恢复分区方案和 Android 重装演练。

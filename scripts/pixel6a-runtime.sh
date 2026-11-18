@@ -17,6 +17,7 @@ MKBOOTIMG="${PIXEL6A_MKBOOTIMG:?set PIXEL6A_MKBOOTIMG to a compatible mkbootimg 
 FASTBOOT="${PIXEL6A_FASTBOOT:?set PIXEL6A_FASTBOOT to an Android platform-tools fastboot binary}"
 ADB="${PIXEL6A_ADB:-adb}"
 ELF="${PIXEL6A_RUNTIME_ELF:-$TARGET/aarch64-unknown-none-softfloat/release/jasper-kernel}"
+FEATURES="${PIXEL6A_RUNTIME_FEATURES:-pixel6a-runtime-verify}"
 
 for path in "$STOCK_IMAGE" "$STOCK_BOOT" "$LZ4" "$MKBOOTIMG"; do
     [ -f "$path" ] || {
@@ -39,7 +40,7 @@ if [ "${PIXEL6A_SKIP_BUILD:-0}" != 1 ]; then
         build --locked --release --target-dir "$TARGET" \
         --target aarch64-unknown-none-softfloat \
         -p jasper-kernel --no-default-features \
-        --features pixel6a-runtime-verify \
+        --features "$FEATURES" \
         >"$OUT/kernel-build.log" 2>&1
 fi
 [ -f "$ELF" ] || {
@@ -55,24 +56,6 @@ BOOT="$OUT/pixel6a-runtime-boot.img"
 
 bash "$ROOT/scripts/aarch64-image.sh" "$ELF" "$IMAGE" >"$OUT/image.log" 2>&1
 
-# ABL invokes the PE entry on its selected boot CPU. The existing hardware
-# probes accept any MPIDR.Aff0 by replacing only the bounded bootstrap gate.
-python3 - "$IMAGE" <<'PY'
-import sys
-
-path = sys.argv[1]
-data = bytearray(open(path, "rb").read())
-pattern = bytes.fromhex("a90038d5291d4092")
-entry = data.find(pattern, 0, 0x4000)
-if entry < 0:
-    raise SystemExit("Jasper _start MPIDR sequence not found")
-if data[entry + 9 : entry + 12] != bytes.fromhex("0400b5"):
-    raise SystemExit("unexpected MPIDR branch bytes; refusing blind patch")
-data[entry + 8 : entry + 12] = bytes.fromhex("1f2003d5")
-open(path, "wb").write(data)
-print(f"entry_offset=0x{entry:x}")
-PY
-
 python3 - "$STOCK_IMAGE" "$IMAGE" "$PAYLOAD" <<'PY'
 import struct
 import sys
@@ -82,9 +65,15 @@ offset = 0x2000000
 section_index = 1
 stock = bytearray(open(stock_path, "rb").read())
 payload = open(jasper_path, "rb").read()
-entry_rel = payload.find(bytes.fromhex("a90038d5291d4092"), 0, 0x4000)
-if entry_rel < 0:
-    raise SystemExit("patched Jasper entry not found")
+code0 = struct.unpack_from("<I", payload, 0)[0]
+if code0 & 0xFC000000 != 0x14000000:
+    raise SystemExit("Jasper Image code0 is not a branch")
+branch_words = code0 & 0x03FFFFFF
+if branch_words & (1 << 25):
+    branch_words -= 1 << 26
+entry_rel = branch_words * 4
+if entry_rel <= 0 or entry_rel >= 0x4000:
+    raise SystemExit(f"Jasper Image branch target is outside bounded text: 0x{entry_rel:x}")
 
 pe = struct.unpack_from("<I", stock, 0x3C)[0]
 optional_size = struct.unpack_from("<H", stock, pe + 20)[0]
