@@ -150,7 +150,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: 安装 QEMU / install QEMU
-        timeout-minutes: 12
+        # Hosted-runner package mirrors can take >12 minutes for the ~100 MiB
+        # QEMU/OVMF payload.  Keep a bounded timeout, but do not confuse a slow
+        # package mirror with a kernel acceptance failure.
+        # 托管运行器的软件包镜像下载约 100 MiB 的 QEMU/OVMF 时可能超过 12 分钟；
+        # 保留有界超时，但不把镜像慢误判为内核验收失败。
+        timeout-minutes: 25
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
