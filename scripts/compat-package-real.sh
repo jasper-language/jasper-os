@@ -51,6 +51,7 @@ manifest_version() {
         "name=dxvk" \
         "version=${package_version}" \
         "arch=x86_64" \
+        "runtime=linux" \
         "sha256=${DXVK_SHA256}" \
         "license=Zlib" \
         "entrypoint=dxvk-${DXVK_VERSION}/x64/d3d11.dll" \

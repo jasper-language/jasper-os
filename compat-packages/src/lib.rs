@@ -7,6 +7,8 @@
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
+pub mod resolution;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
@@ -91,6 +93,18 @@ pub struct ComponentManifest {
     pub entrypoint: String,
     /// 组件运行所需的 Jasper 能力或兼容组件及其可选版本约束。
     pub requires: Vec<DependencyRequirement>,
+    /// 可选的运行时名称；缺失表示沿用兼容层既有默认语义。
+    /// Optional runtime name; absence preserves the compatibility layer's existing default.
+    pub runtime: Option<String>,
+    /// 可选的运行时 ABI 语义版本约束。
+    /// Optional semantic-version requirement for the runtime ABI.
+    pub abi: Option<String>,
+    /// 运行环境必须提供的具名能力；这不等同于已获得运行授权。
+    /// Named capabilities the runtime must expose; this is not launch authorization.
+    pub capabilities: Vec<String>,
+    /// 与目标组件版本范围互斥的组件。
+    /// Components whose selected versions conflict with this component.
+    pub conflicts: Vec<DependencyRequirement>,
 }
 
 impl ComponentManifest {
@@ -105,6 +119,10 @@ impl ComponentManifest {
         let mut license = None;
         let mut entrypoint = None;
         let mut requires = Vec::new();
+        let mut runtime = None;
+        let mut abi = None;
+        let mut capabilities = Vec::new();
+        let mut conflicts = Vec::new();
         for (line_no, raw) in text.lines().enumerate() {
             let line = raw.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -122,30 +140,19 @@ impl ComponentManifest {
                 "sha256" => set_once(&mut digest, value, line_no)?,
                 "license" => set_once(&mut license, value, line_no)?,
                 "entrypoint" => set_once(&mut entrypoint, value, line_no)?,
-                "requires" => {
-                    for item in dependency_items(value) {
-                        let item = item.as_str();
-                        let (dependency, version) = match item.split_once('@') {
-                            Some((name, version)) => (name.trim(), version.trim()),
-                            None => (item, ""),
-                        };
-                        if dependency.is_empty() || !safe_token(dependency) {
-                            return Err(PackageError::Manifest(line_no + 1, "非法依赖名".into()));
-                        }
-                        if !version.is_empty() {
-                            VersionReq::parse(version).map_err(|error| {
-                                PackageError::Manifest(
-                                    line_no + 1,
-                                    format!("非法版本约束 {version}: {error}"),
-                                )
-                            })?;
-                        }
-                        requires.push(DependencyRequirement {
-                            name: dependency.to_string(),
-                            version: version.to_string(),
-                        });
-                    }
+                "requires" => requires.extend(parse_requirements(value, line_no + 1)?),
+                "conflicts" => conflicts.extend(parse_requirements(value, line_no + 1)?),
+                "runtime" => set_once(&mut runtime, value, line_no)?,
+                "abi" => {
+                    VersionReq::parse(value).map_err(|error| {
+                        PackageError::Manifest(
+                            line_no + 1,
+                            format!("非法 ABI 约束 {value}: {error}"),
+                        )
+                    })?;
+                    set_once(&mut abi, value, line_no)?;
                 }
+                "capabilities" => capabilities.extend(parse_tokens(value, line_no + 1)?),
                 _ => return Err(PackageError::Manifest(line_no + 1, format!("未知键 {key}"))),
             }
         }
@@ -157,6 +164,10 @@ impl ComponentManifest {
             license: license.ok_or_else(|| missing("license"))?,
             entrypoint: entrypoint.ok_or_else(|| missing("entrypoint"))?,
             requires,
+            runtime,
+            abi,
+            capabilities,
+            conflicts,
         };
         component.validate()?;
         Ok(component)
@@ -169,11 +180,20 @@ impl ComponentManifest {
         if !safe_token(&self.name) || !safe_token(&self.version) {
             return Err(PackageError::Manifest(0, "非法 name/version".into()));
         }
-        if self.arch != "x86_64" {
-            return Err(PackageError::Incompatible(format!(
-                "unsupported architecture {}",
-                self.arch
-            )));
+        if !safe_token(&self.arch) {
+            return Err(PackageError::Manifest(0, "非法 arch".into()));
+        }
+        if self
+            .runtime
+            .as_deref()
+            .is_some_and(|runtime| !safe_token(runtime))
+        {
+            return Err(PackageError::Manifest(0, "非法 runtime".into()));
+        }
+        if let Some(abi) = self.abi.as_deref() {
+            VersionReq::parse(abi).map_err(|error| {
+                PackageError::Manifest(0, format!("非法 ABI 约束 {abi}: {error}"))
+            })?;
         }
         if self.archive_sha256.len() != 64
             || !self
@@ -210,8 +230,89 @@ impl ComponentManifest {
         {
             return Err(PackageError::Manifest(0, "组件不能依赖自身".into()));
         }
+        validate_unique_tokens(&self.capabilities, "capabilities")?;
+        validate_requirements(&self.conflicts, "conflicts")?;
+        if self
+            .conflicts
+            .iter()
+            .any(|conflict| conflict.name == self.name)
+        {
+            return Err(PackageError::Manifest(0, "组件不能与自身名称冲突".into()));
+        }
         Ok(())
     }
+}
+
+fn parse_requirements(
+    value: &str,
+    line_no: usize,
+) -> Result<Vec<DependencyRequirement>, PackageError> {
+    let mut requirements = Vec::new();
+    for item in dependency_items(value) {
+        let (name, version) = match item.split_once('@') {
+            Some((name, version)) => (name.trim(), version.trim()),
+            None => (item.as_str(), ""),
+        };
+        if name.is_empty() || !safe_token(name) {
+            return Err(PackageError::Manifest(line_no, "非法依赖名".into()));
+        }
+        if !version.is_empty() {
+            VersionReq::parse(version).map_err(|error| {
+                PackageError::Manifest(line_no, format!("非法版本约束 {version}: {error}"))
+            })?;
+        }
+        requirements.push(DependencyRequirement {
+            name: name.to_string(),
+            version: version.to_string(),
+        });
+    }
+    Ok(requirements)
+}
+
+fn parse_tokens(value: &str, line_no: usize) -> Result<Vec<String>, PackageError> {
+    let mut tokens = Vec::new();
+    for token in value.split(',').map(str::trim) {
+        if token.is_empty() || !safe_token(token) {
+            return Err(PackageError::Manifest(line_no, "非法能力名".into()));
+        }
+        tokens.push(token.to_string());
+    }
+    Ok(tokens)
+}
+
+fn validate_unique_tokens(tokens: &[String], field: &str) -> Result<(), PackageError> {
+    let mut unique = BTreeSet::new();
+    for token in tokens {
+        if !safe_token(token) || !unique.insert(token.as_str()) {
+            return Err(PackageError::Manifest(
+                0,
+                format!("{field} 包含非法或重复项"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_requirements(
+    requirements: &[DependencyRequirement],
+    field: &str,
+) -> Result<(), PackageError> {
+    let mut unique = BTreeSet::new();
+    for requirement in requirements {
+        if !safe_token(&requirement.name) || !unique.insert(requirement.name.as_str()) {
+            return Err(PackageError::Manifest(
+                0,
+                format!("{field} 包含非法或重复项"),
+            ));
+        }
+        if !requirement.version.is_empty() && VersionReq::parse(&requirement.version).is_err() {
+            return Err(PackageError::Manifest(
+                0,
+                format!("{field} 包含非法版本约束"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn set_once(slot: &mut Option<String>, value: &str, line_no: usize) -> Result<(), PackageError> {
@@ -398,6 +499,12 @@ impl ComponentInstaller {
     ) -> Result<Installed, PackageError> {
         let manifest_text = fs::read_to_string(manifest_path)?;
         let manifest = ComponentManifest::parse(&manifest_text)?;
+        if manifest.arch != std::env::consts::ARCH {
+            return Err(PackageError::Incompatible(format!(
+                "unsupported architecture {}",
+                manifest.arch
+            )));
+        }
         self.preflight_dependency_closure(&manifest)?;
         self.ensure_active_dependents_accept(&manifest.name, &manifest.version)?;
         let actual = digest_file(archive_path)?;
@@ -1437,7 +1544,8 @@ mod tests {
     }
 
     #[test]
-    fn manifest_rejects_wrong_arch_unknown_keys_bad_hash_and_license() {
+    fn manifest_rejects_invalid_fields_and_installer_rejects_wrong_arch() {
+        let temp = TestDir::new("manifest-fields");
         let bad =
             "name=wine\nversion=1\narch=aarch64\nsha256=00\nlicense=MIT\nentrypoint=bin/wine\n";
         assert!(ComponentManifest::parse(bad).is_err());
@@ -1462,17 +1570,35 @@ mod tests {
         );
         assert!(ComponentManifest::parse(&parent_version).is_err());
         let combined = format!(
-            "name=dxvk\nversion=2\narch=x86_64\nsha256={}\nlicense=Zlib OR MIT\nentrypoint=bin/dxvk\n",
+            "name=dxvk\nversion=2\narch=x86_64\nruntime=jasper-linux\nabi=>=3.18,<4\ncapabilities=gpu.vulkan,input.keyboard\nsha256={}\nlicense=Zlib OR MIT\nentrypoint=bin/dxvk\n",
             "a".repeat(64)
         );
-        assert!(ComponentManifest::parse(&combined).is_ok());
+        let parsed = ComponentManifest::parse(&combined).unwrap();
+        assert_eq!(parsed.runtime.as_deref(), Some("jasper-linux"));
+        assert_eq!(parsed.abi.as_deref(), Some(">=3.18,<4"));
+        assert_eq!(
+            parsed.capabilities,
+            ["gpu.vulkan".to_string(), "input.keyboard".to_string()]
+        );
+
+        let (archive_path, digest) = archive(temp.path(), "wrong-arch");
+        let wrong_arch = format!(
+            "name=wine\nversion=1\narch=aarch64\nsha256={digest}\nlicense=MIT\nentrypoint=bin/wine\n"
+        );
+        let wrong_arch_path = temp.path().join("wrong-arch.manifest");
+        fs::write(&wrong_arch_path, wrong_arch).unwrap();
+        assert!(matches!(
+            ComponentInstaller::new(temp.path().join("wrong-arch-root"))
+                .install(&wrong_arch_path, &archive_path),
+            Err(PackageError::Incompatible(_))
+        ));
     }
 
     #[test]
     fn dependency_version_ranges_are_parsed_and_reject_invalid_constraints() {
         let digest = "a".repeat(64);
         let constrained = format!(
-            "name=wine\nversion=1.0.0\narch=x86_64\nsha256={digest}\nlicense=MIT\nentrypoint=bin/wine\nrequires=linux-abi-1@>=1.2.0,<2.0.0,vulkan-1\n"
+            "name=wine\nversion=1.0.0\narch=x86_64\nruntime=jasper-linux\nabi=>=3.18,<4\ncapabilities=gpu.vulkan\nconflicts=broken-abi@>=1.0.0,<2.0.0\nsha256={digest}\nlicense=MIT\nentrypoint=bin/wine\nrequires=linux-abi-1@>=1.2.0,<2.0.0,vulkan-1\n"
         );
         let manifest = ComponentManifest::parse(&constrained).unwrap();
         assert_eq!(manifest.requires[0].name, "linux-abi-1");
@@ -1480,9 +1606,18 @@ mod tests {
         assert!(manifest.requires[0].matches("1.9.0"));
         assert!(!manifest.requires[0].matches("2.0.0"));
         assert!(manifest.requires[1].matches("not-semver"));
+        assert_eq!(manifest.conflicts[0].name, "broken-abi");
+        assert!(manifest.conflicts[0].matches("1.5.0"));
+        assert!(!manifest.conflicts[0].matches("2.0.0"));
 
         let invalid = constrained.replace(">=1.2.0,<2.0.0", "not a range");
         assert!(ComponentManifest::parse(&invalid).is_err());
+
+        let duplicate_capability = constrained.replace(
+            "capabilities=gpu.vulkan",
+            "capabilities=gpu.vulkan,gpu.vulkan",
+        );
+        assert!(ComponentManifest::parse(&duplicate_capability).is_err());
     }
 
     #[test]
