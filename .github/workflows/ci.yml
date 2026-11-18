@@ -200,6 +200,13 @@ jobs:
           ISSUE21_QEMU_MEMORY: 1G
           ISSUE21_UEFI_TIMEOUT: "360"
         run: bash scripts/issue21-uefi-boot-check.sh
+      - name: LC-2 应用升级持久性 / application upgrade persistence
+        timeout-minutes: 15
+        env:
+          JASPER_BUILD_CPUS: 0-1
+          NATIVE_INSTALL_DEFAULT_QEMU_CPUS: 0-1
+          NATIVE_INSTALL_DEFAULT_TIMEOUT: "120"
+        run: bash scripts/native-install-default-stack-check.sh
       - name: 一键验收 / scripts/accept.sh
         env:
           # 托管运行器只有少量核且没有硬件虚拟化：用全部核，QEMU 时限放宽（判据本身不变）。
