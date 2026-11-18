@@ -918,7 +918,13 @@ fn timer_record(entry: u64) {
 pub fn rearm_after_defer(now: u64) {
     TIMER_DEFERRED_HIGHRES.fetch_add(1, Ordering::Relaxed);
     let left = timer_progress_load(cpu::cpu_index()).remaining(now);
-    let mut delay = crate::hrtime::counts_to_ns(left).unwrap_or(crate::hrtime::tick_ns()).max(1);
+    // A sub-tick retry can re-enter the deferred interrupt before the interrupted
+    // execution stream retires a single instruction under -icount.  Keep at least
+    // one normal timer period between deferred retries.
+    // 低于一个 tick 的重试可能在 -icount 下让被打断的执行流连一条指令都无法完成；
+    // 推迟重试至少保留一个正常定时周期。
+    let floor = crate::hrtime::tick_ns().max(1);
+    let mut delay = crate::hrtime::counts_to_ns(left).unwrap_or(floor).max(floor);
     // SAFETY：中断上下文、关中断，本处理器的定时器模式由本路径独占；到期后重新走事务判定。
     while !unsafe { crate::arch::timer_arm_after_ns(delay) } {
         assert!(delay > 1, "high-res timer unsupported after calibration");

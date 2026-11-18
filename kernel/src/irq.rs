@@ -94,11 +94,6 @@ pub fn on_hardware_irq(line: IrqLine, from_user: bool) {
         }
         // 每核事件只更新本处理器的每核数据，不进全局延迟队列（那是引导处理器主循环的队列）
         IrqLine::LocalTimer => {
-            if let Some(now) = crate::hrtime::now() {
-                crate::user_timer::wake_due(now);
-                #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
-                crate::linux_abi::settle_posix_timers(now);
-            }
             #[cfg(feature = "rt2-verify")]
             let diagnostic = crate::rt2_demo::timer_irq();
             #[cfg(not(feature = "rt2-verify"))]
@@ -113,6 +108,7 @@ pub fn on_hardware_irq(line: IrqLine, from_user: bool) {
                     sched::rearm_after_defer(entry);
                     return;
                 }
+                settle_user_timers();
                 sched::on_highres_timer(entry, interrupt_entry);
             } else if !diagnostic {
                 let entry = crate::arch::clock_counter();
@@ -122,13 +118,26 @@ pub fn on_hardware_irq(line: IrqLine, from_user: bool) {
                     sched::defer_local_tick();
                     return;
                 }
+                settle_user_timers();
                 sched::on_local_timer(entry);
+            } else {
+                settle_user_timers();
             }
         }
         IrqLine::Ipi(kind) => crate::smp::on_ipi(kind),
     }
     if from_user && crate::proc::current_exiting() {
         crate::proc::thread_exit(0, "killed");
+    }
+}
+
+/// Settle userspace deadlines only as part of an admitted timer transaction.
+/// 仅在获准的完整定时器事务中结算用户态截止期。
+fn settle_user_timers() {
+    if let Some(now) = crate::hrtime::now() {
+        crate::user_timer::wake_due(now);
+        #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+        crate::linux_abi::settle_posix_timers(now);
     }
 }
 

@@ -39,9 +39,11 @@ ap.add_argument("--accel", default=os.environ.get("JASPER_ACCEL", "kvm"),
                 choices=("kvm", "tcg"))
 ap.add_argument("--cpus", default=os.environ.get("JASPER_CORES", ""))
 ap.add_argument("--in-asm-log")
+ap.add_argument("--stop-at-regex")
 args = ap.parse_args()
 
 TICK = os.sysconf("SC_CLK_TCK")
+stop_re = re.compile(args.stop_at_regex.encode(), re.MULTILINE) if args.stop_at_regex else None
 
 
 if args.accel == "kvm" and args.icount is not None:
@@ -136,7 +138,9 @@ with open(serial_path, "wb") as serial:
     qemu = subprocess.Popen(cmd, stdout=serial, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
 info_at = None
 timed_out = False
+stop_reason = None
 regs = ""
+scan_tail = b""
 with open(args.out + ".trace", "w") as trace, open(serial_path, "rb") as reader:
     lines = 0
     next_sample = start
@@ -146,12 +150,19 @@ with open(args.out + ".trace", "w") as trace, open(serial_path, "rb") as reader:
     while qemu.poll() is None:
         now = time.monotonic()
         chunk = reader.read()
+        if chunk:
+            scan_tail = (scan_tail + chunk)[-8192:]
         if chunk.count(b"\n"):
             if info_at is not None and now - last_new > max_gap[0]:
                 max_gap = (now - last_new, lines)
             lines += chunk.count(b"\n")
             last_new = now
         if args.stop_at_lines and lines >= args.stop_at_lines:
+            stop_reason = "lines"
+            qemu.terminate()
+            break
+        if stop_re is not None and stop_re.search(scan_tail):
+            stop_reason = "marker"
             qemu.terminate()
             break
         if args.stall_secs and info_at is not None and not stall_dumped and now - last_new >= args.stall_secs:
@@ -179,6 +190,7 @@ with open(args.out + ".trace", "w") as trace, open(serial_path, "rb") as reader:
             next_sample += 10
         if now - start >= args.timeout:
             timed_out = True
+            stop_reason = "timeout"
             if info_at is None:
                 try:
                     regs = monitor(sock, "info registers")
@@ -205,5 +217,6 @@ eip = re.search(r"EIP=(\w+)", regs)
 hlt = re.search(r"HLT=(\d)", regs)
 print(f"{os.path.basename(args.out)} rc={qemu.returncode} timed_out={int(timed_out)} "
       f"secs={time.monotonic() - start:.0f} info_at={'-' if info_at is None else f'{info_at:.1f}'} lines={lines} "
+      f"stop={stop_reason or 'exit'} "
       f"max_gap={max_gap[0]:.0f}s@{max_gap[1]}{' STALL' if stall_dumped else ''}"
       f"{' eip=' + eip.group(1) if eip else ''}{' hlt=' + hlt.group(1) if hlt else ''}", flush=True)
