@@ -15,7 +15,8 @@ release-supply-check: PASS threshold=2 signers=3 revocation=true
 revocation_snapshot_epoch=2 rotation=true https_sources=2 offline_sources=1
 tamper_rejected=true
 release-remote-audit-check: PASS append=true idempotent=true
-tamper_rejected=true auth_rejected=true index_rejected=true https_required=true
+tamper_rejected=true auth_rejected=true index_rejected=true
+https_required=true tls_verified=true
 jasper-lifecycle-staging::tests::threshold_source_stages_two_distinct_signatures
 PASS
 ```
