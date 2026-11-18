@@ -147,7 +147,7 @@ python3 scripts/release-production-preflight.py \
 - 默认只接受 HTTPS、禁止重定向和嵌入凭据；仅 loopback 测试可显式开启 HTTP。
 
 CI 的 loopback sink 使用临时 CA 签发的真实 TLS 证书，覆盖首次 HTTPS 写入、
-幂等重放、远端篡改、认证失败、越界 epoch 和明文 endpoint 拒绝。该客户端的
+幂等重放、远端篡改、认证失败、越界 epoch、明文 endpoint 和未受信证书拒绝。该客户端的
 “append-only”取决于远端实际执行 create-only 策略；生产 sink
 的对象锁、保留期、双区域复制和访问审计仍需在真实服务上验收。
 

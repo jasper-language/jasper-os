@@ -176,6 +176,19 @@ def main() -> int:
             if bad_index.returncode == 0 or "outside the audit journal" not in bad_index.stderr:
                 raise SystemExit("remote-audit-check: out-of-range event was accepted")
 
+            untrusted_tls = run(
+                [
+                    item
+                    for item in common
+                    if item not in {str(certificate), "--ca-file"}
+                ]
+            )
+            if (
+                untrusted_tls.returncode == 0
+                or "remote audit request failed" not in untrusted_tls.stderr
+            ):
+                raise SystemExit("remote-audit-check: untrusted TLS certificate was accepted")
+
             insecure = run(
                 [
                     "--endpoint",
@@ -198,7 +211,8 @@ def main() -> int:
             thread.join(timeout=5)
     print(
         "release-remote-audit-check: PASS append=true idempotent=true "
-        "tamper_rejected=true auth_rejected=true index_rejected=true https_required=true"
+        "tamper_rejected=true auth_rejected=true index_rejected=true "
+        "https_required=true tls_verified=true"
     )
     return 0
 
