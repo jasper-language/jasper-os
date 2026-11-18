@@ -3,7 +3,7 @@
 更新时间：2026-11-18。
 
 状态：**proof-only；EL2 驻留、stage-2、最小 VM exit、虚拟 IRQ 注入、
-通用/系统/FP-SIMD vCPU 上下文恢复已验证，Driver VM 未实现**。
+VBAR/通用/系统/FP-SIMD vCPU 上下文恢复已验证，Driver VM 未实现**。
 
 ## 当前切片
 
@@ -36,18 +36,22 @@ virtual IRQ。guest 的 `VBAR_EL1` 指向独立异常向量，IRQ 入口通过 H
 中断；EL2 仅在收到该回报后清除 VI/IMO，并恢复宿主上下文。该路径不使用软件
 篡改 ELR/SPSR 模拟中断到达。
 
+guest 为该 IRQ 路径安装自己的 `VBAR_EL1`。vCPU 帧现在利用原有尾部对齐槽位保存
+VBAR，EL2 返回宿主后恢复进入 guest 前的值；探针机械比较返回前后 VBAR，确认
+guest 的异常向量状态没有泄漏回内核。
+
 QEMU `virt,virtualization=on` 的真实串口结果：
 
 ```text
 [JSR-A64-EL] entry=2 execution=1 el2_available=true el2_retained=true
 [JSR-A64-EL2] retained=true hvc_round_trip=true stage2_table=true stage2=true
-vm_exit=true virtual_irq=true vcpu_context=true system_context=true
+vm_exit=true virtual_irq=true vbar_context=true vcpu_context=true system_context=true
 fp_context=true driver_vm=false
 [JSR-SMP] start present=2 online=2 failed=0 source=fdt.cpus dropped=0 disabled=0
 ```
 
 该运行退出 35 仅含既有 AArch64 x86-only `pci_failed=3`、`krn0_failed=1` 基线；
-没有新增失败。证据见 `evidence/aarch64-el2-virq-20261118-r7h/`。
+没有新增失败。证据见 `evidence/aarch64-el2-vbar-20261118-r8/`。
 
 ## 边界
 
@@ -59,8 +63,8 @@ fp_context=true driver_vm=false
   分配/确认/EOI、GIC 虚拟 CPU 接口或定时器中断虚拟化；
 - 已保存恢复通用寄存器、SP_EL1、ELR、SPSR、基础系统寄存器和 FP/SIMD；
   尚未保存 SVE、GIC/定时器虚拟状态或支持多 vCPU 调度；
-- 基础系统寄存器已覆盖 SP_EL0、TPIDR_EL0/EL1 和 CONTEXTIDR_EL1；TTBR/TCR/MAIR、
-  VBAR、调试/性能/安全配置等仍未形成完整 vCPU 系统寄存器模型；
+- 基础系统寄存器已覆盖 SP_EL0、TPIDR_EL0/EL1、CONTEXTIDR_EL1 和 VBAR_EL1；
+  TTBR/TCR/MAIR、调试/性能/安全配置等仍未形成完整 vCPU 系统寄存器模型；
 - 尚未实现 Device/MMIO/DMA/IOMMU capability 注入或 Linux Driver VM；
 - 不改变 LC-4、DC-1 或 Pixel Driver VM 节点状态。
 
@@ -70,7 +74,7 @@ EL2 保留启动链，才能在实物上继续 Driver VM 验收。
 ## 复现
 
 ```text
-AARCH64_EL2_OUT="$PWD/evidence/aarch64-el2-virq-20261118-r7h" \
+AARCH64_EL2_OUT="$PWD/evidence/aarch64-el2-vbar-20261118-r8" \
 AARCH64_EL2_TARGET="$PWD/target/aarch64-el2-stage2" \
 AARCH64_EL2_QEMU_CPUS=6-7 \
 JASPER_BUILD_CPUS=4-5 \
