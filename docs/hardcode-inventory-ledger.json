@@ -1,5 +1,5 @@
 {
-  "baseline_total": 383,
+  "baseline_total": 382,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,11 +10,11 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 104,
+    "explicit-safety-policy": 101,
     "platform-adapter": 27,
-    "protocol-abi": 21,
+    "protocol-abi": 24,
     "runtime-resource-capacity": 57,
-    "unclassified": 95
+    "unclassified": 94
   },
   "entries": [
     {
@@ -1508,32 +1508,32 @@
       "source": "pub const MIN_WINDOW_SIZE: u64 = WINDOW_END_RISCV32 - WINDOW_BASE_RISCV32;"
     },
     {
-      "category": "explicit-safety-policy",
+      "category": "protocol-abi",
       "count": 1,
       "fingerprint": "0b7792d92b45bb3bb8ea23fd7e4c73ed558d40b491f531c41c1b0113a7d5a318",
       "line": 13,
       "path": "kernel-core/src/usi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
+      "reason": "identifier is a Linux UAPI width or semantic boundary; preserve the documented Linux value",
       "rules": "HC-G1",
       "source": "pub const MAX_PROFILE_NAME: usize = 12;"
     },
     {
-      "category": "explicit-safety-policy",
+      "category": "protocol-abi",
       "count": 1,
       "fingerprint": "0f056e07229fbcf899365ac9d46cdbc2ad5811c6de70cb15533cf468925be7f8",
       "line": 14,
       "path": "kernel-core/src/usi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
+      "reason": "identifier is a Linux UAPI width or semantic boundary; preserve the documented Linux value",
       "rules": "HC-G1",
       "source": "pub const MAX_MODULE_NAME: usize = 24;"
     },
     {
-      "category": "unclassified",
+      "category": "protocol-abi",
       "count": 1,
       "fingerprint": "5914ba3f5fbf2b3cb1da4af674ed6124e74225874118d11e769a1ac9d4dee5a4",
       "line": 15,
       "path": "kernel-core/src/usi.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "identifier is a Linux UAPI width or semantic boundary; preserve the documented Linux value",
       "rules": "HC-G1",
       "source": "pub const MAX_MODULE_VERSION: usize = 8;"
     },
@@ -2808,16 +2808,6 @@
       "source": "pub const MAX_TIMER_OBJECTS: u32 = 256;"
     },
     {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "b84f724cf9707696febeb18b4221b250a3785728d9abf628ca437b24e43cf737",
-      "line": 114,
-      "path": "kernel/src/usi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G6",
-      "source": "let copy_len = profile_name.len().min(usi::MAX_PROFILE_NAME);"
-    },
-    {
       "category": "unclassified",
       "count": 1,
       "fingerprint": "a20a0190828e4ea2a649e342174429d7f817486ad774c8da2bed23e13ccd0df3",
@@ -3060,10 +3050,10 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 121,
+    "explicit-safety-policy": 118,
     "platform-adapter": 43,
-    "protocol-abi": 24,
+    "protocol-abi": 27,
     "runtime-resource-capacity": 96,
-    "unclassified": 99
+    "unclassified": 98
   }
 }

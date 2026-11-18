@@ -137,6 +137,27 @@ fn diagnostic_list_grows_past_previous_sixteen_entry_limit() {
 }
 
 #[test]
+fn usi_names_are_rejected_before_serving_a_truncated_record() {
+    const MODULES: &[ModuleDecl] = &[named("core")];
+    let mut profile = sample(MODULES);
+    profile.name = "profile-name-too-long";
+    let errors = resolve(&profile).unwrap_err();
+    assert!(has(
+        &errors,
+        ProfileErrorCode::InvalidName,
+        "profile-name-too-long"
+    ));
+
+    const LONG_MODULE: &[ModuleDecl] = &[named("module-name-longer-than-usi-limit")];
+    let errors = resolve(&sample(LONG_MODULE)).unwrap_err();
+    assert!(has(
+        &errors,
+        ProfileErrorCode::InvalidName,
+        "module-name-longer-than-usi-limit"
+    ));
+}
+
+#[test]
 fn builtin_profiles_expose_different_service_sets() {
     let full = resolve(&HEADLESS).expect("headless");
     let min = resolve(&HEADLESS_MIN).expect("headless-min");

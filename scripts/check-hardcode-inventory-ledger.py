@@ -110,7 +110,13 @@ def classify(path: str, rules: str, source: str) -> tuple[str, str]:
     """
     name = identifier(source)
     lowered = path.lower()
-    if name in {"MAX_COUNTER", "MIN_ALTSTACK"}:
+    if name in {
+        "MAX_COUNTER",
+        "MIN_ALTSTACK",
+        "MAX_PROFILE_NAME",
+        "MAX_MODULE_NAME",
+        "MAX_MODULE_VERSION",
+    }:
         return (
             "protocol-abi",
             "identifier is a Linux UAPI width or semantic boundary; preserve the documented Linux value",

@@ -111,16 +111,18 @@ pub fn info_get(request_id: u64, ptr: u64, cap: u64) -> i64 {
         None => return err(SYSTEM_ERROR_INVALID_ARGUMENT),
     };
     let profile_name = profile::ACTIVE.name.as_bytes();
-    let copy_len = profile_name.len().min(usi::MAX_PROFILE_NAME);
+    if profile_name.len() > usi::MAX_PROFILE_NAME {
+        return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+    }
     let mut profile_bytes = [0u8; usi::MAX_PROFILE_NAME];
-    profile_bytes[..copy_len].copy_from_slice(&profile_name[..copy_len]);
+    profile_bytes[..profile_name.len()].copy_from_slice(profile_name);
     let info = usi::Info {
         abi: kernel_core::abi_version::NATIVE.packed(),
         online_cpus: sched::online_cpus().len().min(u16::MAX as usize) as u16,
         modules: modules.min(u16::MAX as usize) as u16,
         processes: snapshot.len().min(u16::MAX as usize) as u16,
         capabilities: resolved.capabilities().len().min(u16::MAX as usize) as u16,
-        profile_name_len: copy_len as u16,
+        profile_name_len: profile_name.len() as u16,
         profile_name: profile_bytes,
     };
     respond(

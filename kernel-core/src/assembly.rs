@@ -978,7 +978,7 @@ mod tests {
         decl("side", &["t.side"], &[]),
     ];
     const T_BASE: SystemProfile = SystemProfile {
-        name: "assembly-test",
+        name: "assembly",
         display_zh: "装配测试",
         display_en: "assembly test",
         config: KernelConfig::STANDARD,

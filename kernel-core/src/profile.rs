@@ -345,7 +345,7 @@ pub fn resolve(profile: &SystemProfile) -> Result<ResolvedProfile, ProfileErrors
     let mut errors = ProfileErrors::new();
     let mut resolved = ResolvedProfile::empty();
 
-    if !is_kebab(profile.name) {
+    if !is_kebab(profile.name) || profile.name.len() > crate::usi::MAX_PROFILE_NAME {
         errors.push(ProfileErrorCode::InvalidName, profile.name);
     }
     if profile.modules.is_empty() {
@@ -360,7 +360,7 @@ pub fn resolve(profile: &SystemProfile) -> Result<ResolvedProfile, ProfileErrors
     }
 
     for module in profile.modules {
-        if !is_kebab(module.name) {
+        if !is_kebab(module.name) || module.name.len() > crate::usi::MAX_MODULE_NAME {
             errors.push(ProfileErrorCode::InvalidName, module.name);
         }
         if module_names.contains(&module.name) {
