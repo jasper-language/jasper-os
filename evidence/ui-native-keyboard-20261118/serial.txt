@@ -1,26 +1,26 @@
 INFO : Framebuffer info: FrameBufferInfo { byte_len: 2764800, width: 1280, height: 720, pixel_format: Bgr, bytes_per_pixel: 3, stride: 1280 }
 INFO : 4th Stage
-INFO : BiosInfo { stage_4: Region { start: 130000, len: 25068 }, kernel: Region { start: 1000000, len: 3d85f0 }, ramdisk: Region { start: 13d9000, len: 0 }, config_file: Region { start: 13d9000, len: 0 }, last_used_addr: 13d8fff, framebuffer: BiosFramebufferInfo { region: Region { start: fd000000, len: 2a3000 }, width: 500, height: 2d0, bytes_per_pixel: 3, stride: 500, pixel_format: Bgr }, memory_map_addr: 1207c, memory_map_len: 7 }
+INFO : BiosInfo { stage_4: Region { start: 130000, len: 25068 }, kernel: Region { start: 1000000, len: 3d8b28 }, ramdisk: Region { start: 13d9000, len: 0 }, config_file: Region { start: 13d9000, len: 0 }, last_used_addr: 13d8fff, framebuffer: BiosFramebufferInfo { region: Region { start: fd000000, len: 2a3000 }, width: 500, height: 2d0, bytes_per_pixel: 3, stride: 500, pixel_format: Bgr }, memory_map_addr: 1207c, memory_map_len: 7 }
 INFO : BIOS boot
 INFO : Elf file loaded at Pointer {
     addr: 0x0000000001000000,
-    metadata: 4031984,
+    metadata: 4033320,
 }
 INFO : virtual_address_offset: 0x10000000000
-INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(4), offset: 0, virtual_addr: 0, physical_addr: 0, file_size: 1779bc, mem_size: 1779bc, align: 1000 })
-INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(5), offset: 1779c0, virtual_addr: 1789c0, physical_addr: 1789c0, file_size: d808f, mem_size: d808f, align: 1000 })
-INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 24fa50, virtual_addr: 251a50, physical_addr: 251a50, file_size: c170, mem_size: c5b0, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(4), offset: 0, virtual_addr: 0, physical_addr: 0, file_size: 177974, mem_size: 177974, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(5), offset: 177980, virtual_addr: 178980, physical_addr: 178980, file_size: d809f, mem_size: d809f, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 24fa20, virtual_addr: 251a20, physical_addr: 251a20, file_size: c168, mem_size: c5e0, align: 1000 })
 INFO : Mapping bss section
-INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 25bbc0, virtual_addr: 25ebc0, physical_addr: 25ebc0, file_size: 1275c0, mem_size: 23b6d0, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 25bbc0, virtual_addr: 25ebc0, physical_addr: 25ebc0, file_size: 1275d0, mem_size: 23b6d4, align: 1000 })
 INFO : Mapping bss section
-INFO : Entry point at: 0x10000178c40
-INFO : Creating GDT at PhysAddr(0x153a000)
+INFO : Entry point at: 0x10000178c00
+INFO : Creating GDT at PhysAddr(0x153b000)
 INFO : Map framebuffer
 INFO : Map physical memory
 INFO : Allocate bootinfo
 INFO : Create Memory Map
 INFO : Create bootinfo
-INFO : Jumping to kernel entry point at VirtAddr(0x10000178c40)
+INFO : Jumping to kernel entry point at VirtAddr(0x10000178c00)
 [JSR-BOOT] jasper-os rust kernel 0.0.1 x86_64
 [JSR-CONFIG] profile=standard valid=ok params=29
 [JSR-CONFIG] timer_hz=100
@@ -86,16 +86,16 @@ INFO : Jumping to kernel entry point at VirtAddr(0x10000178c40)
 [JSR-BOOT-STAGE] done stage=timer done_mask=0x7
 [JSR-BOOT-STAGE] done stage=frames done_mask=0xf
 [JSR-BOOT-STAGE] done stage=kernel_map done_mask=0x1f
-[JSR-TERM] capacity input=32768 output=32768 uart_pump=512 available=131645440
+[JSR-TERM] capacity input=32768 output=32768 uart_pump=512 available=131641344
 [JSR-DISPLAY-COMPOSITOR] layers=2 visible=2 primary=terminal overlays=bounded alpha=true full_frame=false damage=true overlay_damage=true text_full=true input_capacity=675
 [JSR-BOOT-STAGE] done stage=heap done_mask=0x3f
 [JSR-SPAWN] child_limit=8 tasks=64 source=boot_capacity
-[JSR-WORKLOAD] capacity workloads=64 members=256 tasks=64 budget=131645440 dynamic=true
+[JSR-WORKLOAD] capacity workloads=64 members=256 tasks=64 budget=131641344 dynamic=true
 [JSR-SCHED] qos quantum=[1, 1, 1, 1] decay=8 owed_cap=2000 timer_hz=100 tasks=64 dynamic=true
 [JSR-RING] capacity rings=64 in_flight=1024 tasks=64 objects=1024 dynamic=true
-[JSR-IPC] capacity endpoints=8 queue_bytes=128560 process_bytes=514240 total_bytes=8227840 tasks=64 objects=1024 budget=131645440 dynamic=true
-[JSR-SANDBOX] capacity sandboxes=64 workloads=64 budget=131645440 dynamic=true
-[JSR-SANDBOX-STORAGE] capacity images=128 layers=1607 volumes=502 sandboxes=64 budget=131645440 dynamic=true
+[JSR-IPC] capacity endpoints=8 queue_bytes=128556 process_bytes=514224 total_bytes=8227584 tasks=64 objects=1024 budget=131641344 dynamic=true
+[JSR-SANDBOX] capacity sandboxes=64 workloads=64 budget=131641344 dynamic=true
+[JSR-SANDBOX-STORAGE] capacity images=128 layers=1606 volumes=502 sandboxes=64 budget=131641344 dynamic=true
 [JSR-BOOT-STAGE] done stage=capacity done_mask=0x7f
 [JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=720 stride=1280 bpp=3 frames=1 keys=0 input_capacity=675 dropped=0 compositor_layers=2 pressed=0 released=0
 [JSR-BOOT-STAGE] done stage=devices done_mask=0xff
@@ -103,7 +103,7 @@ INFO : Jumping to kernel entry point at VirtAddr(0x10000178c40)
 [JSR-PROFILE] table idx=1 name=headless-min valid=true modules=5 services=20 capabilities=5 min_tasks=32 min_objects=128 hot_load=0
 [JSR-PROFILE] active name=headless valid=true params=standard modules=9 services=25 capabilities=10 guarantees=2 dynamic=true
 [JSR-BOOT-STAGE] done stage=profile done_mask=0x1ff
-[JSR-ASSEMBLY] capacity modules=9 capabilities=10 services=25 metadata=1870 budget=128560 dynamic=true
+[JSR-ASSEMBLY] capacity modules=9 capabilities=10 services=25 metadata=1870 budget=128556 dynamic=true
 [JSR-LIFE] release_dispatch closing_locks=true outside_lock=5 none=11 none_empty=true destroyed_when_none=0 hooks_match_registry=true
 [JSR-ASSEMBLY] activate module=core objects=1024
 [JSR-ASSEMBLY] activate module=sched tasks=64 stacks=64
@@ -125,7 +125,7 @@ INFO : Jumping to kernel entry point at VirtAddr(0x10000178c40)
 [JSR-ASSEMBLY] module=job order=6 state=ready reason= version=1.0.0
 [JSR-ASSEMBLY] module=async order=7 state=ready reason= version=1.0.0
 [JSR-ASSEMBLY] module=devices order=8 state=ready reason= version=1.0.0
-[JSR-CAP] boot source=derived objects=1024 tasks=64 rt=8 task_stacks=64 mem_limit=98734080
+[JSR-CAP] boot source=derived objects=1024 tasks=64 rt=8 task_stacks=64 mem_limit=98731008
 [JSR-K06] profile=headless ops=109 kernel_base=72 module_service=37 active_unavailable=0 unclaimed=0 gate_mismatch=0 ring=available time=available sync=available
 [JSR-ASSEMBLY] summary profile=headless modules=9 ready=9 failed=0 blocked=0 declared=10 published=10 pre_publish=0 audit=ok restart=system.module.error.already_started stop_core=system.module.error.in_use stop_devices=system.module.error.permanent generation=0 readers=0
 [JSR-BOOT-STAGE] done stage=assembly done_mask=0x3ff
@@ -141,13 +141,13 @@ INFO : Jumping to kernel entry point at VirtAddr(0x10000178c40)
 [JSR-IOAPIC] line=0 name=serial vector=80 gsi_pin=4 controlled=true
 [JSR-IOAPIC] line=1 name=rtc vector=81 gsi_pin=8 controlled=true
 [JSR-SMP] start present=2 online=2 failed=0 source=acpi.madt dropped=0 disabled=0
-[JSR-IRQ] topology source=smp_ready discovered=2 admitted=2 rejected=0 capacity=2 budget=128560 dynamic=true complete=true
+[JSR-IRQ] topology source=smp_ready discovered=2 admitted=2 rejected=0 capacity=2 budget=128556 dynamic=true complete=true
 [JSR-BOOT-STAGE] done stage=smp done_mask=0x1fff
 [JSR-STAGE] user_runtime embedded_programs=true
 [JSR-BOOT-STAGE] done stage=user_runtime done_mask=0x9fff
 [JSR-PLAN] finish plan=ui-process stages=0x9fff cases=0
-[JSR-PROC] event=system.process.created id=0x2 name=ui-process-host memory_cap_capacity=1147 memory_cap_metadata_budget=4113920 memory_budget=131645440 process_slots=64 dynamic=true
-[JSR-PROC] event=system.process.created id=0x4 name=ui-service memory_cap_capacity=1147 memory_cap_metadata_budget=4113920 memory_budget=131645440 process_slots=64 dynamic=true
+[JSR-PROC] event=system.process.created id=0x2 name=ui-process-host memory_cap_capacity=1147 memory_cap_metadata_budget=4113792 memory_budget=131641344 process_slots=64 dynamic=true
+[JSR-PROC] event=system.process.created id=0x4 name=ui-service memory_cap_capacity=1147 memory_cap_metadata_budget=4113792 memory_budget=131641344 process_slots=64 dynamic=true
 [JSR-IPC] event=system.channel.created a=0x5 b=0x6
 [JSR-UI-PROCESS] waiting_real_key=true native_enter=0x0103
 [JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=720 stride=1280 bpp=3 frames=2 keys=1 input_capacity=675 dropped=0 compositor_layers=2 pressed=1 released=0
@@ -211,6 +211,6 @@ INFO : Jumping to kernel entry point at VirtAddr(0x10000178c40)
 [JSR-LIFE] cleanup destroy type=ExitState id=0x7
 [JSR-LIFE] cleanup destroy type=ExitState id=0x3
 [JSR-LIFE] cleanup destroy type=ExitState id=0x1
-[JSR-UI-PROCESS-BASELINE] before=Baseline { free_frames: 125721, objects: 0, pending: 0, pins: (0, 0) } after=Baseline { free_frames: 125721, objects: 0, pending: 0, pins: (0, 0) } queued=0/0
+[JSR-UI-PROCESS-BASELINE] before=Baseline { free_frames: 125720, objects: 0, pending: 0, pins: (0, 0) } after=Baseline { free_frames: 125720, objects: 0, pending: 0, pins: (0, 0) } queued=0/0
 [JSR-DISPLAY-UI] presented=true width=64 height=64 x=608 y=328 layers=3
 [JSR-UI-PROCESS] started=true channel=true request_queued=true engine=cpu rendered=true present=true patch=true input=true native_keyboard=true frames=3 display=true exit=0 response=true terminal_alive=true resources=true checks=15 failed=0

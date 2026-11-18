@@ -52,7 +52,7 @@ kernel.img
 Kernel image SHA-256:
 
 ```text
-664d5bf99a1dd1c336e66d278f19780f29f9e2f9a49055cfdae730bea15c5fc6
+e97dc9d9a9e7c44bc561c2da2e78b35242b2d7786ae5319e39abbcc802ca5653
 ```
 
 ## Scope

@@ -238,7 +238,7 @@ pub fn run() -> u32 {
     UiInputRecord {
         code: JSUI_ENTER_CODE,
         pressed: true,
-        modifiers: 0,
+        modifiers: native_key.modifiers,
     }
     .encode_into(&mut input_payload)
     .expect("encode UI input probe");
