@@ -57,3 +57,21 @@ PDPT/PD，不通过新增低地址映射修改共享内核页表。
 
 APK 专用证据：
 `evidence/issue21-uefi-boot-20261118-144543/README.md`。
+
+## Activity/Framework 生命周期边界
+
+APK 中的 DEX 能由 unmodified ART 执行，不等于 Android Activity 已可启动。当前
+固定夹具没有 `zygote64`、`system_server`、`installd` 或运行中的 ActivityManager
+Binder service，也没有完整的 `/system`、`/apex` Framework namespace、
+`services.jar`、`am.jar`、framework resources 和 system_server 服务图。
+
+`app_process64` 自身依赖 `libandroid_runtime.so`、`libbinder.so`、
+`libhidlbase.so`、`libwilhelm.so`，并继续引入 graphics、media、audio、camera、
+EGL/Vulkan 等系统库。因此单独启动 `app_process64 com.android.commands.am.Am`
+不能证明 Activity 生命周期，当前也不是只需补一个 syscall 的小修。
+
+后续真实门必须先建立受权限约束的 Android Framework/APEX namespace 和后端服务
+关系，再启动 system_server/ActivityManager Binder，随后验证 APK 安装登记、
+Activity `onCreate/onStart/onResume`、资源与 configuration 交付、
+graphics/input/audio 以及撤销和资源回收。任何只验证 shell、固定文本或 mock
+Activity 成功的路径都不能关闭该节点。
