@@ -856,6 +856,44 @@ impl ComponentInstaller {
         self.current(name)
     }
 
+    /// Resolve and roll back to the previous version only when the exact
+    /// planned dependency closure is already active.
+    ///
+    /// This is the rollback counterpart of [`Self::install_resolved`]. It
+    /// resolves the historical manifest against current platform facts and
+    /// rejects version or archive-identity drift before changing component
+    /// state. It never installs or downgrades dependencies implicitly.
+    ///
+    /// 仅在精确规划的依赖闭包已经激活时回滚到上一版本。这是
+    /// [`Self::install_resolved`] 的回滚对应路径：在修改组件状态前用当前平台
+    /// 事实重新解析历史清单，并拒绝版本或归档身份漂移；不会隐式安装或降级依赖。
+    pub fn rollback_resolved(
+        &self,
+        name: &str,
+        catalog: &[ComponentManifest],
+        platform: &resolution::ResolutionPlatform,
+    ) -> Result<(Installed, resolution::ResolutionPlan), PackageError> {
+        let state = self.read_state(name)?;
+        let previous = state
+            .previous
+            .clone()
+            .ok_or_else(|| PackageError::NotInstalled(name.into()))?;
+        self.verify_installed(name, &previous)?;
+        let previous_manifest = self.installed_manifest(name, &previous)?;
+        self.require_target_arch(&previous_manifest)?;
+        let plan = resolution::resolve(&previous_manifest, catalog, platform)
+            .map_err(PackageError::Resolution)?;
+        self.verify_resolution(&previous_manifest, &plan, catalog)?;
+        self.preflight_dependency_closure(&previous_manifest)?;
+        self.ensure_active_dependents_accept(name, &previous)?;
+        let pending = self.write_state_temporary_values(name, &previous, Some(&state.current))?;
+        if let Err(error) = fs::rename(&pending, self.state_path(name)) {
+            let _ = fs::remove_file(pending);
+            return Err(error.into());
+        }
+        Ok((self.current(name)?, plan))
+    }
+
     /// 只卸载指定组件及其状态，不修改其他组件。
     ///
     /// Removes only the named component and its state.
@@ -1787,6 +1825,126 @@ mod tests {
         ));
         assert!(!root.exists());
         drop(runtime_archive);
+    }
+
+    #[test]
+    fn resolved_rollback_consumes_exact_active_dependency_plan() {
+        let temp = TestDir::new("resolved-rollback");
+        let root = temp.path().join("root");
+        let installer = ComponentInstaller::new(&root);
+        let (runtime_archive, runtime_digest) = archive(temp.path(), "runtime-1.5.0");
+        let runtime_manifest =
+            component_manifest(temp.path(), "runtime", "1.5.0", &runtime_digest, "");
+        let runtime =
+            ComponentManifest::parse(&fs::read_to_string(&runtime_manifest).unwrap()).unwrap();
+        installer
+            .install(&runtime_manifest, &runtime_archive)
+            .unwrap();
+
+        let requirement = "runtime@>=1.0.0,<2.0.0";
+        let (app1_archive, app1_digest) = archive(temp.path(), "app-1.0.0");
+        let app1 = component_manifest(temp.path(), "app", "1.0.0", &app1_digest, requirement);
+        let (app2_archive, app2_digest) = archive(temp.path(), "app-2.0.0");
+        let app2 = component_manifest(temp.path(), "app", "2.0.0", &app2_digest, requirement);
+        installer.install(&app1, &app1_archive).unwrap();
+        installer.install(&app2, &app2_archive).unwrap();
+        assert_eq!(installer.current("app").unwrap().version, "2.0.0");
+
+        let (installed, plan) = installer
+            .rollback_resolved("app", &[runtime], &resolution_platform())
+            .unwrap();
+        assert_eq!(installed.version, "1.0.0");
+        assert_eq!(installer.current("app").unwrap().version, "1.0.0");
+        assert_eq!(
+            plan.order
+                .iter()
+                .map(|component| (component.name.as_str(), component.version.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("runtime", "1.5.0"), ("app", "1.0.0")]
+        );
+        assert!(transient_entries(&root).is_empty());
+    }
+
+    #[test]
+    fn resolved_rollback_rejects_version_and_digest_drift_before_activation() {
+        let temp = TestDir::new("resolved-rollback-drift");
+        let root = temp.path().join("root");
+        let installer = ComponentInstaller::new(&root);
+        let (runtime1_archive, runtime1_digest) = archive(temp.path(), "runtime-1.0.0");
+        let runtime1 = component_manifest(temp.path(), "runtime", "1.0.0", &runtime1_digest, "");
+        let (runtime15_archive, runtime15_digest) = archive(temp.path(), "runtime-1.5.0");
+        let runtime15 = component_manifest(temp.path(), "runtime", "1.5.0", &runtime15_digest, "");
+        installer.install(&runtime1, &runtime1_archive).unwrap();
+
+        let requirement = "runtime@>=1.0.0,<2.0.0";
+        let (app1_archive, app1_digest) = archive(temp.path(), "app-1.0.0");
+        let app1 = component_manifest(temp.path(), "app", "1.0.0", &app1_digest, requirement);
+        let (app2_archive, app2_digest) = archive(temp.path(), "app-2.0.0");
+        let app2 = component_manifest(temp.path(), "app", "2.0.0", &app2_digest, requirement);
+        installer.install(&app1, &app1_archive).unwrap();
+        installer.install(&app2, &app2_archive).unwrap();
+
+        let runtime1_candidate =
+            ComponentManifest::parse(&fs::read_to_string(&runtime1).unwrap()).unwrap();
+        let runtime15_candidate =
+            ComponentManifest::parse(&fs::read_to_string(&runtime15).unwrap()).unwrap();
+        assert!(matches!(
+            installer.rollback_resolved(
+                "app",
+                &[runtime1_candidate.clone(), runtime15_candidate],
+                &resolution_platform()
+            ),
+            Err(PackageError::ResolutionStateDrift {
+                component,
+                planned,
+                installed,
+            }) if component == "runtime"
+                && planned == "1.5.0"
+                && installed == "1.0.0"
+        ));
+        assert_eq!(installer.current("app").unwrap().version, "2.0.0");
+
+        let mut wrong_digest = runtime1_candidate;
+        wrong_digest.archive_sha256 = "f".repeat(64);
+        assert!(matches!(
+            installer.rollback_resolved("app", &[wrong_digest], &resolution_platform()),
+            Err(PackageError::ResolutionStateDrift { component, .. })
+                if component == "runtime"
+        ));
+        assert_eq!(installer.current("app").unwrap().version, "2.0.0");
+        assert_eq!(installer.current("runtime").unwrap().version, "1.0.0");
+        assert!(transient_entries(&root).is_empty());
+        drop(runtime15_archive);
+    }
+
+    #[test]
+    fn resolved_rollback_rejects_unsatisfied_plan_before_activation() {
+        let temp = TestDir::new("resolved-rollback-missing");
+        let root = temp.path().join("root");
+        let installer = ComponentInstaller::new(&root);
+        let (runtime_archive, runtime_digest) = archive(temp.path(), "runtime-1.0.0");
+        let runtime_manifest =
+            component_manifest(temp.path(), "runtime", "1.0.0", &runtime_digest, "");
+        installer
+            .install(&runtime_manifest, &runtime_archive)
+            .unwrap();
+
+        let requirement = "runtime@>=1.0.0,<2.0.0";
+        let (app1_archive, app1_digest) = archive(temp.path(), "app-1.0.0");
+        let app1 = component_manifest(temp.path(), "app", "1.0.0", &app1_digest, requirement);
+        let (app2_archive, app2_digest) = archive(temp.path(), "app-2.0.0");
+        let app2 = component_manifest(temp.path(), "app", "2.0.0", &app2_digest, requirement);
+        installer.install(&app1, &app1_archive).unwrap();
+        installer.install(&app2, &app2_archive).unwrap();
+
+        assert!(matches!(
+            installer.rollback_resolved("app", &[], &resolution_platform()),
+            Err(PackageError::Resolution(
+                resolution::ResolutionError::Missing { package }
+            )) if package == "runtime"
+        ));
+        assert_eq!(installer.current("app").unwrap().version, "2.0.0");
+        assert!(transient_entries(&root).is_empty());
     }
 
     #[test]
