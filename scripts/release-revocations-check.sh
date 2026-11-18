@@ -8,6 +8,7 @@ cd "$ROOT"
 work="$(mktemp -d "${TMPDIR:-/tmp}/jasper-revocations.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/snapshots" "$work/state"
+software_anchor=(--development-software-anchor)
 
 openssl genpkey -algorithm ED25519 -out "$work/governance.private.pem"
 openssl pkey -in "$work/governance.private.pem" -pubout -out "$work/governance.public.pem"
@@ -37,7 +38,8 @@ accept() {
     --snapshot "$work/snapshots/$name.revocations.json" \
     --signature "$work/snapshots/$name.revocations.sig" \
     --governance-public-key "$work/governance.public.pem" \
-    --state-dir "$work/state"
+    --state-dir "$work/state" \
+    "${software_anchor[@]}"
 }
 
 accept epoch1
@@ -49,7 +51,8 @@ grep -q 'IDEMPOTENT' "$work/idempotent.txt"
 python3 scripts/release-revocations.py export \
   --state-dir "$work/state" \
   --governance-public-key "$work/governance.public.pem" \
-  --output "$work/exported.txt"
+  --output "$work/exported.txt" \
+  "${software_anchor[@]}"
 [[ ! -s "$work/exported.txt" ]]
 
 printf '%s\n' "$fp_a" > "$work/revoked-a.txt"
@@ -95,7 +98,8 @@ grep -q 'stale revocation snapshot' "$work/stale.err"
 python3 scripts/release-revocations.py export \
   --state-dir "$work/state" \
   --governance-public-key "$work/governance.public.pem" \
-  --output "$work/exported.txt"
+  --output "$work/exported.txt" \
+  "${software_anchor[@]}"
 grep -qx "$fp_a" "$work/exported.txt"
 
 python3 scripts/release-revocations.py create \
@@ -149,7 +153,8 @@ if python3 scripts/release-revocations.py accept \
   --snapshot "$work/tampered.json" \
   --signature "$work/snapshots/epoch2.revocations.sig" \
   --governance-public-key "$work/governance.public.pem" \
-  --state-dir "$work/state" 2>"$work/tamper.err"; then
+  --state-dir "$work/state" \
+  "${software_anchor[@]}" 2>"$work/tamper.err"; then
   echo "release-revocations-check: tampered snapshot was accepted" >&2
   exit 1
 fi
@@ -169,7 +174,8 @@ if python3 scripts/release-revocations.py accept \
   --snapshot "$work/snapshots/epoch3.revocations.json" \
   --signature "$work/tampered.sig" \
   --governance-public-key "$work/governance.public.pem" \
-  --state-dir "$work/state" 2>"$work/signature.err"; then
+  --state-dir "$work/state" \
+  "${software_anchor[@]}" 2>"$work/signature.err"; then
   echo "release-revocations-check: tampered signature was accepted" >&2
   exit 1
 fi
@@ -194,7 +200,8 @@ for name in sys.argv[1:]:
 PY
 if python3 scripts/release-revocations.py status \
   --state-dir "$work/state" \
-  --governance-public-key "$work/governance.public.pem" 2>"$work/state-tamper.err"; then
+  --governance-public-key "$work/governance.public.pem" \
+  "${software_anchor[@]}" 2>"$work/state-tamper.err"; then
   echo "release-revocations-check: unsigned state tampering was accepted" >&2
   exit 1
 fi
@@ -205,7 +212,8 @@ cp "$work/state/state.1.backup" "$work/state/state.1.json"
 printf '{}\n' > "$work/state/state.1.json"
 if python3 scripts/release-revocations.py status \
   --state-dir "$work/state" \
-  --governance-public-key "$work/governance.public.pem" 2>"$work/copies.err"; then
+  --governance-public-key "$work/governance.public.pem" \
+  "${software_anchor[@]}" 2>"$work/copies.err"; then
   echo "release-revocations-check: divergent state copies were accepted" >&2
   exit 1
 fi
@@ -214,7 +222,183 @@ cp "$work/state/state.1.backup" "$work/state/state.1.json"
 
 python3 scripts/release-revocations.py status \
   --state-dir "$work/state" \
-  --governance-public-key "$work/governance.public.pem" >"$work/status.txt"
+  --governance-public-key "$work/governance.public.pem" \
+  "${software_anchor[@]}" >"$work/status.txt"
 grep -q 'epoch=3 .*revoked=2 audit=3' "$work/status.txt"
+if python3 scripts/release-revocations.py status \
+  --state-dir "$work/state" \
+  --governance-public-key "$work/governance.public.pem" \
+  2>"$work/no-anchor.err"; then
+  echo "release-revocations-check: production state without a TPM anchor was accepted" >&2
+  exit 1
+fi
+grep -q 'TPM2 monotonic anchor is required' "$work/no-anchor.err"
 
-echo "release-revocations-check: PASS signed=true monotonic=true replay_rejected=true rollback_rejected=true dual_copy=true audit=true"
+# TPM2 NV counter adapter. The fake executable below is only a deterministic
+# protocol harness; production must pass the real tpm2-tools executables.
+cat >"$work/fake-tpm.py" <<'PY'
+from pathlib import Path
+import os
+import sys
+
+mode, counter_path = sys.argv[1], Path(sys.argv[2])
+try:
+    counter = int(counter_path.read_text(encoding="ascii").strip())
+except (OSError, ValueError):
+    raise SystemExit(31)
+if mode == "increment":
+    counter += 1
+    if counter > (1 << 64) - 1:
+        raise SystemExit(32)
+    temporary = counter_path.with_name(counter_path.name + ".tmp")
+    temporary.write_text(f"{counter}\n", encoding="ascii")
+    os.replace(temporary, counter_path)
+elif mode == "read":
+    sys.stdout.buffer.write(counter.to_bytes(8, "big"))
+else:
+    raise SystemExit(33)
+PY
+cat >"$work/tpm-increment" <<EOF
+#!/bin/sh
+exec python3 "$work/fake-tpm.py" increment "$work/tpm-counter"
+EOF
+cat >"$work/tpm-read" <<EOF
+#!/bin/sh
+exec python3 "$work/fake-tpm.py" read "$work/tpm-counter"
+EOF
+cat >"$work/tpm-increment-fail" <<'EOF'
+#!/bin/sh
+exit 47
+EOF
+chmod +x "$work/tpm-increment" "$work/tpm-read" "$work/tpm-increment-fail"
+printf '0\n' >"$work/tpm-counter"
+tpm_args=(
+  --tpm-nv-index 0x01800001
+  --tpm-increment-command "$work/tpm-increment"
+  --tpm-read-command "$work/tpm-read"
+)
+accept_tpm() {
+  local name=$1
+  python3 scripts/release-revocations.py accept \
+    --snapshot "$work/snapshots/$name.revocations.json" \
+    --signature "$work/snapshots/$name.revocations.sig" \
+    --governance-public-key "$work/governance.public.pem" \
+    --state-dir "$work/state-tpm" \
+    "${tpm_args[@]}"
+}
+
+accept_tpm epoch1
+[[ "$(cat "$work/tpm-counter")" -eq 1 ]]
+accept_tpm epoch1 >"$work/tpm-idempotent.txt"
+grep -q 'IDEMPOTENT' "$work/tpm-idempotent.txt"
+[[ "$(cat "$work/tpm-counter")" -eq 1 ]]
+accept_tpm epoch2
+[[ "$(cat "$work/tpm-counter")" -eq 2 ]]
+cp "$work/state-tpm/state.0.json" "$work/tpm-state2.0.json"
+cp "$work/state-tpm/state.1.json" "$work/tpm-state2.1.json"
+cp "$work/state-tpm/monotonic-anchor.json" "$work/tpm-anchor2.json"
+
+if python3 scripts/release-revocations.py accept \
+  --snapshot "$work/snapshots/epoch3.revocations.json" \
+  --signature "$work/snapshots/epoch3.revocations.sig" \
+  --governance-public-key "$work/governance.public.pem" \
+  --state-dir "$work/state-tpm" \
+  --tpm-nv-index 0x01800001 \
+  --tpm-increment-command "$work/tpm-increment-fail" \
+  --tpm-read-command "$work/tpm-read" \
+  2>"$work/tpm-failed-increment.err"; then
+  echo "release-revocations-check: failed TPM increment was accepted" >&2
+  exit 1
+fi
+grep -q 'status 47' "$work/tpm-failed-increment.err"
+[[ "$(cat "$work/tpm-counter")" -eq 2 ]]
+
+# The failed increment left a durable intent. Retrying with the working tool
+# must reconcile that intent and increment exactly once.
+accept_tpm epoch3
+[[ "$(cat "$work/tpm-counter")" -eq 3 ]]
+accept_tpm epoch3 >"$work/tpm-idempotent3.txt"
+grep -q 'IDEMPOTENT' "$work/tpm-idempotent3.txt"
+[[ "$(cat "$work/tpm-counter")" -eq 3 ]]
+cp "$work/state-tpm/state.0.json" "$work/tpm-state3.0.json"
+cp "$work/state-tpm/state.1.json" "$work/tpm-state3.1.json"
+cp "$work/state-tpm/monotonic-anchor.json" "$work/tpm-anchor3.json"
+
+python3 scripts/release-revocations.py status \
+  --state-dir "$work/state-tpm" \
+  --governance-public-key "$work/governance.public.pem" \
+  "${tpm_args[@]}" >"$work/tpm-status.txt"
+grep -q 'STATUS epoch=3 .*audit=3' "$work/tpm-status.txt"
+python3 scripts/release-revocations.py export \
+  --state-dir "$work/state-tpm" \
+  --governance-public-key "$work/governance.public.pem" \
+  --output "$work/tpm-revoked.txt" \
+  "${tpm_args[@]}"
+grep -qx "$fp_a" "$work/tpm-revoked.txt"
+grep -qx "$fp_b" "$work/tpm-revoked.txt"
+
+cp "$work/tpm-state2.0.json" "$work/state-tpm/state.0.json"
+cp "$work/tpm-state2.1.json" "$work/state-tpm/state.1.json"
+cp "$work/tpm-anchor2.json" "$work/state-tpm/monotonic-anchor.json"
+if python3 scripts/release-revocations.py status \
+  --state-dir "$work/state-tpm" \
+  --governance-public-key "$work/governance.public.pem" \
+  "${tpm_args[@]}" 2>"$work/tpm-state-rollback.err"; then
+  echo "release-revocations-check: rolled-back local state was accepted" >&2
+  exit 1
+fi
+grep -q 'unregistered increment' "$work/tpm-state-rollback.err"
+cp "$work/tpm-state3.0.json" "$work/state-tpm/state.0.json"
+cp "$work/tpm-state3.1.json" "$work/state-tpm/state.1.json"
+cp "$work/tpm-anchor3.json" "$work/state-tpm/monotonic-anchor.json"
+
+printf '2\n' >"$work/tpm-counter"
+if python3 scripts/release-revocations.py status \
+  --state-dir "$work/state-tpm" \
+  --governance-public-key "$work/governance.public.pem" \
+  "${tpm_args[@]}" 2>"$work/tpm-rollback.err"; then
+  echo "release-revocations-check: TPM counter rollback was accepted" >&2
+  exit 1
+fi
+grep -q 'counter rolled back' "$work/tpm-rollback.err"
+
+printf '4\n' >"$work/tpm-counter"
+if python3 scripts/release-revocations.py export \
+  --state-dir "$work/state-tpm" \
+  --governance-public-key "$work/governance.public.pem" \
+  --output "$work/tpm-unregistered.txt" \
+  "${tpm_args[@]}" 2>"$work/tpm-unregistered.err"; then
+  echo "release-revocations-check: unregistered TPM increment was accepted" >&2
+  exit 1
+fi
+grep -q 'unregistered increment' "$work/tpm-unregistered.err"
+
+printf '3\n' >"$work/tpm-counter"
+if python3 scripts/release-revocations.py status \
+  --state-dir "$work/state-tpm" \
+  --governance-public-key "$work/governance.public.pem" \
+  --tpm-nv-index 0x01800001 \
+  --tpm-increment-command "$work/tpm-increment" \
+  --tpm-read-command "$work/does-not-exist" 2>"$work/tpm-missing.err"; then
+  echo "release-revocations-check: missing TPM reader was accepted" >&2
+  exit 1
+fi
+
+cat >"$work/tpm-read-hang" <<'EOF'
+#!/bin/sh
+sleep 5
+EOF
+chmod +x "$work/tpm-read-hang"
+if python3 scripts/release-revocations.py status \
+  --state-dir "$work/state-tpm" \
+  --governance-public-key "$work/governance.public.pem" \
+  --tpm-nv-index 0x01800001 \
+  --tpm-increment-command "$work/tpm-increment" \
+  --tpm-read-command "$work/tpm-read-hang" \
+  --tpm-command-timeout 1 2>"$work/tpm-timeout.err"; then
+  echo "release-revocations-check: hanging TPM reader was accepted" >&2
+  exit 1
+fi
+grep -q 'exceeded its 1s command deadline' "$work/tpm-timeout.err"
+
+echo "release-revocations-check: PASS signed=true monotonic=true replay_rejected=true rollback_rejected=true dual_copy=true audit=true tpm_anchor=true unregistered_increment_rejected=true"

@@ -6,6 +6,7 @@ require_signed_manifest = true
 release_signer_threshold = 2
 release_signer_count = 3
 require_signed_revocation_snapshot = true
+require_hardware_monotonic_anchor = true
 require_offline_source = true
 
 [[channel]]

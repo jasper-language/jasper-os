@@ -81,6 +81,32 @@ release policy 的 `require_signed_revocation_snapshot`：
 本地双副本与审计日志可以发现普通文件回滚和副本分歧，但不具备 TPM/安全单调计数器
 的物理回滚保护；生产密钥托管、审计远端留存和硬件背书仍属于未完成的生产发布门。
 
+新增 TPM2 硬件单调锚适配层：
+
+- `accept`、`export` 和 `status` 默认要求 `--tpm-nv-index`，并调用现成
+  `tpm2_nvincrement` / `tpm2_nvread`；只有显式
+  `--development-software-anchor` 的测试路径可以跳过硬件锚；
+- 新快照先写 durable increment intent，再执行 TPM 递增，必须读回恰好
+  “前值 + 1”才能写审计和撤销状态；
+- anchor 同时绑定 TPM 计数值与签名快照 SHA-256；状态/TPM 回退、未登记的 TPM
+  增量、错误 8 字节读数、工具失败/超时或残留未完成 intent 均失败关闭；
+- 同一快照重放只读取并核对硬件计数，不重复递增；递增命令已成功但读回/状态
+  写入中断时，下一次重试只完成同一次 intent，不跳过计数值；
+- 自动化和负例测试使用临时 fake TPM executable，只证明调用协议、持久顺序与
+  失败语义，不改写为“真实 TPM 已验证”。
+
+生产调用形态：
+
+```text
+python3 scripts/release-revocations.py accept \
+  --snapshot ... --signature ... \
+  --governance-public-key ... --state-dir ... \
+  --tpm-nv-index 0x01800001
+```
+
+实际 NV index、owner/NV auth、TPM 资源管理器和 salted session 必须由发布环境
+提供；当前宿主未安装 `tpm2-tools`，因此尚无真实 TPM 计数器证据。
+
 ## 2-of-3 发布门限
 
 `jasper.release-artifact/v2` 将以下事实纳入同一签名消息：
@@ -112,7 +138,8 @@ release-supply-check: PASS threshold=2 signers=3 revocation=true
 ## 仍未完成
 
 - 生产发布私钥只能由相互隔离的 HSM/离线签名环境持有，本仓库不保存生产私钥；
-- 反回滚仍需要 TPM 2.0 或等价的安全单调计数器，不能把本地双副本冒充硬件根；
+- TPM2 适配代码已存在，但仍需在真实 TPM 2.0 或等价硬件上完成 NV 索引 provisioning、
+  auth/session、断电恢复、计数回退拒绝与远端审计证据；fake TPM 不能关闭该门；
 - 远端不可篡改审计留存、签名仪式与双人操作的现场证据尚未完成；
 - CVE 响应期限、补丁回移、实际 stable/LTS 发布和旧版本再次升级尚未形成真实
   发行闭环；

@@ -41,6 +41,7 @@ def validate(policy: dict) -> None:
     assert policy["release_signer_count"] == 3
     assert policy["release_signer_threshold"] < policy["release_signer_count"]
     assert policy["require_signed_revocation_snapshot"] is True
+    assert policy["require_hardware_monotonic_anchor"] is True
     assert policy["require_offline_source"] is True
     channels = policy["channel"]
     names = [channel["name"] for channel in channels]

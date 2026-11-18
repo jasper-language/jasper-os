@@ -16,6 +16,7 @@ fi
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/jasper-release-supply.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
+software_anchor=(--development-software-anchor)
 
 keys="$work/keys"
 trusted="$work/trusted"
@@ -66,7 +67,8 @@ python3 scripts/release-revocations.py accept \
   --snapshot "$bundle/revocations-1.revocations.json" \
   --signature "$bundle/revocations-1.revocations.sig" \
   --governance-public-key "$keys/governance.public.pem" \
-  --state-dir "$work/revocation-state"
+  --state-dir "$work/revocation-state" \
+  "${software_anchor[@]}"
 
 python3 scripts/release-artifact.py create \
   --payload "$bundle/jasper-kernel" \
@@ -102,7 +104,8 @@ verify() {
 python3 scripts/release-revocations.py export \
   --state-dir "$work/revocation-state" \
   --governance-public-key "$keys/governance.public.pem" \
-  --output "$work/revoked.txt"
+  --output "$work/revoked.txt" \
+  "${software_anchor[@]}"
 release_sigs=(
   "$bundle/release.$fp_a.manifest.sig"
   "$bundle/release.$fp_b.manifest.sig"
@@ -177,11 +180,13 @@ python3 scripts/release-revocations.py accept \
   --snapshot "$bundle/revocations-2.revocations.json" \
   --signature "$bundle/revocations-2.revocations.sig" \
   --governance-public-key "$keys/governance.public.pem" \
-  --state-dir "$work/revocation-state"
+  --state-dir "$work/revocation-state" \
+  "${software_anchor[@]}"
 python3 scripts/release-revocations.py export \
   --state-dir "$work/revocation-state" \
   --governance-public-key "$keys/governance.public.pem" \
-  --output "$work/revoked.txt"
+  --output "$work/revoked.txt" \
+  "${software_anchor[@]}"
 if verify \
   "$bundle/release.manifest.json" \
   "$bundle/jasper-kernel" \

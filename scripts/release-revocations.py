@@ -25,10 +25,14 @@ from typing import Any
 
 SNAPSHOT_SCHEMA = "jasper.release-revocations/v1"
 STATE_SCHEMA = "jasper.release-revocation-state/v1"
+ANCHOR_SCHEMA = "jasper.release-monotonic-anchor/v1"
+ANCHOR_INTENT_SCHEMA = "jasper.release-monotonic-anchor-intent/v1"
 DOMAIN = b"JASPER-REVOCATION-SNAPSHOT-V1\0"
 MAX_SNAPSHOT_BYTES = 64 * 1024
+MAX_ANCHOR_BYTES = 4 * 1024
 ZERO_DIGEST = "0" * 64
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+U64_MAX = (1 << 64) - 1
 
 
 def fail(message: str) -> None:
@@ -317,6 +321,269 @@ def write_state(root: Path, state: dict[str, Any]) -> None:
     fsync_directory(root)
 
 
+def tpm_enabled(args: argparse.Namespace) -> bool:
+    return getattr(args, "tpm_nv_index", None) is not None
+
+
+def require_anchor_mode(args: argparse.Namespace) -> None:
+    hardware = tpm_enabled(args)
+    software = bool(getattr(args, "development_software_anchor", False))
+    if hardware and software:
+        fail("TPM and development software anchor modes are mutually exclusive")
+    if hardware:
+        return
+    if software:
+        return
+    fail(
+        "a TPM2 monotonic anchor is required; "
+        "--development-software-anchor is test-only"
+    )
+
+
+def tpm_auth_arguments(args: argparse.Namespace) -> list[str]:
+    return [
+        "-C",
+        args.tpm_auth_handle,
+        "-P",
+        args.tpm_auth_password,
+    ]
+
+
+def run_tpm_command(command: list[str], action: str, timeout: int) -> bytes:
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        fail(f"TPM {action} exceeded its {timeout}s command deadline")
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        fail(f"TPM {action} failed with status {result.returncode}: {detail}")
+    return result.stdout
+
+
+def tpm_increment(args: argparse.Namespace) -> None:
+    run_tpm_command(
+        [
+            args.tpm_increment_command,
+            *tpm_auth_arguments(args),
+            args.tpm_nv_index,
+        ],
+        "increment",
+        args.tpm_command_timeout,
+    )
+
+
+def tpm_read_counter(args: argparse.Namespace) -> int:
+    raw = run_tpm_command(
+        [
+            args.tpm_read_command,
+            *tpm_auth_arguments(args),
+            "--offset",
+            "0",
+            "-s",
+            "8",
+            args.tpm_nv_index,
+        ],
+        "read",
+        args.tpm_command_timeout,
+    )
+    if len(raw) != 8:
+        fail(f"TPM counter read returned {len(raw)} bytes instead of exactly 8")
+    counter = int.from_bytes(raw, "big")
+    if counter > U64_MAX:
+        fail("TPM counter read returned an out-of-range value")
+    return counter
+
+
+def load_anchor_document(
+    path: Path, schema: str, fields: set[str], label: str
+) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    path = regular_file(path, label)
+    if path.stat().st_size == 0 or path.stat().st_size > MAX_ANCHOR_BYTES:
+        fail(f"{label} size is outside its bound")
+    raw = path.read_bytes()
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        fail(f"{label} is not valid UTF-8 JSON: {error}")
+    if not isinstance(value, dict) or canonical(value) != raw or set(value) != fields:
+        fail(f"{label} is not canonical or has an unknown field set")
+    if value["schema"] != schema:
+        fail(f"{label} schema mismatch")
+    return value
+
+
+def load_anchor(root: Path) -> dict[str, Any] | None:
+    value = load_anchor_document(
+        root / "monotonic-anchor.json",
+        ANCHOR_SCHEMA,
+        {"counter", "schema", "snapshot_sha256"},
+        "monotonic anchor",
+    )
+    if value is None:
+        return None
+    if (
+        not isinstance(value["counter"], int)
+        or value["counter"] <= 0
+        or value["counter"] > U64_MAX
+        or not isinstance(value["snapshot_sha256"], str)
+        or not SHA256_RE.fullmatch(value["snapshot_sha256"])
+    ):
+        fail("monotonic anchor contents are invalid")
+    return value
+
+
+def load_anchor_intent(root: Path) -> dict[str, Any] | None:
+    value = load_anchor_document(
+        root / "monotonic-anchor.intent.json",
+        ANCHOR_INTENT_SCHEMA,
+        {
+            "expected_counter",
+            "previous_counter",
+            "previous_snapshot_sha256",
+            "schema",
+            "snapshot_sha256",
+        },
+        "monotonic anchor intent",
+    )
+    if value is None:
+        return None
+    if (
+        not isinstance(value["expected_counter"], int)
+        or not isinstance(value["previous_counter"], int)
+        or value["previous_counter"] < 0
+        or value["expected_counter"] != value["previous_counter"] + 1
+        or value["expected_counter"] > U64_MAX
+        or not isinstance(value["previous_snapshot_sha256"], str)
+        or not SHA256_RE.fullmatch(value["previous_snapshot_sha256"])
+        or not isinstance(value["snapshot_sha256"], str)
+        or not SHA256_RE.fullmatch(value["snapshot_sha256"])
+    ):
+        fail("monotonic anchor intent contents are invalid")
+    return value
+
+
+def write_anchor(root: Path, counter: int, snapshot_sha256: str) -> None:
+    value = {
+        "counter": counter,
+        "schema": ANCHOR_SCHEMA,
+        "snapshot_sha256": snapshot_sha256,
+    }
+    atomic_write(root / "monotonic-anchor.json", canonical(value))
+    fsync_directory(root)
+
+
+def write_anchor_intent(root: Path, value: dict[str, Any]) -> None:
+    atomic_write(root / "monotonic-anchor.intent.json", canonical(value))
+    fsync_directory(root)
+
+
+def clear_anchor_intent(root: Path) -> None:
+    path = root / "monotonic-anchor.intent.json"
+    if path.exists():
+        path.unlink()
+        fsync_directory(root)
+
+
+def require_tpm_anchor_for_state(
+    root: Path, args: argparse.Namespace, state: dict[str, Any]
+) -> None:
+    if not tpm_enabled(args):
+        return
+    if load_anchor_intent(root) is not None:
+        fail("monotonic anchor has an unfinished increment intent")
+    anchor = load_anchor(root)
+    counter = tpm_read_counter(args)
+    if state["epoch"] == 0:
+        if anchor is not None or counter != 0:
+            fail("initial revocation state conflicts with the TPM monotonic anchor")
+        return
+    if anchor is None:
+        fail("non-empty revocation state has no TPM monotonic anchor")
+    if anchor["snapshot_sha256"] != state["snapshot_sha256"]:
+        fail("TPM monotonic anchor does not match the revocation state")
+    if counter < anchor["counter"]:
+        fail("TPM monotonic counter rolled back below the persisted anchor")
+    if counter > anchor["counter"]:
+        fail("TPM monotonic counter contains an unregistered increment")
+
+
+def advance_tpm_anchor(
+    root: Path,
+    args: argparse.Namespace,
+    state: dict[str, Any],
+    snapshot_sha256: str,
+) -> None:
+    if not tpm_enabled(args):
+        return
+    anchor = load_anchor(root)
+    intent = load_anchor_intent(root)
+    counter = tpm_read_counter(args)
+
+    if intent is not None:
+        previous_counter = 0 if anchor is None else anchor["counter"]
+        previous_snapshot = ZERO_DIGEST if anchor is None else anchor["snapshot_sha256"]
+        if (
+            intent["previous_counter"] != previous_counter
+            or intent["previous_snapshot_sha256"] != previous_snapshot
+            or intent["snapshot_sha256"] != snapshot_sha256
+        ):
+            fail("monotonic anchor intent does not bind the current transition")
+        if counter < intent["expected_counter"]:
+            tpm_increment(args)
+            counter = tpm_read_counter(args)
+        if counter != intent["expected_counter"]:
+            fail(
+                "TPM counter does not equal the pending increment intent "
+                f"({counter} != {intent['expected_counter']})"
+            )
+        write_anchor(root, counter, snapshot_sha256)
+        clear_anchor_intent(root)
+        return
+
+    if anchor is None:
+        if counter != 0:
+            fail("TPM counter is non-zero before the first recorded anchor")
+        previous_counter = 0
+        previous_snapshot = ZERO_DIGEST
+    else:
+        if counter < anchor["counter"]:
+            fail("TPM monotonic counter rolled back below the persisted anchor")
+        if counter > anchor["counter"]:
+            fail("TPM monotonic counter contains an unregistered increment")
+        if anchor["snapshot_sha256"] == snapshot_sha256:
+            return
+        if anchor["snapshot_sha256"] != state["snapshot_sha256"]:
+            fail("TPM anchor and revocation state disagree before a new transition")
+        previous_counter = anchor["counter"]
+        previous_snapshot = anchor["snapshot_sha256"]
+
+    expected = previous_counter + 1
+    write_anchor_intent(
+        root,
+        {
+            "expected_counter": expected,
+            "previous_counter": previous_counter,
+            "previous_snapshot_sha256": previous_snapshot,
+            "schema": ANCHOR_INTENT_SCHEMA,
+            "snapshot_sha256": snapshot_sha256,
+        },
+    )
+    tpm_increment(args)
+    counter = tpm_read_counter(args)
+    if counter != expected:
+        fail(f"TPM counter did not advance exactly once ({counter} != {expected})")
+    write_anchor(root, counter, snapshot_sha256)
+    clear_anchor_intent(root)
+
+
 def verify_snapshot_signature(
     snapshot: bytes, signature: bytes, public_key: Path
 ) -> None:
@@ -373,6 +640,7 @@ def verify_state_matches_signature(state: dict[str, Any], public_key: Path) -> N
 
 
 def accept(args: argparse.Namespace) -> None:
+    require_anchor_mode(args)
     root = Path(args.state_dir)
     root.mkdir(parents=True, exist_ok=True)
     public_key = regular_file(Path(args.governance_public_key), "--governance-public-key")
@@ -403,6 +671,7 @@ def accept(args: argparse.Namespace) -> None:
         if state["governance"] not in (ZERO_DIGEST, governance):
             fail("snapshot governance key differs from the persisted key")
         if snapshot_sha256 == state["snapshot_sha256"] and value["epoch"] == state["epoch"]:
+            require_tpm_anchor_for_state(root, args, state)
             print(f"release-revocations: IDEMPOTENT epoch={state['epoch']} snapshot={snapshot_sha256}")
             return
         if value["epoch"] < state["epoch"]:
@@ -422,6 +691,7 @@ def accept(args: argparse.Namespace) -> None:
             "snapshot": value,
             "snapshot_sha256": snapshot_sha256,
         }
+        advance_tpm_anchor(root, args, state, snapshot_sha256)
         if not pending_recovery:
             append_audit(
                 root,
@@ -440,6 +710,7 @@ def accept(args: argparse.Namespace) -> None:
 
 
 def export(args: argparse.Namespace) -> None:
+    require_anchor_mode(args)
     root = Path(args.state_dir)
     public_key = regular_file(Path(args.governance_public_key), "--governance-public-key")
     with (root / "accept.lock").open("a+b") as lock:
@@ -449,6 +720,7 @@ def export(args: argparse.Namespace) -> None:
         audit = audit_records(root)
         if state["epoch"] != len(audit):
             fail("cannot export an inconsistent revocation state")
+        require_tpm_anchor_for_state(root, args, state)
     output = Path(args.output)
     lines = "".join(f"{fingerprint}\n" for fingerprint in state["revoked"])
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -457,6 +729,7 @@ def export(args: argparse.Namespace) -> None:
 
 
 def status(args: argparse.Namespace) -> None:
+    require_anchor_mode(args)
     root = Path(args.state_dir)
     public_key = regular_file(Path(args.governance_public_key), "--governance-public-key")
     with (root / "accept.lock").open("a+b") as lock:
@@ -464,12 +737,51 @@ def status(args: argparse.Namespace) -> None:
         state = load_state(root)
         verify_state_matches_signature(state, public_key)
         audit = audit_records(root)
+        require_tpm_anchor_for_state(root, args, state)
     if state["epoch"] != len(audit):
         fail("revocation state and audit journal are inconsistent")
     print(
         f"release-revocations: STATUS epoch={state['epoch']} "
         f"snapshot={state['snapshot_sha256']} governance={state['governance']} "
         f"revoked={len(state['revoked'])} audit={len(audit)}"
+    )
+
+
+def add_tpm_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--development-software-anchor",
+        action="store_true",
+        help="test-only fallback; never valid for a production release state",
+    )
+    parser.add_argument(
+        "--tpm-nv-index",
+        help="TPM2 NV counter index; enabling this activates the hardware anchor",
+    )
+    parser.add_argument(
+        "--tpm-increment-command",
+        default="tpm2_nvincrement",
+        help="tpm2-tools nvincrement executable",
+    )
+    parser.add_argument(
+        "--tpm-read-command",
+        default="tpm2_nvread",
+        help="tpm2-tools nvread executable",
+    )
+    parser.add_argument(
+        "--tpm-auth-handle",
+        default="o",
+        help="TPM auth handle passed as tpm2-tools -C",
+    )
+    parser.add_argument(
+        "--tpm-auth-password",
+        default="",
+        help="TPM auth password passed as tpm2-tools -P",
+    )
+    parser.add_argument(
+        "--tpm-command-timeout",
+        type=int,
+        default=30,
+        help="maximum seconds for one tpm2-tools command",
     )
 
 
@@ -491,20 +803,25 @@ def main() -> int:
     accept_parser.add_argument("--signature", required=True)
     accept_parser.add_argument("--governance-public-key", required=True)
     accept_parser.add_argument("--state-dir", required=True)
+    add_tpm_arguments(accept_parser)
     accept_parser.set_defaults(run=accept)
 
     export_parser = commands.add_parser("export")
     export_parser.add_argument("--state-dir", required=True)
     export_parser.add_argument("--governance-public-key", required=True)
     export_parser.add_argument("--output", required=True)
+    add_tpm_arguments(export_parser)
     export_parser.set_defaults(run=export)
 
     status_parser = commands.add_parser("status")
     status_parser.add_argument("--state-dir", required=True)
     status_parser.add_argument("--governance-public-key", required=True)
+    add_tpm_arguments(status_parser)
     status_parser.set_defaults(run=status)
 
     args = parser.parse_args()
+    if hasattr(args, "tpm_command_timeout") and not 1 <= args.tpm_command_timeout <= 600:
+        fail("--tpm-command-timeout must be between 1 and 600 seconds")
     args.run(args)
     return 0
 
