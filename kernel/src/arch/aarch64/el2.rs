@@ -1,6 +1,7 @@
 //! Minimal resident EL2 stage-2 identity mapping for verification builds.
 
 const STAGE2_ENTRIES: usize = 512;
+const STAGE2_L2_ENTRIES: usize = 512;
 const STAGE2_IPA_T0SZ: u64 = 25; // 39-bit IPA, 512 GiB covered by one level-1 table.
 const STAGE2_VTCR: u64 = (1 << 31)
     | (2 << 16)
@@ -22,7 +23,11 @@ const STAGE2_DEVICE: u64 =
 #[repr(C, align(4096))]
 struct Stage2Root([u64; STAGE2_ENTRIES]);
 
+#[repr(C, align(4096))]
+struct Stage2L2([u64; STAGE2_L2_ENTRIES]);
+
 static mut STAGE2_ROOT: Stage2Root = Stage2Root([0; STAGE2_ENTRIES]);
+static mut STAGE2_L2: Stage2L2 = Stage2L2([0; STAGE2_L2_ENTRIES]);
 
 fn root_physical_address() -> Option<u64> {
     // SAFETY: Only the address is observed; ASLR is disabled and the static
@@ -31,28 +36,48 @@ fn root_physical_address() -> Option<u64> {
     Some(unsafe { (&raw const STAGE2_ROOT.0) as u64 })
 }
 
+fn l2_physical_address() -> Option<u64> {
+    // SAFETY: As for the root table, this identity-mapped static has a fixed
+    // address and is filled once before any secondary CPU runs.
+    Some(unsafe { (&raw const STAGE2_L2.0) as u64 })
+}
+
 /// Build a bounded identity map before the first CPU enables stage 2.
 pub fn initialize_identity_table() -> bool {
     let Some(root_pa) = root_physical_address() else {
         return false;
     };
-    if root_pa & 0xfff != 0 {
+    let Some(l2_pa) = l2_physical_address() else {
+        return false;
+    };
+    if root_pa & 0xfff != 0 || l2_pa & 0xfff != 0 {
         return false;
     }
-    // Only the 1 GiB block containing RAM is mapped as Normal memory. Other
-    // identity blocks remain Device so the verification build can reach the
-    // platform's high MMIO apertures without claiming a final memory policy.
+    // Only the 1 GiB block containing RAM is mapped as Normal memory. The
+    // first GiB uses a second-level table so one mapped stage-1 IPA can be
+    // denied specifically to exercise a real stage-2 data-abort exit.
     for index in 0..STAGE2_ENTRIES {
-        let attributes = if index == 1 {
-            STAGE2_NORMAL
+        let entry = if index == 0 {
+            l2_pa | 3
+        } else if index == 1 {
+            ((index as u64) << 30) | STAGE2_NORMAL
         } else {
-            STAGE2_DEVICE
+            ((index as u64) << 30) | STAGE2_DEVICE
         };
         // SAFETY: The static table has exactly STAGE2_ENTRIES aligned entries.
         unsafe {
-            ((&raw mut STAGE2_ROOT.0) as *mut u64)
-                .add(index)
-                .write(((index as u64) << 30) | attributes);
+            ((&raw mut STAGE2_ROOT.0) as *mut u64).add(index).write(entry);
+        }
+    }
+    for index in 0..STAGE2_L2_ENTRIES {
+        let entry = if index == 256 {
+            0
+        } else {
+            ((index as u64) << 21) | STAGE2_DEVICE
+        };
+        // SAFETY: The L2 static has exactly STAGE2_L2_ENTRIES aligned entries.
+        unsafe {
+            ((&raw mut STAGE2_L2.0) as *mut u64).add(index).write(entry);
         }
     }
     // SAFETY: Publish the complete table before the EL2 page-table walker sees it.

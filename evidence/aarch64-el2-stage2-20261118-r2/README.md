@@ -15,6 +15,8 @@ exit_failures=pci_failed:3,krn0_failed:1
 ```
 
 The nonzero counters are the registered AArch64 x86-only test baseline.
+This run predates the minimal stage-2 VM-exit probe; that later evidence is in
+`evidence/aarch64-el2-vmexit-20261118-r3/`.
 
 The stage-2 map covers a 39-bit IPA identity range with 1 GiB blocks. The RAM
 block is Normal memory and other blocks are temporarily Device memory so high

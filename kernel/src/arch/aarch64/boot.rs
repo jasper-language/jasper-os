@@ -62,6 +62,32 @@ pub(crate) fn el2_hvc_probe() -> bool {
     status == 1 && reply == 0x4a54
 }
 
+#[cfg(feature = "aarch64-el2-retain-verify")]
+fn el2_guest_stage2_fault_probe() -> bool {
+    let status: u64;
+    let reply: u64;
+    // SAFETY: EL2 saves the host ELR/SPSR, enters a bounded test guest, and
+    // returns after classifying the guest's stage-2 data abort.
+    unsafe {
+        core::arch::asm!(
+            "mov x0, #0",
+            "hvc #0x4a55",
+            "mov {status}, x0",
+            "mov {reply}, x1",
+            status = out(reg) status,
+            reply = out(reg) reply,
+            out("x0") _,
+            out("x1") _,
+            out("x9") _,
+            out("x10") _,
+            out("x11") _,
+            out("x12") _,
+            options(nostack),
+        );
+    }
+    status == 2 && reply == 0x4654
+}
+
 #[cfg(feature = "pixel6a-el2-observable")] // JASPER-HARDCODE-REVIEW: issue=21 source=pixel-el2-observation-window reason=physical-boot-carrier-probe-only
 pub(crate) fn wait_el2_observation_window() {
     let frequency: u64;
@@ -337,14 +363,26 @@ jsr_aarch64_el2_sync:
     mrs x9, esr_el2
     lsr x10, x9, #26
     cmp x10, #0x16
-    b.ne 1f
+    b.eq el2_hvc
+    cmp x10, #0x24
+    b.eq el2_stage2_fault
+    b el2_fail
+el2_hvc:
     and x11, x9, #0xffff
     mov x12, #0x4a53
     cmp x11, x12
-    b.eq 2f
+    b.eq el2_hvc_probe
     mov x12, #0x4a54
     cmp x11, x12
-    b.ne 1f
+    b.eq el2_stage2_enable
+    mov x12, #0x4a55
+    cmp x11, x12
+    b.eq el2_guest_enter
+    mov x12, #0x4a56
+    cmp x11, x12
+    b.eq el2_guest_unexpected
+    b el2_fail
+el2_stage2_enable:
     msr vtcr_el2, x1
     msr vttbr_el2, x2
     mrs x9, hcr_el2
@@ -357,13 +395,52 @@ jsr_aarch64_el2_sync:
     mov x0, #1
     mov x1, #0x5354
     eret
-2:
+el2_hvc_probe:
     mov x0, #1
     mov x1, #0x4a54
     eret
-1:
+el2_guest_enter:
+    adrp x9, jsr_aarch64_el2_host_return
+    add x9, x9, :lo12:jsr_aarch64_el2_host_return
+    mrs x10, elr_el2
+    mrs x11, spsr_el2
+    stp x10, x11, [x9]
+    adrp x9, jsr_aarch64_test_guest
+    add x9, x9, :lo12:jsr_aarch64_test_guest
+    msr elr_el2, x9
+    mov x9, #0x3c5
+    msr spsr_el2, x9
+    eret
+el2_guest_unexpected:
+    mov x0, #3
+    b el2_return_host
+el2_stage2_fault:
+    mov x0, #2
+el2_return_host:
+    adrp x9, jsr_aarch64_el2_host_return
+    add x9, x9, :lo12:jsr_aarch64_el2_host_return
+    ldp x10, x11, [x9]
+    msr elr_el2, x10
+    msr spsr_el2, x11
+    mov x1, #0x4654
+    eret
+el2_fail:
     wfe
-    b 1b
+    b el2_fail
+
+.balign 4
+.global jsr_aarch64_test_guest
+jsr_aarch64_test_guest:
+    ldr x9, =0x8020000000
+    ldr x10, [x9]
+    hvc #0x4a56
+    b .
+
+.section .bss.jsr_aarch64_el2_test, "aw", %nobits
+.balign 16
+jsr_aarch64_el2_host_return:
+    .space 16
+
     .previous
     "#
 );
@@ -802,13 +879,15 @@ extern "C" fn jsr_aarch64_boot(
         let round_trip = el2_hvc_probe();
         let table = round_trip && super::el2::initialize_identity_table();
         let stage2 = table && super::el2::enable_current_cpu();
+        let vm_exit = stage2 && el2_guest_stage2_fault_probe();
         crate::kprintln!(
-            "[JSR-A64-EL2] retained=true hvc_round_trip={} stage2_table={} stage2={} driver_vm=false",
+            "[JSR-A64-EL2] retained=true hvc_round_trip={} stage2_table={} stage2={} vm_exit={} driver_vm=false",
             round_trip,
             table,
-            stage2
+            stage2,
+            vm_exit
         );
-        if !stage2 {
+        if !vm_exit {
             semihost::exit(EXIT_FAILURE);
         }
     }
