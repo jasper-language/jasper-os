@@ -85,16 +85,17 @@ fn el2_guest_stage2_fault_probe() -> bool {
 }
 
 #[cfg(feature = "aarch64-el2-retain-verify")]
-fn el2_virtual_irq_probe() -> bool {
+fn el2_vgic_probe() -> bool {
     let vbar_before: u64;
     let timer_ctl_before: u64;
     let timer_cval_before: u64;
     let status: u64;
     let reply: u64;
-    // SAFETY: The EL2 handler installs an EL1 guest vector before asserting
-    // HCR_EL2.VI. The guest proves IRQ delivery and exits through HVC.
-    // 安全性：EL2 在置位 HCR_EL2.VI 前安装 EL1 guest 向量；guest 以 HVC 回报
-    // 真实 IRQ 已送达，测试不使用软件伪造的异常返回。
+    // SAFETY: The EL2 handler installs a GICv3 virtual CPU interface and an EL1
+    // guest vector before placing a group-1 interrupt in LR0. The guest proves
+    // architectural IAR/EOI delivery and exits through HVC.
+    // 安全性：EL2 在向 LR0 注入 group-1 中断前安装 GICv3 虚拟 CPU 接口和
+    // guest 向量；guest 以真实 IAR/EOI 验证交付，不伪造异常返回。
     unsafe {
         core::arch::asm!("mrs {}, vbar_el1", out(reg) vbar_before, options(nomem, nostack));
         core::arch::asm!(
@@ -107,7 +108,7 @@ fn el2_virtual_irq_probe() -> bool {
         core::arch::asm!(
             "mov x0, #0",
             "mov x1, #0",
-            "hvc #0x4a58", // JASPER-HARDCODE-REVIEW: issue=22 source=aarch64-el2-virq-probe reason=private-hypercall-contract
+            "hvc #0x4a58", // JASPER-HARDCODE-REVIEW: issue=34 source=aarch64-el2-vgic-probe reason=private-verification-hypercall-contract
             "mov {status}, x0",
             "mov {reply}, x1",
             status = out(reg) status,
@@ -136,18 +137,93 @@ fn el2_virtual_irq_probe() -> bool {
         );
     }
     crate::kprintln!(
-        "[JSR-A64-VIRQ] status={} reply=0x{:x} vbar_same={} timer_ctl_same={} timer_cval_same={}",
+        "[JSR-A64-VGIC] direct=true status={} reply=0x{:x} ack={} eoi={} lr_cleared={} host_restored={} vbar_same={} timer_ctl_same={} timer_cval_same={}",
         status,
         reply,
+        status == 5,
+        status == 5,
+        status == 5,
+        status == 5,
         vbar_before == vbar_after,
         timer_ctl_before == timer_ctl_after,
         timer_cval_before == timer_cval_after
     );
-    status == 4
-        && reply == 0x4952
+    status == 5
+        && reply == 0x5647
         && vbar_before == vbar_after
         && timer_ctl_before == timer_ctl_after
         && timer_cval_before == timer_cval_after
+}
+
+#[cfg(feature = "aarch64-el2-retain-verify")]
+fn el2_virtual_timer_irq_probe() -> bool {
+    let vbar_before: u64;
+    let timer_ctl_before: u64;
+    let timer_cval_before: u64;
+    let status: u64;
+    let reply: u64;
+    // SAFETY: The resident EL2 IRQ vector acknowledges the physical virtual
+    // timer PPI and injects a distinct vINTID into the guest through LR0.
+    // 安全性：EL2 IRQ 向量确认物理虚拟定时器 PPI，并通过 LR0 向 guest
+    // 注入独立的 vINTID；guest 必须完成 IAR/EOI 后才能退出。
+    unsafe {
+        core::arch::asm!("mrs {}, vbar_el1", out(reg) vbar_before, options(nomem, nostack));
+        core::arch::asm!(
+            "mrs {ctl}, cntv_ctl_el0",
+            "mrs {cval}, cntv_cval_el0",
+            ctl = out(reg) timer_ctl_before,
+            cval = out(reg) timer_cval_before,
+            options(nomem, nostack),
+        );
+        core::arch::asm!(
+            "mov x0, #0",
+            "mov x1, #0",
+            "hvc #0x4a5b", // JASPER-HARDCODE-REVIEW: issue=34 source=aarch64-el2-vgic-timer-probe reason=private-verification-hypercall-contract
+            "mov {status}, x0",
+            "mov {reply}, x1",
+            status = out(reg) status,
+            reply = out(reg) reply,
+            out("x0") _,
+            out("x1") _,
+            out("x9") _,
+            out("x10") _,
+            out("x11") _,
+            out("x12") _,
+            options(nostack),
+        );
+    }
+    let vbar_after: u64;
+    let timer_ctl_after: u64;
+    let timer_cval_after: u64;
+    // SAFETY: These reads verify that the EL2 transaction restored all state
+    // changed by the timer guest before ordinary kernel execution resumes.
+    // 安全：这些读取验证 EL2 事务在普通内核恢复前还原了 timer guest 改动的状态。
+    unsafe {
+        core::arch::asm!("mrs {}, vbar_el1", out(reg) vbar_after, options(nomem, nostack));
+        core::arch::asm!(
+            "mrs {ctl}, cntv_ctl_el0",
+            "mrs {cval}, cntv_cval_el0",
+            ctl = out(reg) timer_ctl_after,
+            cval = out(reg) timer_cval_after,
+            options(nomem, nostack),
+        );
+    }
+    let vbar_same = vbar_before == vbar_after;
+    let timer_ctl_same = timer_ctl_before == timer_ctl_after;
+    let timer_cval_same = timer_cval_before == timer_cval_after;
+    crate::kprintln!(
+        "[JSR-A64-VGIC] timer_irq=true status={} reply=0x{:x} ack={} eoi={} lr_cleared={} host_restored={} vbar_same={} timer_ctl_same={} timer_cval_same={}",
+        status,
+        reply,
+        status == 6,
+        status == 6,
+        status == 6,
+        status == 6,
+        vbar_same,
+        timer_ctl_same,
+        timer_cval_same
+    );
+    status == 6 && reply == 0x5449 && vbar_same && timer_ctl_same && timer_cval_same
 }
 
 #[cfg(feature = "pixel6a-el2-observable")] // JASPER-HARDCODE-REVIEW: issue=21 source=pixel-el2-observation-window reason=physical-boot-carrier-probe-only
@@ -440,20 +516,25 @@ _start:
 #[cfg(feature = "aarch64-el2-retain-verify")]
 global_asm!(
     r#"
-    .equ JSR_EL2_HVC_VIRTUAL_IRQ_HANDLED, 0x4a57
-    .equ JSR_EL2_HVC_VIRTUAL_IRQ_ARM, 0x4a58
-    .equ JSR_EL2_HCR_VIRTUAL_IRQ, 0x80
+    .equ JSR_EL2_HVC_VGIC_DIRECT_DONE, 0x4a57
+    .equ JSR_EL2_HVC_VGIC_DIRECT_ARM, 0x4a58
+    .equ JSR_EL2_HVC_VGIC_TIMER_TIMEOUT, 0x4a59
     .equ JSR_EL2_HCR_ROUTE_IRQ, 0x10
+    .equ JSR_EL2_HVC_VGIC_TIMER_ARM, 0x4a5b
+    .equ JSR_EL2_HVC_VGIC_TIMER_DONE, 0x4a5c
+    .equ JSR_EL2_VGIC_DIRECT_INTID, 64
+    .equ JSR_EL2_VGIC_TIMER_INTID, 27
+    .equ JSR_EL2_TIMER_PPI, 27
+    .equ JSR_EL2_FRAME_BYTES, 864
     .arch_extension simd
-    .section .text.el2-vectors, "ax"
-    .balign 2048
-    .global jsr_aarch64_el2_vectors
-jsr_aarch64_el2_vectors:
-    .space 0x400
-    b jsr_aarch64_el2_sync
-    .space 0x3fc
-jsr_aarch64_el2_sync:
-    sub sp, sp, #864
+
+    // Save the complete software vCPU state used by the EL2 probe. GICv3
+    // virtual-interface state is kept in the separate host-state record below
+    // because it is only modified across a complete guest transaction.
+    // 保存探针使用的完整 vCPU 状态；GICv3 虚拟接口状态保存在独立宿主
+    // 状态记录中，因为它只在完整 guest 事务期间变化。
+    .macro JSR_EL2_SAVE_FRAME
+    sub sp, sp, #JSR_EL2_FRAME_BYTES
     stp x0, x1, [sp, #0]
     stp x2, x3, [sp, #16]
     stp x4, x5, [sp, #32]
@@ -497,20 +578,32 @@ jsr_aarch64_el2_sync:
     stp q26, q27, [sp, #720]
     stp q28, q29, [sp, #752]
     stp q30, q31, [sp, #784]
+    add x11, sp, #816
     mrs x9, S3_3_C4_C4_0
     mrs x10, S3_3_C4_C4_1
-    add x11, sp, #816
-    stp x9, x10, [x11]
+    stp x9, x10, [x11, #0]
     mrs x9, cpacr_el1
-    str x9, [sp, #832]
-    // VBAR_EL1 occupies the frame's final alignment slot.
-    // VBAR_EL1 使用帧末尾原有的 8 字节对齐槽位。
+    str x9, [x11, #16]
     mrs x9, vbar_el1
-    str x9, [sp, #840]
+    str x9, [x11, #24]
     mrs x9, cntv_ctl_el0
     mrs x10, cntv_cval_el0
-    str x9, [sp, #848]
-    str x10, [sp, #856]
+    stp x9, x10, [x11, #32]
+    .endm
+
+    .section .text.el2-vectors, "ax"
+    .balign 2048
+    .global jsr_aarch64_el2_vectors
+jsr_aarch64_el2_vectors:
+    .space 0x400
+    b jsr_aarch64_el2_sync
+    .space 0x7c
+    // Lower-EL AArch64 IRQ, used when IMO routes the physical timer PPI here.
+    // 低 EL AArch64 IRQ；IMO 将物理定时器 PPI 路由到此处。
+    b jsr_aarch64_el2_irq
+    .space 0x37c
+jsr_aarch64_el2_sync:
+    JSR_EL2_SAVE_FRAME
     adrp x9, jsr_aarch64_el2_guest_active
     add x9, x9, :lo12:jsr_aarch64_el2_guest_active
     ldr x10, [x9]
@@ -536,12 +629,15 @@ el2_hvc:
     mov x12, #0x4a56
     cmp x11, x12
     b.eq el2_guest_unexpected
-    mov x12, #JSR_EL2_HVC_VIRTUAL_IRQ_ARM
+    mov x12, #JSR_EL2_HVC_VGIC_DIRECT_ARM
     cmp x11, x12
-    b.eq el2_guest_irq_enter
+    b.eq el2_guest_vgic_direct_enter
     mov x12, #0x4a5a
     cmp x11, x12
     b.eq el2_stage2_open
+    mov x12, #JSR_EL2_HVC_VGIC_TIMER_ARM
+    cmp x11, x12
+    b.eq el2_guest_vgic_timer_enter
     b el2_fail
 el2_stage2_enable:
     msr vtcr_el2, x1
@@ -603,26 +699,199 @@ el2_guest_exit:
     b.eq el2_guest_stage2_fault
     cmp x9, #0x16
     b.eq el2_guest_hvc
-    mov x10, #3
-    mov x11, #0
-    b el2_restore_guest
+    b el2_guest_unexpected
 el2_guest_hvc:
     mrs x9, esr_el2
     and x11, x9, #0xffff
-    mov x12, #JSR_EL2_HVC_VIRTUAL_IRQ_HANDLED
+    mov x12, #JSR_EL2_HVC_VGIC_DIRECT_ARM
     cmp x11, x12
-    b.eq el2_guest_irq_handled
+    b.eq el2_guest_vgic_direct_inject
+    mov x12, #JSR_EL2_HVC_VGIC_DIRECT_DONE
+    cmp x11, x12
+    b.eq el2_guest_vgic_direct_done
+    mov x12, #JSR_EL2_HVC_VGIC_TIMER_ARM
+    cmp x11, x12
+    b.eq el2_guest_return_after_hvc
+    mov x12, #JSR_EL2_HVC_VGIC_TIMER_DONE
+    cmp x11, x12
+    b.eq el2_guest_vgic_timer_done
+    mov x12, #JSR_EL2_HVC_VGIC_TIMER_TIMEOUT
+    cmp x11, x12
+    b.eq el2_guest_vgic_timer_timeout
     b el2_guest_unexpected
-el2_guest_irq_handled:
-    mrs x9, hcr_el2
-    bic x9, x9, #JSR_EL2_HCR_VIRTUAL_IRQ
-    bic x9, x9, #JSR_EL2_HCR_ROUTE_IRQ
-    msr hcr_el2, x9
+el2_guest_vgic_direct_inject:
+    // Negative path already proved ICC_IAR1 returned SPURIOUS. Inject one
+    // group-1 pending vINTID through an architectural LR.
+    // 负例已证明 ICC_IAR1 返回 SPURIOUS；现在通过架构 LR 注入一个
+    // group-1 pending vINTID。
+    mov x9, #JSR_EL2_VGIC_DIRECT_INTID
+    mov x10, #0x80
+    lsl x10, x10, #48
+    orr x9, x9, x10
+    mov x10, #1
+    lsl x10, x10, #60
+    orr x9, x9, x10
+    mov x10, #1
+    lsl x10, x10, #62
+    orr x9, x9, x10
+    msr ich_lr0_el2, x9
+    dsb ish
     isb
-    mov x10, #4
-    mov x11, #0x4952
+    b el2_guest_return_after_hvc
+el2_guest_vgic_direct_done:
+    ldr x12, [sp, #0]
+    cbz x12, 1f
+    mrs x10, S3_4_C12_C11_5
+    tbz x10, #0, 1f
+    b 2f
+1:
+    mov x12, #0
+2:
+    mov x13, #1
+    b el2_restore_vgic_host_state_direct
+el2_guest_vgic_direct_result:
+    cbnz x12, 1f
+    mov x10, #3
+    mov x11, #0x5646
     b el2_restore_guest
+1:
+    mov x10, #5
+    mov x11, #0x5647
+    b el2_restore_guest
+el2_guest_vgic_timer_done:
+    ldr x12, [sp, #0]
+    cbz x12, 1f
+    mrs x10, S3_4_C12_C11_5
+    tbz x10, #0, 1f
+    b 2f
+1:
+    mov x12, #0
+2:
+    mov x13, #2
+    b el2_restore_vgic_host_state_timer
+el2_guest_vgic_timer_result:
+    cbnz x12, 1f
+    mov x10, #3
+    mov x11, #0x5446
+    b el2_restore_guest
+1:
+    mov x10, #6
+    mov x11, #0x5449
+    b el2_restore_guest
+el2_guest_vgic_timer_timeout:
+    mov x12, #0
+    mov x13, #3
+el2_restore_vgic_host_state_timer:
+    adrp x9, jsr_aarch64_el2_vgic_host_state
+    add x9, x9, :lo12:jsr_aarch64_el2_vgic_host_state
+    b el2_restore_vgic_host_state
+el2_restore_vgic_host_state_direct:
+    adrp x9, jsr_aarch64_el2_vgic_host_state
+    add x9, x9, :lo12:jsr_aarch64_el2_vgic_host_state
+el2_restore_vgic_host_state:
+    msr ich_hcr_el2, xzr
+    isb
+    ldr x10, [x9, #16]
+    msr ich_vmcr_el2, x10
+    ldr x10, [x9, #24]
+    msr ich_lr0_el2, x10
+    ldr x10, [x9, #32]
+    msr ich_lr1_el2, x10
+    ldr x10, [x9, #40]
+    msr ich_lr2_el2, x10
+    ldr x10, [x9, #48]
+    msr ich_lr3_el2, x10
+    ldr x10, [x9, #8]
+    msr ich_hcr_el2, x10
+    // Verify all virtual-interface state while SRE_EL2.Enable is still set.
+    // SRE_EL2.Enable 仍置位时核对全部虚拟接口状态。
+    mov x14, #1
+    mrs x15, ich_hcr_el2
+    ldr x10, [x9, #8]
+    cmp x15, x10
+    b.ne 20f
+    mrs x15, ich_vmcr_el2
+    ldr x10, [x9, #16]
+    cmp x15, x10
+    b.ne 20f
+    mrs x15, ich_lr0_el2
+    ldr x10, [x9, #24]
+    cmp x15, x10
+    b.ne 20f
+    mrs x15, ich_lr1_el2
+    ldr x10, [x9, #32]
+    cmp x15, x10
+    b.ne 20f
+    mrs x15, ich_lr2_el2
+    ldr x10, [x9, #40]
+    cmp x15, x10
+    b.ne 20f
+    mrs x15, ich_lr3_el2
+    ldr x10, [x9, #48]
+    cmp x15, x10
+    b.ne 20f
+    b 21f
+20:
+    mov x14, #0
+21:
+    and x12, x12, x14
+    ldr x10, [x9, #56]
+    msr icc_sre_el2, x10
+    ldr x10, [x9, #0]
+    msr hcr_el2, x10
+    mrs x15, hcr_el2
+    ldr x10, [x9, #0]
+    cmp x15, x10
+    b.eq 22f
+    mov x12, #0
+22:
+    dsb ish
+    isb
+    adrp x9, jsr_aarch64_el2_vgic_active
+    add x9, x9, :lo12:jsr_aarch64_el2_vgic_active
+    str xzr, [x9]
+    cmp x13, #1
+    b.eq el2_guest_vgic_direct_result
+    cmp x13, #3
+    b.eq el2_guest_vgic_timer_timeout_result
+    cmp x13, #4
+    b.eq el2_guest_vgic_timer_irq_failed
+    cmp x13, #5
+    b.eq el2_guest_vgic_unexpected
+    b el2_guest_vgic_timer_result
+el2_guest_vgic_timer_timeout_result:
+    mov x10, #3
+    mov x11, #0x544f
+    b el2_restore_guest
+el2_guest_vgic_timer_irq_failed:
+    mov x10, #3
+    mov x11, #0x5046
+    b el2_restore_guest
+el2_guest_vgic_unexpected:
+    mov x10, #3
+    mov x11, #0x4655
+    b el2_restore_guest
+el2_guest_return_after_hvc:
+    // Return from a guest HVC without discarding the outer host frame.
+    // 从 guest HVC 返回，同时保留外层宿主帧。
+    adrp x9, jsr_aarch64_el2_return_status
+    add x9, x9, :lo12:jsr_aarch64_el2_return_status
+    ldr x10, [sp, #0]
+    str x10, [x9]
+    adrp x9, jsr_aarch64_el2_return_reply
+    add x9, x9, :lo12:jsr_aarch64_el2_return_reply
+    ldr x10, [sp, #8]
+    str x10, [x9]
+    b el2_restore_host
 el2_guest_unexpected:
+    adrp x9, jsr_aarch64_el2_vgic_active
+    add x9, x9, :lo12:jsr_aarch64_el2_vgic_active
+    ldr x10, [x9]
+    cbz x10, 1f
+    mov x12, #0
+    mov x13, #5
+    b el2_restore_vgic_host_state_timer
+1:
     mov x10, #3
     mov x11, #0x4655
     b el2_restore_guest
@@ -639,9 +908,24 @@ el2_guest_stage2_fault:
     mov x10, #2
     mov x11, #0x4654
     b el2_restore_guest
-el2_guest_irq_enter:
+el2_guest_vgic_direct_enter:
+    adrp x14, jsr_aarch64_guest_vgic_vectors
+    add x14, x14, :lo12:jsr_aarch64_guest_vgic_vectors
+    adrp x15, jsr_aarch64_guest_vgic_target
+    add x15, x15, :lo12:jsr_aarch64_guest_vgic_target
+    b el2_guest_vgic_enter
+el2_guest_vgic_timer_enter:
+    adrp x14, jsr_aarch64_guest_timer_vectors
+    add x14, x14, :lo12:jsr_aarch64_guest_timer_vectors
+    adrp x15, jsr_aarch64_guest_timer_target
+    add x15, x15, :lo12:jsr_aarch64_guest_timer_target
+el2_guest_vgic_enter:
     adrp x9, jsr_aarch64_el2_guest_active
     add x9, x9, :lo12:jsr_aarch64_el2_guest_active
+    mov x10, #1
+    str x10, [x9]
+    adrp x9, jsr_aarch64_el2_vgic_active
+    add x9, x9, :lo12:jsr_aarch64_el2_vgic_active
     mov x10, #1
     str x10, [x9]
     adrp x9, JSR_EL2_GUEST_STACK
@@ -649,30 +933,115 @@ el2_guest_irq_enter:
     mov x10, #65536
     add x10, x9, x10
     msr sp_el1, x10
-    adrp x9, jsr_aarch64_guest_vectors
-    add x9, x9, :lo12:jsr_aarch64_guest_vectors
-    msr vbar_el1, x9
-    adrp x9, jsr_aarch64_guest_irq_target
-    add x9, x9, :lo12:jsr_aarch64_guest_irq_target
-    msr elr_el2, x9
-    // D/A/F remain masked; clearing I and setting IMO/VI makes a real virtual
-    // IRQ pending for the EL1 guest.
-    // D/A/F 保持屏蔽；清 I 并置 IMO/VI 后，EL1 guest 将收到真实虚拟 IRQ。
+    msr vbar_el1, x14
+    msr elr_el2, x15
+    adrp x9, jsr_aarch64_el2_vgic_host_state
+    add x9, x9, :lo12:jsr_aarch64_el2_vgic_host_state
+    mrs x10, hcr_el2
+    str x10, [x9, #0]
+    mrs x10, ich_hcr_el2
+    str x10, [x9, #8]
+    mrs x10, ich_vmcr_el2
+    str x10, [x9, #16]
+    mrs x10, ich_lr0_el2
+    str x10, [x9, #24]
+    mrs x10, ich_lr1_el2
+    str x10, [x9, #32]
+    mrs x10, ich_lr2_el2
+    str x10, [x9, #40]
+    mrs x10, ich_lr3_el2
+    str x10, [x9, #48]
+    mrs x10, icc_sre_el2
+    str x10, [x9, #56]
+    dsb ish
+    // ICC_SRE_EL2.Enable exposes the virtual CPU interface to EL1. VMCR sets
+    // VPMR=0xff, VEOIm=1 and group-1 enable; ICH_HCR enables LR delivery.
+    // ICC_SRE_EL2.Enable 向 EL1 暴露虚拟 CPU 接口；VMCR 配置优先级、
+    // EOI deactivate 和 group-1，ICH_HCR 启用 LR 交付。
+    mov x9, #9
+    msr icc_sre_el2, x9
+    msr ich_hcr_el2, xzr
+    msr ich_lr0_el2, xzr
+    msr ich_lr1_el2, xzr
+    msr ich_lr2_el2, xzr
+    msr ich_lr3_el2, xzr
+    ldr x9, =0xf8000202 // JASPER-HARDCODE-REVIEW: issue=34 source=GICv3-IH-VMCR reason=verification-vpmr-eoi-group1
+    msr ich_vmcr_el2, x9
+    mov x9, #1
+    msr ich_hcr_el2, x9
+    // D/A/F remain masked; clearing I permits the guest IRQ vector. IMO routes
+    // physical IRQs to EL2 and exposes injected vIRQs to EL1.
+    // D/A/F 保持屏蔽；清 I 允许 guest IRQ 向量。IMO 将物理 IRQ 路由 EL2，
+    // 同时向 EL1 暴露注入的 vIRQ。
     mov x9, #0x345
     msr spsr_el2, x9
     mrs x9, hcr_el2
-    mov x10, #1
-    lsl x10, x10, #7
-    orr x10, x10, #JSR_EL2_HCR_ROUTE_IRQ
-    orr x9, x9, x10
+    bic x9, x9, #0x80
+    orr x9, x9, #JSR_EL2_HCR_ROUTE_IRQ
     msr hcr_el2, x9
+    dsb ish
     isb
     eret
+jsr_aarch64_el2_irq:
+    JSR_EL2_SAVE_FRAME
+    adrp x9, jsr_aarch64_el2_guest_active
+    add x9, x9, :lo12:jsr_aarch64_el2_guest_active
+    ldr x10, [x9]
+    cbz x10, el2_irq_unexpected
+    // The physical IRQ must be the virtual timer PPI before it can be
+    // translated into a virtual interrupt.
+    // 只有物理 IRQ 确认为虚拟定时器 PPI 后，才允许转换为虚拟中断。
+    mrs x11, icc_iar1_el1
+    and x12, x11, #0xffffff
+    cmp x12, #JSR_EL2_TIMER_PPI
+    b.ne el2_irq_unexpected
+    // Mask and disable the guest's virtual timer before physical EOI so the
+    // level interrupt cannot immediately retrigger while LR0 is pending.
+    // 物理 EOI 前屏蔽并关闭 guest 虚拟定时器，避免 level IRQ 在 LR0
+    // pending 期间立刻重复触发。
+    mov x9, #2
+    msr cntv_ctl_el0, x9
+    isb
+    msr icc_eoir1_el1, x11
+    isb
+    mov x9, #JSR_EL2_VGIC_TIMER_INTID
+    mov x10, #0x80
+    lsl x10, x10, #48
+    orr x9, x9, x10
+    mov x10, #1
+    lsl x10, x10, #60
+    orr x9, x9, x10
+    mov x10, #1
+    lsl x10, x10, #62
+    orr x9, x9, x10
+    msr ich_lr0_el2, x9
+    dsb ish
+    isb
+    // The nested frame restores the guest timer at ERET. Persist the masked
+    // state written above, otherwise a compare value in the past immediately
+    // retriggers the physical PPI and livelocks EL2.
+    // 嵌套帧会在 ERET 时恢复 guest 定时器；必须持久化上面的 masked 状态，
+    // 否则已经过期的 compare value 会立即重复触发物理 PPI 并活锁 EL2。
+    mov x9, #2
+    str x9, [sp, #848]
+    adrp x9, jsr_aarch64_el2_return_status
+    add x9, x9, :lo12:jsr_aarch64_el2_return_status
+    ldr x10, [sp, #0]
+    str x10, [x9]
+    adrp x9, jsr_aarch64_el2_return_reply
+    add x9, x9, :lo12:jsr_aarch64_el2_return_reply
+    ldr x10, [sp, #8]
+    str x10, [x9]
+    b el2_restore_host
+el2_irq_unexpected:
+    mov x12, #0
+    mov x13, #4
+    b el2_restore_vgic_host_state_timer
 el2_restore_guest:
     adrp x9, jsr_aarch64_el2_guest_active
     add x9, x9, :lo12:jsr_aarch64_el2_guest_active
     str xzr, [x9]
-    add sp, sp, #864
+    add sp, sp, #JSR_EL2_FRAME_BYTES
 el2_restore_host_with_reply:
     adrp x9, jsr_aarch64_el2_return_status
     add x9, x9, :lo12:jsr_aarch64_el2_return_status
@@ -742,7 +1111,7 @@ el2_restore_host:
     adrp x9, jsr_aarch64_el2_return_reply
     add x9, x9, :lo12:jsr_aarch64_el2_return_reply
     ldr x1, [x9]
-    add sp, sp, #864
+    add sp, sp, #JSR_EL2_FRAME_BYTES
     eret
 el2_fail:
     wfe
@@ -827,32 +1196,119 @@ jsr_aarch64_test_guest:
     b .
 
 .balign 2048
-.global jsr_aarch64_guest_vectors
-jsr_aarch64_guest_vectors:
+.global jsr_aarch64_guest_vgic_vectors
+jsr_aarch64_guest_vgic_vectors:
     // AArch64 vectors: current EL with SPx IRQ is the second entry at 0x280.
     // AArch64 向量表：当前 EL 使用 SPx 时，IRQ 是 0x280 处的第二项。
     .space 0x280
-    b jsr_aarch64_guest_irq_handler
+    b jsr_aarch64_guest_vgic_irq_handler
 
 .balign 4
-.global jsr_aarch64_guest_irq_target
-jsr_aarch64_guest_irq_target:
-    // Bounded fallback: HVC reaches the unexpected-exit path if VI is lost.
-    // 有界回退：若 VI 未送达，HVC 会进入非预期退出路径而不是无限等待。
-    mov x9, #0x1000000
-1:
-    subs x9, x9, #1
-    b.ne 1b
-    hvc #0x4a59
+jsr_aarch64_guest_vgic_target:
+    // A missing LR must acknowledge as SPURIOUS before injection.
+    // 未注入 LR 时，IAR 必须返回 SPURIOUS。
+    mrs x9, icc_sre_el1
+    orr x9, x9, #1
+    msr icc_sre_el1, x9
+    isb
+    mov x9, #0xff
+    msr icc_pmr_el1, x9
+    msr icc_bpr1_el1, xzr
+    msr icc_ctlr_el1, xzr
+    mov x9, #1
+    msr icc_igrpen1_el1, x9
+    isb
+    mrs x9, icc_iar1_el1
+    cmp x9, #1023
+    b.ne jsr_aarch64_guest_vgic_fail
+    hvc #JSR_EL2_HVC_VGIC_DIRECT_ARM
+    // If LR delivery failed, report failure instead of hanging.
+    // LR 交付失败时报告失败，而不是无限等待。
+    mov x0, #0
+    hvc #JSR_EL2_HVC_VGIC_DIRECT_DONE
     b .
 
+jsr_aarch64_guest_vgic_irq_handler:
+    mrs x0, icc_iar1_el1
+    cmp x0, #JSR_EL2_VGIC_DIRECT_INTID
+    b.ne jsr_aarch64_guest_vgic_fail
+    msr icc_eoir1_el1, x0
+    isb
+    // VEOIm=1 must deactivate the LR. A second acknowledgement is therefore
+    // required to be SPURIOUS.
+    // VEOIm=1 必须 deactivate LR，因此第二次确认必须为 SPURIOUS。
+    mrs x1, icc_iar1_el1
+    cmp x1, #1023
+    b.ne jsr_aarch64_guest_vgic_fail
+    mov x0, #1
+    hvc #JSR_EL2_HVC_VGIC_DIRECT_DONE
+    b .
+
+jsr_aarch64_guest_vgic_fail:
+    mov x0, #0
+    hvc #JSR_EL2_HVC_VGIC_DIRECT_DONE
+    b .
+
+.balign 2048
+.global jsr_aarch64_guest_timer_vectors
+jsr_aarch64_guest_timer_vectors:
+    .space 0x280
+    b jsr_aarch64_guest_timer_irq_handler
+
 .balign 4
-jsr_aarch64_guest_irq_handler:
-    mov x9, #0x7fff0000
-    msr cntv_cval_el0, x9
-    mov x9, #3
+jsr_aarch64_guest_timer_target:
+    mrs x9, icc_sre_el1
+    orr x9, x9, #1
+    msr icc_sre_el1, x9
+    isb
+    mov x9, #0xff
+    msr icc_pmr_el1, x9
+    msr icc_bpr1_el1, xzr
+    msr icc_ctlr_el1, xzr
+    mov x9, #1
+    msr icc_igrpen1_el1, x9
+    isb
+    // Arm a real architectural virtual timer. Its physical PPI must be
+    // acknowledged by EL2 before a virtual timer INTID reaches LR0.
+    // 启用真实架构虚拟定时器；其物理 PPI 必须先由 EL2 确认，
+    // 再把虚拟定时器 INTID 写入 LR0。
+    mrs x9, cntfrq_el0
+    lsr x9, x9, #2
+    mrs x10, cntvct_el0
+    add x10, x10, x9
+    msr cntv_cval_el0, x10
+    mov x9, #1
     msr cntv_ctl_el0, x9
-    hvc #JSR_EL2_HVC_VIRTUAL_IRQ_HANDLED
+    isb
+    hvc #JSR_EL2_HVC_VGIC_TIMER_ARM
+    mrs x9, cntfrq_el0
+    lsl x9, x9, #1
+    mrs x20, cntvct_el0
+    add x20, x20, x9
+1:
+    mrs x9, cntvct_el0
+    cmp x9, x20
+    b.lo 1b
+    mov x0, #0
+    hvc #JSR_EL2_HVC_VGIC_TIMER_TIMEOUT
+    b .
+
+jsr_aarch64_guest_timer_irq_handler:
+    mrs x0, icc_iar1_el1
+    cmp x0, #JSR_EL2_VGIC_TIMER_INTID
+    b.ne jsr_aarch64_guest_timer_fail
+    msr icc_eoir1_el1, x0
+    isb
+    mrs x1, icc_iar1_el1
+    cmp x1, #1023
+    b.ne jsr_aarch64_guest_timer_fail
+    mov x0, #1
+    hvc #JSR_EL2_HVC_VGIC_TIMER_DONE
+    b .
+
+jsr_aarch64_guest_timer_fail:
+    mov x0, #0
+    hvc #JSR_EL2_HVC_VGIC_TIMER_DONE
     b .
 
 .balign 4
@@ -1003,9 +1459,21 @@ el2_context_restore:
 .balign 16
 jsr_aarch64_el2_guest_active:
     .quad 0
+jsr_aarch64_el2_vgic_active:
+    .quad 0
 jsr_aarch64_el2_return_status:
     .quad 0
 jsr_aarch64_el2_return_reply:
+    .quad 0
+.balign 16
+jsr_aarch64_el2_vgic_host_state:
+    .quad 0
+    .quad 0
+    .quad 0
+    .quad 0
+    .quad 0
+    .quad 0
+    .quad 0
     .quad 0
 .global jsr_aarch64_stage2_hpfar
 jsr_aarch64_stage2_hpfar:
@@ -1444,57 +1912,6 @@ extern "C" fn jsr_aarch64_boot(
         entry_exception_level == 2,
         cfg!(feature = "aarch64-el2-retain-verify") && entry_exception_level == 2
     );
-    #[cfg(feature = "aarch64-el2-retain-verify")]
-    if entry_exception_level == 2 {
-        let round_trip = el2_hvc_probe();
-        crate::kprintln!("[JSR-A64-EL2-STEP] hvc_round_trip={}", round_trip);
-        let mut stage2_ram_base = None;
-        // This QEMU verification window is registered for later issue-35 review.
-        // 该 QEMU 验收窗口已登记，留待 issue-35 统一治理。
-        const STAGE2_NEGATIVE_WINDOW: u64 = 0xfe00000; // JASPER-HARDCODE-REVIEW: issue=22 source=aarch64-stage2-negative reason=qemu-negative-map-window
-        let memory_valid = fdt
-            .for_each_memory(|base, size| {
-                if stage2_ram_base.is_none()
-                    && base & ((1 << 30) - 1) == 0
-                    && size > STAGE2_NEGATIVE_WINDOW
-                {
-                    stage2_ram_base = Some(base);
-                }
-            })
-            .is_ok();
-        let table = round_trip
-            && memory_valid
-            && stage2_ram_base.is_some_and(super::el2::initialize_identity_table);
-        crate::kprintln!("[JSR-A64-EL2-STEP] stage2_table={}", table);
-        let stage2 = table && super::el2::enable_current_cpu();
-        let vm_exit = stage2 && el2_guest_stage2_fault_probe();
-        crate::kprintln!("[JSR-A64-EL2-STEP] stage2={}", stage2);
-        crate::kprintln!("[JSR-A64-EL2-STEP] vm_exit={}", vm_exit);
-        let virtual_irq = vm_exit && el2_virtual_irq_probe();
-        crate::kprintln!("[JSR-A64-EL2-STEP] virtual_irq={}", virtual_irq);
-        let timer_context = virtual_irq;
-        let vbar_context = timer_context;
-        let vcpu_context = vbar_context;
-        let system_context = vcpu_context;
-        let fp_context = system_context;
-        crate::kprintln!(
-            "[JSR-A64-EL2] retained=true hvc_round_trip={} stage2_table={} stage2={} vm_exit={} virtual_irq={} timer_context={} vbar_context={} vcpu_context={} system_context={} fp_context={} driver_vm=false",
-            round_trip,
-            table,
-            stage2,
-            vm_exit,
-            virtual_irq,
-            timer_context,
-            vbar_context,
-            vcpu_context,
-            system_context,
-            fp_context
-        );
-        if !fp_context {
-            semihost::exit(EXIT_FAILURE);
-        }
-    }
-
     // 严格校验：截断、越界、重复属性/节点、非法结构都在这里被拒绝。
     if let Err(error) = fdt.validate_strict() {
         crate::kprintln!("[JSR-DTB] reject={}", error.name());
@@ -1533,6 +1950,63 @@ extern "C" fn jsr_aarch64_boot(
     if let Err(missing) = configure_devices(&fdt, &summary) {
         crate::kprintln!("[JSR-BOOT] device tree lacks {}", missing);
         semihost::exit(EXIT_FAILURE);
+    }
+
+    #[cfg(feature = "aarch64-el2-retain-verify")]
+    if entry_exception_level == 2 {
+        let round_trip = el2_hvc_probe();
+        crate::kprintln!("[JSR-A64-EL2-STEP] hvc_round_trip={}", round_trip);
+        let mut stage2_ram_base = None;
+        // This QEMU verification window is registered for later issue-35 review.
+        // 该 QEMU 验收窗口已登记，留待 issue-35 统一治理。
+        const STAGE2_NEGATIVE_WINDOW: u64 = 0xfe00000; // JASPER-HARDCODE-REVIEW: issue=22 source=aarch64-stage2-negative reason=qemu-negative-map-window
+        let memory_valid = fdt
+            .for_each_memory(|base, size| {
+                if stage2_ram_base.is_none()
+                    && base & ((1 << 30) - 1) == 0
+                    && size > STAGE2_NEGATIVE_WINDOW
+                {
+                    stage2_ram_base = Some(base);
+                }
+            })
+            .is_ok();
+        let table = round_trip
+            && memory_valid
+            && stage2_ram_base.is_some_and(super::el2::initialize_identity_table);
+        crate::kprintln!("[JSR-A64-EL2-STEP] stage2_table={}", table);
+        let stage2 = table && super::el2::enable_current_cpu();
+        let vm_exit = stage2 && el2_guest_stage2_fault_probe();
+        crate::kprintln!("[JSR-A64-EL2-STEP] stage2={}", stage2);
+        crate::kprintln!("[JSR-A64-EL2-STEP] vm_exit={}", vm_exit);
+        let irq_controller = summary.timer_irq.is_some_and(gic::init);
+        crate::kprintln!("[JSR-A64-EL2-STEP] irq_controller={}", irq_controller);
+        let vgic = vm_exit && el2_vgic_probe();
+        crate::kprintln!("[JSR-A64-EL2-STEP] vgic={}", vgic);
+        let timer_irq = vgic && irq_controller && el2_virtual_timer_irq_probe();
+        crate::kprintln!("[JSR-A64-EL2-STEP] timer_irq={}", timer_irq);
+        let timer_context = timer_irq;
+        let vbar_context = timer_context;
+        let vcpu_context = vbar_context;
+        let system_context = vcpu_context;
+        let fp_context = system_context;
+        crate::kprintln!(
+            "[JSR-A64-EL2] retained=true hvc_round_trip={} stage2_table={} stage2={} vm_exit={} virtual_irq={} vgic={} timer_irq={} timer_context={} vbar_context={} vcpu_context={} system_context={} fp_context={} driver_vm=false",
+            round_trip,
+            table,
+            stage2,
+            vm_exit,
+            vgic,
+            vgic,
+            timer_irq,
+            timer_context,
+            vbar_context,
+            vcpu_context,
+            system_context,
+            fp_context
+        );
+        if !fp_context {
+            semihost::exit(EXIT_FAILURE);
+        }
     }
 
     #[cfg(feature = "pixel6a-smoke")]

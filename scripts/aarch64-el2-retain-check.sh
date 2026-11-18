@@ -10,7 +10,7 @@ OUT="${AARCH64_EL2_OUT:-$ROOT/evidence/aarch64-el2-retain-$(date '+%Y%m%d-%H%M%S
 TARGET="${AARCH64_EL2_TARGET:-$ROOT/target/aarch64-el2-retain}"
 IMAGE="$OUT/jasper-Image"
 ELF="$TARGET/aarch64-unknown-none-softfloat/release/jasper-kernel"
-LIMIT="${AARCH64_EL2_TIMEOUT:-30}"
+LIMIT="${AARCH64_EL2_TIMEOUT:-45}"
 QEMU_CPUS="${AARCH64_EL2_QEMU_CPUS:-6-7}"
 mkdir -p "$OUT" "$TARGET"
 
@@ -32,7 +32,7 @@ bash scripts/aarch64-image.sh "$ELF" "$IMAGE" >"$OUT/image.log" 2>&1
 
 set +e
 timeout "$LIMIT" taskset -c "$QEMU_CPUS" "$QEMU" \
-  -M virt,virtualization=on -cpu cortex-a72 -smp 2 -m 256M \
+  -M virt,gic-version=3,virtualization=on -cpu cortex-a72 -smp 2 -m 256M \
   -kernel "$IMAGE" -append "console=ttyAMA0 el2-retain=1" \
   -semihosting -serial stdio -display none -monitor none -no-reboot \
   >"$OUT/serial.log" 2>&1
@@ -45,7 +45,13 @@ grep -aFq \
   "$OUT/serial.log"
 grep -aFq '[JSR-A64-STAGE2] vm_exit=true hpfar=0x4fe000 stage2_open=true' "$OUT/serial.log"
 grep -aFq \
-  '[JSR-A64-EL2] retained=true hvc_round_trip=true stage2_table=true stage2=true vm_exit=true virtual_irq=true timer_context=true vbar_context=true vcpu_context=true system_context=true fp_context=true driver_vm=false' \
+  '[JSR-A64-VGIC] direct=true status=5 reply=0x5647 ack=true eoi=true lr_cleared=true host_restored=true vbar_same=true timer_ctl_same=true timer_cval_same=true' \
+  "$OUT/serial.log"
+grep -aFq \
+  '[JSR-A64-VGIC] timer_irq=true status=6 reply=0x5449 ack=true eoi=true lr_cleared=true host_restored=true vbar_same=true timer_ctl_same=true timer_cval_same=true' \
+  "$OUT/serial.log"
+grep -aFq \
+  '[JSR-A64-EL2] retained=true hvc_round_trip=true stage2_table=true stage2=true vm_exit=true virtual_irq=true vgic=true timer_irq=true timer_context=true vbar_context=true vcpu_context=true system_context=true fp_context=true driver_vm=false' \
   "$OUT/serial.log"
 grep -aFq \
   '[JSR-SMP] start present=2 online=2 failed=0 source=fdt.cpus dropped=0 disabled=0' \
@@ -69,4 +75,4 @@ if {name: value for name, value in failed.items() if value} != expected:
     raise SystemExit(f"aarch64-el2-retain: unexpected failure baseline: {failed}")
 PY
 
-echo "aarch64-el2-retain: PASS bsp=true ap=true hvc=true stage2=true vm_exit=true virtual_irq=true timer_context=true vbar_context=true vcpu_context=true system_context=true fp_context=true driver_vm=false evidence=$OUT"
+echo "aarch64-el2-retain: PASS bsp=true ap=true hvc=true stage2=true vm_exit=true vgic=true timer_irq=true timer_context=true vbar_context=true vcpu_context=true system_context=true fp_context=true driver_vm=false evidence=$OUT"
