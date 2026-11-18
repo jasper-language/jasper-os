@@ -567,11 +567,11 @@ impl Runtime {
         unsafe {
             let pointer = self.base as *mut u8;
             match self.surface.layout {
-                PixelLayout::Rgb | PixelLayout::Bgr => {
-                    let (first, third) = if self.surface.layout == PixelLayout::Rgb {
-                        (red, blue)
-                    } else {
-                        (blue, red)
+                PixelLayout::Rgb | PixelLayout::Bgr | PixelLayout::Rgba => {
+                    let (first, third) = match self.surface.layout {
+                        PixelLayout::Rgb | PixelLayout::Rgba => (red, blue),
+                        PixelLayout::Bgr => (blue, red),
+                        PixelLayout::Gray => unreachable!(),
                     };
                     core::ptr::write_volatile(pointer.add(offset), first);
                     core::ptr::write_volatile(pointer.add(offset + 1), green);

@@ -1,0 +1,28 @@
+[package]
+name = "user-ui-service"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Jasper-OS UI service host adapter for the pinned Jasper UI Engine"
+
+[lib]
+name = "jasper_ui_service"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ui-service"
+path = "src/main.rs"
+test = false
+bench = false
+required-features = ["native-transport"]
+
+[dependencies]
+jasper-rt = { path = "../rt", optional = true }
+kernel-core = { path = "../../kernel-core" }
+
+[build-dependencies]
+kernel-core = { path = "../../kernel-core" }
+
+[features]
+default = []
+native-transport = ["dep:jasper-rt"]

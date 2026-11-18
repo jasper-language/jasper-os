@@ -576,7 +576,10 @@ fn validate_surface(surface: SurfaceSpec) -> Result<u64, CompositorError> {
         DisplayInputError::Unsupported => CompositorError::Unsupported,
         _ => CompositorError::InvalidSurface,
     })?;
-    if matches!(surface.layout, PixelLayout::Rgb | PixelLayout::Bgr) && surface.bytes_per_pixel < 3
+    if matches!(
+        surface.layout,
+        PixelLayout::Rgb | PixelLayout::Bgr | PixelLayout::Rgba
+    ) && surface.bytes_per_pixel < 3
     {
         return Err(CompositorError::InvalidSurface);
     }
@@ -756,6 +759,7 @@ fn read_pixel(
         PixelLayout::Gray => (pixel[0], pixel[0], pixel[0], alpha),
         PixelLayout::Rgb => (pixel[0], pixel[1], pixel[2], alpha),
         PixelLayout::Bgr => (pixel[2], pixel[1], pixel[0], alpha),
+        PixelLayout::Rgba => (pixel[0], pixel[1], pixel[2], alpha),
     })
 }
 
@@ -802,6 +806,11 @@ fn write_pixel(
             pixel[0] = blue;
             pixel[1] = green;
             pixel[2] = red;
+        }
+        PixelLayout::Rgba => {
+            pixel[0] = red;
+            pixel[1] = green;
+            pixel[2] = blue;
         }
     }
     if bpp == 4 {
@@ -1467,5 +1476,20 @@ mod tests {
             .unwrap();
         assert_eq!(frame, first);
         assert_eq!(pixel(&frame, 1, 1), [4, 127, 128, 0xff]);
+    }
+
+    #[test]
+    fn rgba_surface_preserves_engine_channel_order() {
+        let surface = SurfaceSpec {
+            width: 1,
+            height: 1,
+            stride: 1,
+            bytes_per_pixel: 4,
+            layout: PixelLayout::Rgba,
+        };
+        let mut bytes = [0u8; 4];
+        write_pixel(surface, &mut bytes, 0, 0, 10, 20, 30).unwrap();
+        assert_eq!(bytes, [10, 20, 30, 0xff]);
+        assert_eq!(read_pixel(surface, &bytes, 0, 0), Ok((10, 20, 30, 0xff)));
     }
 }

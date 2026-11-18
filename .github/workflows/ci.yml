@@ -81,6 +81,7 @@ jobs:
           python3 scripts/check-gpu-abi-boundary.py
           python3 scripts/check-ui-engine-pin.py --self-test
           python3 scripts/check-ui-engine-pin.py
+          bash scripts/ui-host-check.sh
           python3 scripts/check-linux-graphics-compat.py
       - name: LC-5 可重复 SBOM / deterministic SBOM
         run: |

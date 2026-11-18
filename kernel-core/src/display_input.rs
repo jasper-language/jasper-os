@@ -19,6 +19,9 @@ use alloc::collections::VecDeque;
 pub enum PixelLayout {
     Rgb,
     Bgr,
+    /// Byte order R, G, B, A (or three bytes when bpp is 3).
+    /// 字节顺序为 R、G、B、A；bpp 为 3 时没有显式 alpha。
+    Rgba,
     Gray,
 }
 
