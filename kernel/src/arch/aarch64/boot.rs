@@ -364,7 +364,7 @@ jsr_aarch64_el2_vectors:
     b jsr_aarch64_el2_sync
     .space 0x3fc
 jsr_aarch64_el2_sync:
-    sub sp, sp, #272
+    sub sp, sp, #304
     stp x0, x1, [sp, #0]
     stp x2, x3, [sp, #16]
     stp x4, x5, [sp, #32]
@@ -386,6 +386,12 @@ jsr_aarch64_el2_sync:
     mrs x11, spsr_el2
     stp x9, x10, [sp, #248]
     str x11, [sp, #264]
+    mrs x9, sp_el0
+    mrs x10, tpidr_el0
+    stp x9, x10, [sp, #272]
+    mrs x9, tpidr_el1
+    mrs x10, contextidr_el1
+    stp x9, x10, [sp, #288]
     adrp x9, jsr_aarch64_el2_guest_active
     add x9, x9, :lo12:jsr_aarch64_el2_guest_active
     ldr x10, [x9]
@@ -439,6 +445,14 @@ el2_guest_enter:
     mov x10, #65536
     add x10, x9, x10
     msr sp_el1, x10
+    mov x9, #0x160
+    msr sp_el0, x9
+    mov x9, #0x161
+    msr tpidr_el0, x9
+    mov x9, #0x162
+    msr tpidr_el1, x9
+    mov x9, #0x163
+    msr contextidr_el1, x9
     adrp x9, jsr_aarch64_test_guest
     add x9, x9, :lo12:jsr_aarch64_test_guest
     msr elr_el2, x9
@@ -466,7 +480,7 @@ el2_restore_guest:
     adrp x9, jsr_aarch64_el2_guest_active
     add x9, x9, :lo12:jsr_aarch64_el2_guest_active
     str xzr, [x9]
-    add sp, sp, #272
+    add sp, sp, #304
 el2_restore_host_with_reply:
     adrp x9, jsr_aarch64_el2_return_status
     add x9, x9, :lo12:jsr_aarch64_el2_return_status
@@ -481,6 +495,12 @@ el2_restore_host:
     msr elr_el2, x9
     ldr x9, [sp, #264]
     msr spsr_el2, x9
+    ldp x9, x10, [sp, #272]
+    msr sp_el0, x9
+    msr tpidr_el0, x10
+    ldp x9, x10, [sp, #288]
+    msr tpidr_el1, x9
+    msr contextidr_el1, x10
     ldp x2, x3, [sp, #16]
     ldp x4, x5, [sp, #32]
     ldp x6, x7, [sp, #48]
@@ -502,7 +522,7 @@ el2_restore_host:
     adrp x9, jsr_aarch64_el2_return_reply
     add x9, x9, :lo12:jsr_aarch64_el2_return_reply
     ldr x1, [x9]
-    add sp, sp, #272
+    add sp, sp, #304
     eret
 el2_fail:
     wfe
@@ -552,13 +572,19 @@ jsr_aarch64_test_guest:
 .balign 4
 .global jsr_aarch64_el2_context_probe
 jsr_aarch64_el2_context_probe:
-    sub sp, sp, #96
+    sub sp, sp, #128
     stp x18, x19, [sp, #0]
     stp x20, x21, [sp, #16]
     stp x22, x23, [sp, #32]
     stp x24, x25, [sp, #48]
     stp x26, x27, [sp, #64]
     stp x28, x29, [sp, #80]
+    mrs x10, sp_el0
+    mrs x11, tpidr_el0
+    stp x10, x11, [sp, #96]
+    mrs x10, tpidr_el1
+    mrs x11, contextidr_el1
+    stp x10, x11, [sp, #112]
     mov x2, #2
     mov x3, #3
     mov x4, #4
@@ -585,6 +611,14 @@ jsr_aarch64_el2_context_probe:
     mov x27, #27
     mov x28, #28
     mov x29, #29
+    mov x10, #0x50
+    msr sp_el0, x10
+    mov x10, #0x51
+    msr tpidr_el0, x10
+    mov x10, #0x52
+    msr tpidr_el1, x10
+    mov x10, #0x53
+    msr contextidr_el1, x10
     mov x0, #0
     hvc #0x4a55
     cmp x0, #2
@@ -644,6 +678,18 @@ jsr_aarch64_el2_context_probe:
     b.ne el2_context_failed
     cmp x29, #29
     b.ne el2_context_failed
+    mrs x10, sp_el0
+    cmp x10, #0x50
+    b.ne el2_context_failed
+    mrs x10, tpidr_el0
+    cmp x10, #0x51
+    b.ne el2_context_failed
+    mrs x10, tpidr_el1
+    cmp x10, #0x52
+    b.ne el2_context_failed
+    mrs x10, contextidr_el1
+    cmp x10, #0x53
+    b.ne el2_context_failed
     mov x9, #1
     b el2_context_restore
 el2_context_failed:
@@ -655,8 +701,14 @@ el2_context_restore:
     ldp x24, x25, [sp, #48]
     ldp x26, x27, [sp, #64]
     ldp x28, x29, [sp, #80]
+    ldp x10, x11, [sp, #96]
+    msr sp_el0, x10
+    msr tpidr_el0, x11
+    ldp x10, x11, [sp, #112]
+    msr tpidr_el1, x10
+    msr contextidr_el1, x11
     mov x0, x9
-    add sp, sp, #96
+    add sp, sp, #128
     ret
 
 .section .bss.jsr_aarch64_el2_test, "aw", %nobits
@@ -1108,15 +1160,17 @@ extern "C" fn jsr_aarch64_boot(
         let stage2 = table && super::el2::enable_current_cpu();
         let vm_exit = stage2 && el2_guest_stage2_fault_probe();
         let vcpu_context = vm_exit;
+        let system_context = vcpu_context;
         crate::kprintln!(
-            "[JSR-A64-EL2] retained=true hvc_round_trip={} stage2_table={} stage2={} vm_exit={} vcpu_context={} driver_vm=false",
+            "[JSR-A64-EL2] retained=true hvc_round_trip={} stage2_table={} stage2={} vm_exit={} vcpu_context={} system_context={} driver_vm=false",
             round_trip,
             table,
             stage2,
             vm_exit,
-            vcpu_context
+            vcpu_context,
+            system_context
         );
-        if !vcpu_context {
+        if !system_context {
             semihost::exit(EXIT_FAILURE);
         }
     }
