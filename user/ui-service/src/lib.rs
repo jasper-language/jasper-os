@@ -292,9 +292,14 @@ pub fn surface_error(_error: DisplayInputError) -> HostError {
 }
 
 /// Input normalization belongs to the host; the engine receives only admitted
-/// logical events.
-pub fn admit_key(_key: KeyInput) -> Result<KeyInput, HostError> {
-    Err(HostError::InputUnavailable)
+/// logical events. Backend key code zero is reserved and cannot cross the host
+/// boundary.
+pub fn admit_key(key: KeyInput) -> Result<KeyInput, HostError> {
+    if key.code == 0 {
+        Err(HostError::InputUnavailable)
+    } else {
+        Ok(key)
+    }
 }
 
 #[cfg(test)]
@@ -375,5 +380,19 @@ mod tests {
         assert_eq!(host.render(&mut stale), Err(HostError::InvalidSequence));
         assert_eq!(host.engine.renders, 1);
         assert_eq!(stale.pixels(), &[0; 48]);
+    }
+
+    #[test]
+    fn host_admits_stable_keys_and_rejects_reserved_zero_code() {
+        let key = KeyInput {
+            code: 30,
+            pressed: true,
+            modifiers: 1,
+        };
+        assert_eq!(admit_key(key), Ok(key));
+        assert_eq!(
+            admit_key(KeyInput { code: 0, ..key }),
+            Err(HostError::InputUnavailable)
+        );
     }
 }
