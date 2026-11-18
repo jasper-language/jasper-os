@@ -45,6 +45,10 @@ struct IrqBinding {
     kind: DeviceKind,
 }
 
+/// Drivers implemented by this build. This is not the platform's interrupt
+/// inventory: every firmware-declared IOAPIC input is discovered and masked
+/// independently, while unsupported drivers remain visible as unsupported.
+/// 本构建已实现的驱动清单，不是平台中断库存；所有固件 IOAPIC 输入仍独立发现并屏蔽。
 const DEVICE_BINDINGS: [IrqBinding; 2] = [
     IrqBinding {
         name: "serial",
@@ -429,7 +433,14 @@ pub(crate) fn wall_clock_unix_seconds() -> Option<u64> {
     let day = decode_rtc_field(fields[3], binary)?;
     let month = decode_rtc_field(fields[4], binary)?;
     let short_year = decode_rtc_field(fields[5], binary)?;
-    let century = decode_rtc_field(century, binary).unwrap_or(0);
+    // A zero century register is the legacy "not provided" convention. Any
+    // other invalid encoding is corrupted firmware state, not year 1900.
+    // 世纪寄存器为零表示旧平台未提供；其他非法编码必须失败，不能伪装成 19xx。
+    let century = if century == 0 {
+        0
+    } else {
+        decode_rtc_field(century, binary)?
+    };
     let year = if century == 0 {
         if short_year < 70 {
             2000 + u32::from(short_year)

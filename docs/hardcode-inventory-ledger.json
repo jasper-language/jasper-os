@@ -1,5 +1,5 @@
 {
-  "baseline_total": 422,
+  "baseline_total": 413,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -14,7 +14,7 @@
     "platform-adapter": 27,
     "protocol-abi": 18,
     "runtime-resource-capacity": 57,
-    "unclassified": 139
+    "unclassified": 131
   },
   "entries": [
     {
@@ -921,7 +921,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "d17815fdfa3394962e8f5b840cf03e28a819419d990f6e276d5f98a9d3b66be4",
-      "line": 22,
+      "line": 26,
       "path": "kernel-core/src/fdt.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
@@ -930,28 +930,8 @@
     {
       "category": "unclassified",
       "count": 1,
-      "fingerprint": "059d51e006a6113745444d23b14516dacb3c19a7bab50586b106c5df9c031c47",
-      "line": 553,
-      "path": "kernel-core/src/fdt.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "height: n.cell(\"height\", 0).unwrap_or(0),"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "0d19efd67780a7439b38be0d999b7d8fd8cbcfc93e1a9631708ddc1f5ca962d8",
-      "line": 574,
-      "path": "kernel-core/src/fdt.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let (redist, redist_size) = if v3 { node.reg(1).unwrap_or((0, 0)) } else { (0, 0) };"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
       "fingerprint": "487918563738a9d008dd39c6600714250c1f50175980fefbc6bbf8a2dcabe0e7",
-      "line": 575,
+      "line": 612,
       "path": "kernel-core/src/fdt.rs",
       "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
       "rules": "HC-G7",
@@ -960,18 +940,8 @@
     {
       "category": "unclassified",
       "count": 1,
-      "fingerprint": "4e1cd62d5567760ac2137a308872eab1e635aed297af196e6159c8a7a83c81e9",
-      "line": 552,
-      "path": "kernel-core/src/fdt.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "width: n.cell(\"width\", 0).unwrap_or(0),"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
       "fingerprint": "66e4022e6dc4ac0a0f23bb9280b6d71c361aac52272e3d7b845d944843517015",
-      "line": 755,
+      "line": 792,
       "path": "kernel-core/src/fdt.rs",
       "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
       "rules": "HC-G7",
@@ -980,18 +950,8 @@
     {
       "category": "unclassified",
       "count": 1,
-      "fingerprint": "6b72f93f0f1b76c4c521f6434cd48ace46eb5d6dca5b035f41967884122466bf",
-      "line": 555,
-      "path": "kernel-core/src/fdt.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "format: PixelFormat::from_name(n.string(\"format\").unwrap_or(\"\")),"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
       "fingerprint": "6dca0eabb2fdb005a6b27f02df51a92133ee8316600aafbded8148773fd90ef6",
-      "line": 565,
+      "line": 582,
       "path": "kernel-core/src/fdt.rs",
       "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
       "rules": "HC-G7",
@@ -999,19 +959,9 @@
     },
     {
       "category": "unclassified",
-      "count": 2,
-      "fingerprint": "8c1a3e75cc30050943d5851e0c7a7f539862874e98a86a1b564f023b4aaabac7",
-      "line": 534,
-      "path": "kernel-core/src/fdt.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let (base, size) = n.reg(0).unwrap_or((0, 0));"
-    },
-    {
-      "category": "unclassified",
       "count": 1,
       "fingerprint": "926e44735be1c54f41377653c63639e2b8524809706f9a0c4bf1d05a004e4cfa",
-      "line": 577,
+      "line": 614,
       "path": "kernel-core/src/fdt.rs",
       "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
       "rules": "HC-G7",
@@ -1021,31 +971,11 @@
       "category": "unclassified",
       "count": 1,
       "fingerprint": "a35b4a65790bae69441165279981f6fefe92aaba1368e463c297538b0f9d7f5d",
-      "line": 540,
+      "line": 550,
       "path": "kernel-core/src/fdt.rs",
       "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
       "rules": "HC-G7",
       "source": "compatible: n.string(\"compatible\").unwrap_or(\"arm,pl011\"),"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "a5b24a224ac9e69d2f1d3e1f69a1f2576e496a2abe2e7765ed9590ae2f1533f4",
-      "line": 554,
-      "path": "kernel-core/src/fdt.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "stride: n.cell(\"stride\", 0).unwrap_or(0),"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "ac94fce82a48c14308e4f0247b0ca2329d1b8f7c7c08ba01c014d378af42fce2",
-      "line": 572,
-      "path": "kernel-core/src/fdt.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let (dist, _) = node.reg(0).unwrap_or((0, 0));"
     },
     {
       "category": "explicit-safety-policy",
@@ -2100,18 +2030,8 @@
     {
       "category": "unclassified",
       "count": 1,
-      "fingerprint": "bb2a87f4ed84faafd02a1f6c5af706e6f4c7c2e9b08c8b4d57e5ed5460e1af9e",
-      "line": 432,
-      "path": "kernel/src/arch/x86_64/ioapic.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let century = decode_rtc_field(century, binary).unwrap_or(0);"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
       "fingerprint": "f83fc8de7fbc4dee4e0195efcd4c51cf3d33cf3f82e1cba51195d907e23903c9",
-      "line": 266,
+      "line": 270,
       "path": "kernel/src/arch/x86_64/ioapic.rs",
       "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
       "rules": "HC-G7",
@@ -3394,6 +3314,6 @@
     "platform-adapter": 43,
     "protocol-abi": 21,
     "runtime-resource-capacity": 96,
-    "unclassified": 161
+    "unclassified": 152
   }
 }

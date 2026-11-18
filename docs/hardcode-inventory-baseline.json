@@ -44,12 +44,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "059d51e006a6113745444d23b14516dacb3c19a7bab50586b106c5df9c031c47",
-      "path": "kernel-core/src/fdt.rs",
-      "rules": "HC-G7"
-    },
-    {
-      "count": 1,
       "fingerprint": "06672d32adf1f58efbe9430275f6917edc6d1a572d1cbb69c89b709963e50e92",
       "path": "jaso/src/lib.rs",
       "rules": "HC-G1"
@@ -125,12 +119,6 @@
       "fingerprint": "0cebe565c2770d7b600fe721381fecea5ebed8b35553fc9e88f27f07f94ed327",
       "path": "kernel-core/src/xsave.rs",
       "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "0d19efd67780a7439b38be0d999b7d8fd8cbcfc93e1a9631708ddc1f5ca962d8",
-      "path": "kernel-core/src/fdt.rs",
-      "rules": "HC-G7"
     },
     {
       "count": 2,
@@ -638,12 +626,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "4e1cd62d5567760ac2137a308872eab1e635aed297af196e6159c8a7a83c81e9",
-      "path": "kernel-core/src/fdt.rs",
-      "rules": "HC-G7"
-    },
-    {
-      "count": 1,
       "fingerprint": "4fe0491e6723c5bf88d3f088d1276fdc3822fef91ada2566722b9245c788c2fa",
       "path": "kernel/src/fscrypt.rs",
       "rules": "HC-G1"
@@ -914,12 +896,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "6b72f93f0f1b76c4c521f6434cd48ace46eb5d6dca5b035f41967884122466bf",
-      "path": "kernel-core/src/fdt.rs",
-      "rules": "HC-G7"
-    },
-    {
-      "count": 1,
       "fingerprint": "6b9a993248aaf75aed50ad81fab010949508619a332e265273ae4b4d7e06c706",
       "path": "kernel/src/kmain.rs",
       "rules": "HC-G3"
@@ -1148,12 +1124,6 @@
     },
     {
       "count": 2,
-      "fingerprint": "8c1a3e75cc30050943d5851e0c7a7f539862874e98a86a1b564f023b4aaabac7",
-      "path": "kernel-core/src/fdt.rs",
-      "rules": "HC-G7"
-    },
-    {
-      "count": 2,
       "fingerprint": "8ce9da0c2fad3644bb26927ce1eb8639b54a9f3685ec5e5653d824a227692e49",
       "path": "kernel/src/linux_abi.rs",
       "rules": "HC-G1"
@@ -1321,12 +1291,6 @@
       "rules": "HC-G3"
     },
     {
-      "count": 1,
-      "fingerprint": "a5b24a224ac9e69d2f1d3e1f69a1f2576e496a2abe2e7765ed9590ae2f1533f4",
-      "path": "kernel-core/src/fdt.rs",
-      "rules": "HC-G7"
-    },
-    {
       "count": 2,
       "fingerprint": "a6d4b5a94278727726cee6d7e1c0f38664446e62fd63cef33be2bd9d385432c7",
       "path": "kernel-core/src/config.rs",
@@ -1384,12 +1348,6 @@
       "count": 1,
       "fingerprint": "ac4f9c55a3e50e2d149c6912c6a9378d8f4952f4530c8e2b18609cd9267037ce",
       "path": "lifecycle-boot/src/lib.rs",
-      "rules": "HC-G7"
-    },
-    {
-      "count": 1,
-      "fingerprint": "ac94fce82a48c14308e4f0247b0ca2329d1b8f7c7c08ba01c014d378af42fce2",
-      "path": "kernel-core/src/fdt.rs",
       "rules": "HC-G7"
     },
     {
@@ -1511,12 +1469,6 @@
       "fingerprint": "baff9c9ea2b78b20249aff542eb328868238ae7e2d284d6c15d2b3bc33de620e",
       "path": "kernel-core/src/block.rs",
       "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "bb2a87f4ed84faafd02a1f6c5af706e6f4c7c2e9b08c8b4d57e5ed5460e1af9e",
-      "path": "kernel/src/arch/x86_64/ioapic.rs",
-      "rules": "HC-G7"
     },
     {
       "count": 1,
@@ -2043,5 +1995,5 @@
     "user",
     "xtask"
   ],
-  "total": 422
+  "total": 413
 }

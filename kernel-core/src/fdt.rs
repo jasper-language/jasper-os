@@ -18,7 +18,11 @@ pub const MAGIC: u32 = 0xd00d_feed;
 const COMPAT_VERSION: u32 = 16;
 /// 头部长度（字节）。
 const HEADER_LEN: usize = 40;
-/// 节点嵌套深度上限：超过即视为结构错误（防御恶意或损坏的输入）。
+/// 最大节点层数（根节点计 1 层）：超过即视为结构错误。
+///
+/// This is a parser-owned pre-allocation safety policy, not a hardware fact.
+/// 该值是解析器在无堆、固定 cells 栈下防止恶意深度输入的显式安全策略，
+/// 不是硬件设备树事实。
 pub const MAX_DEPTH: usize = 16;
 
 const TOKEN_BEGIN_NODE: u32 = 1;
@@ -182,6 +186,9 @@ impl<'a> Fdt<'a> {
                     let rest = s.get(pos..).ok_or(FdtError::BadStructure)?;
                     let nul = rest.iter().position(|&b| b == 0).ok_or(FdtError::BadStructure)?;
                     let name = core::str::from_utf8(&rest[..nul]).map_err(|_| FdtError::BadStructure)?;
+                    if depth == 0 && !name.is_empty() {
+                        return Err(FdtError::BadStructure);
+                    }
                     pos = align4(pos + nul + 1).ok_or(FdtError::BadStructure)?;
                     // 本节点的属性紧跟在名字之后、任何子节点之前
                     let props_start = pos;
@@ -518,11 +525,11 @@ impl<'a> Fdt<'a> {
         };
 
         let gic = if let Some(n) = self.find_compatible("arm,cortex-a15-gic")? {
-            Some(gic_info(n, false))
+            gic_info(n, false)
         } else if let Some(n) = self.find_compatible("arm,gic-400")? {
-            Some(gic_info(n, false))
+            gic_info(n, false)
         } else {
-            self.find_compatible("arm,gic-v3")?.map(|n| gic_info(n, true))
+            self.find_compatible("arm,gic-v3")?.and_then(|n| gic_info(n, true))
         };
 
         let timer_irq = self
@@ -530,30 +537,40 @@ impl<'a> Fdt<'a> {
             .and_then(|n| n.cell("interrupts", 7))
             .and_then(|cell| cell.checked_add(16));
 
-        let serial = self.find_compatible("arm,pl011")?.map(|n| {
-            let (base, size) = n.reg(0).unwrap_or((0, 0));
+        let serial = self.find_compatible("arm,pl011")?.and_then(|n| {
+            let (base, size) = n.reg(0)?;
+            if base == 0 || size == 0 {
+                return None;
+            }
             let irq = match (n.cell("interrupts", 0), n.cell("interrupts", 1)) {
                 (Some(0), Some(num)) => num.checked_add(32),
                 _ => None,
             };
-            SerialInfo {
+            Some(SerialInfo {
                 compatible: n.string("compatible").unwrap_or("arm,pl011"),
                 base,
                 size,
                 irq,
-            }
+            })
         });
 
-        let framebuffer = self.find_compatible("simple-framebuffer")?.map(|n| {
-            let (base, size) = n.reg(0).unwrap_or((0, 0));
-            FramebufferInfo {
+        let framebuffer = self.find_compatible("simple-framebuffer")?.and_then(|n| {
+            let (base, size) = n.reg(0)?;
+            let width = n.cell("width", 0)?;
+            let height = n.cell("height", 0)?;
+            let stride = n.cell("stride", 0)?;
+            let format = PixelFormat::from_name(n.string("format")?);
+            if base == 0 || size == 0 || width == 0 || height == 0 || stride == 0 {
+                return None;
+            }
+            Some(FramebufferInfo {
                 base,
                 size,
-                width: n.cell("width", 0).unwrap_or(0),
-                height: n.cell("height", 0).unwrap_or(0),
-                stride: n.cell("stride", 0).unwrap_or(0),
-                format: PixelFormat::from_name(n.string("format").unwrap_or("")),
-            }
+                width,
+                height,
+                stride,
+                format,
+            })
         });
 
         Ok(BootSummary { bootargs, initrd, psci, gic, timer_irq, serial, framebuffer })
@@ -568,12 +585,32 @@ fn psci_info<'a>(node: Node<'a>) -> PsciInfo<'a> {
     }
 }
 
-fn gic_info<'a>(node: Node<'a>, v3: bool) -> GicInfo<'a> {
-    let (dist, _) = node.reg(0).unwrap_or((0, 0));
-    let cpu = if v3 { None } else { node.reg(1).map(|(base, _)| base) };
-    let (redist, redist_size) = if v3 { node.reg(1).unwrap_or((0, 0)) } else { (0, 0) };
+fn gic_info<'a>(node: Node<'a>, v3: bool) -> Option<GicInfo<'a>> {
+    let (dist, dist_size) = node.reg(0)?;
+    if dist == 0 || dist_size == 0 {
+        return None;
+    }
+    let cpu = if v3 {
+        None
+    } else {
+        let (base, size) = node.reg(1)?;
+        if base == 0 || size == 0 {
+            return None;
+        }
+        Some(base)
+    };
+    let (redist, redist_size) = if v3 {
+        let region = node.reg(1)?;
+        if region.0 == 0 || region.1 == 0 {
+            return None;
+        }
+        region
+    } else {
+        (0, 0)
+    };
+    // The GICv3 DT binding defines the optional stride default as 128 KiB.
     let redist_stride = node.cell("redistributor-stride", 0).map(u64::from).unwrap_or(0x20_000);
-    GicInfo {
+    Some(GicInfo {
         compatible: node.string("compatible").unwrap_or(if v3 { "arm,gic-v3" } else { "arm,gic" }),
         v3,
         dist,
@@ -581,7 +618,7 @@ fn gic_info<'a>(node: Node<'a>, v3: bool) -> GicInfo<'a> {
         redist: (redist != 0).then_some(redist),
         redist_size,
         redist_stride,
-    }
+    })
 }
 
 /// 严格校验一个节点（`pos` 指向 `FDT_BEGIN_NODE`）。
@@ -591,7 +628,7 @@ fn validate_node(
     pos: &mut usize,
     depth: usize,
 ) -> Result<(), FdtError> {
-    if depth > MAX_DEPTH {
+    if depth >= MAX_DEPTH {
         return Err(FdtError::BadStructure);
     }
     if be32(s, *pos).ok_or(FdtError::BadStructure)? != TOKEN_BEGIN_NODE {
@@ -1053,6 +1090,36 @@ mod tests {
     }
 
     #[test]
+    fn depth_policy_is_identical_for_strict_and_walk_paths() {
+        for depth in [MAX_DEPTH, MAX_DEPTH + 1] {
+            let mut b = Builder::new();
+            b.begin("");
+            for _ in 1..depth {
+                b.begin("n");
+            }
+            for _ in 0..depth {
+                b.end();
+            }
+            let blob = b.finish(&[]);
+            let fdt = Fdt::parse(&blob).unwrap();
+            let expected = if depth <= MAX_DEPTH {
+                Ok(())
+            } else {
+                Err(FdtError::BadStructure)
+            };
+            assert_eq!(fdt.validate_strict(), expected, "strict depth={depth}");
+            assert_eq!(fdt.walk(|_| true), expected, "walk depth={depth}");
+        }
+
+        let mut b = Builder::new();
+        b.begin("not-root").end();
+        let blob = b.finish(&[]);
+        let fdt = Fdt::parse(&blob).unwrap();
+        assert_eq!(fdt.validate_strict(), Err(FdtError::BadStructure));
+        assert_eq!(fdt.walk(|_| true), Err(FdtError::BadStructure));
+    }
+
+    #[test]
     fn reg_rejects_short_or_oversized_cells() {
         let mut b = Builder::new();
         b.begin("").cells("#address-cells", &[3]).cells("#size-cells", &[1]);
@@ -1234,6 +1301,28 @@ mod tests {
         assert_eq!(gic.redist, Some(0x080a_0000));
         assert_eq!(gic.redist_size, 0x00f6_0000);
         assert_eq!(gic.redist_stride, 0x20_000);
+    }
+
+    #[test]
+    fn boot_summary_does_not_synthesize_missing_device_facts() {
+        let mut b = Builder::new();
+        b.begin("").cells("#address-cells", &[2]).cells("#size-cells", &[2]);
+        b.begin("intc@0")
+            .prop("compatible", b"arm,cortex-a15-gic\0")
+            .end();
+        b.begin("uart")
+            .prop("compatible", b"arm,pl011\0")
+            .end();
+        b.begin("framebuffer")
+            .prop("compatible", b"simple-framebuffer\0")
+            .cells("width", &[640])
+            .end();
+        b.end();
+        let blob = b.finish(&[]);
+        let summary = Fdt::parse(&blob).unwrap().boot_summary().unwrap();
+        assert_eq!(summary.gic, None, "GIC without distributor/CPU regions is absent");
+        assert_eq!(summary.serial, None, "PL011 without reg is absent");
+        assert_eq!(summary.framebuffer, None, "incomplete framebuffer is absent");
     }
 
     #[test]
