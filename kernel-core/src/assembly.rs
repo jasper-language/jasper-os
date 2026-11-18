@@ -1309,7 +1309,7 @@ mod tests {
             .collect();
         let modules: &'static [ModuleDecl] = Box::leak(modules.into_boxed_slice());
         let profile: &'static SystemProfile = Box::leak(Box::new(SystemProfile {
-            name: "large-assembly",
+            name: "large-cap",
             modules,
             ..T_BASE
         }));
@@ -1338,7 +1338,7 @@ mod tests {
             .collect();
         let modules: &'static [ModuleDecl] = Box::leak(modules.into_boxed_slice());
         let profile: &'static SystemProfile = Box::leak(Box::new(SystemProfile {
-            name: "wide-capabilities",
+            name: "wide-cap",
             modules,
             ..T_BASE
         }));
