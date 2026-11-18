@@ -16,15 +16,14 @@
 
 use core::ptr::addr_of_mut;
 
+use kernel_core::boot_memory::linear_map_end;
+
 use super::cpu::{self, read_sysreg, write_sysreg};
 use super::paging::desc;
+use super::platform;
 
 /// 全物理内存映射的偏移（顶级第 1 项的起点）。
 pub const PHYS_OFFSET: u64 = 1 << 39;
-/// Minimum early normal-RAM coverage outside the Pixel firmware path.
-const QEMU_EARLY_GIB: u64 = 2;
-/// Pixel firmware tables can sit above QEMU's RAM base.
-const PIXEL_EARLY_GIB: u64 = 4;
 /// 内核映像恒等映射可用的第 3 级表数（每张 2 MiB；与链接脚本中的映像大小上限一致）。
 const IMAGE_L3_TABLES: usize = 16;
 const GIB: u64 = 1 << 30;
@@ -154,11 +153,7 @@ pub unsafe fn build_boot_tables(early_normal: u64) -> bool {
             .add(first_normal)
             .write_volatile(normal_block(first_normal as u64 * GIB));
     }
-    let early_gib = if cfg!(any(feature = "pixel6a-smoke", feature = "pixel6a-full")) {
-        PIXEL_EARLY_GIB
-    } else {
-        QEMU_EARLY_GIB.max(normal_start / GIB + 1)
-    };
+    let early_gib = platform::minimum_linear_gib().max(normal_start / GIB + 1);
     let mut g = if normal_start < GIB { 1 } else { normal_start / GIB + 1 };
     while g < early_gib {
         phys_l1.add(g as usize).write_volatile(normal_block(g * GIB));
@@ -168,16 +163,19 @@ pub unsafe fn build_boot_tables(early_normal: u64) -> bool {
     true
 }
 
-/// 让全物理内存映射覆盖到物理地址 `end`（不含）；已覆盖的部分不变。返回实际覆盖到的地址：
-/// 至少是早期映射的范围，至多 512 GiB（超出部分不映射）。
+/// 让全物理内存映射覆盖到物理地址 `end`（不含）；已覆盖的部分不变。
+/// 返回实际覆盖到的地址；完整发现图超过 512 GiB 时返回 0，调用者必须失败关闭。
 /// Extend the linear physical map to cover `[0, end)`; returns the covered end.
 pub fn cover_phys(end: u64) -> u64 {
-    let minimum = if cfg!(any(feature = "pixel6a-smoke", feature = "pixel6a-full")) {
-        PIXEL_EARLY_GIB
-    } else {
-        QEMU_EARLY_GIB
+    let Some(covered) = linear_map_end(
+        end,
+        platform::minimum_linear_gib() * GIB,
+        512 * GIB,
+        GIB,
+    ) else {
+        return 0;
     };
-    let gib = end.div_ceil(GIB).clamp(minimum, 512) as usize;
+    let gib = (covered / GIB) as usize;
     let phys_l1 = addr_of_mut!(PHYS_L1) as *mut u64;
     for g in 1..gib {
         // SAFETY: PHYS_L1 is the module-owned direct-map table accessed through

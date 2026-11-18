@@ -133,12 +133,6 @@
       "rules": "HC-G7"
     },
     {
-      "count": 1,
-      "fingerprint": "0e6e0870f4b8a51027e89e1c792fdda286c0b55554ce975e2bdf9b1bdcab27ac",
-      "path": "kernel/src/arch/aarch64/mmu.rs",
-      "rules": "HC-G1"
-    },
-    {
       "count": 2,
       "fingerprint": "0e71ab577f174728643a90dacf52d2af8400f536c88929f5300e7ea70192386c",
       "path": "kernel/src/arch/x86_64/vmx.rs",
@@ -535,7 +529,7 @@
       "rules": "HC-G1"
     },
     {
-      "count": 6,
+      "count": 5,
       "fingerprint": "3f6a2adbc19a548a6cc0f663fab6db7c7f7753496daf1ee19a3b87c32ed96720",
       "path": "kernel/src/arch/aarch64/boot.rs",
       "rules": "HC-G3"
@@ -962,12 +956,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "6e6814c4602a1ba2c7410cce47a6d50322a54f99748e3825b3c7ada3d1c4eb2a",
-      "path": "kernel/src/arch/aarch64/mmu.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "70d62d156d1ec93a05bbab06ea5e37de84d5b0bd0439abe6603c8220044a8e27",
       "path": "compat-loader/src/execution.rs",
       "rules": "HC-G1"
@@ -1351,12 +1339,6 @@
       "rules": "HC-G7"
     },
     {
-      "count": 1,
-      "fingerprint": "a61d820b1c7d203707466b718800a9a8ef3e313045ab7d2d58d6256951adadb7",
-      "path": "kernel/src/arch/aarch64/mmu.rs",
-      "rules": "HC-G3"
-    },
-    {
       "count": 2,
       "fingerprint": "a6d4b5a94278727726cee6d7e1c0f38664446e62fd63cef33be2bd9d385432c7",
       "path": "kernel-core/src/config.rs",
@@ -1681,7 +1663,7 @@
       "rules": "HC-G8"
     },
     {
-      "count": 8,
+      "count": 6,
       "fingerprint": "d77cc829c1822579b8de7af2eb64604cc1fff075319b6269bfd7634626c85382",
       "path": "kernel/src/arch/aarch64/boot.rs",
       "rules": "HC-G3"
@@ -1876,12 +1858,6 @@
       "count": 1,
       "fingerprint": "ea6baf6b41e06584f0efe580f810faf77cd4ce27100cd549f275c163e04546b0",
       "path": "kernel/src/arch/aarch64/boot.rs",
-      "rules": "HC-G3"
-    },
-    {
-      "count": 1,
-      "fingerprint": "eb77861534b767a85278baf4e496c86383affb97a835d511d30b7280e7dc184e",
-      "path": "kernel/src/arch/aarch64/mmu.rs",
       "rules": "HC-G3"
     },
     {
@@ -2085,5 +2061,5 @@
     "user",
     "xtask"
   ],
-  "total": 435
+  "total": 428
 }

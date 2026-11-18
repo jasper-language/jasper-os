@@ -81,6 +81,7 @@ pub mod argcase;
 pub mod arbiter;
 pub mod bench;
 pub mod block;
+pub mod boot_memory;
 pub mod boot_stage;
 pub mod async_ring;
 #[cfg(feature = "runtime-registries")]

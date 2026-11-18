@@ -29,6 +29,7 @@ use super::samsung_uart;
 use super::{devirq, gic, mmu, semihost, smp, timer};
 #[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))]
 use super::uart;
+use super::platform::direct_boot_normal;
 use crate::boot::{self, BootSpec, FrameBufferFormat, FrameBufferInfo, PsciBoot, SerialBoot};
 
 /// 启动栈大小。
@@ -308,29 +309,6 @@ pub(crate) fn guest_stack_range() -> (u64, u64) {
     (start, start + GUEST_STACK_BYTES as u64)
 }
 
-/// Explicit Pixel verification firmware-table window.
-///
-/// This address is reachable only in the verification feature builds below and
-/// never acts as a generic direct-boot fallback.
-///
-/// 显式 Pixel 验收特性使用的固件表早期窗口；通用直接启动不得回退到该地址。
-#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
-const PIXEL_EARLY_NORMAL: u64 = 0x4000_0000; // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=explicit-pixel-uefi-table-window
-
-#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
-const fn direct_boot_normal(dtb_hint: u64) -> Option<u64> {
-    let _ = dtb_hint;
-    Some(PIXEL_EARLY_NORMAL)
-}
-
-#[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))]
-const fn direct_boot_normal(dtb_hint: u64) -> Option<u64> {
-    if dtb_hint != 0 && dtb_hint % (2 * 1024 * 1024) == 0 {
-        Some(dtb_hint)
-    } else {
-        None
-    }
-}
 /// 找不到设备树或必需设备时的退出码（与 x86_64 的失败码相同）。
 const EXIT_FAILURE: u32 = 35;
 
@@ -2058,6 +2036,14 @@ extern "C" fn jsr_aarch64_boot(
     }
 
     let covered = mmu::cover_phys(ram_end);
+    if covered < ram_end {
+        crate::kprintln!(
+            "[JSR-MMAP] discovered_end=0x{:x} admitted_end=0x{:x} rejected=true complete=false",
+            ram_end,
+            covered
+        );
+        semihost::exit(EXIT_FAILURE);
+    }
     // 保留：内核映像、设备树本身、设备树声明的固件保留区（分配器按「保留优先」处理重叠）
     let (img_start, img_end) = mmu::image_range();
     spec.push_region(PhysRegion { start: img_start, end: img_end, kind: RegionKind::Reserved });
@@ -2077,10 +2063,6 @@ extern "C" fn jsr_aarch64_boot(
                 kind: RegionKind::Reserved,
             });
         }
-    }
-    // 超出全物理内存映射范围的内存不能交给分配器（内核无法访问它们）
-    if ram_end > covered {
-        spec.push_region(PhysRegion { start: covered, end: ram_end, kind: RegionKind::Reserved });
     }
     // Publish usable ranges only after every reserved range has a chance to
     // consume the bounded table. This prevents a long usable list from

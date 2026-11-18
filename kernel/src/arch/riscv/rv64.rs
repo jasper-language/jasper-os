@@ -20,6 +20,8 @@
 
 use core::ptr::addr_of_mut;
 
+use kernel_core::boot_memory::linear_map_end;
+
 use super::cpu;
 use super::paging::pte;
 use crate::syscall::SyscallArgs;
@@ -174,10 +176,15 @@ pub fn boot_linear_required_end() -> u64 {
 /// 至少是早期映射的范围，至多 64 GiB（超出部分不映射）。
 /// Extend the linear physical map to cover `[0, end)`; returns the covered end.
 pub fn cover_phys(end: u64) -> u64 {
-    let gib = end
-        .max(boot_linear_required_end())
-        .div_ceil(GIB)
-        .min((PHYS_LAST - PHYS_FIRST) as u64) as usize;
+    let Some(covered) = linear_map_end(
+        end,
+        boot_linear_required_end(),
+        (PHYS_LAST - PHYS_FIRST) as u64 * GIB,
+        GIB,
+    ) else {
+        return 0;
+    };
+    let gib = (covered / GIB) as usize;
     let root = addr_of_mut!(ROOT) as *mut u64;
     for g in 0..gib {
         // SAFETY：ROOT 是本模块的启动顶级表，经恒等映射访问；只写全物理内存映射范围内的空项。

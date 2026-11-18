@@ -15,6 +15,11 @@ use std::path::PathBuf;
 use kernel_core::elf::ElfClass;
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(jasper_verification_platform)");
+    #[cfg(feature = "pixel6a-smoke")] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=explicit-smoke-selector
+    println!("cargo:rustc-cfg=jasper_verification_platform");
+    #[cfg(feature = "pixel6a-full")] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=explicit-full-selector
+    println!("cargo:rustc-cfg=jasper_verification_platform");
     let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("..");
     enforce_production_feature_isolation(&root);
     let reg_path = root.join("abi/system-ids.txt");

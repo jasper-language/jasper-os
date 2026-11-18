@@ -30,6 +30,7 @@ mod el2;
 mod gic;
 mod mmu;
 mod paging;
+mod platform;
 #[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
 mod samsung_uart;
 mod semihost;
