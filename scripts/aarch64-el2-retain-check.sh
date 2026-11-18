@@ -43,6 +43,7 @@ printf '%s\n' "$rc" >"$OUT/qemu.rc"
 grep -aFq \
   '[JSR-A64-EL] entry=2 execution=1 el2_available=true el2_retained=true' \
   "$OUT/serial.log"
+grep -aFq '[JSR-A64-EL2-STEP] stage2_open=true' "$OUT/serial.log"
 grep -aFq \
   '[JSR-A64-EL2] retained=true hvc_round_trip=true stage2_table=true stage2=true vm_exit=true virtual_irq=true timer_context=true vbar_context=true vcpu_context=true system_context=true fp_context=true driver_vm=false' \
   "$OUT/serial.log"

@@ -68,10 +68,14 @@ pub(crate) fn el2_hvc_probe() -> bool {
 fn el2_guest_stage2_fault_probe() -> bool {
     unsafe extern "C" {
         fn jsr_aarch64_el2_context_probe() -> u64;
+        static jsr_aarch64_stage2_hpfar: u64;
     }
     // SAFETY: The assembly probe saves all callee registers it rewrites, checks
     // the EL2-restored sentinels and preserves the AArch64 C ABI on return.
-    unsafe { jsr_aarch64_el2_context_probe() == 1 }
+    let ok = unsafe { jsr_aarch64_el2_context_probe() == 1 };
+    let hpfar = unsafe { core::ptr::addr_of!(jsr_aarch64_stage2_hpfar).read_volatile() };
+    crate::kprintln!("[JSR-A64-STAGE2] vm_exit={} hpfar=0x{:x}", ok, hpfar);
+    ok
 }
 
 #[cfg(feature = "aarch64-el2-retain-verify")]
@@ -523,6 +527,9 @@ el2_hvc:
     mov x12, #JSR_EL2_HVC_VIRTUAL_IRQ_ARM
     cmp x11, x12
     b.eq el2_guest_irq_enter
+    mov x12, #0x4a5a
+    cmp x11, x12
+    b.eq el2_stage2_open
     b el2_fail
 el2_stage2_enable:
     msr vtcr_el2, x1
@@ -540,6 +547,13 @@ el2_stage2_enable:
 el2_hvc_probe:
     mov x10, #1
     mov x11, #0x4a54
+    b el2_restore_host_with_reply
+el2_stage2_open:
+    tlbi vmalls12e1
+    dsb nsh
+    isb
+    mov x10, #1
+    mov x11, #0x4f50
     b el2_restore_host_with_reply
 el2_guest_enter:
     adrp x9, jsr_aarch64_el2_guest_active
@@ -601,6 +615,15 @@ el2_guest_unexpected:
     mov x11, #0x4655
     b el2_restore_guest
 el2_guest_stage2_fault:
+    // HPFAR_EL2 carries IPA[47:12] in bits [39:4].
+    // HPFAR_EL2 的 [39:4] 保存触发 fault 的 IPA[47:12]。
+    mrs x9, hpfar_el2
+    adrp x11, jsr_aarch64_stage2_hpfar
+    add x11, x11, :lo12:jsr_aarch64_stage2_hpfar
+    str x9, [x11]
+    ldr x10, =0x4fe000 // JASPER-HARDCODE-REVIEW: issue=22 source=aarch64-stage2-negative reason=expected-denied-ipa-page
+    cmp x9, x10
+    b.ne el2_guest_unexpected
     mov x10, #2
     mov x11, #0x4654
     b el2_restore_guest
@@ -782,7 +805,11 @@ jsr_aarch64_test_guest:
     movi v30.16b, #31
     movi v31.16b, #32
     fadd v0.2d, v1.2d, v2.2d
-    ldr x9, =0x8020000000
+    // The level-2 entry at IPA 0x4fe00000 is intentionally invalid. The load
+    // uses PHYS_OFFSET so stage 1 succeeds and stage 2 supplies the abort.
+    // IPA 0x4fe00000 的第二级表项被有意设为无效块；load 使用物理线性映射，
+    // 确保 stage 1 成功而由 stage 2 产生异常。
+    ldr x9, =0x804fe00000 // JASPER-HARDCODE-REVIEW: issue=22 source=aarch64-stage2-negative reason=qemu-ram-verification-denied-ipa
     ldr x10, [x9]
     hvc #0x4a56
     b .
@@ -967,6 +994,9 @@ jsr_aarch64_el2_guest_active:
 jsr_aarch64_el2_return_status:
     .quad 0
 jsr_aarch64_el2_return_reply:
+    .quad 0
+.global jsr_aarch64_stage2_hpfar
+jsr_aarch64_stage2_hpfar:
     .quad 0
 
     .previous
@@ -1406,13 +1436,31 @@ extern "C" fn jsr_aarch64_boot(
     if entry_exception_level == 2 {
         let round_trip = el2_hvc_probe();
         crate::kprintln!("[JSR-A64-EL2-STEP] hvc_round_trip={}", round_trip);
-        let table = round_trip && super::el2::initialize_identity_table();
+        let mut stage2_ram_base = None;
+        // This QEMU verification window is registered for later issue-35 review.
+        // 该 QEMU 验收窗口已登记，留待 issue-35 统一治理。
+        const STAGE2_NEGATIVE_WINDOW: u64 = 0xfe00000; // JASPER-HARDCODE-REVIEW: issue=22 source=aarch64-stage2-negative reason=qemu-negative-map-window
+        let memory_valid = fdt
+            .for_each_memory(|base, size| {
+                if stage2_ram_base.is_none()
+                    && base & ((1 << 30) - 1) == 0
+                    && size > STAGE2_NEGATIVE_WINDOW
+                {
+                    stage2_ram_base = Some(base);
+                }
+            })
+            .is_ok();
+        let table = round_trip
+            && memory_valid
+            && stage2_ram_base.is_some_and(super::el2::initialize_identity_table);
         crate::kprintln!("[JSR-A64-EL2-STEP] stage2_table={}", table);
         let stage2 = table && super::el2::enable_current_cpu();
         crate::kprintln!("[JSR-A64-EL2-STEP] stage2={}", stage2);
         let vm_exit = stage2 && el2_guest_stage2_fault_probe();
         crate::kprintln!("[JSR-A64-EL2-STEP] vm_exit={}", vm_exit);
-        let virtual_irq = vm_exit && el2_virtual_irq_probe();
+        let stage2_open = vm_exit && super::el2::open_verification_block();
+        crate::kprintln!("[JSR-A64-EL2-STEP] stage2_open={}", stage2_open);
+        let virtual_irq = stage2_open && el2_virtual_irq_probe();
         crate::kprintln!("[JSR-A64-EL2-STEP] virtual_irq={}", virtual_irq);
         let timer_context = virtual_irq;
         let vbar_context = timer_context;
