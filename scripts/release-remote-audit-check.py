@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import http.server
+import ssl
 import subprocess
 import tempfile
 import threading
@@ -70,14 +71,42 @@ def run(args: list[str]) -> subprocess.CompletedProcess[str]:
 
 def main() -> int:
     Sink.objects = {}
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Sink)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    port = server.server_address[1]
-    endpoint = f"http://127.0.0.1:{port}"
-    try:
-        with tempfile.TemporaryDirectory(prefix="jasper-remote-audit-") as temporary:
-            root = Path(temporary)
+    with tempfile.TemporaryDirectory(prefix="jasper-remote-audit-") as temporary:
+        root = Path(temporary)
+        certificate = root / "audit.crt"
+        private_key = root / "audit.key"
+        subprocess.run(
+            [
+                "openssl",
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=localhost",
+                "-addext",
+                "subjectAltName=DNS:localhost,IP:127.0.0.1",
+                "-keyout",
+                str(private_key),
+                "-out",
+                str(certificate),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Sink)
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.load_cert_chain(certificate, private_key)
+        server.socket = tls.wrap_socket(server.socket, server_side=True)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        port = server.server_address[1]
+        endpoint = f"https://localhost:{port}"
+        try:
             journal = root / "audit.jsonl"
             journal.write_text(
                 '{"epoch":1,"previous_sha256":"'
@@ -106,7 +135,8 @@ def main() -> int:
                 str(receipts),
                 "--bearer-token-file",
                 str(token),
-                "--development-allow-http-local",
+                "--ca-file",
+                str(certificate),
             ]
             first = run(common)
             if first.returncode != 0 or "STORED epoch=2" not in first.stdout:
@@ -162,10 +192,10 @@ def main() -> int:
             )
             if insecure.returncode == 0 or "endpoint must be HTTPS" not in insecure.stderr:
                 raise SystemExit("remote-audit-check: insecure endpoint was accepted")
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
     print(
         "release-remote-audit-check: PASS append=true idempotent=true "
         "tamper_rejected=true auth_rejected=true index_rejected=true https_required=true"
