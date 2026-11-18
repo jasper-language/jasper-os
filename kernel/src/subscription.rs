@@ -58,21 +58,30 @@ pub(crate) fn subscribe_in(t:&mut Table,pid:ObjId,handle:HandleId,policy:Policy)
 /// Kernel publishers resolve the source identity, never user-selected raw pointers.
 /// No allocation after publication begins. Object lock prevents partial observation.
 pub(crate) fn publish_value_in(t:&mut Table,id:ObjId,value:u64,snapshot_value:u64)->Result<(),Error> {
- let (event,subscribers)=match t.get_mut(id) {
+ let (mut snapshot,subscribers)=match t.get(id) {
   Ok(KObject::EventSource(s)) if !s.closed=>{
    // Bounded stack snapshot avoids a source borrow while accessing subscriptions.
    let mut ids=[None;MAX_SUBSCRIPTIONS as usize];
    for (slot,id) in ids.iter_mut().zip(&s.subscribers) {*slot=Some(*id);}
-   (s.snapshot.publish(snapshot_value).map_err(|_|Error::Exhausted)?,ids)
+   (s.snapshot,ids)
   },_=>return Err(Error::Closed),
  };
+ let event=snapshot.publish(snapshot_value).map_err(|_|Error::Exhausted)?;
+ for subid in subscribers.into_iter().flatten() {
+  if let Ok(KObject::Subscription(sub))=t.get(subid) {
+   if sub.source==id && !sub.closed && !sub.queue.accepts(event.version) {return Err(Error::Invalid);}
+  }
+ }
  for subid in subscribers.into_iter().flatten() {
   if let Ok(KObject::Subscription(sub))=t.get_mut(subid) {
    if sub.source==id && !sub.closed {
-    // Contiguous source version invariant; failure is never silently ignored.
-    assert!(sub.queue.publish(Snapshot {version:event.version,value}).is_ok(),"subscription sequence diverged");
+    if sub.queue.publish(Snapshot {version:event.version,value}).is_err() {sub.queue.resync_to(event);}
    }
   }
+ }
+ match t.get_mut(id) {
+  Ok(KObject::EventSource(source)) if !source.closed=>source.snapshot=event,
+  _=>return Err(Error::Closed),
  }
  for subid in subscribers.into_iter().flatten() {notify_in(t,subid);}
  Ok(())

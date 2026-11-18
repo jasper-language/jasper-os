@@ -27,8 +27,10 @@ impl<const N:usize> Queue<N> {
         Self {entries:[None;N],head:0,len:0,latest:snapshot,resync:false,policy}
     }
     fn require_resync(&mut self) { self.entries.fill(None);self.head=0;self.len=0;self.resync=true; }
+    pub fn accepts(&self,version:u64)->bool {self.latest.version.checked_add(1)==Some(version)}
+    pub fn resync_to(&mut self,snapshot:Snapshot) {self.latest=snapshot;self.require_resync();}
     pub fn publish(&mut self,snapshot:Snapshot)->Result<(),Error> {
-        if self.latest.version.checked_add(1)!=Some(snapshot.version) {return Err(Error::Sequence);}
+        if !self.accepts(snapshot.version) {return Err(Error::Sequence);}
         self.latest=snapshot;
         if self.resync {return Ok(());}
         if N==0 {self.require_resync();return Ok(());}
@@ -55,6 +57,20 @@ impl<const N:usize> Queue<N> {
         self.head=(self.head+1)%N;self.len-=1;Some(Delivery::Event(event))
     }
     pub const fn queued(&self)->usize {self.len}
+}
+
+#[cfg(test)]
+mod tests {
+ use super::*;
+ #[test]
+ fn divergence_is_recovered_as_one_resync_snapshot() {
+  let mut queue=Queue::<2>::new(Snapshot {version:1,value:10},Policy::Events);
+  assert!(queue.accepts(2));assert!(!queue.accepts(3));
+  queue.publish(Snapshot {version:2,value:20}).unwrap();
+  queue.resync_to(Snapshot {version:9,value:90});
+  assert_eq!(queue.take(),Some(Delivery::Resync(Snapshot {version:9,value:90})));
+  assert_eq!(queue.take(),None);assert!(queue.accepts(10));
+ }
 }
 
 #[cfg(kani)]

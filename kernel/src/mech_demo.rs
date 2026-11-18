@@ -254,7 +254,7 @@ static MECH_MODULES: &[ModuleDecl] = &[
 ];
 
 static MECH_PROFILE: SystemProfile = SystemProfile {
-    name: "mech-assembly",
+    name: "mech-asm",
     display_zh: "机制装配",
     display_en: "mechanism assembly",
     config: KernelConfig::STANDARD,
