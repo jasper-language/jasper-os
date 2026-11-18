@@ -40,13 +40,26 @@ runtime_active() {
     [ -r "$comm" ] || continue
     IFS= read -r name <"$comm" 2>/dev/null || continue
     case "$name" in
-      qemu-system*|VBoxHeadless) return 0 ;;
+      qemu-system*) return 0 ;;
     esac
   done
   return 1
 }
 if runtime_active; then
-  echo "FAIL another QEMU/VBox workload is already running" >&2
+  echo "FAIL another QEMU workload is already running" >&2
+  exit 75
+fi
+virtualbox_active() {
+  local comm name
+  for comm in /proc/[0-9]*/comm; do
+    [ -r "$comm" ] || continue
+    IFS= read -r name <"$comm" 2>/dev/null || continue
+    [ "$name" = VBoxHeadless ] && return 0
+  done
+  return 1
+}
+if [ "${NATIVE_INSTALL_ALLOW_VIRTUALBOX:-0}" != 1 ] && virtualbox_active; then
+  echo "FAIL another VirtualBox workload is already running" >&2
   exit 75
 fi
 
@@ -83,13 +96,13 @@ for round in 1 2 3; do
   ! grep -aqE '^\[JSR-(PANIC|NATIVE-INSTALL-FAIL)\]|KERNEL PANIC|panicked at' "$serial"
 done
 
-grep -aq '^\[JSR-NATIVE-INSTALL\] stage=format packages=1 installations=2 grants=1 runtimes=1 data=1 failed=0' \
+grep -aq '^\[JSR-NATIVE-INSTALL\] stage=format upgrade=true runtime_old=true data_new=true packages=2 installations=2 grants=1 runtimes=1 data=1 failed=0' \
   "$OUT/round-1.serial"
 ! grep -aq 'stage=format' "$OUT/round-2.serial"
 ! grep -aq 'stage=format' "$OUT/round-3.serial"
-grep -aq '^\[JSR-NATIVE-INSTALL\] stage=reopen packages=1 installations=2 grants=1 runtimes=1 data=1 bytes=26 faults=9 failed=0' \
+grep -aq '^\[JSR-NATIVE-INSTALL\] stage=reopen upgrade=true runtime_old=true data_new=true packages=2 installations=2 grants=1 runtimes=1 data=1 bytes=26 faults=9 failed=0' \
   "$OUT/round-2.serial"
-grep -aq '^\[JSR-NATIVE-INSTALL\] stage=reopen packages=1 installations=2 grants=1 runtimes=1 data=1 bytes=26 faults=9 failed=0' \
+grep -aq '^\[JSR-NATIVE-INSTALL\] stage=reopen upgrade=true runtime_old=true data_new=true packages=2 installations=2 grants=1 runtimes=1 data=1 bytes=26 faults=9 failed=0' \
   "$OUT/round-3.serial"
 
 echo "native-install-block: PASS rounds=3 faults=9 evidence=$OUT"

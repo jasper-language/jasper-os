@@ -175,6 +175,21 @@ impl<D: SectorIo> NativeInstallService<D> {
             .map_err(Into::into)
     }
 
+    /// Switch one installation to a newer package while preserving active
+    /// runtime package identities and the application data scope.
+    pub fn upgrade_application(
+        &mut self,
+        caller: InstallServiceCaller,
+        installation: InstallationKey,
+        package: PackageKey,
+    ) -> Result<(), InstallServiceError> {
+        self.require_update_authority(caller, installation)?;
+        let subjects = [caller.subject];
+        self.store
+            .upgrade(Actor::new(&subjects), installation, package)
+            .map_err(Into::into)
+    }
+
     /// A non-system caller may grant only from an installation it updates.
     pub fn add_grant(
         &mut self,
@@ -626,6 +641,88 @@ mod tests {
         service.uninstall(owner, installation).unwrap();
         service.destroy_data(owner, data).unwrap();
         assert_eq!(service.store().installation_count_for(package), 0);
+    }
+
+    #[test]
+    fn service_updates_own_application_without_retargeting_active_runtime() {
+        let store = PersistentInstallStore::format(MemoryDisk::new(64)).unwrap();
+        let mut service = NativeInstallService::new(store);
+        let system = system();
+        let owner = workload(7);
+        let outsider = workload(8);
+        let old_package = service
+            .install_package(
+                system,
+                PackageSpec {
+                    app_id: 0x5158,
+                    publisher: 9,
+                    content: [0x51; 32],
+                    version: 1,
+                },
+                b"app-v1",
+            )
+            .unwrap();
+        let new_package = service
+            .install_package(
+                system,
+                PackageSpec {
+                    app_id: 0x5158,
+                    publisher: 9,
+                    content: [0x52; 32],
+                    version: 2,
+                },
+                b"app-v2",
+            )
+            .unwrap();
+        let installation = service
+            .register(
+                owner,
+                old_package,
+                OwnerScope::Workload(7),
+                PackageSource::UserImport,
+                Subject::Workload(7),
+            )
+            .unwrap();
+        service
+            .add_grant(
+                owner,
+                installation,
+                Subject::Workload(7),
+                GrantRights::DISCOVER.union(GrantRights::START),
+                None,
+            )
+            .unwrap();
+        let runtime = service
+            .start(owner, installation, PrincipalKind::Workload, 1, 10)
+            .unwrap();
+        let data = service
+            .create_data(
+                owner,
+                installation,
+                Subject::Workload(7),
+                DataOwnerKind::PrivateUser,
+            )
+            .unwrap();
+
+        assert_eq!(
+            service.upgrade_application(outsider, installation, new_package),
+            Err(InstallServiceError::Unauthorized)
+        );
+        service
+            .upgrade_application(owner, installation, new_package)
+            .unwrap();
+        assert_eq!(
+            service.store().runtime(runtime).unwrap().package,
+            old_package
+        );
+        assert_eq!(service.store().data(data).unwrap().package, new_package);
+        assert_eq!(
+            service
+                .query(owner, installation, 11)
+                .unwrap()
+                .package,
+            new_package
+        );
     }
 
     #[test]

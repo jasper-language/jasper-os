@@ -351,6 +351,9 @@ pub enum InstallError {
     InvalidGrant,
     InvalidPrincipal,
     InvalidAuthority,
+    PublisherMismatch,
+    VersionNotNewer,
+    AmbiguousDataScope,
     StaleKey,
     Capacity,
     IdExhausted,
@@ -369,6 +372,9 @@ impl InstallError {
             Self::InvalidGrant => "system.install.error.grant",
             Self::InvalidPrincipal => "system.install.error.principal",
             Self::InvalidAuthority => "system.install.error.authority",
+            Self::PublisherMismatch => "system.install.error.publisher",
+            Self::VersionNotNewer => "system.install.error.version",
+            Self::AmbiguousDataScope => "system.install.error.data_scope",
             Self::StaleKey => "system.install.error.stale",
             Self::Capacity => "system.install.error.capacity",
             Self::IdExhausted => "system.install.error.ids_exhausted",
@@ -411,6 +417,10 @@ pub struct GrantSnapshot {
 pub struct RuntimeSnapshot {
     pub key: RuntimeKey,
     pub installation: InstallationKey,
+    /// Package identity frozen at launch. An application update changes the
+    /// installation's current package but cannot retarget an active session.
+    /// 启动时冻结的包身份；应用升级不能改写已运行会话的代码身份。
+    pub package: PackageKey,
     pub principal: RuntimePrincipal,
     pub started_at: u64,
 }
@@ -419,6 +429,10 @@ pub struct RuntimeSnapshot {
 pub struct DataSnapshot {
     pub key: DataKey,
     pub package: PackageKey,
+    /// Installation lineage. It may name an uninstalled installation because
+    /// owned data survives code removal; `None` is only possible for legacy
+    /// snapshots whose original installation cannot be proven.
+    pub installation: Option<InstallationKey>,
     pub owner: Subject,
     pub kind: DataOwnerKind,
 }
@@ -612,6 +626,7 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
                             )
                     )
                     || model.installation_record(record.installation).is_err()
+                    || model.package_record(record.package).is_err()
                 {
                     return Err(InstallError::StaleKey);
                 }
@@ -624,6 +639,11 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
                     || model.data_generations[slot] != record.key.generation
                     || !record.owner.is_valid()
                     || model.package_record(record.package).is_err()
+                    || record.installation.is_some_and(|installation| {
+                        model
+                            .installation_record(installation)
+                            .is_ok_and(|current| current.package != record.package)
+                    })
                 {
                     return Err(InstallError::StaleKey);
                 }
@@ -669,6 +689,7 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
 
     pub fn find_data(
         &self,
+        installation: InstallationKey,
         package: PackageKey,
         owner: Subject,
         kind: DataOwnerKind,
@@ -677,7 +698,10 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
             .iter()
             .flatten()
             .find(|record| {
-                record.package == package && record.owner == owner && record.kind == kind
+                record.installation == Some(installation)
+                    && record.package == package
+                    && record.owner == owner
+                    && record.kind == kind
             })
             .map(|record| record.key)
     }
@@ -803,6 +827,53 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
         Ok(())
     }
 
+    /// Atomically switches one stable installation to a newer package.
+    ///
+    /// The app and publisher identities cannot change. Existing runtimes keep
+    /// the package identity frozen at launch, while data owned by this
+    /// installation moves to the new package identity so versions share the
+    /// same application data scope.
+    ///
+    /// 将一个稳定安装原子切换到更新的包。AppID 与 publisher 不得改变；已运行
+    /// 会话保留启动时的包身份，安装所属数据迁移到新包身份以保持同一应用数据域。
+    pub fn upgrade(
+        &mut self,
+        actor: Actor<'_>,
+        installation: InstallationKey,
+        package: PackageKey,
+    ) -> Result<(), InstallError> {
+        if !self.can_update(actor, installation) {
+            return Err(InstallError::NotAuthorized);
+        }
+        let slot = self.installation_slot(installation)?;
+        let current = self.installations[slot].ok_or(InstallError::StaleKey)?;
+        let current_package = self.package_record(current.package)?;
+        let next_package = self.package_record(package)?;
+        if current_package.spec.app_id != next_package.spec.app_id
+            || current_package.spec.publisher != next_package.spec.publisher
+        {
+            return Err(InstallError::PublisherMismatch);
+        }
+        if next_package.spec.version <= current_package.spec.version {
+            return Err(InstallError::VersionNotNewer);
+        }
+        if self.data.iter().flatten().any(|data| {
+            data.package == current.package && data.installation.is_none()
+        }) {
+            return Err(InstallError::AmbiguousDataScope);
+        }
+        for data in self.data.iter_mut().flatten() {
+            if data.installation == Some(installation) {
+                data.package = package;
+            }
+        }
+        self.installations[slot]
+            .as_mut()
+            .ok_or(InstallError::StaleKey)?
+            .package = package;
+        Ok(())
+    }
+
     /// Start snapshots the principal and effective rights. Revocation after this
     /// point affects only new starts, not the running instance's authority.
     pub fn start(
@@ -818,7 +889,8 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
         if !actor.contains(principal.subject) {
             return Err(InstallError::NotAuthorized);
         }
-        if !self.installation_record(installation)?.enabled {
+        let installation_record = self.installation_record(installation)?;
+        if !installation_record.enabled {
             return Err(InstallError::Disabled);
         }
         let rights = self
@@ -832,6 +904,7 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
         self.runtimes[slot as usize] = Some(RuntimeSnapshot {
             key,
             installation,
+            package: installation_record.package,
             principal: RuntimePrincipal {
                 kind: principal.kind,
                 subject: principal.subject,
@@ -881,6 +954,7 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
         self.data[slot as usize] = Some(DataSnapshot {
             key,
             package,
+            installation: Some(installation),
             owner,
             kind,
         });
@@ -893,6 +967,7 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
         Ok(DataSnapshot {
             key,
             package: record.package,
+            installation: record.installation,
             owner: record.owner,
             kind: record.kind,
         })
@@ -964,6 +1039,7 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
             .flatten()
             .any(|installation| installation.package == key)
             || self.data.iter().flatten().any(|data| data.package == key)
+            || self.runtimes.iter().flatten().any(|runtime| runtime.package == key)
         {
             return Err(InstallError::InUse);
         }
@@ -1332,6 +1408,189 @@ mod tests {
             .uninstall(Actor::new(&actor_b), installation_b)
             .unwrap();
         model.destroy_package(package).unwrap();
+    }
+
+    #[test]
+    fn application_upgrade_preserves_old_runtime_and_moves_shared_data() {
+        let mut model = InstallModel::<4, 2, 3, 2, 4>::new();
+        let app_id = 0x2200;
+        let old_package = model
+            .add_package(PackageSpec {
+                app_id,
+                publisher: 7,
+                content: digest(0x71),
+                version: 1,
+            })
+            .unwrap();
+        let new_package = model
+            .add_package(PackageSpec {
+                app_id,
+                publisher: 7,
+                content: digest(0x72),
+                version: 2,
+            })
+            .unwrap();
+        let wrong_publisher = model
+            .add_package(PackageSpec {
+                app_id,
+                publisher: 8,
+                content: digest(0x73),
+                version: 3,
+            })
+            .unwrap();
+        let downgrade = model
+            .add_package(PackageSpec {
+                app_id,
+                publisher: 7,
+                content: digest(0x74),
+                version: 1,
+            })
+            .unwrap();
+        let installation = model
+            .install(InstallSpec {
+                package: old_package,
+                scope: scope_user(10),
+                source: PackageSource::UserImport,
+                update_authority: UpdateAuthority {
+                    subject: Subject::User(10),
+                },
+            })
+            .unwrap();
+        let other_installation = model
+            .install(InstallSpec {
+                package: old_package,
+                scope: scope_user(20),
+                source: PackageSource::UserImport,
+                update_authority: UpdateAuthority {
+                    subject: Subject::User(20),
+                },
+            })
+            .unwrap();
+        model
+            .add_grant(GrantSpec {
+                installation,
+                subject: Subject::User(10),
+                rights: GrantRights::DISCOVER.union(GrantRights::START),
+                expires_at: None,
+            })
+            .unwrap();
+        let actor = [Subject::User(10)];
+        let old_runtime = model
+            .start(Actor::new(&actor), installation, principal(10), 1)
+            .unwrap();
+        let data = model
+            .create_data(
+                installation,
+                Subject::User(10),
+                DataOwnerKind::PrivateUser,
+            )
+            .unwrap();
+        let other_data = model
+            .create_data(
+                other_installation,
+                Subject::User(20),
+                DataOwnerKind::PrivateUser,
+            )
+            .unwrap();
+
+        assert_eq!(
+            model.upgrade(Actor::new(&actor), installation, wrong_publisher),
+            Err(InstallError::PublisherMismatch)
+        );
+        assert_eq!(
+            model.upgrade(Actor::new(&actor), installation, downgrade),
+            Err(InstallError::VersionNotNewer)
+        );
+        assert_eq!(
+            model.installation(installation).unwrap().package,
+            old_package
+        );
+        assert_eq!(model.data(data).unwrap().package, old_package);
+        assert_eq!(
+            model.runtime(old_runtime).unwrap().package,
+            old_package
+        );
+
+        model
+            .upgrade(Actor::new(&actor), installation, new_package)
+            .unwrap();
+        assert_eq!(
+            model.installation(installation).unwrap().package,
+            new_package
+        );
+        assert_eq!(model.data(data).unwrap().package, new_package);
+        assert_eq!(
+            model.data(other_data).unwrap().package,
+            old_package,
+            "another user's installation must retain its own package data"
+        );
+        assert_eq!(
+            model.installation(other_installation).unwrap().package,
+            old_package
+        );
+        assert_eq!(
+            model.runtime(old_runtime).unwrap().package,
+            old_package,
+            "an update must not retarget an already running application"
+        );
+        let new_runtime = model
+            .start(Actor::new(&actor), installation, principal(10), 2)
+            .unwrap();
+        assert_eq!(model.runtime(new_runtime).unwrap().package, new_package);
+        assert_eq!(model.destroy_package(old_package), Err(InstallError::InUse));
+        model.stop_runtime(old_runtime).unwrap();
+        model
+            .uninstall(Actor::new(&[Subject::User(20)]), other_installation)
+            .unwrap();
+        model.destroy_data(other_data).unwrap();
+        model.destroy_package(old_package).unwrap();
+    }
+
+    #[test]
+    fn legacy_ambiguous_data_scope_blocks_upgrade_instead_of_guessing() {
+        let mut model = InstallModel::<2, 1, 1, 1, 1>::new();
+        let old_package = model.add_package(package_spec(0x75)).unwrap();
+        let new_package = model
+            .add_package(PackageSpec {
+                app_id: package_spec(0x75).app_id,
+                publisher: 7,
+                content: digest(0x76),
+                version: 2,
+            })
+            .unwrap();
+        let installation = model
+            .install(InstallSpec {
+                package: old_package,
+                scope: scope_user(10),
+                source: PackageSource::UserImport,
+                update_authority: UpdateAuthority {
+                    subject: Subject::User(10),
+                },
+            })
+            .unwrap();
+        let data = model
+            .create_data(
+                installation,
+                Subject::User(10),
+                DataOwnerKind::PrivateUser,
+            )
+            .unwrap();
+        model.data[data.slot as usize]
+            .as_mut()
+            .unwrap()
+            .installation = None;
+        assert_eq!(
+            model.upgrade(
+                Actor::new(&[Subject::User(10)]),
+                installation,
+                new_package
+            ),
+            Err(InstallError::AmbiguousDataScope)
+        );
+        assert_eq!(
+            model.installation(installation).unwrap().package,
+            old_package
+        );
     }
 
     #[test]

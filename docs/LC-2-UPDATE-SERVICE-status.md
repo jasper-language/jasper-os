@@ -21,6 +21,30 @@ Issue #39 的全系统统一授权、完整并发/断电故障矩阵和 Pixel �
 汇总证据见 `evidence/lc2-exit-matrix-20261118/README.md`。该矩阵关闭软件
 Profile 的事务和故障出口，不关闭 Pixel 物理安装门。
 
+## 统一应用升级与数据作用域
+
+原生安装模型现在增加应用版本切换事务，而不要求普通应用使用系统 A/B：
+
+- 同一稳定 `InstallationKey` 只接受相同 AppID 和 publisher 的更高
+  `PackageSpec.version`；同名不同 publisher 与同版本/降级均失败且不产生部分变更；
+- 更新前已启动的 `RuntimeSnapshot` 冻结原包身份，运行中的旧会话不会被静默切换到
+  新代码；后续启动读取安装当前版本；
+- 应用数据记录持久化安装谱系，仅迁移目标安装作用域的数据。同一共享包被其他用户、
+  组或租户安装时，其数据保持原版本作用域；
+- 卸载代码仍不删除独立数据；旧安装谱系可以失效，但数据包身份仍阻止底层包字节被
+  提前回收；
+- 安装快照格式升级为 v3，v1/v2 快照可读取；旧快照中无法证明安装谱系的数据会在
+  升级时返回 `system.install.error.data_scope`，不做猜测迁移。
+
+真实 OVMF/virtio-blk 三轮演练在首轮创建 v1/v2 两个包、两个用户安装、运行会话、
+授权和数据，升级用户 7 后重启两次。三轮都保持用户 7 当前包为 v2、已运行会话仍为
+v1、用户 7 数据为 v2、用户 8 安装及数据仍为 v1，且九个持久化写/flush 中断点仍
+保持完整旧状态或完整新状态。QEMU 退出码均为 33，资源均回到基线。证据见
+`evidence/lc2-app-upgrade-20261118/`。
+
+该切片仍没有新增用户 ABI，也没有替代 Issue #38 要求的多用户策略、企业策略、
+依赖求解、可逆 Schema 迁移、发布者密钥轮换和真实整机闭环。
+
 Pixel 6a 的只读 LUN/GPT 审计没有发现 Jasper 专用持久范围。现有 AOSP/Linux
 UFS 后端为 GPL-2.0 系列并依赖 Linux 内核 API，upstream U-Boot 也缺少
 GS101/Tensor UFS platform driver。因此 Pixel 安装、更新、回滚和断电矩阵必须

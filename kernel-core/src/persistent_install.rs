@@ -37,7 +37,8 @@ const SNAPSHOT_MAX_BYTES: usize = SLOT_BODY_UNITS * STORAGE_UNIT_BYTES;
 const FORMAT_MAGIC: &[u8; 8] = b"JSIINST1";
 const SNAPSHOT_MAGIC: &[u8; 8] = b"JSISNAP1";
 const BLOB_MAGIC: &[u8; 8] = b"JSIBLOB1";
-const FORMAT_VERSION: u32 = 1;
+const LEGACY_FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PersistentInstallError {
@@ -173,8 +174,9 @@ impl<D: SectorIo> PersistentInstallStore<D> {
         device
             .read_unit(0, &mut header)
             .map_err(|_| PersistentInstallError::Io)?;
+        let header_version = u32::from_le_bytes(header[8..12].try_into().unwrap());
         if &header[..8] != FORMAT_MAGIC
-            || u32::from_le_bytes(header[8..12].try_into().unwrap()) != FORMAT_VERSION
+            || !(LEGACY_FORMAT_VERSION..=FORMAT_VERSION).contains(&header_version)
         {
             return Err(PersistentInstallError::InvalidFormat);
         }
@@ -199,6 +201,13 @@ impl<D: SectorIo> PersistentInstallStore<D> {
         };
         store.scan_blobs()?;
         store.reclaim_orphan_blobs()?;
+        if header_version != FORMAT_VERSION {
+            let mut migrated = [0u8; STORAGE_UNIT_BYTES];
+            migrated[..8].copy_from_slice(FORMAT_MAGIC);
+            migrated[8..12].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+            store.write_unit(0, &migrated)?;
+            store.flush()?;
+        }
         Ok(store)
     }
 
@@ -224,6 +233,12 @@ impl<D: SectorIo> PersistentInstallStore<D> {
     pub fn runtime(&self, key: RuntimeKey) -> Result<RuntimeSnapshot, PersistentInstallError> {
         self.model
             .runtime(key)
+            .map_err(PersistentInstallError::Install)
+    }
+
+    pub fn data(&self, key: DataKey) -> Result<DataSnapshot, PersistentInstallError> {
+        self.model
+            .data(key)
             .map_err(PersistentInstallError::Install)
     }
 
@@ -334,6 +349,21 @@ impl<D: SectorIo> PersistentInstallStore<D> {
         self.commit_model(next)
     }
 
+    /// Persist one application update transaction. Existing runtime records
+    /// retain their launch package while the installation and its data scope
+    /// move atomically to the new package.
+    pub fn upgrade(
+        &mut self,
+        actor: Actor<'_>,
+        installation: InstallationKey,
+        package: PackageKey,
+    ) -> Result<(), PersistentInstallError> {
+        let mut next = self.model.clone();
+        next.upgrade(actor, installation, package)
+            .map_err(PersistentInstallError::Install)?;
+        self.commit_model(next)
+    }
+
     pub fn start(
         &mut self,
         actor: Actor<'_>,
@@ -367,7 +397,7 @@ impl<D: SectorIo> PersistentInstallStore<D> {
             .installation(installation)
             .map_err(PersistentInstallError::Install)?
             .package;
-        if let Some(key) = self.model.find_data(package, owner, kind) {
+        if let Some(key) = self.model.find_data(installation, package, owner, kind) {
             return Ok(key);
         }
         let mut next = self.model.clone();
@@ -529,7 +559,10 @@ impl<D: SectorIo> PersistentInstallStore<D> {
             let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
             let len = u32::from_le_bytes(header[44..48].try_into().unwrap()) as usize;
             let expected = u32::from_le_bytes(header[48..52].try_into().unwrap());
-            if version != FORMAT_VERSION || len == 0 || len > STORAGE_UNIT_BYTES {
+            if !(LEGACY_FORMAT_VERSION..=FORMAT_VERSION).contains(&version)
+                || len == 0
+                || len > STORAGE_UNIT_BYTES
+            {
                 continue;
             }
             let mut body = [0u8; STORAGE_UNIT_BYTES];
@@ -640,8 +673,9 @@ fn read_slot<D: SectorIo>(
     device
         .read_unit(sector_for_unit(base + SLOT_BODY_UNITS)?, &mut marker)
         .map_err(|_| PersistentInstallError::Io)?;
+    let version = u32::from_le_bytes(marker[8..12].try_into().unwrap());
     if &marker[..8] != SNAPSHOT_MAGIC
-        || u32::from_le_bytes(marker[8..12].try_into().unwrap()) != FORMAT_VERSION
+        || !(LEGACY_FORMAT_VERSION..=FORMAT_VERSION).contains(&version)
     {
         return Ok(None);
     }
@@ -672,7 +706,7 @@ fn read_slot<D: SectorIo>(
         return Ok(None);
     }
     let mut source = SnapshotUnitReader::new(device, base, len);
-    let state = decode_state(&mut source)?;
+    let state = decode_state(&mut source, version)?;
     source.finish()?;
     Ok(Some((sequence, state)))
 }
@@ -754,6 +788,7 @@ fn encode_model<S: SnapshotSink>(
         if let Some(record) = record {
             sink.put_u64(record.key.to_raw())?;
             sink.put_u64(record.installation.to_raw())?;
+            sink.put_u64(record.package.to_raw())?;
             sink.put_u8(principal_kind_tag(record.principal.kind))?;
             put_subject(sink, record.principal.subject)?;
             sink.put_u32(record.principal.generation)?;
@@ -771,6 +806,10 @@ fn encode_model<S: SnapshotSink>(
         if let Some(record) = record {
             sink.put_u64(record.key.to_raw())?;
             sink.put_u64(record.package.to_raw())?;
+            sink.put_u8(u8::from(record.installation.is_some()))?;
+            if let Some(installation) = record.installation {
+                sink.put_u64(installation.to_raw())?;
+            }
             put_subject(sink, record.owner)?;
             sink.put_u8(data_kind_tag(record.kind))?;
         }
@@ -782,11 +821,14 @@ fn encode_model<S: SnapshotSink>(
 }
 
 #[inline(never)]
-fn decode_state<R: SnapshotSource>(source: &mut R) -> Result<Box<State>, PersistentInstallError> {
+fn decode_state<R: SnapshotSource>(
+    source: &mut R,
+    version: u32,
+) -> Result<Box<State>, PersistentInstallError> {
     let mut cursor = DecodeReader { source };
     let mut magic = [0u8; 8];
     cursor.read_exact(&mut magic)?;
-    if &magic != SNAPSHOT_MAGIC || cursor.get_u32()? != FORMAT_VERSION {
+    if &magic != SNAPSHOT_MAGIC || cursor.get_u32()? != version {
         return Err(PersistentInstallError::Corrupt);
     }
     let mut state = Box::new(State {
@@ -882,6 +924,14 @@ fn decode_state<R: SnapshotSource>(source: &mut R) -> Result<Box<State>, Persist
                 RuntimeKey::from_raw(cursor.get_u64()?).ok_or(PersistentInstallError::Corrupt)?;
             let installation = InstallationKey::from_raw(cursor.get_u64()?)
                 .ok_or(PersistentInstallError::Corrupt)?;
+            let package = if version == LEGACY_FORMAT_VERSION {
+                state.installations[installation.to_raw() as u16 as usize]
+                    .map(|record| record.package)
+                    .ok_or(PersistentInstallError::Corrupt)?
+            } else {
+                PackageKey::from_raw(cursor.get_u64()?)
+                    .ok_or(PersistentInstallError::Corrupt)?
+            };
             let kind = get_principal_kind(cursor.get_u8()?)?;
             let subject = get_subject(&mut cursor)?;
             let generation = cursor.get_u32()?;
@@ -894,6 +944,7 @@ fn decode_state<R: SnapshotSource>(source: &mut R) -> Result<Box<State>, Persist
             *record = Some(RuntimeSnapshot {
                 key,
                 installation,
+                package,
                 principal: crate::native_install::RuntimePrincipal {
                     kind,
                     subject,
@@ -914,11 +965,20 @@ fn decode_state<R: SnapshotSource>(source: &mut R) -> Result<Box<State>, Persist
                 DataKey::from_raw(cursor.get_u64()?).ok_or(PersistentInstallError::Corrupt)?;
             let package =
                 PackageKey::from_raw(cursor.get_u64()?).ok_or(PersistentInstallError::Corrupt)?;
+            let installation = if version >= 3 && cursor.get_u8()? != 0 {
+                Some(
+                    InstallationKey::from_raw(cursor.get_u64()?)
+                        .ok_or(PersistentInstallError::Corrupt)?,
+                )
+            } else {
+                None
+            };
             let owner = get_subject(&mut cursor)?;
             let kind = get_data_kind(cursor.get_u8()?)?;
             *record = Some(DataSnapshot {
                 key,
                 package,
+                installation,
                 owner,
                 kind,
             });
@@ -1322,6 +1382,15 @@ mod tests {
         }
     }
 
+    fn package_version(byte: u8, app_id: u64, publisher: u64, version: u32) -> PackageSpec {
+        PackageSpec {
+            app_id,
+            publisher,
+            content: [byte; CONTENT_BYTES],
+            version,
+        }
+    }
+
     fn install_spec(package: PackageKey, user: u64, source: PackageSource) -> InstallSpec {
         InstallSpec {
             package,
@@ -1476,6 +1545,84 @@ mod tests {
             reopened.read_package_bytes(package_spec(0x51).content, &mut [0u8; 32]),
             Err(PersistentInstallError::NotFound)
         );
+    }
+
+    #[test]
+    fn application_upgrade_survives_reopen_with_frozen_runtime_and_data_scope() {
+        let disk = MemoryDisk::new(TOTAL_UNITS);
+        let mut store = PersistentInstallStore::format(disk).unwrap();
+        let app_id = 0x3200;
+        let old_spec = package_version(0x71, app_id, 7, 1);
+        let new_spec = package_version(0x72, app_id, 7, 2);
+        let old_package = store.install_package(old_spec, b"app-v1").unwrap();
+        let new_package = store.install_package(new_spec, b"app-v2").unwrap();
+        let installation = store
+            .install(install_spec(old_package, 7, PackageSource::UserImport))
+            .unwrap();
+        store
+            .add_grant(GrantSpec {
+                installation,
+                subject: Subject::User(7),
+                rights: GrantRights::DISCOVER.union(GrantRights::START),
+                expires_at: None,
+            })
+            .unwrap();
+        let actor = Actor::new(&[Subject::User(7)]);
+        let old_runtime = store
+            .start(
+                actor,
+                installation,
+                PrincipalSpec {
+                    kind: PrincipalKind::User,
+                    subject: Subject::User(7),
+                    generation: 1,
+                    domain: DomainKey {
+                        id: 7,
+                        generation: 1,
+                    },
+                },
+                11,
+            )
+            .unwrap();
+        let data = store
+            .create_data(installation, Subject::User(7), DataOwnerKind::PrivateUser)
+            .unwrap();
+        store.upgrade(actor, installation, new_package).unwrap();
+        assert_eq!(
+            store.destroy_package(old_package),
+            Err(PersistentInstallError::Install(InstallError::InUse))
+        );
+
+        let disk = store.into_device();
+        let mut reopened = PersistentInstallStore::open(disk).unwrap();
+        assert_eq!(
+            reopened.installation(installation).unwrap().package,
+            new_package
+        );
+        assert_eq!(reopened.runtime(old_runtime).unwrap().package, old_package);
+        assert_eq!(reopened.data(data).unwrap().package, new_package);
+        let new_runtime = reopened
+            .start(
+                actor,
+                installation,
+                PrincipalSpec {
+                    kind: PrincipalKind::User,
+                    subject: Subject::User(7),
+                    generation: 1,
+                    domain: DomainKey {
+                        id: 7,
+                        generation: 1,
+                    },
+                },
+                12,
+            )
+            .unwrap();
+        assert_eq!(
+            reopened.runtime(new_runtime).unwrap().package,
+            new_package
+        );
+        reopened.stop_runtime(old_runtime).unwrap();
+        reopened.destroy_package(old_package).unwrap();
     }
 
     #[test]

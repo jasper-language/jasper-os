@@ -35,6 +35,14 @@ const PACKAGE: PackageSpec = PackageSpec {
     content: PACKAGE_CONTENT,
     version: 1,
 };
+const PACKAGE_V2_CONTENT: [u8; 32] = [0x5b; 32];
+const PACKAGE_V2_BYTES: &[u8] = b"native-install-persistence-v2";
+const PACKAGE_V2: PackageSpec = PackageSpec {
+    app_id: PACKAGE.app_id,
+    publisher: PACKAGE.publisher,
+    content: PACKAGE_V2_CONTENT,
+    version: 2,
+};
 
 static FAILED: AtomicU32 = AtomicU32::new(0);
 
@@ -308,6 +316,9 @@ fn verify_baseline(
     let Some(package) = store.find_package(PACKAGE) else {
         return false;
     };
+    let Some(package_v2) = store.find_package(PACKAGE_V2) else {
+        return false;
+    };
     let mut bytes = [0u8; 64];
     let Ok(length) = store.read_package_bytes(PACKAGE_CONTENT, &mut bytes) else {
         return false;
@@ -316,8 +327,9 @@ fn verify_baseline(
     let packages = state.packages.iter().flatten().count();
     length == PACKAGE_BYTES.len()
         && &bytes[..length] == PACKAGE_BYTES
-        && packages == if extra_package { 2 } else { 1 }
-        && store.installation_count_for(package) == 2
+        && packages == if extra_package { 3 } else { 2 }
+        && store.installation_count_for(package) == 1
+        && store.installation_count_for(package_v2) == 1
         && state.installations.iter().flatten().count() == 2
         && state.grants.iter().flatten().count() == 1
         && state.runtimes.iter().flatten().count() == 1
@@ -421,6 +433,7 @@ fn exercise(device: &mut BlockDevice) -> Result<(&'static str, usize), InstallSe
             "non-system package insertion was admitted",
         );
         let package = service.install_package(system, PACKAGE, PACKAGE_BYTES)?;
+        let package_v2 = service.install_package(system, PACKAGE_V2, PACKAGE_V2_BYTES)?;
         let first = service.register(
             system,
             package,
@@ -454,18 +467,36 @@ fn exercise(device: &mut BlockDevice) -> Result<(&'static str, usize), InstallSe
             GrantRights::DISCOVER.union(GrantRights::START),
             None,
         )?;
-        service.start(user, first, PrincipalKind::User, 1, 11)?;
-        service.create_data(user, first, Subject::User(7), DataOwnerKind::PrivateUser)?;
+        let runtime = service.start(user, first, PrincipalKind::User, 1, 11)?;
+        let data = service.create_data(
+            user,
+            first,
+            Subject::User(7),
+            DataOwnerKind::PrivateUser,
+        )?;
         check(
             service.query(other, first, 12).is_err(),
             "cross-user query was admitted",
+        );
+        service.upgrade_application(user, first, package_v2)?;
+        check(
+            service.store().runtime(runtime)?.package == package,
+            "application update retargeted an active runtime",
+        );
+        check(
+            service.store().data(data)?.package == package_v2,
+            "application update did not move the owned data scope",
+        );
+        check(
+            service.query(user, first, 12)?.package == package_v2,
+            "application update did not activate the new package",
         );
         service.query(user, first, 12)?;
         kprintln!(
             "[JSR-NATIVE-INSTALL] service-auth=true package_system_only=true cross_scope_denied=true cross_user_denied=true"
         );
         kprintln!(
-            "[JSR-NATIVE-INSTALL] stage=format packages=1 installations=2 grants=1 runtimes=1 data=1 failed=0"
+            "[JSR-NATIVE-INSTALL] stage=format upgrade=true runtime_old=true data_new=true packages=2 installations=2 grants=1 runtimes=1 data=1 failed=0"
         );
         return Ok((phase, PACKAGE_BYTES.len()));
     }
@@ -473,16 +504,22 @@ fn exercise(device: &mut BlockDevice) -> Result<(&'static str, usize), InstallSe
     let package = store
         .find_package(PACKAGE)
         .ok_or(PersistentInstallError::NotFound)?;
+    let package_v2 = store
+        .find_package(PACKAGE_V2)
+        .ok_or(PersistentInstallError::NotFound)?;
     kprintln!("[JSR-NATIVE-INSTALL] reopen-step=package");
     let mut bytes = [0u8; 64];
     let bytes_len = store.read_package_bytes(PACKAGE_CONTENT, &mut bytes)?;
     kprintln!("[JSR-NATIVE-INSTALL] reopen-step=bytes");
-    if &bytes[..bytes_len] != PACKAGE_BYTES || store.installation_count_for(package) != 2 {
+    if &bytes[..bytes_len] != PACKAGE_BYTES
+        || store.installation_count_for(package) != 1
+        || store.installation_count_for(package_v2) != 1
+    {
         return Err(PersistentInstallError::Corrupt.into());
     }
     kprintln!("[JSR-NATIVE-INSTALL] reopen-step=counts");
     let state = store.state();
-    if state.packages.iter().flatten().count() != 1
+    if state.packages.iter().flatten().count() != 2
         || state.installations.iter().flatten().count() != 2
         || state.grants.iter().flatten().count() != 1
         || state.runtimes.iter().flatten().count() != 1
@@ -497,6 +534,32 @@ fn exercise(device: &mut BlockDevice) -> Result<(&'static str, usize), InstallSe
         .flatten()
         .find(|installation| installation.scope == OwnerScope::User(7))
         .ok_or(PersistentInstallError::Corrupt)?;
+    let second = state
+        .installations
+        .iter()
+        .flatten()
+        .find(|installation| installation.scope == OwnerScope::User(8))
+        .ok_or(PersistentInstallError::Corrupt)?;
+    let runtime = state
+        .runtimes
+        .iter()
+        .flatten()
+        .next()
+        .ok_or(PersistentInstallError::Corrupt)?;
+    let data = state
+        .data
+        .iter()
+        .flatten()
+        .next()
+        .ok_or(PersistentInstallError::Corrupt)?;
+    if first.package != package_v2
+        || second.package != package
+        || runtime.package != package
+        || data.package != package_v2
+        || data.installation != Some(first.key)
+    {
+        return Err(PersistentInstallError::Corrupt.into());
+    }
     let actor = Actor::new(&[Subject::User(7)]);
     if !store.can_discover(actor, first.key, 12) || !store.can_start(actor, first.key, 12) {
         return Err(PersistentInstallError::Install(
@@ -504,7 +567,7 @@ fn exercise(device: &mut BlockDevice) -> Result<(&'static str, usize), InstallSe
         )
         .into());
     }
-    let mut service = NativeInstallService::new(store);
+    let service = NativeInstallService::new(store);
     check(
         service.query(user_caller(8), first.key, 12).is_err(),
         "cross-user reopen query was admitted",
@@ -526,7 +589,7 @@ fn exercise(device: &mut BlockDevice) -> Result<(&'static str, usize), InstallSe
     };
     let _ = io;
     kprintln!(
-        "[JSR-NATIVE-INSTALL] stage=reopen packages=1 installations=2 grants=1 runtimes=1 data=1 bytes={} faults={} failed=0",
+        "[JSR-NATIVE-INSTALL] stage=reopen upgrade=true runtime_old=true data_new=true packages=2 installations=2 grants=1 runtimes=1 data=1 bytes={} faults={} failed=0",
         bytes_len,
         faults
     );

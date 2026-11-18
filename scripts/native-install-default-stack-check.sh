@@ -84,10 +84,10 @@ for round in 1 2; do
   ! grep -aqE '^\[JSR-(PANIC|NATIVE-INSTALL-FAIL)\]|KERNEL PANIC|panicked at' "$serial"
 done
 
-grep -aq '^\[JSR-NATIVE-INSTALL\] stage=format packages=1 installations=2 grants=1 runtimes=1 data=1 failed=0' \
+grep -aq '^\[JSR-NATIVE-INSTALL\] stage=format upgrade=true runtime_old=true data_new=true packages=2 installations=2 grants=1 runtimes=1 data=1 failed=0' \
   "$OUT/round-1.serial"
 ! grep -aq 'stage=format' "$OUT/round-2.serial"
-grep -aq '^\[JSR-NATIVE-INSTALL\] stage=reopen packages=1 installations=2 grants=1 runtimes=1 data=1 bytes=26 faults=0 failed=0' \
+grep -aq '^\[JSR-NATIVE-INSTALL\] stage=reopen upgrade=true runtime_old=true data_new=true packages=2 installations=2 grants=1 runtimes=1 data=1 bytes=26 faults=0 failed=0' \
   "$OUT/round-2.serial"
 
 echo "native-install-default-stack: PASS rounds=2 evidence=$OUT"
