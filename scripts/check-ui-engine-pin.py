@@ -12,6 +12,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 LOCK = ROOT / "ui-engine.lock.toml"
 KERNEL_MANIFESTS = (ROOT / "kernel" / "Cargo.toml", ROOT / "kernel-core" / "Cargo.toml")
+UI_SERVICE_MANIFEST = ROOT / "user" / "ui-service" / "Cargo.toml"
+UI_SERVICE_SOURCE = ROOT / "user" / "ui-service" / "src" / "lib.rs"
 FORBIDDEN = (
     "jasper-ui-engine",
     "jasper-ui-framework",
@@ -69,6 +71,11 @@ def validate(lock_path: Path, manifests: tuple[Path, ...]) -> list[str]:
     evidence = target.get("evidence")
     if not isinstance(evidence, str) or not (ROOT / evidence).is_file():
         findings.append("ui-engine-pin: evidence document is missing")
+    if UI_SERVICE_SOURCE.is_file() and isinstance(commit, str):
+        source = UI_SERVICE_SOURCE.read_text(encoding="utf-8", errors="replace")
+        expected_pin = f'PINNED_ENGINE_COMMIT: &str = "{commit}"'
+        if expected_pin not in source:
+            findings.append("ui-engine-pin: UI service source pin does not match lock")
     for manifest in manifests:
         text = manifest.read_text(encoding="utf-8", errors="replace")
         for crate in FORBIDDEN:
@@ -129,7 +136,7 @@ def main() -> int:
     if "--self-test" in sys.argv[1:]:
         self_test()
         return 0
-    findings = validate(LOCK, KERNEL_MANIFESTS)
+    findings = validate(LOCK, (*KERNEL_MANIFESTS, UI_SERVICE_MANIFEST))
     if findings:
         print("ui-engine-pin: FAIL", file=sys.stderr)
         for finding in findings:

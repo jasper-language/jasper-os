@@ -16,6 +16,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use kernel_core::display_input::{DisplayInputError, KeyInput, SurfaceSpec};
+#[cfg(feature = "native-transport")]
 use kernel_core::ui_protocol::{decode_ui_frame, encode_ui_frame, UiFrame, UiFrameHeader};
 use kernel_core::ui_service::UI_SERVICE_PROTOCOL_VERSION;
 
@@ -168,14 +169,20 @@ impl SurfaceBinding {
         })
     }
 
-    /// Adopt a frame only when its Surface and monotonic sequence match.
-    pub fn adopt(&mut self, frame: &CpuFrame) -> Result<u64, HostError> {
+    /// Validate a frame without publishing its sequence.
+    pub fn validate(&self, frame: &CpuFrame) -> Result<(), HostError> {
         if frame.surface != self.surface || frame.surface_generation != self.generation {
             return Err(HostError::StaleGeneration);
         }
         if frame.sequence <= self.last_sequence {
             return Err(HostError::InvalidSequence);
         }
+        Ok(())
+    }
+
+    /// Adopt a frame only when its Surface and monotonic sequence match.
+    pub fn adopt(&mut self, frame: &CpuFrame) -> Result<u64, HostError> {
+        self.validate(frame)?;
         self.last_sequence = frame.sequence;
         Ok(frame.sequence)
     }
@@ -222,9 +229,7 @@ impl<E: EngineHost> UiHost<E> {
         if frame.surface != self.surface.surface {
             return Err(HostError::InvalidSurface);
         }
-        if frame.surface_generation != self.surface.generation {
-            return Err(HostError::StaleGeneration);
-        }
+        self.surface.validate(frame)?;
         self.engine
             .render_cpu(self.scene_version, &mut frame.bytes)?;
         self.surface.adopt(frame)
@@ -333,5 +338,42 @@ mod tests {
         assert_eq!(host.set_scene(b"scene"), Err(HostError::EngineUnavailable));
         let mut frame = CpuFrame::new(SURFACE, 1, 1, 1, vec![0; 48]).unwrap();
         assert_eq!(host.render(&mut frame), Err(HostError::EngineUnavailable));
+    }
+
+    #[derive(Default)]
+    struct CountingEngine {
+        renders: u32,
+    }
+
+    impl EngineHost for CountingEngine {
+        fn state(&self) -> EngineState {
+            EngineState::CpuReady
+        }
+
+        fn set_scene(&mut self, _scene: &[u8]) -> Result<(), HostError> {
+            Ok(())
+        }
+
+        fn render_cpu(
+            &mut self,
+            _scene_version: u64,
+            pixels: &mut [u8],
+        ) -> Result<(), HostError> {
+            self.renders = self.renders.saturating_add(1);
+            pixels.fill(0x7f);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn stale_sequence_is_rejected_before_engine_rendering() {
+        let mut host = UiHost::new(CountingEngine::default(), SURFACE, 1).unwrap();
+        let mut first = CpuFrame::new(SURFACE, 1, 1, 1, vec![0; 48]).unwrap();
+        assert_eq!(host.render(&mut first), Ok(1));
+        assert_eq!(host.engine.renders, 1);
+        let mut stale = CpuFrame::new(SURFACE, 1, 1, 1, vec![0; 48]).unwrap();
+        assert_eq!(host.render(&mut stale), Err(HostError::InvalidSequence));
+        assert_eq!(host.engine.renders, 1);
+        assert_eq!(stale.pixels(), &[0; 48]);
     }
 }
