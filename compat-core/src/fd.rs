@@ -4,7 +4,7 @@ use alloc::sync::Arc;
 use kernel_core::object::Rights;
 use kernel_core::sync::SpinLock;
 
-pub const MAX_FDS: usize = 1024;
+const STANDARD_FD_COUNT: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompatKind {
@@ -100,41 +100,51 @@ struct Slot {
     active: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FdBatch<const N: usize> {
-    handles: [u64; N],
-    len: usize,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FdBatch {
+    handles: alloc::vec::Vec<u64>,
 }
 
-impl<const N: usize> FdBatch<N> {
+impl FdBatch {
     const fn empty() -> Self {
         Self {
-            handles: [0; N],
-            len: 0,
+            handles: alloc::vec::Vec::new(),
         }
     }
 
-    pub const fn len(&self) -> usize {
-        self.len
+    pub fn len(&self) -> usize {
+        self.handles.len()
     }
 
-    pub const fn is_empty(&self) -> bool {
-        self.len == 0
+    pub fn is_empty(&self) -> bool {
+        self.handles.is_empty()
     }
 
     pub fn handles(&self) -> &[u64] {
-        &self.handles[..self.len]
+        &self.handles
     }
+
 }
 
+/// Heap-backed Linux descriptor table.
+///
+/// Storage grows lazily to the descriptor number actually used. The runtime
+/// soft/hard limits are supplied from the process resource budget and are the
+/// only authority for allocation; there is no compile-time descriptor count.
+///
+/// 堆后备 Linux 描述符表。存储只按实际使用的描述符编号懒增长；容量唯一来源是
+/// 进程资源预算产生的运行时软/硬上限，不再使用编译期固定描述符数组。
 #[derive(Clone)]
-pub struct FdTable<const N: usize = MAX_FDS> {
-    slots: [Option<Slot>; N],
-    generations: [u32; N],
+pub struct FdTable {
+    slots: alloc::vec::Vec<Option<Slot>>,
+    generations: alloc::vec::Vec<u32>,
     /// One open-file description per fd slot. Duplicates and fork clones share
     /// the same cursor and status flags; closing one fd drops only its reference.
-    open_files: [Option<Arc<SpinLock<OpenFileState>>>; N],
+    open_files: alloc::vec::Vec<Option<Arc<SpinLock<OpenFileState>>>>,
     open: usize,
+    soft_limit: usize,
+    hard_limit: usize,
+    next_free: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,14 +153,57 @@ struct OpenFileState {
     status_flags: u32,
 }
 
-impl<const N: usize> FdTable<N> {
-    pub const fn new() -> Self {
+impl FdTable {
+    pub fn new() -> Self {
+        Self::with_limits(u32::MAX as usize, u32::MAX as usize)
+    }
+
+    pub fn with_limits(soft_limit: usize, hard_limit: usize) -> Self {
+        let hard_limit = hard_limit.min(u32::MAX as usize);
+        let soft_limit = soft_limit.min(hard_limit);
         Self {
-            slots: [None; N],
-            generations: [0; N],
-            open_files: [const { None }; N],
+            slots: alloc::vec::Vec::new(),
+            generations: alloc::vec::Vec::new(),
+            open_files: alloc::vec::Vec::new(),
             open: 0,
+            soft_limit,
+            hard_limit,
+            next_free: 0,
         }
+    }
+
+    /// Derive a descriptor budget from a process byte budget.
+    ///
+    /// This estimates the table's metadata footprint. It is a policy input,
+    /// not a claim that every descriptor consumes exactly this many bytes.
+    /// 从进程字节预算推导 FD 上限；该估算只用于准入策略，不冒充精确内存记账。
+    pub fn capacity_for_bytes(bytes: u64) -> u64 {
+        let per_entry = core::mem::size_of::<Option<Slot>>()
+            .saturating_add(core::mem::size_of::<u32>())
+            .saturating_add(core::mem::size_of::<Option<Arc<SpinLock<OpenFileState>>>>())
+            .max(1) as u64;
+        (bytes / per_entry).clamp(STANDARD_FD_COUNT as u64, u64::from(u32::MAX))
+    }
+
+    pub fn soft_limit(&self) -> usize {
+        self.soft_limit
+    }
+
+    pub fn hard_limit(&self) -> usize {
+        self.hard_limit
+    }
+
+    pub fn allocated_capacity(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub fn set_limits(&mut self, soft_limit: usize, hard_limit: usize) -> bool {
+        if hard_limit > u32::MAX as usize || soft_limit > hard_limit {
+            return false;
+        }
+        self.hard_limit = hard_limit;
+        self.soft_limit = soft_limit;
+        true
     }
 
     pub const fn open_count(&self) -> usize {
@@ -176,9 +229,10 @@ impl<const N: usize> FdTable<N> {
         close_on_exec: bool,
     ) -> Result<FdHandle, FdTableError> {
         let index = fd as usize;
-        if index >= N {
+        if index >= self.soft_limit {
             return Err(FdTableError::InvalidFd);
         }
+        self.ensure_len(index + 1)?;
         if self.slots[index].is_some() {
             return Err(FdTableError::NoSpace);
         }
@@ -232,9 +286,10 @@ impl<const N: usize> FdTable<N> {
     ) -> Result<FdHandle, FdTableError> {
         let entry = self.get_fd(source).ok_or(FdTableError::InvalidFd)?;
         let index = target as usize;
-        if index >= N {
+        if index >= self.soft_limit {
             return Err(FdTableError::InvalidFd);
         }
+        self.ensure_len(index + 1)?;
         let cursor = Arc::clone(
             self.open_files[source as usize]
                 .as_ref()
@@ -259,6 +314,7 @@ impl<const N: usize> FdTable<N> {
             },
             active: true,
         });
+        self.advance_next_free(index);
         Ok(FdHandle {
             fd: target,
             generation,
@@ -421,6 +477,7 @@ impl<const N: usize> FdTable<N> {
         slot.active = false;
         self.open_files[handle.fd as usize] = None;
         self.open -= 1;
+        self.next_free = self.next_free.min(handle.fd as usize);
         Ok(entry.handle)
     }
 
@@ -432,9 +489,13 @@ impl<const N: usize> FdTable<N> {
         })
     }
 
-    pub fn take_close_on_exec(&mut self) -> FdBatch<N> {
+    pub fn take_close_on_exec(&mut self) -> Result<FdBatch, FdTableError> {
         let mut batch = FdBatch::empty();
-        for index in 0..N {
+        batch
+            .handles
+            .try_reserve(self.open)
+            .map_err(|_| FdTableError::Capacity)?;
+        for index in 0..self.slots.len() {
             let close = self.slots[index]
                 .as_ref()
                 .is_some_and(|slot| slot.active && slot.entry.close_on_exec);
@@ -446,16 +507,20 @@ impl<const N: usize> FdTable<N> {
                 self.slots[index].as_mut().unwrap().active = false;
                 self.open_files[index] = None;
                 self.open -= 1;
-                batch.handles[batch.len] = handle;
-                batch.len += 1;
+                batch.handles.push(handle);
             }
         }
-        batch
+        self.next_free = 0;
+        Ok(batch)
     }
 
-    pub fn take_all(&mut self) -> FdBatch<N> {
+    pub fn take_all(&mut self) -> Result<FdBatch, FdTableError> {
         let mut batch = FdBatch::empty();
-        for index in 0..N {
+        batch
+            .handles
+            .try_reserve(self.open)
+            .map_err(|_| FdTableError::Capacity)?;
+        for index in 0..self.slots.len() {
             let close = self.slots[index].as_ref().is_some_and(|slot| slot.active);
             if close {
                 let handle = self.slots[index]
@@ -465,11 +530,11 @@ impl<const N: usize> FdTable<N> {
                 self.slots[index].as_mut().unwrap().active = false;
                 self.open_files[index] = None;
                 self.open -= 1;
-                batch.handles[batch.len] = handle;
-                batch.len += 1;
+                batch.handles.push(handle);
             }
         }
-        batch
+        self.next_free = 0;
+        Ok(batch)
     }
 
     fn install_at_or_above(
@@ -484,12 +549,10 @@ impl<const N: usize> FdTable<N> {
             return Err(FdTableError::InvalidHandle);
         }
         let start = min_fd as usize;
-        if start >= N {
+        if start >= self.soft_limit {
             return Err(FdTableError::NoSpace);
         }
-        let index = (start..N)
-            .find(|&index| self.slots[index].is_none_or(|slot| !slot.active))
-            .ok_or(FdTableError::NoSpace)?;
+        let index = self.find_free_at_or_above(start)?;
         self.install_slot(index, handle, rights, kind, close_on_exec)
     }
 
@@ -501,12 +564,10 @@ impl<const N: usize> FdTable<N> {
     ) -> Result<FdHandle, FdTableError> {
         let entry = self.get(source)?;
         let start = min_fd as usize;
-        if start >= N {
+        if start >= self.soft_limit {
             return Err(FdTableError::NoSpace);
         }
-        let index = (start..N)
-            .find(|&index| self.slots[index].is_none_or(|slot| !slot.active))
-            .ok_or(FdTableError::NoSpace)?;
+        let index = self.find_free_at_or_above(start)?;
         let generation = self.generations[index]
             .checked_add(1)
             .ok_or(FdTableError::GenerationExhausted)?;
@@ -529,6 +590,7 @@ impl<const N: usize> FdTable<N> {
             active: true,
         });
         self.open += 1;
+        self.advance_next_free(index);
         Ok(FdHandle {
             fd: index as u32,
             generation,
@@ -546,12 +608,10 @@ impl<const N: usize> FdTable<N> {
             return Err(FdTableError::InvalidHandle);
         }
         let start = min_fd as usize;
-        if start >= N {
+        if start >= self.soft_limit {
             return Err(FdTableError::NoSpace);
         }
-        let index = (start..N)
-            .find(|&index| self.slots[index].is_none_or(|slot| !slot.active))
-            .ok_or(FdTableError::NoSpace)?;
+        let index = self.find_free_at_or_above(start)?;
         let generation = self.generations[index]
             .checked_add(1)
             .ok_or(FdTableError::GenerationExhausted)?;
@@ -569,6 +629,7 @@ impl<const N: usize> FdTable<N> {
             active: true,
         });
         self.open += 1;
+        self.advance_next_free(index);
         Ok(FdHandle {
             fd: index as u32,
             generation,
@@ -606,14 +667,65 @@ impl<const N: usize> FdTable<N> {
             active: true,
         });
         self.open += 1;
+        self.advance_next_free(index);
         Ok(FdHandle {
             fd: index as u32,
             generation,
         })
     }
+
+    fn ensure_len(&mut self, target: usize) -> Result<(), FdTableError> {
+        if target > self.hard_limit {
+            return Err(FdTableError::InvalidFd);
+        }
+        if target <= self.slots.len() {
+            return Ok(());
+        }
+        let doubled = self.slots.len().saturating_mul(2).max(1);
+        let new_len = target.max(doubled).min(self.hard_limit);
+        let additional = new_len - self.slots.len();
+        self.slots
+            .try_reserve(additional)
+            .map_err(|_| FdTableError::Capacity)?;
+        self.generations
+            .try_reserve(additional)
+            .map_err(|_| FdTableError::Capacity)?;
+        self.open_files
+            .try_reserve(additional)
+            .map_err(|_| FdTableError::Capacity)?;
+        self.slots.resize(new_len, None);
+        self.generations.resize(new_len, 0);
+        self.open_files.resize(new_len, None);
+        Ok(())
+    }
+
+    fn find_free_at_or_above(&mut self, min_fd: usize) -> Result<usize, FdTableError> {
+        let mut index = min_fd.max(self.next_free);
+        while index < self.soft_limit {
+            self.ensure_len(index + 1)?;
+            if self.slots[index].is_none_or(|slot| !slot.active) {
+                return Ok(index);
+            }
+            index += 1;
+        }
+        Err(FdTableError::NoSpace)
+    }
+
+    fn advance_next_free(&mut self, installed: usize) {
+        if installed != self.next_free {
+            return;
+        }
+        while self
+            .slots
+            .get(self.next_free)
+            .is_some_and(|slot| slot.is_some_and(|slot| slot.active))
+        {
+            self.next_free += 1;
+        }
+    }
 }
 
-impl<const N: usize> Default for FdTable<N> {
+impl Default for FdTable {
     fn default() -> Self {
         Self::new()
     }
@@ -625,7 +737,7 @@ mod tests {
 
     #[test]
     fn standard_install_duplicate_close_and_stale_generation() {
-        let mut fds = FdTable::<16>::new();
+        let mut fds = FdTable::new();
         for fd in 0..3 {
             fds.install_at(
                 fd,
@@ -660,24 +772,24 @@ mod tests {
 
     #[test]
     fn cloexec_and_exit_close_only_owned_handles() {
-        let mut fds = FdTable::<8>::new();
+        let mut fds = FdTable::new();
         let a = fds
             .install(1, Rights::READ, CompatKind::File, true)
             .unwrap();
         let b = fds
             .install(2, Rights::READ, CompatKind::Pipe, false)
             .unwrap();
-        let closed = fds.take_close_on_exec();
+        let closed = fds.take_close_on_exec().unwrap();
         assert_eq!(closed.handles(), &[1]);
         assert_eq!(fds.get(a), Err(FdTableError::Stale));
         assert!(fds.get(b).is_ok());
-        assert_eq!(fds.take_all().handles(), &[2]);
+        assert_eq!(fds.take_all().unwrap().handles(), &[2]);
         assert_eq!(fds.open_count(), 0);
     }
 
     #[test]
     fn duplicate_cannot_escalate_rights() {
-        let mut fds = FdTable::<4>::new();
+        let mut fds = FdTable::new();
         let fd = fds
             .install(1, Rights::READ, CompatKind::File, false)
             .unwrap();
@@ -695,7 +807,7 @@ mod tests {
 
     #[test]
     fn duplicate_fd_uses_the_current_generation_and_minimum() {
-        let mut fds = FdTable::<8>::new();
+        let mut fds = FdTable::new();
         let source = fds
             .install_at(
                 2,
@@ -721,7 +833,7 @@ mod tests {
 
     #[test]
     fn duplicate_to_replaces_target_and_preserves_open_count() {
-        let mut fds = FdTable::<8>::new();
+        let mut fds = FdTable::with_limits(8, 8);
         fds.install_at(1, 0x11, Rights::READ, CompatKind::File, false)
             .unwrap();
         fds.install_at(5, 0x55, Rights::WRITE, CompatKind::File, true)
@@ -740,7 +852,7 @@ mod tests {
 
     #[test]
     fn duplicate_and_fork_clone_share_open_file_offset() {
-        let mut parent = FdTable::<8>::new();
+        let mut parent = FdTable::new();
         let source = parent
             .install(0x11, Rights::READ, CompatKind::File, false)
             .unwrap();
@@ -761,7 +873,7 @@ mod tests {
 
     #[test]
     fn captured_description_survives_source_close_and_preserves_cursor() {
-        let mut fds = FdTable::<8>::new();
+        let mut fds = FdTable::new();
         let source = fds
             .install(
                 0x88,
@@ -783,7 +895,7 @@ mod tests {
 
     #[test]
     fn separate_opens_of_same_handle_have_independent_descriptions() {
-        let mut fds = FdTable::<8>::new();
+        let mut fds = FdTable::new();
         let first = fds
             .install(0x11, Rights::READ, CompatKind::File, false)
             .unwrap();
@@ -798,7 +910,7 @@ mod tests {
 
     #[test]
     fn status_flags_follow_shared_open_file_description() {
-        let mut parent = FdTable::<8>::new();
+        let mut parent = FdTable::new();
         let source = parent
             .install(0x11, Rights::READ, CompatKind::Pipe, false)
             .unwrap();
@@ -812,7 +924,7 @@ mod tests {
             .map(|_| child.get_fd(source.fd()).unwrap())
             .unwrap();
         assert_eq!(independent.handle, 0x11);
-        let mut other = FdTable::<8>::new();
+        let mut other = FdTable::new();
         let other_fd = other
             .install(0x11, Rights::READ, CompatKind::Pipe, false)
             .unwrap();
@@ -821,7 +933,7 @@ mod tests {
 
     #[test]
     fn controlled_transfer_preserves_the_open_file_description() {
-        let mut source = FdTable::<8>::new();
+        let mut source = FdTable::new();
         let fd = source
             .install(
                 0x500,
@@ -835,17 +947,66 @@ mod tests {
         let description = source.description_fd(fd.fd()).unwrap();
         assert!(source.close(fd).is_ok());
 
-        let mut receiver = FdTable::<8>::new();
+        let mut receiver = FdTable::new();
         let second_receiver = description.clone();
         let received = receiver.install_description(description, true).unwrap();
         assert_eq!(receiver.fd_offset(received.fd()), Some(37));
         assert_eq!(receiver.fd_status_flags(received.fd()), Some(0x800));
         assert!(receiver.get(received).unwrap().close_on_exec);
         assert!(receiver.set_fd_offset(received.fd(), 91));
-        let mut other_receiver = FdTable::<8>::new();
+        let mut other_receiver = FdTable::new();
         let other = other_receiver
             .install_description(second_receiver, false)
             .unwrap();
         assert_eq!(other_receiver.fd_offset(other.fd()), Some(91));
+    }
+
+    #[test]
+    fn close_reuses_the_lowest_available_descriptor() {
+        let mut fds = FdTable::with_limits(8, 8);
+        let first = fds
+            .install_at(0, 1, Rights::READ, CompatKind::File, false)
+            .unwrap();
+        fds.install_at(1, 2, Rights::READ, CompatKind::File, false)
+            .unwrap();
+        assert_eq!(fds.close(first), Ok(1));
+        assert_eq!(
+            fds.install(3, Rights::READ, CompatKind::File, false)
+                .unwrap()
+                .fd(),
+            0
+        );
+    }
+
+    #[test]
+    fn runtime_budget_allows_high_descriptors_without_fixed_array() {
+        let mut fds = FdTable::with_limits(4096, 4096);
+        let high = fds
+            .install_at(2048, 0x900, Rights::READ, CompatKind::File, false)
+            .unwrap();
+        assert_eq!(high.fd(), 2048);
+        assert!(fds.allocated_capacity() >= 2049);
+        assert_eq!(fds.close(high), Ok(0x900));
+        let replacement = fds
+            .install_at_or_above(2048, 0x901, Rights::READ, CompatKind::File, false)
+            .unwrap();
+        assert_eq!(replacement.fd(), 2048);
+        assert_ne!(replacement.generation(), high.generation());
+    }
+
+    #[test]
+    fn descriptor_budget_rejects_above_runtime_limit_and_grows_from_metadata() {
+        let mut fds = FdTable::with_limits(1024, 2048);
+        assert_eq!(
+            fds.install_at(1024, 1, Rights::READ, CompatKind::File, false),
+            Err(FdTableError::InvalidFd)
+        );
+        assert!(fds.set_limits(2048, 2048));
+        assert!(
+            fds.install_at(1536, 1, Rights::READ, CompatKind::File, false)
+                .is_ok()
+        );
+        assert!(FdTable::capacity_for_bytes(4096) >= 3);
+        assert!(FdTable::capacity_for_bytes(u64::MAX) <= u32::MAX as u64);
     }
 }

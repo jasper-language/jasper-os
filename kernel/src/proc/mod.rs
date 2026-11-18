@@ -123,7 +123,7 @@ const LINUX_LANDLOCK_HANDLE_BASE: u64 = 0x0000_9000_0000_0000;
 #[cfg(feature = "linux-abi")]
 struct LinuxProcessState {
     calls: LinuxSyscallSet,
-    fds: FdTable<64>,
+    fds: FdTable,
     pid: u32,
     ppid: u32,
     pgid: u32,
@@ -5282,18 +5282,26 @@ pub(crate) fn linux_close_range(
         }
         let mut released = Vec::new();
         let mut descriptions = Vec::new();
-        for fd in first..=last.min(63) {
-            if close_on_exec {
-                let _ = linux.fds.set_close_on_exec_fd(fd, true);
-            } else if let Some(handle) = linux.fds.get_fd(fd).map(|entry| entry.handle) {
-                if let Some(description) = linux.fds.description_identity(fd) {
-                    if !descriptions.contains(&description) {
-                        descriptions.try_reserve(1).map_err(|_| ProcError::NoTaskSlot)?;
-                        descriptions.push(description);
+        let allocated_upper = linux
+            .fds
+            .allocated_capacity()
+            .saturating_sub(1)
+            .min(linux.fds.soft_limit().saturating_sub(1)) as u32;
+        let upper = last.min(allocated_upper);
+        if first <= upper {
+            for fd in first..=upper {
+                if close_on_exec {
+                    let _ = linux.fds.set_close_on_exec_fd(fd, true);
+                } else if let Some(handle) = linux.fds.get_fd(fd).map(|entry| entry.handle) {
+                    if let Some(description) = linux.fds.description_identity(fd) {
+                        if !descriptions.contains(&description) {
+                            descriptions.try_reserve(1).map_err(|_| ProcError::NoTaskSlot)?;
+                            descriptions.push(description);
+                        }
                     }
-                }
-                if linux.fds.close_fd(fd).is_ok() {
-                    released.push(handle);
+                    if linux.fds.close_fd(fd).is_ok() {
+                        released.push(handle);
+                    }
                 }
             }
         }
@@ -5815,7 +5823,13 @@ pub(crate) fn linux_rlimits(pid: ObjId) -> Option<LinuxRlimits> {
 #[cfg(feature = "linux-abi")]
 pub(crate) fn set_linux_rlimits(pid: ObjId, limits: LinuxRlimits) -> bool {
     with_proc(pid, |process| {
-        process.linux.as_mut().ok_or(ProcError::Exited)?.rlimits = limits;
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        let current = usize::try_from(limits.nofile_current).unwrap_or(usize::MAX);
+        let maximum = usize::try_from(limits.nofile_maximum).unwrap_or(usize::MAX);
+        if !linux.fds.set_limits(current, maximum) {
+            return Err(ProcError::NoTaskSlot);
+        }
+        linux.rlimits = limits;
         Ok(())
     })
     .is_ok()
@@ -6719,7 +6733,10 @@ pub fn create(name: &'static str, syscalls: SyscallSet) -> Result<ObjId, ProcErr
 #[cfg(feature = "linux-abi")]
 pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId, ProcError> {
     let pid = allocate_linux_pid().ok_or(ProcError::NoTaskSlot)?;
-    let mut fds = FdTable::new();
+    let fd_budget = FdTable::capacity_for_bytes(
+        (MAX_PROCESS_FRAMES as u64).saturating_mul(FRAME_SIZE as u64),
+    );
+    let mut fds = FdTable::with_limits(fd_budget as usize, fd_budget as usize);
     for (fd, rights) in [(0, Rights::READ), (1, Rights::WRITE), (2, Rights::WRITE)] {
         fds.install_at(
             fd,
@@ -6773,8 +6790,8 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         rlimits: LinuxRlimits {
             stack_current: 8 * 1024 * 1024,
             stack_maximum: u64::MAX,
-            nofile_current: 64,
-            nofile_maximum: 64,
+            nofile_current: fd_budget,
+            nofile_maximum: fd_budget,
         },
         aio_contexts: Vec::new(),
         seccomp_filters: Vec::new(),
@@ -6854,7 +6871,10 @@ pub(crate) fn begin_exec_address_space(pid: ObjId) -> Result<ExecAddressSpace, P
         {
             revoke_all_device_mappings(p);
             let linux = p.linux.as_mut().expect("checked Linux process");
-            let close_on_exec = linux.fds.take_close_on_exec();
+            let close_on_exec = linux
+                .fds
+                .take_close_on_exec()
+                .map_err(|_| ProcError::NoTaskSlot)?;
             for handle in close_on_exec.handles().iter().copied() {
                 release_unreferenced_pipe(linux, handle);
             }
