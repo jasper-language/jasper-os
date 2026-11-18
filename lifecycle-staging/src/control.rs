@@ -9,13 +9,14 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use jasper_lifecycle_model::boot::{
     commit, recover, BootControlError, CommitError, ControlBlock, ControlIo, ControlIoError,
 };
 use jasper_lifecycle_model::CONTROL_RECORD_BYTES;
-use rustix::fs::{flock, FlockOperation};
+use rustix::fs::{fcntl_lock, FlockOperation};
 
 const CONTROL_COPIES: [&str; 2] = ["control.0", "control.1"];
 const CONTROL_LEASE: &str = ".control.lock";
@@ -106,7 +107,26 @@ pub struct FileControlStore {
     /// `flock` is tied to the open file description, so a crashed process
     /// releases the lease automatically while a second live service cannot
     /// read a generation and then race its durable commit.
-    _lease: File,
+    _lease: ControlLease,
+}
+
+struct ControlLease {
+    _file: File,
+    registered_path: PathBuf,
+}
+
+impl Drop for ControlLease {
+    fn drop(&mut self) {
+        let _ = fcntl_lock(&self._file, FlockOperation::NonBlockingUnlock);
+        if let Ok(mut registered) = active_leases().lock() {
+            registered.remove(&self.registered_path);
+        }
+    }
+}
+
+fn active_leases() -> &'static Mutex<std::collections::HashSet<PathBuf>> {
+    static ACTIVE: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
+    ACTIVE.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 
 /// 控制存储打开、初始化或提交失败。
@@ -128,7 +148,10 @@ pub enum ControlStoreError {
 impl std::fmt::Display for ControlStoreError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Busy => write!(formatter, "control store is already owned by a live service"),
+            Self::Busy => write!(
+                formatter,
+                "control store is already owned by a live service"
+            ),
             Self::Io(error) => write!(formatter, "control-store I/O failed: {error}"),
             Self::Corrupt => write!(formatter, "both control records are invalid"),
             Self::Recovery(error) => write!(formatter, "control recovery failed: {error:?}"),
@@ -231,32 +254,54 @@ fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, ControlStoreError> {
     Ok(Some(bytes))
 }
 
-fn acquire_exclusive_lease(root: &Path) -> Result<File, ControlStoreError> {
-    let path = root.join(CONTROL_LEASE);
-    let lease = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .mode(0o600)
-        // Do not let helper processes inherit a control-root lease. Rust tests
-        // run in parallel and some production clients spawn short-lived tools;
-        // an inherited descriptor would keep the previous owner alive after
-        // the service itself has closed.
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)?;
-    match flock(&lease, FlockOperation::NonBlockingLockExclusive) {
-        Ok(()) => Ok(lease),
-        Err(error)
-            if matches!(
-                error.raw_os_error(),
-                code if code == libc::EWOULDBLOCK || code == libc::EAGAIN
-            ) =>
-        {
-            Err(ControlStoreError::Busy)
+fn acquire_exclusive_lease(root: &Path) -> Result<ControlLease, ControlStoreError> {
+    let canonical_root = fs::canonicalize(root)?;
+    let path = canonical_root.join(CONTROL_LEASE);
+    {
+        let mut registered = active_leases()
+            .lock()
+            .map_err(|_| ControlStoreError::Io(io::Error::other("lease registry poisoned")))?;
+        if !registered.insert(path.clone()) {
+            return Err(ControlStoreError::Busy);
         }
-        Err(error) => Err(ControlStoreError::Io(io::Error::from_raw_os_error(
-            error.raw_os_error(),
-        ))),
+    }
+    let lease = (|| {
+        let lease = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            // POSIX record locks are process-associated rather than attached to
+            // the inherited open file description. A helper process may inherit
+            // this descriptor, but cannot extend the parent's lease across fork.
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path)?;
+        match fcntl_lock(&lease, FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => Ok(lease),
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    code if code == libc::EWOULDBLOCK || code == libc::EAGAIN
+                ) =>
+            {
+                Err(ControlStoreError::Busy)
+            }
+            Err(error) => Err(ControlStoreError::Io(io::Error::from_raw_os_error(
+                error.raw_os_error(),
+            ))),
+        }
+    })();
+    match lease {
+        Ok(file) => Ok(ControlLease {
+            _file: file,
+            registered_path: path,
+        }),
+        Err(error) => {
+            if let Ok(mut registered) = active_leases().lock() {
+                registered.remove(&path);
+            }
+            Err(error)
+        }
     }
 }
 

@@ -233,10 +233,17 @@ ABI syscall 和原生 Shell 消费。archive 已具备内核持久收据和正�
 
 ## 独占控制租约与重启恢复矩阵
 
-`FileControlStore` 现在对每个 control root 持有进程生命周期内的独占 `flock`
-租约。同一 root 的第二个存活服务在读取 generation 前即以 `Busy` 失败；进程
-退出或崩溃后由内核关闭文件描述符并自动释放租约，因此不会留下永久锁，也不能让
-两个服务同时基于同一旧 generation 提交不同结果。
+`FileControlStore` 现在对每个 control root 持有进程生命周期内的独占 POSIX
+record lock，并用进程内 canonical-path 登记保持同一进程内的互斥。同一 root
+的第二个存活服务在读取 generation 前即以 `Busy` 失败；进程退出或崩溃后由内核
+自动释放租约，因此不会留下永久锁，也不能让两个服务同时基于同一旧 generation
+提交不同结果。
+
+此前 `flock` 绑定 open-file-description；并发测试或其他调用者执行
+`fork` 后、子进程尚未 `exec` 时会短暂继承描述符，导致已经 drop 的服务仍让下一
+次 `open` 误报 `Busy`。POSIX record lock 与进程关联，不会被 fork 子进程继承，
+同时保留跨进程崩溃释放语义。完整 lifecycle-staging 41 项测试连续运行 5 轮均
+通过。
 
 恢复路径同时修正了三个持久状态问题：
 
