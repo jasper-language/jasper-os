@@ -3,7 +3,7 @@
 更新时间：2026-11-18。
 
 状态：**proof-only；EL2 驻留、stage-2、最小 VM exit、虚拟 IRQ 注入、
-VBAR/通用/系统/FP-SIMD vCPU 上下文恢复已验证，Driver VM 未实现**。
+虚拟定时器/VBAR/通用/系统/FP-SIMD vCPU 上下文恢复已验证，Driver VM 未实现**。
 
 ## 当前切片
 
@@ -40,27 +40,33 @@ guest 为该 IRQ 路径安装自己的 `VBAR_EL1`。vCPU 帧现在利用原有�
 VBAR，EL2 返回宿主后恢复进入 guest 前的值；探针机械比较返回前后 VBAR，确认
 guest 的异常向量状态没有泄漏回内核。
 
+虚拟定时器状态也已进入同一 vCPU 帧：`CNTV_CTL_EL0` 与绝对比较值
+`CNTV_CVAL_EL0` 在 EL2 入口保存，guest 改写后由宿主恢复。探针比较前后 CTL/CVAL，
+避免把会自然递减的 `CNTV_TVAL_EL0` 视图误当作稳定状态；这证明定时器上下文切换，
+不表示 vGIC 定时器中断注入已实现。
+
 QEMU `virt,virtualization=on` 的真实串口结果：
 
 ```text
 [JSR-A64-EL] entry=2 execution=1 el2_available=true el2_retained=true
 [JSR-A64-EL2] retained=true hvc_round_trip=true stage2_table=true stage2=true
-vm_exit=true virtual_irq=true vbar_context=true vcpu_context=true system_context=true
-fp_context=true driver_vm=false
+vm_exit=true virtual_irq=true timer_context=true vbar_context=true vcpu_context=true
+system_context=true fp_context=true driver_vm=false
 [JSR-SMP] start present=2 online=2 failed=0 source=fdt.cpus dropped=0 disabled=0
 ```
 
 该运行退出 35 仅含既有 AArch64 x86-only `pci_failed=3`、`krn0_failed=1` 基线；
-没有新增失败。证据见 `evidence/aarch64-el2-vbar-20261118-r8/`。
+没有新增失败。证据见 `evidence/aarch64-el2-vtimer-20261118-r9e/`。
 
 ## 边界
 
 - 当前证明 BSP/AP 的 EL2 向量驻留、EL1→EL2→EL1 HVC 往返和共享 stage-2
   身份翻译；
 - stage-2 除一个负例块外仍是宽松身份映射；已分类最小 stage-2 data abort，但尚未
-  实现按 capability 的最小映射、完整 VE/VM exit 分类及 vCPU/定时器上下文切换；
+  实现按 capability 的最小映射、完整 VE/VM exit 分类及多 vCPU 调度；
 - 当前 virtual IRQ 只证明最小 VI 注入与 guest 向量交付；尚未实现 vGIC
-  分配/确认/EOI、GIC 虚拟 CPU 接口或定时器中断虚拟化；
+  分配/确认/EOI、GIC 虚拟 CPU 接口或定时器中断虚拟化；当前只完成定时器寄存器
+  上下文的保存恢复；
 - 已保存恢复通用寄存器、SP_EL1、ELR、SPSR、基础系统寄存器和 FP/SIMD；
   尚未保存 SVE、GIC/定时器虚拟状态或支持多 vCPU 调度；
 - 基础系统寄存器已覆盖 SP_EL0、TPIDR_EL0/EL1、CONTEXTIDR_EL1 和 VBAR_EL1；
@@ -74,7 +80,7 @@ EL2 保留启动链，才能在实物上继续 Driver VM 验收。
 ## 复现
 
 ```text
-AARCH64_EL2_OUT="$PWD/evidence/aarch64-el2-vbar-20261118-r8" \
+AARCH64_EL2_OUT="$PWD/evidence/aarch64-el2-vtimer-20261118-r9e" \
 AARCH64_EL2_TARGET="$PWD/target/aarch64-el2-stage2" \
 AARCH64_EL2_QEMU_CPUS=6-7 \
 JASPER_BUILD_CPUS=4-5 \

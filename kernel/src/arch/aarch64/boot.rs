@@ -77,6 +77,8 @@ fn el2_guest_stage2_fault_probe() -> bool {
 #[cfg(feature = "aarch64-el2-retain-verify")]
 fn el2_virtual_irq_probe() -> bool {
     let vbar_before: u64;
+    let timer_ctl_before: u64;
+    let timer_cval_before: u64;
     let status: u64;
     let reply: u64;
     // SAFETY: The EL2 handler installs an EL1 guest vector before asserting
@@ -85,6 +87,13 @@ fn el2_virtual_irq_probe() -> bool {
     // 真实 IRQ 已送达，测试不使用软件伪造的异常返回。
     unsafe {
         core::arch::asm!("mrs {}, vbar_el1", out(reg) vbar_before, options(nomem, nostack));
+        core::arch::asm!(
+            "mrs {ctl}, cntv_ctl_el0",
+            "mrs {cval}, cntv_cval_el0",
+            ctl = out(reg) timer_ctl_before,
+            cval = out(reg) timer_cval_before,
+            options(nomem, nostack),
+        );
         core::arch::asm!(
             "mov x0, #0",
             "mov x1, #0",
@@ -103,11 +112,32 @@ fn el2_virtual_irq_probe() -> bool {
         );
     }
     let vbar_after: u64;
+    let timer_ctl_after: u64;
+    let timer_cval_after: u64;
     // SAFETY: Reading VBAR_EL1 in the resident verification build has no side effects.
     unsafe {
         core::arch::asm!("mrs {}, vbar_el1", out(reg) vbar_after, options(nomem, nostack));
+        core::arch::asm!(
+            "mrs {ctl}, cntv_ctl_el0",
+            "mrs {cval}, cntv_cval_el0",
+            ctl = out(reg) timer_ctl_after,
+            cval = out(reg) timer_cval_after,
+            options(nomem, nostack),
+        );
     }
-    status == 4 && reply == 0x4952 && vbar_before == vbar_after
+    crate::kprintln!(
+        "[JSR-A64-VIRQ] status={} reply=0x{:x} vbar_same={} timer_ctl_same={} timer_cval_same={}",
+        status,
+        reply,
+        vbar_before == vbar_after,
+        timer_ctl_before == timer_ctl_after,
+        timer_cval_before == timer_cval_after
+    );
+    status == 4
+        && reply == 0x4952
+        && vbar_before == vbar_after
+        && timer_ctl_before == timer_ctl_after
+        && timer_cval_before == timer_cval_after
 }
 
 #[cfg(feature = "pixel6a-el2-observable")] // JASPER-HARDCODE-REVIEW: issue=21 source=pixel-el2-observation-window reason=physical-boot-carrier-probe-only
@@ -407,7 +437,7 @@ jsr_aarch64_el2_vectors:
     b jsr_aarch64_el2_sync
     .space 0x3fc
 jsr_aarch64_el2_sync:
-    sub sp, sp, #848
+    sub sp, sp, #864
     stp x0, x1, [sp, #0]
     stp x2, x3, [sp, #16]
     stp x4, x5, [sp, #32]
@@ -461,6 +491,10 @@ jsr_aarch64_el2_sync:
     // VBAR_EL1 使用帧末尾原有的 8 字节对齐槽位。
     mrs x9, vbar_el1
     str x9, [sp, #840]
+    mrs x9, cntv_ctl_el0
+    mrs x10, cntv_cval_el0
+    str x9, [sp, #848]
+    str x10, [sp, #856]
     adrp x9, jsr_aarch64_el2_guest_active
     add x9, x9, :lo12:jsr_aarch64_el2_guest_active
     ldr x10, [x9]
@@ -603,7 +637,7 @@ el2_restore_guest:
     adrp x9, jsr_aarch64_el2_guest_active
     add x9, x9, :lo12:jsr_aarch64_el2_guest_active
     str xzr, [x9]
-    add sp, sp, #848
+    add sp, sp, #864
 el2_restore_host_with_reply:
     adrp x9, jsr_aarch64_el2_return_status
     add x9, x9, :lo12:jsr_aarch64_el2_return_status
@@ -648,6 +682,10 @@ el2_restore_host:
     msr cpacr_el1, x9
     ldr x9, [sp, #840]
     msr vbar_el1, x9
+    ldr x9, [sp, #848]
+    ldr x10, [sp, #856]
+    msr cntv_ctl_el0, x9
+    msr cntv_cval_el0, x10
     ldp x2, x3, [sp, #16]
     ldp x4, x5, [sp, #32]
     ldp x6, x7, [sp, #48]
@@ -669,7 +707,7 @@ el2_restore_host:
     adrp x9, jsr_aarch64_el2_return_reply
     add x9, x9, :lo12:jsr_aarch64_el2_return_reply
     ldr x1, [x9]
-    add sp, sp, #848
+    add sp, sp, #864
     eret
 el2_fail:
     wfe
@@ -771,6 +809,10 @@ jsr_aarch64_guest_irq_target:
 
 .balign 4
 jsr_aarch64_guest_irq_handler:
+    mov x9, #0x7fff0000
+    msr cntv_cval_el0, x9
+    mov x9, #3
+    msr cntv_ctl_el0, x9
     hvc #JSR_EL2_HVC_VIRTUAL_IRQ_HANDLED
     b .
 
@@ -1372,17 +1414,19 @@ extern "C" fn jsr_aarch64_boot(
         crate::kprintln!("[JSR-A64-EL2-STEP] vm_exit={}", vm_exit);
         let virtual_irq = vm_exit && el2_virtual_irq_probe();
         crate::kprintln!("[JSR-A64-EL2-STEP] virtual_irq={}", virtual_irq);
-        let vbar_context = virtual_irq;
+        let timer_context = virtual_irq;
+        let vbar_context = timer_context;
         let vcpu_context = vbar_context;
         let system_context = vcpu_context;
         let fp_context = system_context;
         crate::kprintln!(
-            "[JSR-A64-EL2] retained=true hvc_round_trip={} stage2_table={} stage2={} vm_exit={} virtual_irq={} vbar_context={} vcpu_context={} system_context={} fp_context={} driver_vm=false",
+            "[JSR-A64-EL2] retained=true hvc_round_trip={} stage2_table={} stage2={} vm_exit={} virtual_irq={} timer_context={} vbar_context={} vcpu_context={} system_context={} fp_context={} driver_vm=false",
             round_trip,
             table,
             stage2,
             vm_exit,
             virtual_irq,
+            timer_context,
             vbar_context,
             vcpu_context,
             system_context,
