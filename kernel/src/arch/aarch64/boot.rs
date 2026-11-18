@@ -309,6 +309,8 @@ _start:
     mov x10, #{el2_stack}
     add sp, sp, x10
 .if {retain_el2} != 0
+    msr cptr_el2, xzr
+    isb
     adrp x9, jsr_aarch64_el2_vectors
     add x9, x9, :lo12:jsr_aarch64_el2_vectors
     msr vbar_el2, x9
@@ -356,6 +358,7 @@ _start:
 #[cfg(feature = "aarch64-el2-retain-verify")]
 global_asm!(
     r#"
+    .arch_extension simd
     .section .text.el2-vectors, "ax"
     .balign 2048
     .global jsr_aarch64_el2_vectors
@@ -364,7 +367,7 @@ jsr_aarch64_el2_vectors:
     b jsr_aarch64_el2_sync
     .space 0x3fc
 jsr_aarch64_el2_sync:
-    sub sp, sp, #304
+    sub sp, sp, #848
     stp x0, x1, [sp, #0]
     stp x2, x3, [sp, #16]
     stp x4, x5, [sp, #32]
@@ -392,6 +395,28 @@ jsr_aarch64_el2_sync:
     mrs x9, tpidr_el1
     mrs x10, contextidr_el1
     stp x9, x10, [sp, #288]
+    stp q0, q1, [sp, #304]
+    stp q2, q3, [sp, #336]
+    stp q4, q5, [sp, #368]
+    stp q6, q7, [sp, #400]
+    stp q8, q9, [sp, #432]
+    stp q10, q11, [sp, #464]
+    stp q12, q13, [sp, #496]
+    stp q14, q15, [sp, #528]
+    stp q16, q17, [sp, #560]
+    stp q18, q19, [sp, #592]
+    stp q20, q21, [sp, #624]
+    stp q22, q23, [sp, #656]
+    stp q24, q25, [sp, #688]
+    stp q26, q27, [sp, #720]
+    stp q28, q29, [sp, #752]
+    stp q30, q31, [sp, #784]
+    mrs x9, S3_3_C4_C4_0
+    mrs x10, S3_3_C4_C4_1
+    add x11, sp, #816
+    stp x9, x10, [x11]
+    mrs x9, cpacr_el1
+    str x9, [sp, #832]
     adrp x9, jsr_aarch64_el2_guest_active
     add x9, x9, :lo12:jsr_aarch64_el2_guest_active
     ldr x10, [x9]
@@ -453,6 +478,11 @@ el2_guest_enter:
     msr tpidr_el1, x9
     mov x9, #0x163
     msr contextidr_el1, x9
+    mov x9, #3
+    lsl x9, x9, #20
+    msr cpacr_el1, x9
+    msr S3_3_C4_C4_0, xzr
+    msr S3_3_C4_C4_1, xzr
     adrp x9, jsr_aarch64_test_guest
     add x9, x9, :lo12:jsr_aarch64_test_guest
     msr elr_el2, x9
@@ -480,7 +510,7 @@ el2_restore_guest:
     adrp x9, jsr_aarch64_el2_guest_active
     add x9, x9, :lo12:jsr_aarch64_el2_guest_active
     str xzr, [x9]
-    add sp, sp, #304
+    add sp, sp, #848
 el2_restore_host_with_reply:
     adrp x9, jsr_aarch64_el2_return_status
     add x9, x9, :lo12:jsr_aarch64_el2_return_status
@@ -501,6 +531,28 @@ el2_restore_host:
     ldp x9, x10, [sp, #288]
     msr tpidr_el1, x9
     msr contextidr_el1, x10
+    ldp q0, q1, [sp, #304]
+    ldp q2, q3, [sp, #336]
+    ldp q4, q5, [sp, #368]
+    ldp q6, q7, [sp, #400]
+    ldp q8, q9, [sp, #432]
+    ldp q10, q11, [sp, #464]
+    ldp q12, q13, [sp, #496]
+    ldp q14, q15, [sp, #528]
+    ldp q16, q17, [sp, #560]
+    ldp q18, q19, [sp, #592]
+    ldp q20, q21, [sp, #624]
+    ldp q22, q23, [sp, #656]
+    ldp q24, q25, [sp, #688]
+    ldp q26, q27, [sp, #720]
+    ldp q28, q29, [sp, #752]
+    ldp q30, q31, [sp, #784]
+    add x11, sp, #816
+    ldp x9, x10, [x11]
+    msr S3_3_C4_C4_0, x9
+    msr S3_3_C4_C4_1, x10
+    ldr x9, [sp, #832]
+    msr cpacr_el1, x9
     ldp x2, x3, [sp, #16]
     ldp x4, x5, [sp, #32]
     ldp x6, x7, [sp, #48]
@@ -522,7 +574,7 @@ el2_restore_host:
     adrp x9, jsr_aarch64_el2_return_reply
     add x9, x9, :lo12:jsr_aarch64_el2_return_reply
     ldr x1, [x9]
-    add sp, sp, #304
+    add sp, sp, #848
     eret
 el2_fail:
     wfe
@@ -564,6 +616,39 @@ jsr_aarch64_test_guest:
     mov x30, #46
     sub sp, sp, #16
     str x0, [sp]
+    movi v0.16b, #1
+    movi v1.16b, #2
+    movi v2.16b, #3
+    movi v3.16b, #4
+    movi v4.16b, #5
+    movi v5.16b, #6
+    movi v6.16b, #7
+    movi v7.16b, #8
+    movi v8.16b, #9
+    movi v9.16b, #10
+    movi v10.16b, #11
+    movi v11.16b, #12
+    movi v12.16b, #13
+    movi v13.16b, #14
+    movi v14.16b, #15
+    movi v15.16b, #16
+    movi v16.16b, #17
+    movi v17.16b, #18
+    movi v18.16b, #19
+    movi v19.16b, #20
+    movi v20.16b, #21
+    movi v21.16b, #22
+    movi v22.16b, #23
+    movi v23.16b, #24
+    movi v24.16b, #25
+    movi v25.16b, #26
+    movi v26.16b, #27
+    movi v27.16b, #28
+    movi v28.16b, #29
+    movi v29.16b, #30
+    movi v30.16b, #31
+    movi v31.16b, #32
+    fadd v0.2d, v1.2d, v2.2d
     ldr x9, =0x8020000000
     ldr x10, [x9]
     hvc #0x4a56
@@ -690,6 +775,8 @@ jsr_aarch64_el2_context_probe:
     mrs x10, contextidr_el1
     cmp x10, #0x53
     b.ne el2_context_failed
+    mrs x10, cpacr_el1
+    cbnz x10, el2_context_failed
     mov x9, #1
     b el2_context_restore
 el2_context_failed:
@@ -1161,16 +1248,18 @@ extern "C" fn jsr_aarch64_boot(
         let vm_exit = stage2 && el2_guest_stage2_fault_probe();
         let vcpu_context = vm_exit;
         let system_context = vcpu_context;
+        let fp_context = system_context;
         crate::kprintln!(
-            "[JSR-A64-EL2] retained=true hvc_round_trip={} stage2_table={} stage2={} vm_exit={} vcpu_context={} system_context={} driver_vm=false",
+            "[JSR-A64-EL2] retained=true hvc_round_trip={} stage2_table={} stage2={} vm_exit={} vcpu_context={} system_context={} fp_context={} driver_vm=false",
             round_trip,
             table,
             stage2,
             vm_exit,
             vcpu_context,
-            system_context
+            system_context,
+            fp_context
         );
-        if !system_context {
+        if !fp_context {
             semihost::exit(EXIT_FAILURE);
         }
     }

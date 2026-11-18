@@ -68,6 +68,8 @@ jsr_a64_secondary:
     mov x10, #{el2_stack}
     add sp, sp, x10
 .if {retain_el2} != 0
+    msr cptr_el2, xzr
+    isb
     adrp x9, jsr_aarch64_el2_vectors
     add x9, x9, :lo12:jsr_aarch64_el2_vectors
     msr vbar_el2, x9
