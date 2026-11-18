@@ -14,6 +14,9 @@
   和单调 sequence；
 - `SurfaceBinding` 拒绝错误 Surface、陈旧 generation 与重复/回退 sequence；
 - `NativeUiEndpoint` 通过真实 Jasper Channel 句柄收发 UI 服务消息；
+- `NativeUiEndpoint::receive_frame/send_frame` 直接调用
+  `kernel-core::ui_protocol` 的 JSUI v1 编解码；未知版本、Magic、kind、flags、
+  generation、request id、截断和尾随数据由协议层失败关闭；
 - `ui-service` 进程从启动者接收一个预打开 Channel；固定 engine 未就绪时输出
   `service.ui.error.engine_unavailable` 并以 69 失败关闭，不生成伪造帧；
 - `kernel-core::display_input::PixelLayout` 增加 RGBA，Compositor 与 framebuffer

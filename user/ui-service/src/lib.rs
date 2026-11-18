@@ -16,6 +16,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use kernel_core::display_input::{DisplayInputError, KeyInput, SurfaceSpec};
+use kernel_core::ui_protocol::{decode_ui_frame, encode_ui_frame, UiFrame, UiFrameHeader};
 use kernel_core::ui_service::UI_SERVICE_PROTOCOL_VERSION;
 
 /// UI Engine revision currently recorded by `ui-engine.lock.toml`.
@@ -256,6 +257,26 @@ impl NativeUiEndpoint {
         self.channel
             .send(bytes)
             .map_err(|_| HostError::InputUnavailable)
+    }
+
+    /// Receive and validate one versioned UI protocol frame.
+    pub fn receive_frame<'a>(&self, buffer: &'a mut [u8]) -> Result<UiFrame<'a>, HostError> {
+        let len = self.receive(buffer)?;
+        decode_ui_frame(&buffer[..len]).map_err(|_| HostError::InvalidFrame)
+    }
+
+    /// Encode and send one versioned UI protocol frame over the native Channel.
+    pub fn send_frame(&self, header: UiFrameHeader, payload: &[u8]) -> Result<(), HostError> {
+        if payload.len() > kernel_core::ui_protocol::MAX_UI_FRAME_PAYLOAD {
+            return Err(HostError::InvalidFrame);
+        }
+        let mut encoded = alloc::vec![
+            0u8;
+            kernel_core::ui_protocol::UI_FRAME_HEADER_BYTES + payload.len()
+        ];
+        let len = encode_ui_frame(header, payload, &mut encoded)
+            .map_err(|_| HostError::InvalidFrame)?;
+        self.send(&encoded[..len])
     }
 }
 
