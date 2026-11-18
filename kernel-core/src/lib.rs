@@ -194,6 +194,7 @@ pub mod sync;
 pub mod tickless;
 pub mod trace;
 pub mod trap;
+pub mod ui_protocol;
 pub mod ui_service;
 pub mod usi;
 pub mod usi_request;

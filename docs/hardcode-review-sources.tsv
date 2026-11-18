@@ -29,4 +29,5 @@ user-probe-counter	33	runtime	user-probe-runtime-counter
 update-agent-ipc-v1	34	spec	update-Agent-IPC-v1-fixed-envelope
 update-agent-ipc-v2	34	spec	update-Agent-IPC-v2-bounded-list
 update-list-ui-v1	34	spec	tenant-update-list-structured-rendering
+ui-ipc-protocol-v1	36	spec	Issue-36-versioned-service-ui-ipc-envelope
 vmx-diagnostic	35	runtime	VMX-diagnostic-only-unavailable-field

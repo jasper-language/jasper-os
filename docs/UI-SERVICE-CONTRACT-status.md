@@ -20,6 +20,9 @@
 - 新增逻辑操作仅为 `service.ui.session.create/close`、`service.ui.focus.set`、
   `service.ui.frame.present`、`service.ui.input.read`，**没有登记内核 syscall ID**；
 - 契约不包含 `Vk*`、Vulkan 句柄、GPU 后端选择或 UI Engine 源码。
+- `ui_protocol` 定义版本化 `JSUI` Scene/Patch/Input/Present/Cancel/Close/Error
+  帧，载荷对内核不透明；Handle/MemoryObject 仍通过既有 Channel/对象机制带外
+  转移，未增加 syscall。
 
 ## 验证
 
@@ -36,7 +39,7 @@ PASS
 
 ## 尚未完成
 
-- 把契约接入真实 Jasper IPC/Ring 服务入口并登记版本化协议，不新增内核 syscall；
+- 把版本化帧接入真实 Jasper IPC/Ring 服务入口，不新增内核 syscall；
 - 集成锁定 commit 的 Jasper UI Engine 用户态 CPU 服务；
 - 在 Jasper-OS UEFI 系统镜像中完成首帧、真实键盘/指针输入、Surface 重配、服务
   崩溃后 Terminal/Console 救援和重启资源回基线；
