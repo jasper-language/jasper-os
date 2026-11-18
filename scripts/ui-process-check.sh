@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launch the real Jasper-OS UI Service in CPL3 and verify fail-closed engine
-# reporting, Channel delivery, process exit 69, Console liveness and reclaim.
+# reporting, Channel delivery, real PS/2 Enter routing, Console liveness and reclaim.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -11,6 +11,10 @@ OUT="${UI_PROCESS_OUT:-$ROOT/evidence/ui-process-$(date '+%Y%m%d-%H%M%S')}"
 LIMIT="${UI_PROCESS_TIMEOUT:-180}"
 QEMU_CPUS="${UI_PROCESS_QEMU_CPUS:-6-7}"
 mkdir -p "$OUT"
+command -v socat >/dev/null || {
+  echo "ui-process: socat is required to inject the QEMU PS/2 key" >&2
+  exit 69
+}
 
 env -u CARGO_TARGET_DIR \
   JASPER_BUILD_ALLOW_VBOX="${JASPER_BUILD_ALLOW_VBOX:-1}" \
@@ -34,31 +38,52 @@ sha256sum \
   "$OUT/kernel.img" >"$OUT/artifacts.sha256"
 
 set +e
-flock -w 900 /tmp/jasper-os-qemu.lock \
+exec 8>/tmp/jasper-os-qemu.lock
+if ! flock -w 900 8; then
+  rc=75
+else
+  monitor="/tmp/jasper-ui-monitor-$$.sock"
   nice -n 10 taskset -c "$QEMU_CPUS" timeout "$LIMIT" \
   qemu-system-x86_64 \
   -accel tcg -icount shift=5 \
   -drive format=raw,file="$OUT/kernel.img" \
   -smp 2 -m 512M \
-  -serial stdio -display none -monitor none -no-reboot \
+  -serial "file:$OUT/serial.log" -display none \
+  -monitor "unix:$monitor,server=on,wait=off" -no-reboot \
   -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-  >"$OUT/serial.log" 2>&1
-rc=$?
+  >"$OUT/qemu.log" 2>&1 &
+  qemu_pid=$!
+  remaining=$((LIMIT * 10))
+  sent=0
+  while [ "$remaining" -gt 0 ] && kill -0 "$qemu_pid" 2>/dev/null; do
+    if [ "$sent" = 0 ] && grep -aFq 'waiting_real_key=true' "$OUT/serial.log" 2>/dev/null; then
+      if printf 'sendkey ret\n' | timeout 5 socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1; then
+        sent=1
+      fi
+    fi
+    sleep 0.1
+    remaining=$((remaining - 1))
+  done
+  wait "$qemu_pid"
+  rc=$?
+fi
 set -e
 printf '%s\n' "$rc" >"$OUT/qemu_rc.txt"
 
 test "$rc" = 33
+grep -aFq '[JSR-UI-PROCESS] waiting_real_key=true native_enter=0x0103' "$OUT/serial.log"
+grep -aFq '[JSR-UI-PROCESS] native_keyboard=true native_code=0x0103 jsui_code=28' "$OUT/serial.log"
 grep -aFq 'ui-service: ready protocol=1 engine=cpu-ready' "$OUT/serial.log"
 grep -aFq 'ui-service: presented 64x64 bytes=16384 sequence=1' "$OUT/serial.log"
 grep -aFq 'ui-service: patch accepted revision=2 presents=2' "$OUT/serial.log"
 grep -aFq 'ui-service: input accepted code=28 presents=3' "$OUT/serial.log"
 grep -aFq 'ui-service: closed presents=3' "$OUT/serial.log"
-grep -aFq '[JSR-UI-PROCESS] started=true channel=true request_queued=true engine=cpu rendered=true present=true patch=true input=true frames=3 display=true exit=0 response=true terminal_alive=true resources=true' "$OUT/serial.log"
+grep -aFq '[JSR-UI-PROCESS] started=true channel=true request_queued=true engine=cpu rendered=true present=true patch=true input=true native_keyboard=true frames=3 display=true exit=0 response=true terminal_alive=true resources=true' "$OUT/serial.log"
 grep -aFq '[JSR-DISPLAY-UI] presented=true' "$OUT/serial.log"
 ! grep -aEq 'panicked|JSR-PANIC|JSR-UI-PROCESS-FAIL' "$OUT/serial.log"
 
 printf '%s\n' \
-  "ui-process: PASS cpl3=true channel=true jsui=true engine=cpu rendered=true present=true patch=true input=true frames=3 display=true exit=0 terminal=true resources=true" \
+  "ui-process: PASS cpl3=true channel=true jsui=true engine=cpu rendered=true present=true patch=true input=true native_keyboard=true frames=3 display=true exit=0 terminal=true resources=true" \
   "engine_commit=b21dec1ae504a06923defcc715722c7b9e9c1dc8" \
   "qemu_rc=$rc" \
   "evidence=$OUT"

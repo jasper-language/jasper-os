@@ -4,7 +4,8 @@
 
 状态：**精确版本与边界已锁定；`no_std-core` 已在 Jasper-OS CPL3 UI Service
 中完成 Typed UI IR → CPU RGBA8 → JSUI Scene/Patch/Input/Present 持续会话 →
-原生 Compositor/framebuffer 集成。硬件输入、重启和物理显示资格仍未完成。**
+原生 Compositor/framebuffer 集成，并接通 QEMU i8042/PS-2 → 原生输入队列 →
+JSUI Input 的键盘路径。物理硬件输入、重启和物理显示资格仍未完成。**
 
 ## 精确版本
 
@@ -31,15 +32,17 @@ cargo test -p user-ui-service --features native-engine-core --lib
 
 镜像级 `scripts/ui-process-check.sh` 通过真实 CPL3 Service、原生 Channel、
 三帧 RGBA8 Present、revision Patch、焦点 Enter/Activate 准入、Close、Service 资源
-回收、原生 Compositor 第 3 层采纳和 framebuffer 回读检查：
+回收、原生 Compositor 第 3 层采纳、framebuffer 回读，以及 QEMU PS/2 Enter
+进入原生 i8042 驱动后再交给 UI Engine 的检查：
 
 ```text
 ui-process: PASS cpl3=true channel=true jsui=true engine=cpu \
-  rendered=true present=true patch=true input=true frames=3 display=true exit=0 terminal=true resources=true
+  rendered=true present=true patch=true input=true native_keyboard=true \
+  frames=3 display=true exit=0 terminal=true resources=true
 qemu_rc=33
 ```
 
-证据为 `evidence/ui-process-20261118-220330/`，来源审计见
+证据为 `evidence/ui-native-keyboard-20261118/`，来源审计见
 `evidence/ui-engine-cpu-b21dec1/README.md`。这只关闭首帧集成，不关闭 UI-OS-1。
 
 ## 宿主映射
@@ -65,7 +68,8 @@ qemu_rc=33
 3. **首帧与原生合成器采纳已完成**：Jasper 用户态 UI Service 精确依赖固定
    Engine commit，通过原生 Channel 收场景、生成 RGBA8 Surface，并注册为原生
    Compositor 图层写入 framebuffer；Patch 推进 revision 并改变像素，Input 帧可驱动焦点节点 Activate 并产生后续帧。
-   物理硬件输入、显示资格和 Surface 重建仍未完成。
+   QEMU PS/2 Enter 经原生 i8042/输入队列进入 JSUI Input，驱动焦点节点
+   Activate 并产生后续帧。物理硬件输入、显示资格和 Surface 重建仍未完成。
 4. 在同一镜像完成首帧、输入、present、服务死亡、重启、资源回收、越权负例和
    Console 救援；之后才进入 LC-2 签名升级、回滚和跨版本验收。
 

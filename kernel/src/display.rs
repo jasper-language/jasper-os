@@ -69,6 +69,7 @@ struct Runtime {
     cursor: usize,
     prompt_reported: bool,
     echo_reported: bool,
+    ui_input_capture: bool,
 }
 
 static DISPLAY: IrqSpinLock<Option<Runtime>> = IrqSpinLock::ranked(crate::lockorder::DISPLAY, None);
@@ -211,6 +212,7 @@ pub fn start() -> Result<(), DisplayInputError> {
         cursor: 0,
         prompt_reported: false,
         echo_reported: false,
+        ui_input_capture: false,
     };
     runtime.append_text(b"JASPER-OS NATIVE TERMINAL\n\n");
     runtime.paint_boot_frame()?;
@@ -264,10 +266,46 @@ pub fn poll_input() -> usize {
 ///
 /// 为终端前端取出一次按键状态变化。
 pub fn next_key() -> Option<KeyInput> {
-    DISPLAY
-        .lock()
-        .as_mut()
-        .and_then(|runtime| runtime.session.pop_key().ok())
+    DISPLAY.lock().as_mut().and_then(|runtime| {
+        if runtime.ui_input_capture {
+            None
+        } else {
+            runtime.session.pop_key().ok()
+        }
+    })
+}
+
+/// Route queued native key transitions to the UI host instead of the terminal.
+///
+/// 把原生按键队列路由给 UI 宿主而不是终端；没有真实键盘时失败关闭。
+pub fn begin_ui_input_capture() -> bool {
+    let mut guard = DISPLAY.lock();
+    let Some(runtime) = guard.as_mut() else {
+        return false;
+    };
+    if !runtime.session.keyboard_available() {
+        return false;
+    }
+    runtime.ui_input_capture = true;
+    true
+}
+
+/// Return terminal input routing after the bounded UI input transaction.
+pub fn end_ui_input_capture() {
+    if let Some(runtime) = DISPLAY.lock().as_mut() {
+        runtime.ui_input_capture = false;
+    }
+}
+
+/// Remove one native key transition for the active UI input owner.
+pub fn next_ui_key() -> Option<KeyInput> {
+    DISPLAY.lock().as_mut().and_then(|runtime| {
+        if runtime.ui_input_capture {
+            runtime.session.pop_key().ok()
+        } else {
+            None
+        }
+    })
 }
 
 /// Render bytes emitted by the native terminal into the framebuffer text view.

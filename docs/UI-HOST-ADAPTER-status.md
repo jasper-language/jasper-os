@@ -4,7 +4,8 @@
 
 状态：**Jasper-OS 用户态宿主 crate、RGBA Surface 和真实 CPL3 Service 已接入固定
 UI Engine `no_std-core`，Scene/Patch/Input/Present 会话和原生 framebuffer 采纳已通过；
-物理硬件输入、显示资格和重启链路仍未完成。**
+QEMU i8042/PS-2 键盘到 JSUI Input 的原生路径已通过；物理键盘、显示资格和重启
+链路仍未完成。**
 
 ## 已实现
 
@@ -24,6 +25,9 @@ UI Engine `no_std-core`，Scene/Patch/Input/Present 会话和原生 framebuffer 
   client/request/sequence 的 JSUI Present 帧；随后消费 JSUI Patch 并渲染新 revision，
   再消费 JSUI Input，
   Engine 校验焦点节点 Activate 权限/身份/代际并渲染第二帧，Close 后正常退出；
+- 原生显示会话增加互斥输入路由：UI 捕获期间按键只交给 UI 宿主，终端不会抢先
+  消费；验证脚本在 QEMU 中向真实 i8042/PS-2 控制器发送 Enter，内核轮询驱动把
+  set-1 `0x1C` 转为 `0x0103`，UI 宿主再映射为 JSUI `28` 并发送 Input 帧；
 - 未开启 `native-engine-core` 的构建保留显式 `UnavailableEngine` 失败关闭路径；
   任何帧发送都受单条原生 Channel 消息上限约束，不把 JSUI 头之外的载荷按
   64 KiB 独立计算；
@@ -63,13 +67,17 @@ cargo test -p kernel-core 'display_'
 
 bash scripts/ui-process-check.sh
 ui-process: PASS cpl3=true channel=true jsui=true \
-  engine=cpu rendered=true present=true patch=true input=true frames=3 display=true exit=0 terminal=true resources=true
+  engine=cpu rendered=true present=true patch=true input=true native_keyboard=true \
+  frames=3 display=true exit=0 terminal=true resources=true
 qemu_rc=33
 ```
 
+证据见 `evidence/ui-native-keyboard-20261118/`。这证明 QEMU 的真实 emulated PS/2
+设备到原生驱动的完整路径，不冒充物理键盘或 Pixel 硬件验收。
+
 ## 尚未完成
 
-- 完成物理显示资格和真实键盘/指针/IME 设备输入；
+- 完成物理显示资格和真实硬件键盘/指针/IME 设备输入；
 - 接入 Engine `HostInbox` 的持续会话、背压、取消、重连和 Surface 重建；
 - 完成 Service 崩溃、Console 救援和重启后的连续帧；
 - 把 UI service 接入 LC-2 签名组件安装、健康检查和回滚；

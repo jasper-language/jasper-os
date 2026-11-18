@@ -14,7 +14,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use kernel_core::display_input::{PixelLayout, SurfaceSpec};
+use kernel_core::display_input::{KeyInput, PixelLayout, SurfaceSpec};
 use kernel_core::frame::FRAME_SIZE;
 use kernel_core::paging::MapFlags;
 use kernel_core::ui_protocol::{
@@ -34,6 +34,8 @@ const STACK_PAGES: u64 = 4;
 const TEST_SURFACE_WIDTH: u32 = 64;
 const TEST_SURFACE_HEIGHT: u32 = 64;
 const SERVICE_EXIT: i64 = 0;
+const NATIVE_ENTER_CODE: u16 = 0x0103;
+const JSUI_ENTER_CODE: u32 = 28;
 const REQUEST_PAYLOAD: &[u8] = br##"{"ir_version":"0.1.0","identity_domain":"jasper-os/ui-probe","owner":"ui-host","session":"session-1","expected_revision":1,"next_revision":2,"ops":[{"op":"insert","parent":null,"index":0,"node":{"key":{"semantic_id":1,"generation":1},"element":{"kind":"container"},"semantics":{"role":"container","label":"Jasper OS","focusable":true},"style":{"box":{"width":{"unit":"px","value":64},"height":{"unit":"px","value":64}},"paint":{"background":"#0A84FFFF"}},"events":[{"event":"activate","action":"jasper.ui.activate"}],"children":[]}}]}"##;
 const PATCH_PAYLOAD: &[u8] = br##"{"ir_version":"0.1.0","identity_domain":"jasper-os/ui-probe","owner":"ui-host","session":"session-1","expected_revision":2,"next_revision":3,"ops":[{"op":"update","key":{"semantic_id":1,"generation":1},"fields":{"style":{"box":{"width":{"unit":"px","value":64},"height":{"unit":"px","value":64}},"paint":{"background":"#FF0000FF"}}}}]}"##;
 
@@ -81,6 +83,24 @@ fn request_header(client: UiClientKey) -> UiFrameHeader {
 
 fn surface_argument() -> u64 {
     (u64::from(TEST_SURFACE_WIDTH) << 32) | u64::from(TEST_SURFACE_HEIGHT)
+}
+
+fn wait_for_native_enter() -> Option<KeyInput> {
+    if !crate::display::begin_ui_input_capture() {
+        return None;
+    }
+    kprintln!("[JSR-UI-PROCESS] waiting_real_key=true native_enter=0x0103");
+    let deadline = crate::clock::ticks().saturating_add(500);
+    while crate::clock::ticks() < deadline {
+        let _ = crate::display::poll_input();
+        if let Some(key) = crate::display::next_ui_key() {
+            if key.pressed && key.code == NATIVE_ENTER_CODE {
+                return Some(key);
+            }
+        }
+        core::hint::spin_loop();
+    }
+    None
 }
 
 fn launch_service(pid: kernel_core::objtable::ObjId, channel: u64) -> bool {
@@ -195,9 +215,28 @@ pub fn run() -> u32 {
         patch_sent == patch_len as i64,
         "host patch was not queued on the service endpoint",
     );
+    let Some(native_key) = wait_for_native_enter() else {
+        crate::display::end_ui_input_capture();
+        check(false, "native keyboard Enter was not delivered");
+        let _ = proc::exit_idle(host, -1);
+        let _ = proc::exit_idle(service, -1);
+        proc::reap(host);
+        proc::reap(service);
+        kobj::run_cleanup(usize::MAX);
+        check(
+            crate::baseline::baseline() == before && ipc::queued_total() == queued_before,
+            "missing hardware input leaked resources",
+        );
+        return failed();
+    };
+    kprintln!(
+        "[JSR-UI-PROCESS] native_keyboard=true native_code=0x{:04x} jsui_code={}",
+        native_key.code,
+        JSUI_ENTER_CODE
+    );
     let mut input_payload = [0u8; 8];
     UiInputRecord {
-        code: 28,
+        code: JSUI_ENTER_CODE,
         pressed: true,
         modifiers: 0,
     }
@@ -261,6 +300,7 @@ pub fn run() -> u32 {
     if started {
         sched::run();
     }
+    crate::display::end_ui_input_capture();
     let state = proc::state(service);
     check(
         state == Some(ProcState::Exited { code: SERVICE_EXIT }),
@@ -364,7 +404,7 @@ pub fn run() -> u32 {
     // Reaching this marker proves the serial Console remains available after
     // the service process and all of its objects were reclaimed.
     kprintln!(
-        "[JSR-UI-PROCESS] started={} channel=true request_queued={} engine=cpu rendered=true present=true patch=true input=true frames=3 display={} exit={} response={} terminal_alive=true resources={} checks={} failed={}",
+        "[JSR-UI-PROCESS] started={} channel=true request_queued={} engine=cpu rendered=true present=true patch=true input=true native_keyboard=true frames=3 display={} exit={} response={} terminal_alive=true resources={} checks={} failed={}",
         started,
         sent == request_len as i64,
         display_ok,
