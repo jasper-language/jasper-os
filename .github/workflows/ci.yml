@@ -150,9 +150,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: 安装 QEMU / install QEMU
+        timeout-minutes: 12
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 qemu-system-arm qemu-system-misc opensbi qemu-user ovmf e2fsprogs dosfstools gdisk binutils
+          apt_options=(
+            -o Acquire::Retries=3
+            -o Acquire::http::Timeout=30
+            -o Acquire::https::Timeout=30
+            -o Dpkg::Options::=--force-confdef
+            -o Dpkg::Options::=--force-confold
+          )
+          sudo -E apt-get "${apt_options[@]}" update -q
+          sudo -E apt-get "${apt_options[@]}" install -y -q --no-install-recommends \
+            qemu-system-x86 qemu-system-arm qemu-system-misc opensbi qemu-user ovmf \
+            e2fsprogs dosfstools gdisk binutils
           qemu-system-x86_64 --version | head -1
           qemu-system-aarch64 --version | head -1
           qemu-system-riscv64 --version | head -1
