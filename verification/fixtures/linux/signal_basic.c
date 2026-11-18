@@ -4,11 +4,14 @@
 
 #include <errno.h>
 #include <linux/futex.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/select.h>
 #include <sys/syscall.h>
+#include <time.h>
 #include <ucontext.h>
 #include <unistd.h>
 
@@ -44,6 +47,8 @@ static volatile sig_atomic_t altstack_change_denied;
 static volatile sig_atomic_t winch_count;
 static volatile uintptr_t autodisarm_stack_address;
 static volatile sig_atomic_t autodisarm_observed;
+static volatile sig_atomic_t atomic_signal_count;
+static pthread_t atomic_signal_target;
 static unsigned char alternate_stack[64 * 1024] __attribute__((aligned(16)));
 
 static void usr2_handler(int signal, siginfo_t *info, void *context) {
@@ -176,6 +181,22 @@ static void winch_handler(int signal, siginfo_t *info, void *context) {
     winch_count++;
 }
 
+static void atomic_signal_handler(int signal, siginfo_t *info, void *context) {
+    if (signal != SIGURG || info == 0 || info->si_signo != signal ||
+        info->si_pid != getpid() || context == 0) {
+        _exit(37);
+    }
+    atomic_signal_count++;
+}
+
+static void *atomic_signaler(void *argument) {
+    (void)argument;
+    if (pthread_kill(atomic_signal_target, SIGURG) != 0) {
+        return (void *)(intptr_t)-1;
+    }
+    return (void *)(intptr_t)1;
+}
+
 static void *blocked_worker(void *argument) {
     (void)argument;
     sigset_t blocked;
@@ -249,7 +270,8 @@ int main(void) {
         install_handler_flags(SIGTERM, term_handler, SA_SIGINFO | SA_RESETHAND) != 0 ||
         install_handler_flags(SIGPROF, prof_handler, SA_SIGINFO | SA_ONSTACK) != 0 ||
         install_handler_flags(SIGWINCH, winch_handler, SA_SIGINFO | SA_ONSTACK) != 0 ||
-        install_handler_flags(SIGVTALRM, fpu_handler, SA_SIGINFO) != 0) {
+        install_handler_flags(SIGVTALRM, fpu_handler, SA_SIGINFO) != 0 ||
+        install_handler_flags(SIGURG, atomic_signal_handler, SA_SIGINFO) != 0) {
         return 1;
     }
     if (raise(SIGUSR1) != 0 || usr1_count != 1 || usr2_count != 1 || !nested_ok) {
@@ -268,6 +290,45 @@ int main(void) {
     }
     if (sigprocmask(SIG_SETMASK, &old, 0) != 0 || usr1_count != 2) {
         return 5;
+    }
+
+    sigset_t atomic_blocked;
+    sigset_t atomic_empty;
+    sigset_t observed_mask;
+    sigemptyset(&atomic_blocked);
+    sigemptyset(&atomic_empty);
+    sigaddset(&atomic_blocked, SIGUSR1);
+    sigaddset(&atomic_blocked, SIGURG);
+    if (sigprocmask(SIG_SETMASK, &atomic_blocked, 0) != 0) {
+        return 33;
+    }
+    const struct timespec zero_timeout = {.tv_sec = 0, .tv_nsec = 0};
+    if (ppoll(0, 0, &zero_timeout, &atomic_empty) != 0 ||
+        sigprocmask(SIG_SETMASK, 0, &observed_mask) != 0 ||
+        !sigismember(&observed_mask, SIGUSR1)) {
+        return 34;
+    }
+    if (pselect(0, 0, 0, 0, &zero_timeout, &atomic_empty) != 0 ||
+        sigprocmask(SIG_SETMASK, 0, &observed_mask) != 0 ||
+        !sigismember(&observed_mask, SIGUSR1)) {
+        return 35;
+    }
+    pthread_t signaler_thread;
+    void *signaler_result = 0;
+    atomic_signal_target = pthread_self();
+    if (pthread_create(&signaler_thread, 0, atomic_signaler, 0) != 0) {
+        return 37;
+    }
+    errno = 0;
+    if (ppoll(0, 0, 0, &atomic_empty) != -1 || errno != EINTR ||
+        pthread_join(signaler_thread, &signaler_result) != 0 ||
+        signaler_result != (void *)(intptr_t)1 || atomic_signal_count != 1 ||
+        sigprocmask(SIG_SETMASK, 0, &observed_mask) != 0 ||
+        !sigismember(&observed_mask, SIGURG)) {
+        return 38;
+    }
+    if (sigprocmask(SIG_SETMASK, &old, 0) != 0) {
+        return 36;
     }
 
     const uint64_t fpu_magic[4] = {

@@ -992,6 +992,56 @@ fn set_current_signal_mask(process: ObjId, mask: u64) -> bool {
     true
 }
 
+/// Temporarily replaces the current thread mask for `ppoll`/`pselect6`.
+///
+/// The guard restores the previous mask on every return path, including EINTR.
+/// Signal delivery happens after the compatibility syscall returns, so the
+/// restored mask is the one captured in the Linux signal frame.
+struct TemporarySignalMask {
+    process: ObjId,
+    previous: u64,
+    restore_on_drop: bool,
+}
+
+impl Drop for TemporarySignalMask {
+    fn drop(&mut self) {
+        if self.restore_on_drop {
+            let _ = set_current_signal_mask(self.process, self.previous);
+        }
+    }
+}
+
+impl TemporarySignalMask {
+    /// Keep the temporary mask active until the delivered handler returns.
+    fn defer_restore_to_signal_frame(&mut self) -> bool {
+        if !set_current_sigsuspend_restore_mask(self.process, Some(self.previous)) {
+            return false;
+        }
+        self.restore_on_drop = false;
+        true
+    }
+}
+
+fn temporary_signal_mask(
+    process: ObjId,
+    address: u64,
+    size: u64,
+) -> Result<Option<TemporarySignalMask>, CompatErrno> {
+    if address == 0 {
+        return Ok(None);
+    }
+    let requested = read_linux_sigset(address, size)?;
+    let previous = current_signal_mask(process).ok_or(CompatErrno::NoSys)?;
+    if !set_current_signal_mask(process, requested) {
+        return Err(CompatErrno::NoSys);
+    }
+    Ok(Some(TemporarySignalMask {
+        process,
+        previous,
+        restore_on_drop: true,
+    }))
+}
+
 /// Stores the mask `rt_sigsuspend` must restore after its signal handler returns.
 fn set_current_sigsuspend_restore_mask(process: ObjId, mask: Option<u64>) -> bool {
     let (task, _) = sched::current();
@@ -19045,11 +19095,11 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
 }
 
-/// Implements `ppoll(2)` with a bounded timespec timeout and a NULL signal
-/// mask. Atomic signal-mask replacement remains explicitly unsupported.
+/// Implements `ppoll(2)` with a bounded timespec timeout and atomic temporary
+/// signal-mask replacement.
 fn linux_ppoll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    if args[3] != 0 || (args[4] != 0 && args[4] != 8) {
-        return Err(CompatErrno::NoSys);
+    if args[4] != 0 && args[4] != 8 {
+        return Err(CompatErrno::Invalid);
     }
     let timeout = if args[2] == 0 {
         u32::MAX as u64
@@ -19069,10 +19119,20 @@ fn linux_ppoll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .filter(|millis| *millis <= i32::MAX as u64)
             .ok_or(CompatErrno::Invalid)?
     };
-    linux_poll(
+    let mut temporary_mask = temporary_signal_mask(pid, args[3], args[4])?;
+    let result = linux_poll(
         pid,
         [args[0], args[1], timeout, 0, 0, 0],
-    )
+    );
+    if matches!(result, Err(CompatErrno::Interrupted)) {
+        if temporary_mask
+            .as_mut()
+            .is_some_and(|mask| !mask.defer_restore_to_signal_frame())
+        {
+            return Err(CompatErrno::NoSys);
+        }
+    }
+    result
 }
 
 /// Implements `select(2)`/`pselect6(2)` by translating bounded fd sets through
@@ -19091,17 +19151,16 @@ fn linux_select(
     if nfds > FDSET_BYTES * 8 {
         return Err(CompatErrno::Invalid);
     }
+    let mut pselect_mask = None;
     if pselect && args[5] != 0 {
         let mut raw = [0u8; 16];
         copy_from_user(&mut raw, args[5], 16).map_err(|_| CompatErrno::Fault)?;
-        let mask = u64::from_le_bytes(raw[0..8].try_into().unwrap());
+        let mask_address = u64::from_le_bytes(raw[0..8].try_into().unwrap());
         let size = u64::from_le_bytes(raw[8..16].try_into().unwrap());
-        if mask != 0 {
-            return Err(CompatErrno::NoSys);
-        }
-        if size != 0 && size != 8 {
+        if mask_address != 0 && size != 8 {
             return Err(CompatErrno::Invalid);
         }
+        pselect_mask = (mask_address != 0).then_some((mask_address, size));
     }
     let mut read_set = [0u8; FDSET_BYTES];
     let mut write_set = [0u8; FDSET_BYTES];
@@ -19163,8 +19222,21 @@ fn linux_select(
             .filter(|millis| *millis <= i32::MAX as u64)
             .ok_or(CompatErrno::Invalid)?
     };
+    let mut temporary_mask = match pselect_mask {
+        Some((address, size)) => temporary_signal_mask(pid, address, size)?,
+        None => None,
+    };
     if poll_entries.is_empty() {
-        return linux_poll(pid, [0, 0, timeout, 0, 0, 0]);
+        let result = linux_poll(pid, [0, 0, timeout, 0, 0, 0]);
+        if matches!(result, Err(CompatErrno::Interrupted)) {
+            if temporary_mask
+                .as_mut()
+                .is_some_and(|mask| !mask.defer_restore_to_signal_frame())
+            {
+                return Err(CompatErrno::NoSys);
+            }
+        }
+        return result;
     }
     let mut bytes = alloc::vec![0u8; poll_entries.len() * 8];
     for (index, (fd, events)) in poll_entries.iter().enumerate() {
@@ -19178,6 +19250,15 @@ fn linux_select(
         pid,
         [address, poll_entries.len() as u64, timeout, 0, 0, 0],
     );
+    if matches!(result, Err(CompatErrno::Interrupted)) {
+        if temporary_mask
+            .as_mut()
+            .is_some_and(|mask| !mask.defer_restore_to_signal_frame())
+        {
+            let _ = proc::linux_free_transaction_buffer(pid, address, bytes.len());
+            return Err(CompatErrno::NoSys);
+        }
+    }
     let readback = if result.is_ok() {
         let mut output = alloc::vec![0u8; bytes.len()];
         copy_from_user(&mut output, address, bytes.len()).map_err(|_| CompatErrno::Fault)?;
