@@ -344,13 +344,44 @@ if { [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MO
   SERIAL_READER=$!
   (
     exec 8>"$OUT/serial.in"
-    while ! grep -aq '^jasper> ' "$OUT/serial.log"; do
+    # UEFI/TCG can drop individual prompt bytes under serial load. Wait for the
+    # CLI read syscall as the semantic readiness signal, not a byte-perfect prompt.
+    while ! grep -aqE '^jasper> |\[JSR-SYSCALL\] enter name=system\.terminal\.read' "$OUT/serial.log"; do
       sleep 1
     done
+    feed() {
+      printf '%s\n' "$1" >&8
+      sleep "${ISSUE21_SERIAL_FEED_DELAY:-0.2}"
+    }
     if [ "$MODE" = update-list ]; then
-      printf 'help\nsystem update list\nsystem update list --json\nsystem update list --schema\nsystem update list --help\nexit\n' >&8
+      feed 'help'
+      feed 'system update list'
+      feed 'system update list --json'
+      feed 'system update list --schema'
+      feed 'system update list --help'
+      feed 'exit'
     else
-    printf 'help\nsystem update status\nsystem update status --json\nsystem update status --schema\nsystem update status --help\nsystem update recover\nsystem update recover --json\nsystem update recover --schema\nsystem update recover --help\nsystem update archive\nsystem update archive --json\nsystem update archive --schema\nsystem update archive --help\nsystem update audit\nsystem update audit --json\nsystem update audit --schema\nsystem update audit --help\necho history\n\016\n\003\004' >&8
+      feed 'help'
+      feed 'system update status'
+      feed 'system update status --json'
+      feed 'system update status --schema'
+      feed 'system update status --help'
+      feed 'system update recover'
+      feed 'system update recover --json'
+      feed 'system update recover --schema'
+      feed 'system update recover --help'
+      feed 'system update archive'
+      feed 'system update archive --json'
+      feed 'system update archive --schema'
+      feed 'system update archive --help'
+      feed 'system update audit'
+      feed 'system update audit --json'
+      feed 'system update audit --schema'
+      feed 'system update audit --help'
+      feed 'echo history'
+      printf '\016' >&8
+      sleep "${ISSUE21_SERIAL_FEED_DELAY:-0.2}"
+      printf '\003\004' >&8
     fi
   ) &
   SERIAL_FEEDER=$!
