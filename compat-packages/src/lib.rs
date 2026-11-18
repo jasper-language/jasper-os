@@ -402,6 +402,25 @@ pub enum PackageError {
         /// 检测到的损坏原因。
         reason: String,
     },
+    /// Dependency planning could not produce a complete, platform-compatible plan.
+    /// 依赖规划无法生成完整且与平台兼容的计划。
+    Resolution(resolution::ResolutionError),
+    /// The resolved plan selects a version that is not the exact active installation.
+    /// 解析计划选择的版本不是当前精确激活的安装版本。
+    ResolutionStateDrift {
+        /// Planned component.
+        /// 计划中的组件。
+        component: String,
+        /// Version selected by the deterministic planner.
+        /// 确定性规划器选择的版本。
+        planned: String,
+        /// Version currently active in the installer.
+        /// 安装器当前激活的版本。
+        installed: String,
+    },
+    /// A caller-visible resolution plan is malformed or not rooted at this component.
+    /// 对外可见的解析计划格式错误，或根组件不匹配。
+    InvalidResolution(String),
 }
 
 impl std::fmt::Display for PackageError {
@@ -449,11 +468,29 @@ impl std::fmt::Display for PackageError {
             Self::CorruptState { name, reason } => {
                 write!(formatter, "组件状态损坏：{name}：{reason}")
             }
+            Self::Resolution(error) => write!(formatter, "组件依赖解析失败：{error}"),
+            Self::ResolutionStateDrift {
+                component,
+                planned,
+                installed,
+            } => write!(
+                formatter,
+                "组件解析计划要求 {component} {planned}，当前精确安装为 {installed}"
+            ),
+            Self::InvalidResolution(reason) => write!(formatter, "组件解析计划无效：{reason}"),
         }
     }
 }
 
-impl std::error::Error for PackageError {}
+impl std::error::Error for PackageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Resolution(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl From<io::Error> for PackageError {
     fn from(value: io::Error) -> Self {
@@ -499,12 +536,53 @@ impl ComponentInstaller {
     ) -> Result<Installed, PackageError> {
         let manifest_text = fs::read_to_string(manifest_path)?;
         let manifest = ComponentManifest::parse(&manifest_text)?;
+        self.require_target_arch(&manifest)?;
+        self.install_preflighted(manifest_text, manifest, archive_path)
+    }
+
+    /// Resolve a catalog and atomically install exactly the planned root version.
+    ///
+    /// The returned plan is not advisory. Every dependency it selects must
+    /// already be active at that exact version before any archive is staged or
+    /// extracted. This prevents a planner choice from silently drifting into a
+    /// different installer choice.
+    ///
+    /// 解析候选目录并原子安装计划指定的根版本。返回计划不是建议：在任何归档
+    /// 暂存或解包前，每个依赖都必须已按精确版本激活，防止规划结果在安装器
+    /// 内被静默重选。
+    pub fn install_resolved(
+        &self,
+        manifest_path: &Path,
+        archive_path: &Path,
+        catalog: &[ComponentManifest],
+        platform: &resolution::ResolutionPlatform,
+    ) -> Result<(Installed, resolution::ResolutionPlan), PackageError> {
+        let manifest_text = fs::read_to_string(manifest_path)?;
+        let manifest = ComponentManifest::parse(&manifest_text)?;
+        self.require_target_arch(&manifest)?;
+        let plan =
+            resolution::resolve(&manifest, catalog, platform).map_err(PackageError::Resolution)?;
+        self.verify_resolution(&manifest, &plan, catalog)?;
+        let installed = self.install_preflighted(manifest_text, manifest, archive_path)?;
+        Ok((installed, plan))
+    }
+
+    fn require_target_arch(&self, manifest: &ComponentManifest) -> Result<(), PackageError> {
         if manifest.arch != std::env::consts::ARCH {
             return Err(PackageError::Incompatible(format!(
                 "unsupported architecture {}",
                 manifest.arch
             )));
         }
+        Ok(())
+    }
+
+    fn install_preflighted(
+        &self,
+        manifest_text: String,
+        manifest: ComponentManifest,
+        archive_path: &Path,
+    ) -> Result<Installed, PackageError> {
         self.preflight_dependency_closure(&manifest)?;
         self.ensure_active_dependents_accept(&manifest.name, &manifest.version)?;
         let actual = digest_file(archive_path)?;
@@ -649,6 +727,110 @@ impl ComponentInstaller {
                     .into_iter()
                     .map(|nested| (required.name.clone(), nested_path.clone(), nested)),
             );
+        }
+        Ok(())
+    }
+
+    fn verify_resolution(
+        &self,
+        root: &ComponentManifest,
+        plan: &resolution::ResolutionPlan,
+        catalog: &[ComponentManifest],
+    ) -> Result<(), PackageError> {
+        let Some(last) = plan.order.last() else {
+            return Err(PackageError::InvalidResolution("计划为空".into()));
+        };
+        if last.name != root.name || last.version != root.version {
+            return Err(PackageError::InvalidResolution(
+                "计划根组件与待安装组件不一致".into(),
+            ));
+        }
+
+        let mut selected = BTreeMap::new();
+        for component in &plan.order {
+            if !safe_token(&component.name) || !safe_token(&component.version) {
+                return Err(PackageError::InvalidResolution(
+                    "计划包含非法组件名或版本".into(),
+                ));
+            }
+            if selected
+                .insert(component.name.clone(), component.version.clone())
+                .is_some()
+            {
+                return Err(PackageError::InvalidResolution(format!(
+                    "计划重复选择 {}",
+                    component.name
+                )));
+            }
+        }
+        if selected.len() != plan.order.len() || selected.get(&root.name) != Some(&root.version) {
+            return Err(PackageError::InvalidResolution(
+                "计划组件集合与根组件不一致".into(),
+            ));
+        }
+
+        let mut pending = root.requires.clone();
+        let mut encountered = BTreeSet::from([root.name.clone()]);
+        let mut expanded = BTreeSet::new();
+        while let Some(required) = pending.pop() {
+            let Some(planned) = selected.get(&required.name) else {
+                return Err(PackageError::InvalidResolution(format!(
+                    "计划遗漏依赖 {}",
+                    required.name
+                )));
+            };
+            if !required.matches(planned) {
+                return Err(PackageError::InvalidResolution(format!(
+                    "计划版本 {} {} 不满足 {}",
+                    required.name, planned, required.version
+                )));
+            }
+            encountered.insert(required.name.clone());
+            if !expanded.insert(required.name.clone()) {
+                continue;
+            }
+
+            let installed = self.current(&required.name)?;
+            if installed.version != *planned {
+                return Err(PackageError::ResolutionStateDrift {
+                    component: required.name,
+                    planned: planned.clone(),
+                    installed: installed.version,
+                });
+            }
+            let installed_manifest =
+                self.installed_manifest(&installed.name, &installed.version)?;
+            let mut candidates = catalog.iter().filter(|candidate| {
+                candidate.name == required.name && candidate.version == *planned
+            });
+            let Some(candidate) = candidates.next() else {
+                return Err(PackageError::InvalidResolution(format!(
+                    "计划组件 {} {} 不在候选目录中",
+                    required.name, planned
+                )));
+            };
+            if candidates.next().is_some() {
+                return Err(PackageError::InvalidResolution(format!(
+                    "候选目录包含歧义的 {} {}",
+                    required.name, planned
+                )));
+            }
+            if installed_manifest != *candidate {
+                return Err(PackageError::ResolutionStateDrift {
+                    component: required.name,
+                    planned: format!("{} sha256={}", planned, candidate.archive_sha256),
+                    installed: format!(
+                        "{} sha256={}",
+                        installed.version, installed_manifest.archive_sha256
+                    ),
+                });
+            }
+            pending.extend(installed_manifest.requires);
+        }
+        if encountered.len() != selected.len() {
+            return Err(PackageError::InvalidResolution(
+                "计划包含根组件闭包之外的额外组件".into(),
+            ));
         }
         Ok(())
     }
@@ -1337,6 +1519,15 @@ mod tests {
         path
     }
 
+    fn resolution_platform() -> resolution::ResolutionPlatform {
+        resolution::ResolutionPlatform {
+            architecture: std::env::consts::ARCH.into(),
+            runtime: "jasper-linux".into(),
+            abi: Version::new(3, 21, 0),
+            capabilities: BTreeSet::new(),
+        }
+    }
+
     fn transient_entries(root: &Path) -> Vec<String> {
         if !root.exists() {
             return Vec::new();
@@ -1466,6 +1657,136 @@ mod tests {
             Err(PackageError::CorruptState { name, .. }) if name == "linux-abi-1"
         ));
         assert!(transient_entries(&root).is_empty());
+    }
+
+    #[test]
+    fn resolved_install_consumes_exact_installed_versions() {
+        let temp = TestDir::new("resolved-install");
+        let root = temp.path().join("root");
+        let installer = ComponentInstaller::new(&root);
+        let (runtime_archive, runtime_digest) = archive(temp.path(), "runtime-1.5.0");
+        let runtime_manifest =
+            component_manifest(temp.path(), "runtime", "1.5.0", &runtime_digest, "");
+        installer
+            .install(&runtime_manifest, &runtime_archive)
+            .unwrap();
+
+        let (old_runtime_archive, old_runtime_digest) = archive(temp.path(), "runtime-1.0.0");
+        let old_runtime_manifest =
+            component_manifest(temp.path(), "runtime", "1.0.0", &old_runtime_digest, "");
+        let (root_archive, root_digest) = archive(temp.path(), "app-2.0.0");
+        let root_manifest = component_manifest(
+            temp.path(),
+            "app",
+            "2.0.0",
+            &root_digest,
+            "runtime@>=1.0.0,<2.0.0",
+        );
+        let catalog = vec![
+            ComponentManifest::parse(&fs::read_to_string(old_runtime_manifest).unwrap()).unwrap(),
+            ComponentManifest::parse(&fs::read_to_string(runtime_manifest).unwrap()).unwrap(),
+        ];
+
+        let (installed, plan) = installer
+            .install_resolved(
+                &root_manifest,
+                &root_archive,
+                &catalog,
+                &resolution_platform(),
+            )
+            .unwrap();
+        assert_eq!(installed.name, "app");
+        assert_eq!(
+            plan.order
+                .iter()
+                .map(|component| (component.name.as_str(), component.version.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("runtime", "1.5.0"), ("app", "2.0.0")]
+        );
+        assert_eq!(installer.current("app").unwrap().version, "2.0.0");
+        assert_eq!(installer.current("runtime").unwrap().version, "1.5.0");
+        assert!(transient_entries(&root).is_empty());
+        drop(old_runtime_archive);
+    }
+
+    #[test]
+    fn resolved_install_rejects_plan_drift_before_staging() {
+        let temp = TestDir::new("resolved-drift");
+        let root = temp.path().join("root");
+        let installer = ComponentInstaller::new(&root);
+        let (runtime_archive, runtime_digest) = archive(temp.path(), "runtime-1.0.0");
+        let runtime_manifest =
+            component_manifest(temp.path(), "runtime", "1.0.0", &runtime_digest, "");
+        installer
+            .install(&runtime_manifest, &runtime_archive)
+            .unwrap();
+
+        let (new_runtime_archive, new_runtime_digest) = archive(temp.path(), "runtime-1.5.0");
+        let new_runtime_manifest =
+            component_manifest(temp.path(), "runtime", "1.5.0", &new_runtime_digest, "");
+        let (root_archive, root_digest) = archive(temp.path(), "app-2.0.0");
+        let root_manifest = component_manifest(
+            temp.path(),
+            "app",
+            "2.0.0",
+            &root_digest,
+            "runtime@>=1.0.0,<2.0.0",
+        );
+        let catalog = vec![
+            ComponentManifest::parse(&fs::read_to_string(runtime_manifest).unwrap()).unwrap(),
+            ComponentManifest::parse(&fs::read_to_string(new_runtime_manifest).unwrap()).unwrap(),
+        ];
+
+        assert!(matches!(
+            installer.install_resolved(
+                &root_manifest,
+                &root_archive,
+                &catalog,
+                &resolution_platform(),
+            ),
+            Err(PackageError::ResolutionStateDrift {
+                component,
+                planned,
+                installed,
+            }) if component == "runtime"
+                && planned == "1.5.0"
+                && installed == "1.0.0"
+        ));
+        assert!(matches!(
+            installer.current("app"),
+            Err(PackageError::NotInstalled(_))
+        ));
+        assert!(transient_entries(&root).is_empty());
+        drop(new_runtime_archive);
+    }
+
+    #[test]
+    fn resolved_install_rejects_unsatisfied_plan_before_staging() {
+        let temp = TestDir::new("resolved-missing");
+        let root = temp.path().join("root");
+        let installer = ComponentInstaller::new(&root);
+        let (root_archive, root_digest) = archive(temp.path(), "app-2.0.0");
+        let root_manifest =
+            component_manifest(temp.path(), "app", "2.0.0", &root_digest, "runtime@>=2.0.0");
+        let (runtime_archive, runtime_digest) = archive(temp.path(), "runtime-1.0.0");
+        let runtime_manifest =
+            component_manifest(temp.path(), "runtime", "1.0.0", &runtime_digest, "");
+        let catalog =
+            vec![ComponentManifest::parse(&fs::read_to_string(runtime_manifest).unwrap()).unwrap()];
+
+        assert!(matches!(
+            installer.install_resolved(
+                &root_manifest,
+                &root_archive,
+                &catalog,
+                &resolution_platform(),
+            ),
+            Err(PackageError::Resolution(
+                resolution::ResolutionError::Unsatisfied { package, .. }
+            )) if package == "runtime"
+        ));
+        assert!(!root.exists());
+        drop(runtime_archive);
     }
 
     #[test]
