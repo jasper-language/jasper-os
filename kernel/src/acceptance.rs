@@ -1292,7 +1292,30 @@ mod dedicated {
         crate::subscription_broadcast_demo::run();
         exit_on(0);
     }
-    pub const PLAN: &[&[Step]] = &[PREFIX, SMP_UP, &[PlanItem::Finish(finish)]];
+
+    // The broadcast drill needs only the stage closure required by SMP. Running
+    // the shared acceptance prefix adds unrelated console cases and device
+    // exercises before the million-event payload.
+    const BROADCAST_PREFIX: &[Step] = &[
+        st(Stage::Console),
+        st(Stage::Platform),
+        st(Stage::Timer),
+        st(Stage::Frames),
+        st(Stage::KernelMap),
+        st(Stage::Heap),
+        st(Stage::Capacity),
+        st(Stage::Devices),
+        st(Stage::Profile),
+        st(Stage::Assembly),
+        st(Stage::SchedMode),
+        st(Stage::Space),
+    ];
+
+    pub const PLAN: &[&[Step]] = &[
+        BROADCAST_PREFIX,
+        &[st(Stage::Smp)],
+        &[PlanItem::Finish(finish)],
+    ];
 }
 
 #[cfg(feature = "evt2-verify")]

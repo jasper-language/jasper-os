@@ -347,6 +347,15 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
         // SMP-1：启动其他处理器。部分处理器没上线不算失败，结果由 `StartReport` 报告。
         Stage::Smp => stage(ctx, s, |ctx| {
             let report = smp::start_secondaries(TIMER_HZ);
+            kprintln!(
+                "[JSR-SMP] start present={} online={} failed={} source={} dropped={} disabled={}",
+                report.present,
+                report.online,
+                report.failed,
+                report.source,
+                report.dropped,
+                report.disabled
+            );
             irq::device::admit_topology("smp_ready");
             #[cfg(feature = "pixel6a-smp-probe")]
             if report.present == 8 && report.online == 8 && report.failed == 0 {
