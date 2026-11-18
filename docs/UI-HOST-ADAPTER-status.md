@@ -3,7 +3,8 @@
 更新时间：2026-11-18。
 
 状态：**Jasper-OS 用户态宿主 crate、RGBA Surface 和真实 CPL3 Service 已接入固定
-UI Engine `no_std-core`，完成首帧 Present；完整输入/显示/重启链路仍未完成。**
+UI Engine `no_std-core`，首帧已由原生 Compositor 写入 framebuffer；完整输入、
+物理显示资格和重启链路仍未完成。**
 
 ## 已实现
 
@@ -26,7 +27,8 @@ UI Engine `no_std-core`，完成首帧 Present；完整输入/显示/重启链�
   64 KiB 独立计算；
 - `kernel::ui_process_demo` 把该 ELF 嵌入 Jasper-OS 验证内核，建立真实宿主与
   Service Channel，在 CPL3 调度 Service，并检查 64×64 RGBA8 像素、退出码 0、
-  Console 存活以及对象、固定帧、Channel 队列和页帧回收；
+  Service/Channel 资源基线、Console 存活；随后把 Present Surface 注册为原生
+  Compositor 第 3 层，中心写入真实 framebuffer 并回读像素；
 - `kernel-core::display_input::PixelLayout` 增加 RGBA，Compositor 与 framebuffer
   写入路径按 R/G/B/A 顺序处理，匹配 CPU Engine 的 RGBA8 输出。
 
@@ -59,13 +61,13 @@ cargo test -p kernel-core 'display_'
 
 bash scripts/ui-process-check.sh
 ui-process: PASS cpl3=true channel=true jsui=true \
-  engine=cpu rendered=true present=true exit=0 terminal=true resources=true
+  engine=cpu rendered=true present=true display=true exit=0 terminal=true resources=true
 qemu_rc=33
 ```
 
 ## 尚未完成
 
-- 将首帧 Surface 接入合成器采纳和物理显示，并完成真实键盘/指针/IME 输入；
+- 完成物理显示资格和真实键盘/指针/IME 输入；
 - 接入 Engine `HostInbox` 的持续会话、背压、取消、重连和 Surface 重建；
 - 完成 Service 崩溃、Console 救援和重启后的连续帧；
 - 把 UI service 接入 LC-2 签名组件安装、健康检查和回滚；

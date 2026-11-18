@@ -66,7 +66,7 @@ fn surface_from_argument(value: u64) -> Option<SurfaceSpec> {
         layout: PixelLayout::Rgba,
     };
     let bytes = surface.validate().ok()?;
-    if bytes > jasper_ui_service::MAX_NATIVE_UI_FRAME_PAYLOAD as u64 {
+    if bytes > jasper_ui_service::max_native_ui_frame_payload() as u64 {
         return None;
     }
     Some(surface)

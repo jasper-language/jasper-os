@@ -14,11 +14,11 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use kernel_core::display_input::{PixelLayout, SurfaceSpec};
 use kernel_core::frame::FRAME_SIZE;
 use kernel_core::paging::MapFlags;
 use kernel_core::ui_protocol::{
-    decode_ui_frame, encode_ui_frame, UiFrameHeader, UiFrameKind, MAX_UI_FRAME_PAYLOAD,
-    UI_FRAME_HEADER_BYTES,
+    decode_ui_frame, encode_ui_frame, UiFrameHeader, UiFrameKind, UI_FRAME_HEADER_BYTES,
 };
 use kernel_core::ui_service::UiClientKey;
 
@@ -186,18 +186,19 @@ pub fn run() -> u32 {
     );
 
     let response_bytes = ipc::queued_body(host, host_endpoint, ipc::MAX_MSG_BYTES);
-    let response_ok = response_bytes.as_deref().is_some_and(|bytes| {
-        decode_ui_frame(bytes).is_ok_and(|frame| {
-            let expected_bytes = TEST_SURFACE_WIDTH as usize * TEST_SURFACE_HEIGHT as usize * 4;
-            frame.header.kind == UiFrameKind::Present
-                && frame.header.flags == 0
-                && frame.header.client == client
-                && frame.header.request_id == header.request_id
-                && frame.header.sequence == header.sequence
-                && frame.payload.len() == expected_bytes
-                && frame.payload.starts_with(&[0x0a, 0x84, 0xff, 0xff])
-                && frame.payload.chunks_exact(4).all(|pixel| pixel[3] == 0xff)
-        })
+    let response_frame = response_bytes
+        .as_deref()
+        .and_then(|bytes| decode_ui_frame(bytes).ok());
+    let response_ok = response_frame.as_ref().is_some_and(|frame| {
+        let expected_bytes = TEST_SURFACE_WIDTH as usize * TEST_SURFACE_HEIGHT as usize * 4;
+        frame.header.kind == UiFrameKind::Present
+            && frame.header.flags == 0
+            && frame.header.client == client
+            && frame.header.request_id == header.request_id
+            && frame.header.sequence == header.sequence
+            && frame.payload.len() == expected_bytes
+            && frame.payload.starts_with(&[0x0a, 0x84, 0xff, 0xff])
+            && frame.payload.chunks_exact(4).all(|pixel| pixel[3] == 0xff)
     });
     check(
         response_ok,
@@ -230,13 +231,30 @@ pub fn run() -> u32 {
         resources,
         "UI Channel/process resources did not return to baseline",
     );
+    let display_ok = response_frame.as_ref().is_some_and(|frame| {
+        let surface = SurfaceSpec {
+            width: TEST_SURFACE_WIDTH,
+            height: TEST_SURFACE_HEIGHT,
+            stride: TEST_SURFACE_WIDTH,
+            bytes_per_pixel: 4,
+            layout: PixelLayout::Rgba,
+        };
+        crate::display::present_ui_frame(surface, frame.payload)
+            .ok()
+            .is_some_and(|(x, y)| crate::display::read_pixel_rgb(x, y) == Some((0x0a, 0x84, 0xff)))
+    });
+    check(
+        display_ok,
+        "Engine Surface was not adopted into the native framebuffer compositor",
+    );
 
     // Reaching this marker proves the serial Console remains available after
     // the service process and all of its objects were reclaimed.
     kprintln!(
-        "[JSR-UI-PROCESS] started={} channel=true request_queued={} engine=cpu rendered=true present=true exit={} response={} terminal_alive=true resources={} checks={} failed={}",
+        "[JSR-UI-PROCESS] started={} channel=true request_queued={} engine=cpu rendered=true present=true display={} exit={} response={} terminal_alive=true resources={} checks={} failed={}",
         started,
         sent == request_len as i64,
+        display_ok,
         SERVICE_EXIT,
         response_ok,
         resources,

@@ -19,7 +19,9 @@ The public source branch is `codex/no-std-core`.
 The Jasper-OS `user/ui-service` CPL3 process receives a JSUI v1 Scene frame over
 a real native Channel, parses Typed UI IR, runs the pinned Engine CPU core, and
 returns a versioned JSUI Present frame containing a host-owned 64x64 RGBA8
-surface.
+surface. The host first verifies Service/Channel cleanup, then adopts the Surface
+as a third native Compositor layer at `(608, 328)` and reads the framebuffer
+pixel back as `0A 84 FF`.
 
 The acceptance scene is a 64x64 container with background `#0A84FFFF`. The host
 verifies all 16,384 payload bytes are present, the first pixel is the expected
@@ -30,18 +32,19 @@ Evidence:
 
 ```text
 ui-host-adapter-20261118-204008/
-ui-process-20261118-203825/serial.log
-ui-process-20261118-203825/qemu_rc.txt=33
+ui-process-20261118-205633/serial.log
+ui-process-20261118-205633/qemu_rc.txt=33
 ```
 
 Final marker:
 
 ```text
-[JSR-UI-PROCESS] started=true channel=true request_queued=true engine=cpu rendered=true present=true exit=0 response=true terminal_alive=true resources=true
-ui-process: PASS cpl3=true channel=true jsui=true engine=cpu rendered=true present=true exit=0 terminal=true resources=true
+[JSR-DISPLAY-UI] presented=true width=64 height=64 x=608 y=328 layers=3
+[JSR-UI-PROCESS] started=true channel=true request_queued=true engine=cpu rendered=true present=true display=true exit=0 response=true terminal_alive=true resources=true
+ui-process: PASS cpl3=true channel=true jsui=true engine=cpu rendered=true present=true display=true exit=0 terminal=true resources=true
 ```
 
-This closes the first Engine-to-RGBA8-Surface integration slice only. It does
-not claim UI-OS-1 completion: interactive input, compositor adoption, physical
-display presentation, restart continuity, fonts/text rendering and GPU/WSI
-remain open.
+This closes the Engine-to-RGBA8-to-native-framebuffer first-frame slice. It does
+not claim UI-OS-1 completion: physical display qualification, sustained
+interactive input, restart continuity, fonts/text rendering and GPU/WSI remain
+open.

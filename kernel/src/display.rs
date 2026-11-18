@@ -12,6 +12,7 @@
 //! 按键送入原生终端会话；compositor 只保留 overlay damage 区域用于局部更新，
 //! 不宣称窗口系统已经完成。
 
+use alloc::vec::Vec;
 #[cfg(target_arch = "x86_64")]
 use bootloader_api::info::{FrameBuffer, PixelFormat};
 use kernel_core::display_compositor::{Compositor, DamageRect, LayerKey, LayerPixels, LayerSpec};
@@ -20,8 +21,8 @@ use kernel_core::display_input::{
     DynamicDisplayInputSession, KeyInput, PixelLayout, SurfaceSpec,
 };
 
-use crate::{kprintln, mm};
 use crate::sync::IrqSpinLock;
+use crate::{kprintln, mm};
 
 const TEXT_COLUMNS: usize = 96;
 const TEXT_ROWS: usize = 32;
@@ -46,22 +47,22 @@ const ACCENT_SURFACE: SurfaceSpec = SurfaceSpec {
     bytes_per_pixel: 4,
     layout: PixelLayout::Bgr,
 };
-const OVERLAY_REGION_BYTES: usize =
-    (OVERLAY_WIDTH as usize + ACCENT_WIDTH as usize) * OVERLAY_HEIGHT as usize * 4;
-
 struct Runtime {
     base: usize,
     len: usize,
     surface: SurfaceSpec,
     session: DynamicDisplayInputSession,
-    compositor: Compositor<2>,
+    compositor: Compositor<3>,
     overlay: [u8; OVERLAY_BYTES],
     overlay_key: LayerKey,
     accent: [u8; ACCENT_BYTES],
     accent_key: LayerKey,
     overlay_damage: DamageRect,
     overlay_region_len: usize,
-    overlay_base: [u8; OVERLAY_REGION_BYTES],
+    overlay_base: Vec<u8>,
+    ui_surface: Option<SurfaceSpec>,
+    ui_key: Option<LayerKey>,
+    ui_pixels: Vec<u8>,
     pressed: u32,
     released: u32,
     text: [u8; TEXT_CELLS],
@@ -120,15 +121,18 @@ pub fn prepare(framebuffer: FrameBuffer) -> Result<(), DisplayInputError> {
 
 /// Start the native display runtime after the kernel heap is available.
 pub fn start() -> Result<(), DisplayInputError> {
-    let prepared = PREPARED.lock().take().ok_or(DisplayInputError::Unsupported)?;
+    let prepared = PREPARED
+        .lock()
+        .take()
+        .ok_or(DisplayInputError::Unsupported)?;
     let surface = prepared.surface;
     let required = surface.validate()?;
     #[cfg(target_arch = "x86_64")]
     let keyboard = crate::arch::x86_64::keyboard::init(); // JASPER-ISA-REFERENCE: x86_64 input backend.
     #[cfg(not(target_arch = "x86_64"))]
     let keyboard = false;
-    let input_capacity = plan_key_queue_capacity(required, mm::heap::limit())
-        .ok_or(DisplayInputError::Failed)?;
+    let input_capacity =
+        plan_key_queue_capacity(required, mm::heap::limit()).ok_or(DisplayInputError::Failed)?;
     let session = DynamicDisplayInputSession::open(
         DisplayCapabilities {
             backend: Some(DisplayBackend::Framebuffer),
@@ -137,7 +141,7 @@ pub fn start() -> Result<(), DisplayInputError> {
         },
         input_capacity,
     )?;
-    let mut compositor = Compositor::<2>::new();
+    let mut compositor = Compositor::<3>::new();
     let overlay_key = compositor
         .create(LayerSpec {
             surface: OVERLAY_SURFACE,
@@ -181,9 +185,6 @@ pub fn start() -> Result<(), DisplayInputError> {
         .map_err(|_| DisplayInputError::Failed)?,
     );
     let overlay_region_len = region_bytes(overlay_damage, surface)?;
-    if overlay_region_len > OVERLAY_REGION_BYTES {
-        return Err(DisplayInputError::InvalidSurface);
-    }
     let frame_len = usize::try_from(required).map_err(|_| DisplayInputError::InvalidSurface)?;
     if prepared.len < frame_len {
         return Err(DisplayInputError::InvalidSurface);
@@ -200,7 +201,10 @@ pub fn start() -> Result<(), DisplayInputError> {
         accent_key,
         overlay_damage,
         overlay_region_len,
-        overlay_base: [0u8; OVERLAY_REGION_BYTES],
+        overlay_base: alloc::vec![0u8; overlay_region_len],
+        ui_surface: None,
+        ui_key: None,
+        ui_pixels: Vec::new(),
         pressed: 0,
         released: 0,
         text: [b' '; TEXT_CELLS],
@@ -226,7 +230,8 @@ pub fn poll_input() -> usize {
     {
         let mut count = 0;
         for _ in 0..32 {
-            let Some(key) = crate::arch::x86_64::keyboard::try_read_event() else { // JASPER-ISA-REFERENCE: x86_64 input backend.
+            let Some(key) = crate::arch::x86_64::keyboard::try_read_event() else {
+                // JASPER-ISA-REFERENCE: x86_64 input backend.
                 break;
             };
             let mut guard = DISPLAY.lock();
@@ -294,7 +299,9 @@ pub fn report() {
             runtime.released,
         )
     });
-    if let Some((surface, keyboard, frames, keys, capacity, dropped, layers, pressed, released)) = snapshot {
+    if let Some((surface, keyboard, frames, keys, capacity, dropped, layers, pressed, released)) =
+        snapshot
+    {
         kprintln!(
             "[JSR-DISPLAY] backend=framebuffer keyboard={} width={} height={} stride={} bpp={} frames={} keys={} input_capacity={} dropped={} compositor_layers={} pressed={} released={}",
             keyboard,
@@ -325,7 +332,198 @@ pub fn primary_surface() -> Option<(u32, u32)> {
         .map(|runtime| (runtime.surface.width, runtime.surface.height))
 }
 
+/// Register one Engine-produced Surface as a native compositor layer, then
+/// present the updated framebuffer. Returns the layer's top-left position.
+///
+/// 把 Engine 生成的 Surface 注册为原生 compositor 图层并提交新帧，返回图层左上角坐标。
+pub fn present_ui_frame(
+    source: SurfaceSpec,
+    pixels: &[u8],
+) -> Result<(u32, u32), DisplayInputError> {
+    let expected = source.validate()?;
+    if expected != pixels.len() as u64 {
+        return Err(DisplayInputError::InvalidFrame);
+    }
+    let mut owned_pixels = Vec::new();
+    owned_pixels
+        .try_reserve_exact(pixels.len())
+        .map_err(|_| DisplayInputError::Failed)?;
+    owned_pixels.extend_from_slice(pixels);
+    let (region_len, same_surface) = {
+        let guard = DISPLAY.lock();
+        let runtime = guard.as_ref().ok_or(DisplayInputError::Unsupported)?;
+        (
+            runtime.ui_overlay_region_len(source)?,
+            runtime.ui_surface == Some(source),
+        )
+    };
+    let mut overlay_base = if same_surface {
+        None
+    } else {
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(region_len)
+            .map_err(|_| DisplayInputError::Failed)?;
+        bytes.resize(region_len, 0);
+        Some(bytes)
+    };
+    let mut owned_pixels = Some(owned_pixels);
+    let (result, retired) = {
+        let mut guard = DISPLAY.lock();
+        guard.as_mut().map_or_else(
+            || (Err(DisplayInputError::Unsupported), (Vec::new(), Vec::new())),
+            |runtime| {
+                let (result, retired) = match runtime.adopt_ui_frame(
+                    source,
+                    &mut owned_pixels,
+                    &mut overlay_base,
+                    region_len,
+                ) {
+                    Ok((x, y, retired)) => {
+                        let position = (x, y);
+                        let result = runtime
+                            .paint_text_frame()
+                            .map(|()| position)
+                            .map_err(|_| DisplayInputError::Failed);
+                        if result.is_ok() {
+                            kprintln!(
+                                "[JSR-DISPLAY-UI] presented=true width={} height={} x={} y={} layers={}",
+                                source.width,
+                                source.height,
+                                position.0,
+                                position.1,
+                                runtime.compositor.count()
+                            );
+                        }
+                        (result, retired)
+                    }
+                    Err(error) => (Err(error), (Vec::new(), Vec::new())),
+                };
+                (result, retired)
+            },
+        )
+    };
+    drop(owned_pixels);
+    drop(overlay_base);
+    drop(retired);
+    result
+}
+
+/// Read one already-presented native framebuffer pixel as RGB.
+///
+/// 把已经提交的 framebuffer 像素读取为 RGB。
+pub fn read_pixel_rgb(x: u32, y: u32) -> Option<(u8, u8, u8)> {
+    DISPLAY
+        .lock()
+        .as_ref()
+        .and_then(|runtime| runtime.read_pixel(x, y))
+}
+
 impl Runtime {
+    fn ui_overlay_region_len(&self, source: SurfaceSpec) -> Result<usize, DisplayInputError> {
+        let (_, _, damage) = self.ui_layout(source)?;
+        region_bytes(damage, self.surface)
+    }
+
+    fn ui_layout(&self, source: SurfaceSpec) -> Result<(u32, u32, DamageRect), DisplayInputError> {
+        let x = self.surface.width.saturating_sub(source.width) / 2;
+        let y = self.surface.height.saturating_sub(source.height) / 2;
+        let layer = LayerSpec {
+            surface: source,
+            x: x as i32,
+            y: y as i32,
+            z_order: 5,
+            visible: true,
+            opacity: 0xff,
+        };
+        let ui_damage =
+            DamageRect::for_layer(layer, self.surface).map_err(|_| DisplayInputError::Failed)?;
+        Ok((x, y, self.overlay_damage.union(ui_damage)))
+    }
+
+    fn adopt_ui_frame(
+        &mut self,
+        source: SurfaceSpec,
+        pixels: &mut Option<Vec<u8>>,
+        overlay_base: &mut Option<Vec<u8>>,
+        region_len: usize,
+    ) -> Result<(u32, u32, (Vec<u8>, Vec<u8>)), DisplayInputError> {
+        let (x, y, damage) = self.ui_layout(source)?;
+        if pixels.as_ref().is_none()
+            || overlay_base
+                .as_ref()
+                .is_some_and(|bytes| bytes.len() != region_len)
+        {
+            return Err(DisplayInputError::InvalidFrame);
+        }
+        if self.ui_surface != Some(source) {
+            if let Some(key) = self.ui_key.take() {
+                self.compositor
+                    .destroy(key)
+                    .map_err(|_| DisplayInputError::Failed)?;
+            }
+            let key = self
+                .compositor
+                .create(LayerSpec {
+                    surface: source,
+                    x: x as i32,
+                    y: y as i32,
+                    z_order: 5,
+                    visible: true,
+                    opacity: 0xff,
+                })
+                .map_err(|_| DisplayInputError::Failed)?;
+            self.ui_surface = Some(source);
+            self.ui_key = Some(key);
+            let old_pixels = core::mem::replace(
+                &mut self.ui_pixels,
+                pixels.take().ok_or(DisplayInputError::InvalidFrame)?,
+            );
+            let old_base = core::mem::replace(
+                &mut self.overlay_base,
+                overlay_base.take().ok_or(DisplayInputError::InvalidFrame)?,
+            );
+            self.overlay_damage = damage;
+            self.overlay_region_len = region_len;
+            Ok((x, y, (old_pixels, old_base)))
+        } else {
+            let old_pixels = core::mem::replace(
+                &mut self.ui_pixels,
+                pixels.take().ok_or(DisplayInputError::InvalidFrame)?,
+            );
+            if let Some(key) = self.ui_key {
+                self.compositor
+                    .set_position(key, x as i32, y as i32)
+                    .map_err(|_| DisplayInputError::Failed)?;
+            }
+            Ok((x, y, (old_pixels, Vec::new())))
+        }
+    }
+
+    fn read_pixel(&self, x: u32, y: u32) -> Option<(u8, u8, u8)> {
+        if x >= self.surface.width || y >= self.surface.height {
+            return None;
+        }
+        let bpp = usize::from(self.surface.bytes_per_pixel);
+        let offset = (y as usize)
+            .checked_mul(self.surface.stride as usize)?
+            .checked_add(x as usize)?
+            .checked_mul(bpp)?;
+        if offset.checked_add(bpp)? > self.len {
+            return None;
+        }
+        // SAFETY: the framebuffer remains mapped for the Runtime lifetime and
+        // the offset was checked against its exact presented length.
+        let pixel = unsafe { core::slice::from_raw_parts(self.base as *const u8, self.len) };
+        match self.surface.layout {
+            PixelLayout::Rgb | PixelLayout::Rgba => {
+                Some((pixel[offset], pixel[offset + 1], pixel[offset + 2]))
+            }
+            PixelLayout::Bgr => Some((pixel[offset + 2], pixel[offset + 1], pixel[offset])),
+            PixelLayout::Gray => Some((pixel[offset], pixel[offset], pixel[offset])),
+        }
+    }
+
     fn paint_boot_frame(&mut self) -> Result<(), DisplayInputError> {
         let required = usize::try_from(self.required_bytes()?)
             .map_err(|_| DisplayInputError::InvalidSurface)?;
@@ -517,6 +715,28 @@ impl Runtime {
     }
 
     fn compose_overlay(&self) -> Result<(), DisplayInputError> {
+        let mut layers = [
+            LayerPixels {
+                key: self.overlay_key,
+                bytes: &self.overlay,
+            },
+            LayerPixels {
+                key: self.accent_key,
+                bytes: &self.accent,
+            },
+            LayerPixels {
+                key: self.overlay_key,
+                bytes: &[],
+            },
+        ];
+        let mut layer_count = 2;
+        if let Some(key) = self.ui_key {
+            layers[layer_count] = LayerPixels {
+                key,
+                bytes: &self.ui_pixels,
+            };
+            layer_count += 1;
+        }
         // SAFETY: the framebuffer pointer and length remain valid for the
         // lifetime of this Runtime, and all geometry is validated before write.
         let frame = unsafe { core::slice::from_raw_parts_mut(self.base as *mut u8, self.len) };
@@ -525,16 +745,7 @@ impl Runtime {
                 self.surface,
                 frame,
                 &self.overlay_base[..self.overlay_region_len],
-                &[
-                    LayerPixels {
-                        key: self.overlay_key,
-                        bytes: &self.overlay,
-                    },
-                    LayerPixels {
-                        key: self.accent_key,
-                        bytes: &self.accent,
-                    },
-                ],
+                &layers[..layer_count],
                 self.overlay_damage,
             )
             .map(|_| ())

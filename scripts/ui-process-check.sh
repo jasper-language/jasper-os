@@ -50,11 +50,12 @@ printf '%s\n' "$rc" >"$OUT/qemu_rc.txt"
 test "$rc" = 33
 grep -aFq 'ui-service: ready protocol=1 engine=cpu-ready' "$OUT/serial.log"
 grep -aFq 'ui-service: presented 64x64 bytes=16384 sequence=1' "$OUT/serial.log"
-grep -aFq '[JSR-UI-PROCESS] started=true channel=true request_queued=true engine=cpu rendered=true present=true exit=0 response=true terminal_alive=true resources=true' "$OUT/serial.log"
+grep -aFq '[JSR-UI-PROCESS] started=true channel=true request_queued=true engine=cpu rendered=true present=true display=true exit=0 response=true terminal_alive=true resources=true' "$OUT/serial.log"
+grep -aFq '[JSR-DISPLAY-UI] presented=true' "$OUT/serial.log"
 ! grep -aEq 'panicked|JSR-PANIC|JSR-UI-PROCESS-FAIL' "$OUT/serial.log"
 
 printf '%s\n' \
-  "ui-process: PASS cpl3=true channel=true jsui=true engine=cpu rendered=true present=true exit=0 terminal=true resources=true" \
+  "ui-process: PASS cpl3=true channel=true jsui=true engine=cpu rendered=true present=true display=true exit=0 terminal=true resources=true" \
   "engine_commit=b21dec1ae504a06923defcc715722c7b9e9c1dc8" \
   "qemu_rc=$rc" \
   "evidence=$OUT"

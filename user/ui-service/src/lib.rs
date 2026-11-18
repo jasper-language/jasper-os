@@ -30,8 +30,10 @@ use kernel_core::ui_service::{UI_ERROR_ENGINE_UNAVAILABLE, UI_SERVICE_PROTOCOL_V
 /// UI Engine revision currently recorded by `ui-engine.lock.toml`.
 pub const PINNED_ENGINE_COMMIT: &str = "b21dec1ae504a06923defcc715722c7b9e9c1dc8";
 /// Largest JSUI payload that fits one Jasper native Channel message.
-pub const MAX_NATIVE_UI_FRAME_PAYLOAD: usize = kernel_core::config::bounds::MSG_BYTES
-    .saturating_sub(kernel_core::ui_protocol::UI_FRAME_HEADER_BYTES);
+pub fn max_native_ui_frame_payload() -> usize {
+    kernel_core::config::bounds::MSG_BYTES
+        .saturating_sub(kernel_core::ui_protocol::UI_FRAME_HEADER_BYTES)
+}
 
 /// Build-time engine availability.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -349,7 +351,7 @@ impl NativeUiEndpoint {
 
     /// Encode and send one versioned UI protocol frame over the native Channel.
     pub fn send_frame(&self, header: UiFrameHeader, payload: &[u8]) -> Result<(), HostError> {
-        if payload.len() > MAX_NATIVE_UI_FRAME_PAYLOAD {
+        if payload.len() > max_native_ui_frame_payload() {
             return Err(HostError::InvalidFrame);
         }
         let mut encoded = alloc::vec![
@@ -369,7 +371,7 @@ impl NativeUiEndpoint {
         payload: &[u8],
         output: &mut [u8],
     ) -> Result<(), HostError> {
-        if payload.len() > MAX_NATIVE_UI_FRAME_PAYLOAD {
+        if payload.len() > max_native_ui_frame_payload() {
             return Err(HostError::InvalidFrame);
         }
         let len = encode_ui_frame(header, payload, output).map_err(|_| HostError::InvalidFrame)?;
