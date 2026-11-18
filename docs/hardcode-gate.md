@@ -3,6 +3,10 @@
 `scripts/check-hardcode-gate.py` 是增量审查门，不是“仓库已经没有硬编码”的证明。
 它检查本次变更在全部生产 crate、模块、用户运行时和工具代码中新增的 Rust 行；
 `--inventory` 另行审计当前树存量，避免把“新增不报”误当成全量清零。
+`--inventory-baseline` 用“路径 + 规则 + 规范化源码行”的 SHA-256 多重集与
+`docs/hardcode-inventory-baseline.json` 比较；新增指纹失败，消除条目允许基线
+自然下降，避免只检查总数时用“删一加一”绕过治理。基线文件只是待分类审计快照，
+不表示 437 个命中已经全部证实为缺陷。
 
 覆盖范围包括 `boot-manager`、`compat-*`、`jaso`、`kernel`、`kernel-core`、
 `lifecycle-*`、`modules`、`netd`、`tools`、`user`、`xtask` 和 `arch-probes`。
@@ -57,6 +61,10 @@ const MSIX_MAX_ENTRIES: u16 = 2048; // JASPER-HARDCODE-REVIEW: issue=33 source=P
 ```text
 python3 scripts/check-hardcode-gate.py --inventory
 python3 scripts/check-hardcode-gate.py --inventory --inventory-verbose
+python3 scripts/check-hardcode-gate.py --inventory \
+  --inventory-baseline docs/hardcode-inventory-baseline.json
+python3 scripts/check-hardcode-gate.py --inventory \
+  --write-inventory-baseline docs/hardcode-inventory-baseline.json
 ```
 
 第一条输出当前生产树的规则计数；第二条列出逐文件、逐行证据。存量审计独立于增量

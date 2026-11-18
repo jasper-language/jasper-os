@@ -10,9 +10,12 @@ must match a registered source, issue and reason in
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import re
 import subprocess
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -242,6 +245,71 @@ def scan_inventory(
     return findings
 
 
+def inventory_record(finding: str) -> dict[str, str]:
+    """Convert a diagnostic into a stable baseline record."""
+    match = re.match(r"^(?P<path>[^:]+):\d+: (?P<rules>[^:]+): .*: (?P<text>.*)$", finding)
+    if not match:
+        raise SystemExit(f"hardcode-gate: malformed inventory finding: {finding}")
+    identity = "\0".join(
+        (match.group("path"), match.group("rules"), match.group("text").strip())
+    )
+    return {
+        "fingerprint": hashlib.sha256(identity.encode("utf-8")).hexdigest(),
+        "path": match.group("path"),
+        "rules": match.group("rules"),
+    }
+
+
+def inventory_snapshot(findings: list[str]) -> dict[str, object]:
+    """Build a deterministic multiset snapshot of inventory findings."""
+    records = Counter(inventory_record(finding)["fingerprint"] for finding in findings)
+    details: dict[str, dict[str, str]] = {}
+    for finding in findings:
+        record = inventory_record(finding)
+        details.setdefault(record["fingerprint"], record)
+    return {
+        "schema": 1,
+        "scope": list(SCOPE),
+        "total": len(findings),
+        "entries": [
+            {
+                **details[fingerprint],
+                "count": count,
+            }
+            for fingerprint, count in sorted(records.items())
+        ],
+    }
+
+
+def load_inventory_snapshot(path: Path) -> dict[str, object]:
+    try:
+        snapshot = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"hardcode-gate: invalid inventory baseline {path}: {exc}") from exc
+    if snapshot.get("schema") != 1 or not isinstance(snapshot.get("entries"), list):
+        raise SystemExit(f"hardcode-gate: unsupported inventory baseline {path}")
+    return snapshot
+
+
+def compare_inventory(
+    findings: list[str], baseline: dict[str, object]
+) -> tuple[list[dict[str, str]], int]:
+    """Return newly introduced records and the number of cleared baseline records."""
+    current_records = list(map(inventory_record, findings))
+    current = Counter(record["fingerprint"] for record in current_records)
+    current_details = {
+        record["fingerprint"]: record for record in current_records
+    }
+    previous: Counter[str] = Counter()
+    for entry in baseline["entries"]:
+        fingerprint = entry["fingerprint"]
+        previous[fingerprint] = int(entry["count"])
+    added = current - previous
+    removed = previous - current
+    new_records = [current_details[fingerprint] for fingerprint in added]
+    return new_records, sum(removed.values())
+
+
 def _git(*args: str) -> str:
     return subprocess.run(
         ["git", *args],
@@ -291,6 +359,9 @@ diff --git a/boot-manager/src/lib.rs b/boot-manager/src/lib.rs
     assert any("BAD_CAPACITY_SHAPE" in item for item in found)
     assert any("boot-manager/src/lib.rs" in item for item in found)
     assert not any(item.endswith("MAX_PROTOCOL: usize = 64;") for item in found)
+    snapshot = inventory_snapshot(found)
+    assert snapshot["total"] == len(found)
+    assert "entries" in snapshot
     print("hardcode-gate: self-test PASS")
 
 
@@ -308,12 +379,31 @@ def main() -> int:
         action="store_true",
         help="print every finding produced by --inventory",
     )
+    parser.add_argument(
+        "--inventory-baseline",
+        default="",
+        help="fail when inventory contains fingerprints absent from this baseline",
+    )
+    parser.add_argument(
+        "--write-inventory-baseline",
+        default="",
+        help="write the current deterministic inventory snapshot and exit",
+    )
     args = parser.parse_args()
     if args.self_test:
         self_test()
         return 0
     if args.inventory:
         findings = scan_inventory()
+        if args.write_inventory_baseline:
+            path = Path(args.write_inventory_baseline)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(inventory_snapshot(findings), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            print(f"hardcode-inventory: wrote {len(findings)} findings to {path}")
+            return 0
         counts: dict[str, int] = {}
         for finding in findings:
             match = re.match(r"^[^:]+:\d+: ([^:]+):", finding)
@@ -327,6 +417,23 @@ def main() -> int:
         if args.inventory_verbose:
             for finding in findings:
                 print(f"  {finding}")
+        if args.inventory_baseline:
+            baseline = load_inventory_snapshot(Path(args.inventory_baseline))
+            added, removed = compare_inventory(findings, baseline)
+            print(
+                f"hardcode-inventory-baseline: added={len(added)} "
+                f"cleared={removed} baseline={baseline.get('total', 'unknown')}"
+            )
+            if added:
+                for record in sorted(
+                    added, key=lambda item: (item["path"], item["rules"], item["fingerprint"])
+                ):
+                    print(
+                        f"  NEW {record['path']} {record['rules']} "
+                        f"fingerprint={record['fingerprint'][:16]}",
+                        file=sys.stderr,
+                    )
+                return 1
         return 0
 
     base = resolve_base(args.base)
