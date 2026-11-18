@@ -8,7 +8,7 @@ DMAR unit covers the device, programs a bounded 4 KiB VT-d second-level
 mapping through the `arch` seam.
 
 ```text
-[JSR-IOMMU-DMA] hardware_iommu=true iova=0x1000000 physical=0x10a8000 translated=true
+[JSR-IOMMU-DMA] hardware_iommu=true iova=0x1000000 physical=0x10aa000 translated=true
 [JSR-DRV3] device=0x300 iova=0x1000000 pages=1 writable=true
   iova_opaque=true pinned=true owner_close=true reclaim=true failed=0
 [JSR-IOMMU-DMA] finish failed=0
