@@ -1,5 +1,5 @@
 {
-  "baseline_total": 423,
+  "baseline_total": 422,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -2749,7 +2749,7 @@
     },
     {
       "category": "runtime-resource-capacity",
-      "count": 11,
+      "count": 10,
       "fingerprint": "89e5f4b00dcf46110fa49d6418af23ad0e2f1d685b844041e195ed2ec50d3ab7",
       "line": 52,
       "path": "kernel/src/linux_abi.rs",
@@ -2821,7 +2821,7 @@
       "category": "unclassified",
       "count": 2,
       "fingerprint": "e97a270ced01ef94d308799b5756449ba29e6a718ff48941c1c41ea0a9c5485b",
-      "line": 19408,
+      "line": 19414,
       "path": "kernel/src/linux_abi.rs",
       "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
       "rules": "HC-G1",
@@ -2861,7 +2861,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "c3bdd178d15b9cff2b4f096b7a09e64ad1f794ae3b8fc8ce729caa17606dba1e",
-      "line": 19429,
+      "line": 19435,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G2,HC-G6",
@@ -2881,7 +2881,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "dc7025deaeb7e1c5533875d42b1f12573a6df19dd51a3303af2715fb68febf55",
-      "line": 19536,
+      "line": 19542,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G2,HC-G6",
@@ -3393,7 +3393,7 @@
     "explicit-safety-policy": 101,
     "platform-adapter": 43,
     "protocol-abi": 21,
-    "runtime-resource-capacity": 97,
+    "runtime-resource-capacity": 96,
     "unclassified": 161
   }
 }

@@ -12,6 +12,7 @@ bootstrap-cpu-inventory	35	policy	Issue-35-multi-topology-preheap-inventory
 build-only-physical-runtime-plan	33	build	verification-feature-platform-plan
 diagnostic-usi-v1-contract	21	spec	diagnostic-USI-v1-wire-contract
 irq-policy	33	policy	explicit-IRQ-safety-policy
+linux-poll-scan-policy	35	policy	Issue-35-bounded-Linux-poll-scan
 native-install-verification-stack	21	policy	LC-2-native-install-QEMU-acceptance-stack-policy
 physical-runtime-plan	33	build	verification-feature-platform-plan
 pixel-el2-observation-window	21	test	boot-carrier-EL2-host-observability-probe

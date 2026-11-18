@@ -1117,7 +1117,7 @@
       "rules": "HC-G1"
     },
     {
-      "count": 11,
+      "count": 10,
       "fingerprint": "89e5f4b00dcf46110fa49d6418af23ad0e2f1d685b844041e195ed2ec50d3ab7",
       "path": "kernel/src/linux_abi.rs",
       "rules": "HC-G1"
@@ -2043,5 +2043,5 @@
     "user",
     "xtask"
   ],
-  "total": 423
+  "total": 422
 }

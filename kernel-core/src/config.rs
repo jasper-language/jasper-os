@@ -687,7 +687,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn policy_must_match_idle_divisor() {
         let mut bad = KernelConfig::STANDARD;
         bad.policy.idle_tick_divisor = 1; // tickless 却要求每 tick 都唤醒

@@ -1,0 +1,57 @@
+# Issue #35 配置容量与 Linux 批次审计
+
+更新时间：2026-11-18。
+
+状态：**配置上限与四个兼容批次语义已裁决；poll 超限 errno 已修复，其余
+高规模运行证据仍待补。**
+
+## 配置容量（HC-A10）
+
+`KernelConfig::validate` 对 timer Hz、Task/Object/RT 槽位和内核栈设置上下界，
+并在越界时返回具体字段错误；`capacity::resolve` 进一步检查 RT 与 Task 一致性及
+内存预算，超限不发布部分容量。这些数值是已声明、可测试的产品安全/验证策略，
+不是硬件发现事实：
+
+- timer 50–1000 Hz 约束调度粒度与中断开销；
+- Task 默认 64、验证上限 256，独立容量验收构建允许 1024；
+- Object 默认 1024、验证上限 65536；
+- RT 在册表默认 8、验证上限 64，且必须小于 Task 槽位；
+- 内核栈至少 32 KiB，现役 Profile 使用 128 KiB。
+
+上层 Workload/Profile 仍可通过更小预算收窄；任何超过验证边界的配置必须失败，
+不能按硬件数量静默扩容。更高规模的调度/Object 表实现和真实压力矩阵仍未完成。
+
+## Linux 固定批次（HC-A11）
+
+- `signalfd` 一次最多 16 条记录：Linux `read` 返回可写下的部分记录数，剩余记录
+  留在队列中，不丢事件；
+- `fanotify` 一次最多 8 条事件：返回部分批次，失败时把整批事件放回队首并撤销
+  本次已安装的 event fd；
+- epoll wait 每次最多写回 64 条：Linux 允许返回小于 `maxevents` 的就绪数量；
+- `sendfile`/`copy_file_range` 每轮最多 1 MiB：当前实现返回完成的部分字节并推进
+  文件/显式 offset，调用方可以继续循环，语义不是静默截断；
+- `poll` 单次最多 64 条 `pollfd`：这是兼容服务的显式扫描/用户复制 DoS 策略。
+  以前超限返回 `EINVAL`，会错误地把合法大请求当作参数损坏；现在返回 `ENOMEM`。
+
+`poll` 的 64 条上限仍不是最终产品目标。后续应由 Workload IO/CPU 预算动态授予
+扫描容量，并取得超过 64 个 fd 的未修改 Linux 程序、取消/超时和资源回收证据。
+
+## 验证
+
+```text
+cargo check -p jasper-kernel --target x86_64-unknown-none \
+  --features compat-syscall-verify
+PASS
+
+python3 scripts/check-hardcode-gate.py --self-test
+python3 scripts/check-hardcode-gate.py --base HEAD^
+python3 scripts/check-hardcode-inventory-ledger.py --check \
+  docs/hardcode-inventory-ledger.json
+```
+
+## 未完成
+
+- 配置上限的更高容量实现、真实 256/1024 Task 和 65536 Object 压力矩阵；
+- poll、signalfd、fanotify、epoll、sendfile/copy 在真实 Ubuntu/Android 程序中的
+  大规模分批、取消和资源回基线；
+- 所有固定批次值最终应与 Workload/Profile 资源预算统一，而不是成为跨设备 ABI。

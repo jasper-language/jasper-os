@@ -7765,7 +7765,7 @@ fn linux_landlock_add_rule(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrn
         return Err(CompatErrno::Exists);
     }
     if ruleset.rules.len() >= 64 {
-        return Err(CompatErrno::NoSpace);
+        return Err(CompatErrno::NoMemory);
     }
     ruleset
         .rules
@@ -18864,11 +18864,17 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const POLLERR: u16 = 0x008;
     const POLLHUP: u16 = 0x010;
     const POLLNVAL: u16 = 0x020;
-    const MAX_POLLFDS: usize = 64;
+    // Bound one scan to 64 pollfd records (512 bytes). This is an explicit
+    // compatibility-service DoS policy, not a Linux kernel ABI fact; exceeding
+    // it reports ENOMEM instead of the invalid-argument error used for a bad
+    // user pointer or count that cannot be represented.
+    // 单次扫描限制为 64 条 pollfd（512 字节）；这是兼容服务显式 DoS 策略，
+    // 不是 Linux 内核 ABI 事实。超限返回 ENOMEM，不把合法大请求误报为 EINVAL。
+    const MAX_POLLFDS: usize = 64; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-poll-scan-policy reason=bounded-user-copy-and-readiness-scan
     let count = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
     let timeout = args[2] as u32 as i32;
     if count > MAX_POLLFDS {
-        return Err(CompatErrno::Invalid);
+        return Err(CompatErrno::NoSpace);
     }
     let deadline = if timeout < 0 {
         None
