@@ -18,12 +18,15 @@ from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PRIVATE_KEY_MARKERS = (
-    b"-----BEGIN PRIVATE KEY-----",
-    b"-----BEGIN ENCRYPTED PRIVATE KEY-----",
-    b"-----BEGIN RSA PRIVATE KEY-----",
-    b"-----BEGIN EC PRIVATE KEY-----",
-    b"-----BEGIN OPENSSH PRIVATE KEY-----",
+PRIVATE_KEY_MARKERS = tuple(
+    f"-----BEGIN {kind}-----".encode("ascii")
+    for kind in (
+        "PRIVATE KEY",
+        "ENCRYPTED PRIVATE KEY",
+        "RSA PRIVATE KEY",
+        "EC PRIVATE KEY",
+        "OPENSSH PRIVATE KEY",
+    )
 )
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_SCANNED_FILE = 1024 * 1024
