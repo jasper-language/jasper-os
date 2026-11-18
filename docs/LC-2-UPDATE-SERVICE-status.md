@@ -6,6 +6,27 @@
 一个持有单一 `UpdateCoordinator` 和 `FileControlStore` 的有状态服务门面；
 Issue #39 的全系统统一授权、完整并发/断电故障矩阵和 Pixel 验收仍未完成。
 
+## 声明 Profile 的完整软件矩阵
+
+2026-11-18 已在同一公开源码上重新执行 QEMU/OVMF + P0 virtio-blk 的完整软件出口：
+
+- 三次候选试启动断电均恢复到 A；
+- Confirmed 控制记录损坏后从 generation 3 恢复并重新确认到 generation 5；
+- 最新控制副本损坏后回退到完整旧副本，恢复 generation 2 并确认 B；
+- 真实终端 recovery、archive/audit、update list 和 4 个隔离 update Agent
+  并发执行均通过；
+- 同一 P0 首启 `initialized=true`，次启 `initialized=false`，package、
+  installation、grant、runtime 和 update-list 状态跨重启保持。
+
+汇总证据见 `evidence/lc2-exit-matrix-20261118/README.md`。该矩阵关闭软件
+Profile 的事务和故障出口，不关闭 Pixel 物理安装门。
+
+Pixel 6a 的只读 LUN/GPT 审计没有发现 Jasper 专用持久范围。现有 AOSP/Linux
+UFS 后端为 GPL-2.0 系列并依赖 Linux 内核 API，upstream U-Boot 也缺少
+GS101/Tensor UFS platform driver。因此 Pixel 安装、更新、回滚和断电矩阵必须
+等待隔离的公开 Driver Host/Driver VM 或等价稳定 UFS UAPI；不得挪用
+`userdata`、`super`、`metadata`，也不得用 RAM P0 或私有驱动代替。
+
 ## 当前 QEMU 与 Pixel 6a 边界
 
 公开 `main` `235fc8a` 的四个独立 `user-updateagentd` 进程在真实
