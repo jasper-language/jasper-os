@@ -1,5 +1,5 @@
 {
-  "baseline_total": 412,
+  "baseline_total": 383,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -14,7 +14,7 @@
     "platform-adapter": 27,
     "protocol-abi": 21,
     "runtime-resource-capacity": 57,
-    "unclassified": 119
+    "unclassified": 95
   },
   "entries": [
     {
@@ -2109,109 +2109,9 @@
     },
     {
       "category": "unclassified",
-      "count": 2,
-      "fingerprint": "0ab368fb625efe757558e1b34f82f64c6f668fc8f816c2c2ee6dcdc706417681",
-      "line": 1759,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "&& vmread(GUEST_INTERRUPTIBILITY).unwrap_or(1) == 0"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "0bbc7570687ac522436512cb9378e3792159cfa9d0afc28e2f3bb7b2dba0b6ff",
-      "line": 2182,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let cr3 = vmread(GUEST_CR3).unwrap_or(self.guest.state.cr3);"
-    },
-    {
-      "category": "unclassified",
-      "count": 2,
-      "fingerprint": "0e71ab577f174728643a90dacf52d2af8400f536c88929f5300e7ea70192386c",
-      "line": 1952,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "vmread(GUEST_RIP).unwrap_or(u64::MAX),"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "1f9f6cb94fed8d9cf1258b2b1098eed5802bf9028720697d9053d42a6d937857",
-      "line": 2121,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "vmread(VM_EXIT_INTR_INFO).unwrap_or(u64::MAX)"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "244cf7c65b21a0afd5c4ce7aaf958b540e9a9191605f7774ef550d46383a331a",
-      "line": 2033,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "qualification: vmread(EXIT_QUALIFICATION).unwrap_or(0),"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "2bda01a96d21841b391c6594186df2db7cf86dd227ab66729fc4cb33271348f1",
-      "line": 2586,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let tr_ar = vmread(GUEST_TR_AR).unwrap_or(u64::MAX);"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "462a77d897691c91673c3174594c7c0bb6e36ce7eaeff8bc392abd47cfe6c173",
-      "line": 1960,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "vmread(GUEST_CR4).unwrap_or(u64::MAX)"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "4b11bdaa670219fa50cb61885518b164f0509eba9c07b4077d3c8a58d2d2b3c2",
-      "line": 2584,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let cs_ar = vmread(GUEST_CS_AR).unwrap_or(u64::MAX);"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "54b4e3d5ee9c69a511cf9642e7647c12ae44d4632a684f4a6b120fb36aa58829",
-      "line": 1855,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let qualification = vmread(EXIT_QUALIFICATION).unwrap_or(u64::MAX);"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "650c9fc017a9b6a18524e3059afd87dc89d13f349cd6d841c73cb36f3d1737ac",
-      "line": 2585,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let ss_ar = vmread(GUEST_SS_AR).unwrap_or(u64::MAX);"
-    },
-    {
-      "category": "unclassified",
       "count": 1,
       "fingerprint": "836de41f2cf1e48ad94a8e0a9985bf4e1135e22a851b042d90e549b7a583702f",
-      "line": 1280,
+      "line": 1290,
       "path": "kernel/src/arch/x86_64/vmx.rs",
       "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
       "rules": "HC-G7",
@@ -2221,7 +2121,7 @@
       "category": "unclassified",
       "count": 1,
       "fingerprint": "853503cda679481dc8ab31a29b9f32f83898c4f0feac26ca71a89048646dcab7",
-      "line": 1330,
+      "line": 1340,
       "path": "kernel/src/arch/x86_64/vmx.rs",
       "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
       "rules": "HC-G7",
@@ -2230,152 +2130,12 @@
     {
       "category": "unclassified",
       "count": 1,
-      "fingerprint": "8776a2adac3020e741632cea6c0e848ddf4044be619702d65f747fd4b888cba9",
-      "line": 2580,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let instruction_error = vmread(VM_INSTRUCTION_ERROR).unwrap_or(u64::MAX);"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "9047c35c16c839e0359457bb59c0203bcbb19b70a1a513caf3f7282823534a3b",
-      "line": 2034,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "guest_physical: vmread(GUEST_PHYSICAL_ADDRESS).unwrap_or(0),"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "932c6a8cd99031122f0c3c0868a1c769ce9c6a8b57160a1aea17160e53cb16ff",
-      "line": 2587,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let activity = vmread(GUEST_ACTIVITY_STATE).unwrap_or(u64::MAX);"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "b66f5909fb817936c97116577b6211932e7f011455b2b1743f5a1ed397d99352",
-      "line": 1850,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "code: 0x8_0000_0000 | vmread(EXIT_QUALIFICATION).unwrap_or(0),"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "c83951d41280b5295264f4df5bb2194899aff9284b345e229758a96089695a3f",
-      "line": 2029,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let intr = vmread(VM_EXIT_INTR_INFO).unwrap_or(0);"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
       "fingerprint": "c92999fd79f301867386db0aedc058e5867b96e83cac1188b3c3557fcbc564cd",
-      "line": 2537,
+      "line": 2552,
       "path": "kernel/src/arch/x86_64/vmx.rs",
       "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
       "rules": "HC-G7",
       "source": ".unwrap_or(0);"
-    },
-    {
-      "category": "unclassified",
-      "count": 2,
-      "fingerprint": "cd84ac974783c7f6c9aae4c41d9ecb5525a5163f0c5f01fe34a0b36fa3ed8cf5",
-      "line": 1953,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "vmread(GUEST_RSP).unwrap_or(u64::MAX),"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "d3fbb279888589e0e6d90c2fa3c6657c41a42fac8fa02e87edbad5bf812a097f",
-      "line": 1854,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let physical = vmread(GUEST_PHYSICAL_ADDRESS).unwrap_or(u64::MAX);"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "de8b4818e8d20a73d94e9407ddfc594107037b5bc713b493f94a9b9d712e3c10",
-      "line": 2583,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let efer = vmread(GUEST_IA32_EFER).unwrap_or(u64::MAX);"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "e728a7a278c451763b43ab6e4574be3e6d80bde566ffdd6f5d3a19036a8358fd",
-      "line": 2582,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let cr4 = vmread(GUEST_CR4).unwrap_or(u64::MAX);"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "f4617ae9b1e0ffac4573e78f2dddc1b969fe1eed7f997c0e5d7bb817d6ee8491",
-      "line": 2094,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "vmread(VM_EXIT_INTR_ERROR_CODE).unwrap_or(0),"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "f879b6d17c45246c4eb3ef1b2ab0639907de14fe8b2c928e57ee85966541fbb5",
-      "line": 2581,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let cr0 = vmread(GUEST_CR0).unwrap_or(u64::MAX);"
-    },
-    {
-      "category": "unclassified",
-      "count": 2,
-      "fingerprint": "f92535cf48586aefd020fbcce04f6f1276e5d7d5b53672b6bf4d4716a0028fe3",
-      "line": 1801,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let length = vmread(VM_EXIT_INSTRUCTION_LENGTH).unwrap_or(0);"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
-      "fingerprint": "f95ca1fc1e250e0294d70e54cbffd661cd8a09ed1738ab1c29f6b82bc44840d2",
-      "line": 2588,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let interruptibility = vmread(GUEST_INTERRUPTIBILITY).unwrap_or(u64::MAX);"
-    },
-    {
-      "category": "unclassified",
-      "count": 2,
-      "fingerprint": "fe13a139eae37b268b53187bfb657c53ee65d04603c7d8d0fae4b38c859959a9",
-      "line": 1954,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "vmread(GUEST_CR3).unwrap_or(u64::MAX),"
     },
     {
       "category": "unclassified",
@@ -3304,6 +3064,6 @@
     "platform-adapter": 43,
     "protocol-abi": 24,
     "runtime-resource-capacity": 96,
-    "unclassified": 128
+    "unclassified": 99
   }
 }

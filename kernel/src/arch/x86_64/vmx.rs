@@ -805,6 +805,16 @@ fn vmread(field: u32) -> Result<u64, VmxError> {
     Ok(value)
 }
 
+/// Best-effort VMREAD used only while rendering a failure diagnostic.
+///
+/// Control decisions never use this helper; a diagnostic read failure is shown
+/// as `u64::MAX` so the original failure remains attributable.
+/// 仅在输出故障诊断时使用 best-effort VMREAD；控制决策不得使用本函数，读取失败
+/// 显示为 `u64::MAX`，不覆盖原始故障原因。
+fn vmread_diagnostic(field: u32) -> u64 {
+    vmread(field).unwrap_or(u64::MAX) // JASPER-HARDCODE-REVIEW: issue=35 source=vmx-diagnostic reason=diagnostic-only-vmread-failure
+}
+
 fn read_vm_error() -> u64 {
     let mut value: u64 = 0;
     // SAFETY: best-effort diagnostic read; failures leave zero.
@@ -1756,7 +1766,7 @@ impl VmxVm {
         for _ in 0..2_000_000 {
             if self.pending_interrupt.is_none()
                 && self.guest.state.rflags & 0x200 != 0
-                && vmread(GUEST_INTERRUPTIBILITY).unwrap_or(1) == 0
+                && vmread(GUEST_INTERRUPTIBILITY)? == 0
             {
                 self.pending_interrupt = devices
                     .take_irq()
@@ -1798,7 +1808,7 @@ impl VmxVm {
             self.guest.rsp = vmread(GUEST_RSP)?;
             self.guest.state.rflags = vmread(GUEST_RFLAGS)?;
             let reason = raw_reason & 0xffff;
-            let length = vmread(VM_EXIT_INSTRUCTION_LENGTH).unwrap_or(0);
+            let length = vmread(VM_EXIT_INSTRUCTION_LENGTH)?;
             match reason {
                 EXIT_CPUID => {
                     report.cpuid += 1;
@@ -1847,12 +1857,12 @@ impl VmxVm {
                 }
                 EXIT_CR8_ACCESS => {
                     return Err(VmxError::InvalidState {
-                        code: 0x8_0000_0000 | vmread(EXIT_QUALIFICATION).unwrap_or(0),
+                        code: 0x8_0000_0000 | vmread(EXIT_QUALIFICATION)?,
                     });
                 }
                 EXIT_EPT_VIOLATION => {
-                    let physical = vmread(GUEST_PHYSICAL_ADDRESS).unwrap_or(u64::MAX);
-                    let qualification = vmread(EXIT_QUALIFICATION).unwrap_or(u64::MAX);
+                    let physical = vmread(GUEST_PHYSICAL_ADDRESS)?;
+                    let qualification = vmread(EXIT_QUALIFICATION)?;
                     if self.emulate_linux_mmio(physical, qualification, length, devices)? {
                         continue;
                     }
@@ -1897,7 +1907,7 @@ impl VmxVm {
                         });
                     }
                     if self.guest.state.rflags & 0x200 != 0
-                        && vmread(GUEST_INTERRUPTIBILITY).unwrap_or(1) == 0
+                        && vmread(GUEST_INTERRUPTIBILITY)? == 0
                     {
                         if let Some(irq) = devices.take_irq() {
                             if let Some(vector) = linux.raise_irq(irq) {
@@ -1949,15 +1959,15 @@ impl VmxVm {
                     kprintln!(
                         "[JSR-HWV4-LINUX-FAIL] exit={} rip={:#x} rsp={:#x} cr3={:#x} rax={:#x} rbx={:#x} rbp={:#x} rsi={:#x} rdi={:#x} cr4={:#x}",
                         other,
-                        vmread(GUEST_RIP).unwrap_or(u64::MAX),
-                        vmread(GUEST_RSP).unwrap_or(u64::MAX),
-                        vmread(GUEST_CR3).unwrap_or(u64::MAX),
+                        vmread_diagnostic(GUEST_RIP),
+                        vmread_diagnostic(GUEST_RSP),
+                        vmread_diagnostic(GUEST_CR3),
                         self.gpr(0),
                         self.gpr(3),
                         self.gpr(5),
                         self.gpr(6),
                         self.gpr(7),
-                        vmread(GUEST_CR4).unwrap_or(u64::MAX)
+                        vmread_diagnostic(GUEST_CR4)
                     );
                     return Err(VmxError::InvalidState {
                         code: u64::from(other),
@@ -2025,13 +2035,13 @@ impl VmxVm {
             self.guest.state.rip = vmread(GUEST_RIP)?;
             self.guest.rsp = vmread(GUEST_RSP)?;
             let reason = raw_reason & 0xffff;
-            let length = vmread(VM_EXIT_INSTRUCTION_LENGTH).unwrap_or(0);
-            let intr = vmread(VM_EXIT_INTR_INFO).unwrap_or(0);
+            let length = vmread(VM_EXIT_INSTRUCTION_LENGTH)?;
+            let intr = vmread(VM_EXIT_INTR_INFO)?;
             let action = observer(VmExitEvent {
                 backend: Backend::Vmx,
                 reason,
-                qualification: vmread(EXIT_QUALIFICATION).unwrap_or(0),
-                guest_physical: vmread(GUEST_PHYSICAL_ADDRESS).unwrap_or(0),
+                qualification: vmread(EXIT_QUALIFICATION)?,
+                guest_physical: vmread(GUEST_PHYSICAL_ADDRESS)?,
                 vector: intr as u8,
                 instruction_length: length as u8,
             })?;
@@ -2091,7 +2101,7 @@ impl VmxVm {
                         "[JSR-HWV4-DBG] exception vector={} info={:#x} error={:#x} rip={:#x}",
                         vector,
                         info,
-                        vmread(VM_EXIT_INTR_ERROR_CODE).unwrap_or(0),
+                        vmread_diagnostic(VM_EXIT_INTR_ERROR_CODE),
                         self.guest.state.rip
                     );
                     if vector == 6 {
@@ -2115,10 +2125,10 @@ impl VmxVm {
                     kprintln!(
                         "[JSR-HWV2-DBG] exit reason={} rip={:#x} rsp={:#x} cr3={:#x} intr={:#x}",
                         other,
-                        vmread(GUEST_RIP).unwrap_or(u64::MAX),
-                        vmread(GUEST_RSP).unwrap_or(u64::MAX),
-                        vmread(GUEST_CR3).unwrap_or(u64::MAX),
-                        vmread(VM_EXIT_INTR_INFO).unwrap_or(u64::MAX)
+                        vmread_diagnostic(GUEST_RIP),
+                        vmread_diagnostic(GUEST_RSP),
+                        vmread_diagnostic(GUEST_CR3),
+                        vmread_diagnostic(VM_EXIT_INTR_INFO)
                     );
                     return Err(VmxError::InvalidState {
                         code: u64::from(other),
@@ -2148,7 +2158,7 @@ impl VmxVm {
             return Ok(false);
         }
         let mut bytes = [0u8; 15];
-        if !self.read_guest_va(devices, self.guest.state.rip, &mut bytes) {
+        if !self.read_guest_va(devices, self.guest.state.rip, &mut bytes)? {
             return Ok(false);
         }
         let Some(access) = decode_memory_data_access(&bytes) else {
@@ -2176,23 +2186,28 @@ impl VmxVm {
         Ok(true)
     }
 
-    fn read_guest_va<B: LinuxPlatform>(&self, devices: &mut B, va: u64, out: &mut [u8]) -> bool {
+    fn read_guest_va<B: LinuxPlatform>(
+        &self,
+        devices: &mut B,
+        va: u64,
+        out: &mut [u8],
+    ) -> Result<bool, VmxError> {
         let mut done = 0;
         let mut address = va;
-        let cr3 = vmread(GUEST_CR3).unwrap_or(self.guest.state.cr3);
+        let cr3 = vmread(GUEST_CR3)?;
         while done < out.len() {
             let Some(gpa) = guest_va_to_gpa(cr3, address, devices) else {
-                return false;
+                return Ok(false);
             };
             let page_left = 4096 - (address & 0xfff) as usize;
             let count = (out.len() - done).min(page_left);
             if !devices.read_guest(gpa, &mut out[done..done + count]) {
-                return false;
+                return Ok(false);
             }
             done += count;
             address = address.wrapping_add(count as u64);
         }
-        true
+        Ok(true)
     }
 
     fn emulate_linux_cpuid(&mut self) {
@@ -2577,15 +2592,15 @@ impl VmxVm {
 
     fn dump_entry_failure(&self, reason: u32) {
         kprintln!("[JSR-HWV2-DBG] entry_failure_begin reason={:#x}", reason);
-        let instruction_error = vmread(VM_INSTRUCTION_ERROR).unwrap_or(u64::MAX);
-        let cr0 = vmread(GUEST_CR0).unwrap_or(u64::MAX);
-        let cr4 = vmread(GUEST_CR4).unwrap_or(u64::MAX);
-        let efer = vmread(GUEST_IA32_EFER).unwrap_or(u64::MAX);
-        let cs_ar = vmread(GUEST_CS_AR).unwrap_or(u64::MAX);
-        let ss_ar = vmread(GUEST_SS_AR).unwrap_or(u64::MAX);
-        let tr_ar = vmread(GUEST_TR_AR).unwrap_or(u64::MAX);
-        let activity = vmread(GUEST_ACTIVITY_STATE).unwrap_or(u64::MAX);
-        let interruptibility = vmread(GUEST_INTERRUPTIBILITY).unwrap_or(u64::MAX);
+        let instruction_error = vmread_diagnostic(VM_INSTRUCTION_ERROR);
+        let cr0 = vmread_diagnostic(GUEST_CR0);
+        let cr4 = vmread_diagnostic(GUEST_CR4);
+        let efer = vmread_diagnostic(GUEST_IA32_EFER);
+        let cs_ar = vmread_diagnostic(GUEST_CS_AR);
+        let ss_ar = vmread_diagnostic(GUEST_SS_AR);
+        let tr_ar = vmread_diagnostic(GUEST_TR_AR);
+        let activity = vmread_diagnostic(GUEST_ACTIVITY_STATE);
+        let interruptibility = vmread_diagnostic(GUEST_INTERRUPTIBILITY);
         kprintln!(
             "[JSR-HWV2-DBG] entry_failure reason={:#x} inst={} cr0={:#x} cr4={:#x} efer={:#x} cs_ar={:#x} ss_ar={:#x} tr_ar={:#x} activity={} interruptibility={:#x}",
             reason,
