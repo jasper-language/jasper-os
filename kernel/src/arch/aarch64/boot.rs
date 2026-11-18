@@ -19,6 +19,10 @@ use kernel_core::fdt::Node;
 use kernel_core::frame::{PhysRegion, RegionKind};
 use kernel_core::image_header;
 use kernel_core::psci::Conduit;
+#[cfg(feature = "aarch64-el2-retain-verify")]
+use kernel_core::driver_host::{
+    DeviceIdentity, DriverHostBroker, Needs, Policy, RequestKind, Terminal,
+};
 
 #[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
 use super::samsung_uart;
@@ -224,6 +228,36 @@ fn el2_virtual_timer_irq_probe() -> bool {
         timer_cval_same
     );
     status == 6 && reply == 0x5449 && vbar_same && timer_ctl_same && timer_cval_same
+}
+
+#[cfg(feature = "aarch64-el2-retain-verify")]
+fn el2_vgic_timer_driver_host_completion(irq_delivered: bool, gic_dist: u64) -> bool {
+    let mut broker = DriverHostBroker::<1, 1, 1, 1>::new();
+    let identity = DeviceIdentity {
+        identity: gic_dist as u32,
+        generation: 1,
+    };
+    let rights = Needs::DEVICE.union(Needs::IRQ);
+    let admitted = broker
+        .discover(identity)
+        .and_then(|()| broker.register_host())
+        .and_then(|host| broker.admit(host, identity, rights, Policy::new(rights, 0, 0, 1)))
+        .and_then(|pass| broker.begin(pass, RequestKind::Irq));
+    let completed = admitted.is_ok_and(|request| {
+        irq_delivered
+            && broker
+                .complete(request)
+                .is_ok_and(|terminal| terminal == Terminal::Completed)
+    });
+    let stats = broker.stats();
+    crate::kprintln!(
+        "[JSR-A64-VGIC] driver_host_irq={} completed={} pending={} completed_count={}",
+        completed,
+        stats.completed == 1,
+        stats.pending_requests,
+        stats.completed
+    );
+    completed && stats.completed == 1 && stats.pending_requests == 0
 }
 
 #[cfg(feature = "pixel6a-el2-observable")] // JASPER-HARDCODE-REVIEW: issue=21 source=pixel-el2-observation-window reason=physical-boot-carrier-probe-only
@@ -1944,7 +1978,7 @@ extern "C" fn jsr_aarch64_boot(
 
     print_dtb_summary(&fdt, &summary, &memory, memory_count, memory_truncated);
 
-    #[cfg(feature = "pixel6a-before-kmain-probe")]
+    #[cfg(feature = "pixel6a-before-kmain-probe")] // JASPER-HARDCODE-REVIEW: issue=33 source=physical-runtime-plan reason=pixel-verification-branch
     pixel6a_power_off();
 
     if let Err(missing) = configure_devices(&fdt, &summary) {
@@ -1983,6 +2017,9 @@ extern "C" fn jsr_aarch64_boot(
         let vgic = vm_exit && el2_vgic_probe();
         crate::kprintln!("[JSR-A64-EL2-STEP] vgic={}", vgic);
         let timer_irq = vgic && irq_controller && el2_virtual_timer_irq_probe();
+        let timer_irq = summary.gic.is_some_and(|gic| {
+            timer_irq && el2_vgic_timer_driver_host_completion(timer_irq, gic.dist)
+        });
         crate::kprintln!("[JSR-A64-EL2-STEP] timer_irq={}", timer_irq);
         let timer_context = timer_irq;
         let vbar_context = timer_context;

@@ -49,6 +49,11 @@ INTID、屏蔽定时器、执行物理 `ICC_EOIR1_EL1`，再把 vINTID 27 写入
 guest 通过同一 vGIC `IAR/EOI` 链确认并停用虚拟定时器中断。若物理 IRQ 未到，
 guest 使用有界 counter deadline 退出，不会无限等待。
 
+定时器 IRQ 完成随后进入既有 `DriverHostBroker`：发现事实不自动授权，Host 以
+`DEVICE|IRQ` 最小权限准入，预留一条有界 IRQ route；只有 guest 完成虚拟中断
+`IAR/EOI` 且 LR 已清空后，才发布该请求的唯一 `Completed` 终态。pending 回到 0，
+不建立第二套设备或权限体系。
+
 公共恢复路径在 `ICC_SRE_EL2.Enable` 仍置位时逐项比较 `ICH_HCR_EL2`、
 `ICH_VMCR_EL2` 与 LR0–LR3 和 guest 进入前的快照；Rust 返回后再逐项比较
 `HCR_EL2`、`VBAR_EL1`、`CNTV_CTL_EL0` 与 `CNTV_CVAL_EL0`。
@@ -69,6 +74,7 @@ QEMU `virt,virtualization=on` 的真实串口结果：
 [JSR-A64-STAGE2] vm_exit=true hpfar=0x4fe000 stage2_open=true
 [JSR-A64-VGIC] direct=true status=5 reply=0x5647 ack=true eoi=true lr_cleared=true host_restored=true vbar_same=true timer_ctl_same=true timer_cval_same=true
 [JSR-A64-VGIC] timer_irq=true status=6 reply=0x5449 ack=true eoi=true lr_cleared=true host_restored=true vbar_same=true timer_ctl_same=true timer_cval_same=true
+[JSR-A64-VGIC] driver_host_irq=true completed=true pending=0 completed_count=1
 [JSR-A64-EL2] retained=true hvc_round_trip=true stage2_table=true stage2=true
 vm_exit=true virtual_irq=true vgic=true timer_irq=true timer_context=true
 vbar_context=true vcpu_context=true system_context=true fp_context=true driver_vm=false
@@ -76,7 +82,7 @@ vbar_context=true vcpu_context=true system_context=true fp_context=true driver_v
 ```
 
 该运行退出 35 仅含既有 AArch64 x86-only `pci_failed=3`、`krn0_failed=1` 基线；
-没有新增失败。证据见 `evidence/aarch64-vgic-20261118-r6/`。
+没有新增失败。证据见 `evidence/aarch64-vgic-20261118-r7/`。
 
 ## 边界
 
@@ -87,9 +93,8 @@ vbar_context=true vcpu_context=true system_context=true fp_context=true driver_v
 - 当前 vGIC 证明单 vCPU 的直接 LR pending、guest IAR/EOI、物理定时器 PPI
   经 EL2 转成虚拟定时器中断；尚未实现多 vCPU 分配、维护中断、优先级抢占、
   完整 GICD/GICR 虚拟设备模型或 LR 多槽调度；
-- 当前虚拟设备仍是测试 guest 与 EL2 临时路径，尚未把 MMIO/virtqueue completion
-  经 Device Broker/Driver Host 权限域送入该 guest，不能等同于 Driver VM 或
-  真实 IOMMU 隔离；
+- 当前虚拟设备 IRQ completion 已进入既有 Driver Host 权限域，但
+  MMIO/virtqueue 数据完成尚未接入，不能等同于 Driver VM 或真实 IOMMU 隔离；
 - 已保存恢复通用寄存器、SP_EL1、ELR、SPSR、基础系统寄存器和 FP/SIMD；
   尚未保存 SVE、GIC/定时器虚拟状态或支持多 vCPU 调度；
 - 基础系统寄存器已覆盖 SP_EL0、TPIDR_EL0/EL1、CONTEXTIDR_EL1 和 VBAR_EL1；
@@ -104,7 +109,7 @@ EL2 保留启动链，才能在实物上继续 Driver VM 验收。
 ## 复现
 
 ```text
-AARCH64_EL2_OUT="$PWD/evidence/aarch64-vgic-20261118-r6" \
+AARCH64_EL2_OUT="$PWD/evidence/aarch64-vgic-20261118-r7" \
 AARCH64_EL2_TARGET="$PWD/target/aarch64-el2-stage2" \
 AARCH64_EL2_QEMU_CPUS=6-7 \
 JASPER_BUILD_CPUS=4-5 \

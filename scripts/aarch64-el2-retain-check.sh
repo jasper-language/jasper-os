@@ -51,6 +51,9 @@ grep -aFq \
   '[JSR-A64-VGIC] timer_irq=true status=6 reply=0x5449 ack=true eoi=true lr_cleared=true host_restored=true vbar_same=true timer_ctl_same=true timer_cval_same=true' \
   "$OUT/serial.log"
 grep -aFq \
+  '[JSR-A64-VGIC] driver_host_irq=true completed=true pending=0 completed_count=1' \
+  "$OUT/serial.log"
+grep -aFq \
   '[JSR-A64-EL2] retained=true hvc_round_trip=true stage2_table=true stage2=true vm_exit=true virtual_irq=true vgic=true timer_irq=true timer_context=true vbar_context=true vcpu_context=true system_context=true fp_context=true driver_vm=false' \
   "$OUT/serial.log"
 grep -aFq \
@@ -75,4 +78,4 @@ if {name: value for name, value in failed.items() if value} != expected:
     raise SystemExit(f"aarch64-el2-retain: unexpected failure baseline: {failed}")
 PY
 
-echo "aarch64-el2-retain: PASS bsp=true ap=true hvc=true stage2=true vm_exit=true vgic=true timer_irq=true timer_context=true vbar_context=true vcpu_context=true system_context=true fp_context=true driver_vm=false evidence=$OUT"
+echo "aarch64-el2-retain: PASS bsp=true ap=true hvc=true stage2=true vm_exit=true vgic=true timer_irq=true driver_host_irq=true timer_context=true vbar_context=true vcpu_context=true system_context=true fp_context=true driver_vm=false evidence=$OUT"
