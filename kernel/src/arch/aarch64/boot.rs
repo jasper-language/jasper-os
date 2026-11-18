@@ -74,8 +74,14 @@ fn el2_guest_stage2_fault_probe() -> bool {
     // the EL2-restored sentinels and preserves the AArch64 C ABI on return.
     let ok = unsafe { jsr_aarch64_el2_context_probe() == 1 };
     let hpfar = unsafe { core::ptr::addr_of!(jsr_aarch64_stage2_hpfar).read_volatile() };
-    crate::kprintln!("[JSR-A64-STAGE2] vm_exit={} hpfar=0x{:x}", ok, hpfar);
-    ok
+    let stage2_open = super::el2::open_verification_block();
+    crate::kprintln!(
+        "[JSR-A64-STAGE2] vm_exit={} hpfar=0x{:x} stage2_open={}",
+        ok,
+        hpfar,
+        stage2_open
+    );
+    ok && stage2_open
 }
 
 #[cfg(feature = "aarch64-el2-retain-verify")]
@@ -185,6 +191,12 @@ struct GuestStack([u8; GUEST_STACK_BYTES]);
 
 #[no_mangle]
 static mut JSR_EL2_GUEST_STACK: GuestStack = GuestStack([0; GUEST_STACK_BYTES]);
+
+#[cfg(feature = "aarch64-el2-retain-verify")]
+pub(crate) fn guest_stack_range() -> (u64, u64) {
+    let start = (&raw const JSR_EL2_GUEST_STACK) as u64;
+    (start, start + GUEST_STACK_BYTES as u64)
+}
 
 /// Explicit Pixel verification firmware-table window.
 ///
@@ -1455,12 +1467,10 @@ extern "C" fn jsr_aarch64_boot(
             && stage2_ram_base.is_some_and(super::el2::initialize_identity_table);
         crate::kprintln!("[JSR-A64-EL2-STEP] stage2_table={}", table);
         let stage2 = table && super::el2::enable_current_cpu();
-        crate::kprintln!("[JSR-A64-EL2-STEP] stage2={}", stage2);
         let vm_exit = stage2 && el2_guest_stage2_fault_probe();
+        crate::kprintln!("[JSR-A64-EL2-STEP] stage2={}", stage2);
         crate::kprintln!("[JSR-A64-EL2-STEP] vm_exit={}", vm_exit);
-        let stage2_open = vm_exit && super::el2::open_verification_block();
-        crate::kprintln!("[JSR-A64-EL2-STEP] stage2_open={}", stage2_open);
-        let virtual_irq = stage2_open && el2_virtual_irq_probe();
+        let virtual_irq = vm_exit && el2_virtual_irq_probe();
         crate::kprintln!("[JSR-A64-EL2-STEP] virtual_irq={}", virtual_irq);
         let timer_context = virtual_irq;
         let vbar_context = timer_context;

@@ -12,12 +12,13 @@ AArch64 入口现在记录 `CurrentEL`。验证构建会在进入 EL2 时安装�
 本验证同时为次核安装同一 EL2 向量表，因此双核 SMP 上线也证明每个 AP 在进入
 EL1 前完成 EL2 驻留准备。
 
-验证构建随后通过 EL2 HVC 配置 39-bit IPA 和 4 KiB granule。声明 RAM 所在的
-1 GiB 块改用第二级表，并在 RAM 内 `0x4fe00000` 处移除一个真实 2 MiB 映射；
-其余 RAM 以 2 MiB Normal block 映射。负例 guest 经物理线性映射访问该 IPA，
-`ESR_EL2` 分类为 stage-2 data abort，`HPFAR_EL2` 精确匹配 fault IPA；退出后
-EL2 恢复该 block 并执行 stage-2 TLB invalidate，后续整机运行不会继承测试洞。
-其余 1 GiB 块暂用 Device 属性；该表仍不表达最终设备白名单、最小权限或 IOMMU 隔离。
+验证构建随后通过 EL2 HVC 配置 39-bit IPA 和 4 KiB granule。测试 guest 运行期间，
+声明 RAM 所在的 1 GiB 块走第二级表，仅映射与内核映像和 guest 栈相交的 2 MiB
+block；其他 RAM 与全部设备 block 均无效。负例 guest 经物理线性映射访问
+`0x4fe00000`，`ESR_EL2` 分类为 stage-2 data abort，`HPFAR_EL2` 精确匹配 fault
+IPA。退出后 EL2 恢复宿主 RAM/设备映射并执行 stage-2 TLB invalidate，整机继续
+运行不会继承测试映射。宿主恢复后的设备 block 仍是宽松映射，尚未由 capability
+动态派生，也不构成 IOMMU 隔离。
 
 验证构建还进入一个临时 EL1 测试 guest，并访问 stage-1 已映射但 stage-2 明确拒绝的
 2 MiB IPA。EL2 数据异常入口恢复保存的宿主 ELR/SPSR，确认该路径是 stage-2
@@ -51,7 +52,7 @@ QEMU `virt,virtualization=on` 的真实串口结果：
 
 ```text
 [JSR-A64-EL] entry=2 execution=1 el2_available=true el2_retained=true
-[JSR-A64-STAGE2] vm_exit=true hpfar=0x4fe000
+[JSR-A64-STAGE2] vm_exit=true hpfar=0x4fe000 stage2_open=true
 [JSR-A64-EL2] retained=true hvc_round_trip=true stage2_table=true stage2=true
 vm_exit=true virtual_irq=true timer_context=true vbar_context=true vcpu_context=true
 system_context=true fp_context=true driver_vm=false
@@ -59,14 +60,14 @@ system_context=true fp_context=true driver_vm=false
 ```
 
 该运行退出 35 仅含既有 AArch64 x86-only `pci_failed=3`、`krn0_failed=1` 基线；
-没有新增失败。证据见 `evidence/aarch64-stage2-negative-20261118-r10j/`。
+没有新增失败。证据见 `evidence/aarch64-stage2-minimal-20261118-r11/`。
 
 ## 边界
 
 - 当前证明 BSP/AP 的 EL2 向量驻留、EL1→EL2→EL1 HVC 往返和共享 stage-2
   身份翻译；
-- stage-2 的 RAM 块已有可审计 2 MiB 负例与恢复路径，其余大块仍是宽松设备映射；
-  尚未实现由 capability 动态派生的最小映射、完整 VE/VM exit 分类及多 vCPU 调度；
+- 测试 guest 已有阶段化的最小 RAM 映射和显式恢复；宿主运行阶段的大块设备映射
+  尚未由 capability 动态派生，完整 VE/VM exit 分类及多 vCPU 调度仍未完成；
 - 当前 virtual IRQ 只证明最小 VI 注入与 guest 向量交付；尚未实现 vGIC
   分配/确认/EOI、GIC 虚拟 CPU 接口或定时器中断虚拟化；当前只完成定时器寄存器
   上下文的保存恢复；
@@ -83,7 +84,7 @@ EL2 保留启动链，才能在实物上继续 Driver VM 验收。
 ## 复现
 
 ```text
-AARCH64_EL2_OUT="$PWD/evidence/aarch64-stage2-negative-20261118-r10j" \
+AARCH64_EL2_OUT="$PWD/evidence/aarch64-stage2-minimal-20261118-r11" \
 AARCH64_EL2_TARGET="$PWD/target/aarch64-el2-stage2" \
 AARCH64_EL2_QEMU_CPUS=6-7 \
 JASPER_BUILD_CPUS=4-5 \

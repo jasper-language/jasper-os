@@ -47,10 +47,9 @@ fn l2_physical_address() -> Option<u64> {
 
 /// Build the verification map before the first CPU enables stage 2.
 ///
-/// The declared RAM gigabyte is translated through an L2 table so the
-/// verification guest can prove denial of 0x4fe00000, a real 2 MiB hole inside
-/// stage-1-mapped RAM. Other blocks retain the existing broad device mapping
-/// needed by the acceptance workload.
+/// While the test guest runs, only the blocks intersecting the kernel image and
+/// its guest stack are mapped. All other RAM and device blocks are invalid. The
+/// host full map is restored only after the guest exits.
 pub fn initialize_identity_table(ram_base: u64) -> bool {
     let Some(root_pa) = root_physical_address() else {
         return false;
@@ -68,27 +67,30 @@ pub fn initialize_identity_table(ram_base: u64) -> bool {
         return false;
     }
     STAGE2_RAM_BASE.store(ram_base, Ordering::Release);
-    // The RAM block uses a second-level table so one stage-1-mapped IPA can be
-    // denied specifically to exercise a real stage-2 data-abort exit.
+    // The test guest sees a fail-closed map; opening the host map is a separate
+    // explicit EL2 operation after the guest has exited.
     for index in 0..STAGE2_ENTRIES {
         let entry = if index == ram_block {
             l2_pa | 3
         } else {
-            ((index as u64) << 30) | STAGE2_DEVICE
+            0
         };
         // SAFETY: The static table has exactly STAGE2_ENTRIES aligned entries.
         unsafe {
             ((&raw mut STAGE2_ROOT.0) as *mut u64).add(index).write(entry);
         }
     }
+    let (image_start, image_end) = super::mmu::image_range();
+    let (stack_start, stack_end) = super::boot::guest_stack_range();
     for index in 0..STAGE2_L2_ENTRIES {
-        // L2 index 127 is the 254 MiB verification hole.
-        // L2 索引 127 是 254 MiB 处的验收测试洞。
-        let entry = if index == 127 {
-            // JASPER-HARDCODE-REVIEW: issue=22 source=aarch64-stage2-negative reason=verification-hole-index
-            0
+        let block_start = ram_base + ((index as u64) << 21);
+        let block_end = block_start + (1 << 21);
+        let entry = if intersects(block_start, block_end, image_start, image_end)
+            || intersects(block_start, block_end, stack_start, stack_end)
+        {
+            block_start | STAGE2_NORMAL
         } else {
-            ram_base + ((index as u64) << 21) | STAGE2_NORMAL
+            0
         };
         // SAFETY: The L2 static has exactly STAGE2_L2_ENTRIES aligned entries.
         unsafe {
@@ -102,8 +104,12 @@ pub fn initialize_identity_table(ram_base: u64) -> bool {
     true
 }
 
-/// Restore the verification-only 2 MiB hole and invalidate stage-2 TLB entries
-/// before the host continues through the same RAM.
+fn intersects(block_start: u64, block_end: u64, start: u64, end: u64) -> bool {
+    block_start < end && start < block_end
+}
+
+/// Restore the host RAM/device map and invalidate stage-2 TLB entries after the
+/// restricted test guest has exited.
 pub fn open_verification_block() -> bool {
     let ram_base = STAGE2_RAM_BASE.load(Ordering::Acquire);
     let Some(l2_pa) = l2_physical_address() else {
@@ -112,13 +118,27 @@ pub fn open_verification_block() -> bool {
     if ram_base == 0 || l2_pa & 0xfff != 0 {
         return false;
     }
-    let index = 127usize; // JASPER-HARDCODE-REVIEW: issue=22 source=aarch64-stage2-negative reason=verification-hole-index
-    let entry = ram_base + ((index as u64) << 21) | STAGE2_NORMAL;
+    let ram_block = (ram_base >> 30) as usize;
+    for index in 0..STAGE2_ENTRIES {
+        let entry = if index == ram_block {
+            l2_pa | 3
+        } else {
+            ((index as u64) << 30) | STAGE2_DEVICE
+        };
+        // SAFETY: The root table has exactly STAGE2_ENTRIES aligned entries.
+        unsafe {
+            ((&raw mut STAGE2_ROOT.0) as *mut u64).add(index).write(entry);
+        }
+    }
+    for index in 0..STAGE2_L2_ENTRIES {
+        let entry = ram_base + ((index as u64) << 21) | STAGE2_NORMAL;
+        // SAFETY: The L2 table has exactly STAGE2_L2_ENTRIES aligned entries.
+        unsafe {
+            ((&raw mut STAGE2_L2.0) as *mut u64).add(index).write(entry);
+        }
+    }
     // SAFETY: The L2 table is identity mapped and the fixed index is in range.
     unsafe {
-        ((&raw mut STAGE2_L2.0) as *mut u64)
-            .add(index)
-            .write_volatile(entry);
         core::arch::asm!("dsb ish", "isb", options(nostack));
     }
     let status: u64;
