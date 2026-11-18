@@ -34,8 +34,8 @@ Evidence:
 
 ```text
 ui-host-adapter-20261118-204008/
-ui-process-20261118-214716/serial.log
-ui-process-20261118-214716/qemu_rc.txt=33
+ui-process-20261118-220052/serial.log
+ui-process-20261118-220052/qemu_rc.txt=33
 ```
 
 Final marker:

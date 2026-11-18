@@ -21,8 +21,9 @@ use alloc::vec::Vec;
 use jasper_ui_engine::{
     backend::HeadlessBackend,
     geometry::Size,
+    scene::Node,
     ui_ir::{
-        NativeActivationSource, NativeUiDocument, UiEventContext, UiFrame as IrFrame, UiKey,
+        NativeActivationSource, NativeUiDocument, UiEventContext, UiEventKind, UiFrame as IrFrame,
         UiPermission, UiPermissionContext,
     },
     LegacyEngine, SimpleTextEngine,
@@ -107,7 +108,8 @@ impl CpuEngineHost {
         })
     }
 
-    /// Admit a focused Enter key against the current Typed UI IR activation binding.
+    /// Admit an Enter key against the first current activation binding. This is
+    /// the bounded single-focus acceptance path, not a general focus stack.
     pub fn input_key(
         &mut self,
         code: u32,
@@ -118,7 +120,7 @@ impl CpuEngineHost {
             return Ok(false);
         }
         let document = self.document.as_ref().ok_or(HostError::InvalidSequence)?;
-        let target = UiKey::new(1, 1);
+        let target = first_activation_target(document).ok_or(HostError::InputUnavailable)?;
         let node = document
             .node_for_key(target)
             .ok_or(HostError::InvalidSequence)?;
@@ -138,6 +140,21 @@ impl CpuEngineHost {
             .map(|_| true)
             .map_err(|_| HostError::InputUnavailable)
     }
+}
+
+#[cfg(feature = "native-engine-core")]
+fn first_activation_target(document: &NativeUiDocument) -> Option<jasper_ui_engine::ui_ir::UiKey> {
+    fn visit(document: &NativeUiDocument, node: &Node) -> Option<jasper_ui_engine::ui_ir::UiKey> {
+        if let Some(key) = document.key_for_node(node.id) {
+            if document.event_binding(key, UiEventKind::Activate).is_some() {
+                return Some(key);
+            }
+        }
+        node.children
+            .iter()
+            .find_map(|child| visit(document, child))
+    }
+    visit(document, &document.scene().root)
 }
 
 #[cfg(feature = "native-engine-core")]
