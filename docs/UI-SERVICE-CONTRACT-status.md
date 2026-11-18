@@ -2,7 +2,7 @@
 
 更新时间：2026-11-18。
 
-状态：**宿主契约、真实 CPL3 UI Service Scene/Input/Present 两帧会话和原生
+状态：**宿主契约、真实 CPL3 UI Service Scene/Patch/Input/Present 三帧会话和原生
 Compositor/framebuffer 采纳通过；硬件输入、物理显示资格、多应用窗口和重启链路仍未完成。**
 
 ## 本切片
@@ -32,7 +32,7 @@ cargo test -p kernel-core ui_service -- --nocapture
 3 passed; 0 failed
 
 scripts/ui-process-check.sh
-engine=cpu rendered=true present=true input=true frames=2 display=true exit=0 resources=true
+engine=cpu rendered=true present=true patch=true input=true frames=3 display=true exit=0 resources=true
 PASS
 
 python3 scripts/check-gpu-abi-boundary.py --self-test
@@ -45,6 +45,6 @@ PASS
 ## 尚未完成
 
 - 完成物理显示资格和 Surface 生命周期接线；
-- 完成持续 Patch、真实硬件键盘/指针输入、Surface 重配和服务重连；
+- 完成长时间持续 Patch、真实硬件键盘/指针输入、Surface 重配和服务重连；
 - 在 Jasper-OS UEFI 系统镜像中完成服务崩溃后 Terminal/Console 救援和重启资源回基线；
 - 多应用窗口策略、IME、无障碍、字体资源、GPU/Vulkan 路径和 LC-2 组件更新。

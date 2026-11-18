@@ -35,6 +35,7 @@ const TEST_SURFACE_WIDTH: u32 = 64;
 const TEST_SURFACE_HEIGHT: u32 = 64;
 const SERVICE_EXIT: i64 = 0;
 const REQUEST_PAYLOAD: &[u8] = br##"{"ir_version":"0.1.0","identity_domain":"jasper-os/ui-probe","owner":"ui-host","session":"session-1","expected_revision":1,"next_revision":2,"ops":[{"op":"insert","parent":null,"index":0,"node":{"key":{"semantic_id":1,"generation":1},"element":{"kind":"container"},"semantics":{"role":"container","label":"Jasper OS","focusable":true},"style":{"box":{"width":{"unit":"px","value":64},"height":{"unit":"px","value":64}},"paint":{"background":"#0A84FFFF"}},"events":[{"event":"activate","action":"jasper.ui.activate"}],"children":[]}}]}"##;
+const PATCH_PAYLOAD: &[u8] = br##"{"ir_version":"0.1.0","identity_domain":"jasper-os/ui-probe","owner":"ui-host","session":"session-1","expected_revision":2,"next_revision":3,"ops":[{"op":"update","key":{"semantic_id":1,"generation":1},"fields":{"style":{"box":{"width":{"unit":"px","value":64},"height":{"unit":"px","value":64}},"paint":{"background":"#FF0000FF"}}}}]}"##;
 
 static CHECKS: AtomicU32 = AtomicU32::new(0);
 static FAILED: AtomicU32 = AtomicU32::new(0);
@@ -170,6 +171,30 @@ pub fn run() -> u32 {
         sent == request_len as i64,
         "host request was not queued on the service endpoint",
     );
+    let patch_header = UiFrameHeader {
+        kind: UiFrameKind::Patch,
+        flags: 0,
+        client,
+        request_id: 12,
+        sequence: 2,
+        payload_bytes: PATCH_PAYLOAD.len() as u32,
+    };
+    let mut patch_request = alloc::vec![0u8; UI_FRAME_HEADER_BYTES + PATCH_PAYLOAD.len()];
+    let patch_len = encode_ui_frame(patch_header, PATCH_PAYLOAD, &mut patch_request)
+        .expect("bounded UI patch request");
+    let patch_sent = kobj::with(|table| {
+        ipc::send_in(
+            table,
+            host,
+            host_endpoint,
+            patch_request[..patch_len].to_vec(),
+            &[],
+        )
+    });
+    check(
+        patch_sent == patch_len as i64,
+        "host patch was not queued on the service endpoint",
+    );
     let mut input_payload = [0u8; 8];
     UiInputRecord {
         code: 28,
@@ -182,8 +207,8 @@ pub fn run() -> u32 {
         kind: UiFrameKind::Input,
         flags: 0,
         client,
-        request_id: 12,
-        sequence: 2,
+        request_id: 13,
+        sequence: 3,
         payload_bytes: input_payload.len() as u32,
     };
     let mut input_request = alloc::vec![0u8; UI_FRAME_HEADER_BYTES + input_payload.len()];
@@ -206,8 +231,8 @@ pub fn run() -> u32 {
         kind: UiFrameKind::Close,
         flags: 0,
         client,
-        request_id: 13,
-        sequence: 3,
+        request_id: 14,
+        sequence: 4,
         payload_bytes: 0,
     };
     let mut close_request = [0u8; UI_FRAME_HEADER_BYTES];
@@ -227,8 +252,8 @@ pub fn run() -> u32 {
         "host close was not queued on the service endpoint",
     );
     check(
-        ipc::queued(service, service_endpoint) == Some(3),
-        "service endpoint did not receive Scene/Input/Close",
+        ipc::queued(service, service_endpoint) == Some(4),
+        "service endpoint did not receive Scene/Patch/Input/Close",
     );
 
     let started = launch_service(service, service_endpoint.raw());
@@ -261,7 +286,22 @@ pub fn run() -> u32 {
         response_ok,
         "versioned CPU RGBA8 Present frame was not delivered",
     );
-    let input_response_bytes = ipc::queued_body_at(host, host_endpoint, 1, ipc::MAX_MSG_BYTES);
+    let patch_response_bytes = ipc::queued_body_at(host, host_endpoint, 1, ipc::MAX_MSG_BYTES);
+    let patch_response_frame = patch_response_bytes
+        .as_deref()
+        .and_then(|bytes| decode_ui_frame(bytes).ok());
+    let patch_response_ok = patch_response_frame.as_ref().is_some_and(|frame| {
+        frame.header.kind == UiFrameKind::Present
+            && frame.header.client == client
+            && frame.header.request_id == patch_header.request_id
+            && frame.header.sequence == patch_header.sequence
+            && frame.payload.starts_with(&[0xff, 0x00, 0x00, 0xff])
+    });
+    check(
+        patch_response_ok,
+        "patched scene was not re-rendered into a new Present frame",
+    );
+    let input_response_bytes = ipc::queued_body_at(host, host_endpoint, 2, ipc::MAX_MSG_BYTES);
     let input_response_frame = input_response_bytes
         .as_deref()
         .and_then(|bytes| decode_ui_frame(bytes).ok());
@@ -271,14 +311,15 @@ pub fn run() -> u32 {
             && frame.header.request_id == input_header.request_id
             && frame.header.sequence == input_header.sequence
             && frame.payload.len() == TEST_SURFACE_WIDTH as usize * TEST_SURFACE_HEIGHT as usize * 4
+            && frame.payload.starts_with(&[0xff, 0x00, 0x00, 0xff])
     });
     check(
         input_response_ok,
         "input-driven second Present frame was not delivered",
     );
     check(
-        ipc::queued(host, host_endpoint) == Some(2),
-        "host endpoint did not retain both Present responses",
+        ipc::queued(host, host_endpoint) == Some(3),
+        "host endpoint did not retain all Present responses",
     );
 
     let host_exit = proc::exit_idle(host, 0);
@@ -303,7 +344,7 @@ pub fn run() -> u32 {
         resources,
         "UI Channel/process resources did not return to baseline",
     );
-    let display_ok = response_frame.as_ref().is_some_and(|frame| {
+    let display_ok = patch_response_frame.as_ref().is_some_and(|frame| {
         let surface = SurfaceSpec {
             width: TEST_SURFACE_WIDTH,
             height: TEST_SURFACE_HEIGHT,
@@ -313,7 +354,7 @@ pub fn run() -> u32 {
         };
         crate::display::present_ui_frame(surface, frame.payload)
             .ok()
-            .is_some_and(|(x, y)| crate::display::read_pixel_rgb(x, y) == Some((0x0a, 0x84, 0xff)))
+            .is_some_and(|(x, y)| crate::display::read_pixel_rgb(x, y) == Some((0xff, 0x00, 0x00)))
     });
     check(
         display_ok,
@@ -323,7 +364,7 @@ pub fn run() -> u32 {
     // Reaching this marker proves the serial Console remains available after
     // the service process and all of its objects were reclaimed.
     kprintln!(
-        "[JSR-UI-PROCESS] started={} channel=true request_queued={} engine=cpu rendered=true present=true input=true frames=2 display={} exit={} response={} terminal_alive=true resources={} checks={} failed={}",
+        "[JSR-UI-PROCESS] started={} channel=true request_queued={} engine=cpu rendered=true present=true patch=true input=true frames=3 display={} exit={} response={} terminal_alive=true resources={} checks={} failed={}",
         started,
         sent == request_len as i64,
         display_ok,

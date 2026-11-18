@@ -90,7 +90,7 @@ fn run_cpu_engine(
             return fail_response(&endpoint, request.header, error.name(), 72);
         }
     };
-    let scene_version = match host.set_scene(request.payload) {
+    let mut scene_version = match host.set_scene(request.payload) {
         Ok(version) => version,
         Err(error) => {
             return fail_response(&endpoint, request.header, error.name(), 69);
@@ -151,6 +151,45 @@ fn run_cpu_engine(
             }
         };
         match input_request.header.kind {
+            UiFrameKind::Patch => {
+                scene_version = match host.set_scene(input_request.payload) {
+                    Ok(version) => version,
+                    Err(error) => {
+                        return fail_response(&endpoint, input_request.header, error.name(), 69)
+                    }
+                };
+                let mut next = match CpuFrame::new(
+                    surface,
+                    1,
+                    scene_version,
+                    u64::from(input_request.header.sequence),
+                    vec![0; expected],
+                ) {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        return fail_response(&endpoint, input_request.header, error.name(), 72)
+                    }
+                };
+                if let Err(error) = host.render(&mut next) {
+                    return fail_response(&endpoint, input_request.header, error.name(), 69);
+                }
+                let response = UiFrameHeader {
+                    kind: UiFrameKind::Present,
+                    flags: 0,
+                    client: input_request.header.client,
+                    request_id: input_request.header.request_id,
+                    sequence: input_request.header.sequence,
+                    payload_bytes: next.pixels().len() as u32,
+                };
+                if endpoint.send_frame(response, next.pixels()).is_err() {
+                    return 70;
+                }
+                presents += 1;
+                println!(
+                    "ui-service: patch accepted revision={} presents={}",
+                    scene_version, presents
+                );
+            }
             UiFrameKind::Input => {
                 let input = match UiInputRecord::decode(input_request.payload) {
                     Ok(input) => input,

@@ -555,6 +555,7 @@ mod tests {
             layout: PixelLayout::Rgba,
         };
         let scene = br##"{"ir_version":"0.1.0","identity_domain":"jasper-os/ui-test","owner":"test-host","session":"session-1","expected_revision":1,"next_revision":2,"ops":[{"op":"insert","parent":null,"index":0,"node":{"key":{"semantic_id":1,"generation":1},"element":{"kind":"container"},"semantics":{"role":"container","label":"Engine","focusable":true},"style":{"box":{"width":{"unit":"px","value":4},"height":{"unit":"px","value":4}},"paint":{"background":"#0A84FFFF"}},"events":[{"event":"activate","action":"jasper.ui.activate"}],"children":[]}}]}"##;
+        let patch = br##"{"ir_version":"0.1.0","identity_domain":"jasper-os/ui-test","owner":"test-host","session":"session-1","expected_revision":2,"next_revision":3,"ops":[{"op":"update","key":{"semantic_id":1,"generation":1},"fields":{"style":{"box":{"width":{"unit":"px","value":4},"height":{"unit":"px","value":4}},"paint":{"background":"#FF0000FF"}}}}]}"##;
 
         let engine = CpuEngineHost::new(4, 4).unwrap();
         let mut host = UiHost::new(engine, ENGINE_SURFACE, 1).unwrap();
@@ -563,6 +564,11 @@ mod tests {
         assert_eq!(host.render(&mut frame), Ok(1));
         assert_eq!(&frame.pixels()[..4], &[0x0a, 0x84, 0xff, 0xff]);
         assert!(frame.pixels().chunks_exact(4).all(|pixel| pixel[3] == 0xff));
+        let patched_version = host.set_scene(patch).unwrap();
+        let mut patched =
+            CpuFrame::new(ENGINE_SURFACE, 1, patched_version, 2, vec![0; 64]).unwrap();
+        assert_eq!(host.render(&mut patched), Ok(2));
+        assert_eq!(&patched.pixels()[..4], &[0xff, 0x00, 0x00, 0xff]);
         assert_eq!(host.engine_mut().input_key(28, true, 0), Ok(true));
     }
 }

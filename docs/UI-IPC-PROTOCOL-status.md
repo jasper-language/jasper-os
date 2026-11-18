@@ -2,8 +2,8 @@
 
 更新时间：2026-11-18。
 
-状态：**版本化帧编解码与负例完成；Scene/Input/Present/Close 已绑定真实 Jasper
-Channel 与 CPL3 UI Service 两帧会话；Patch、分片、背压和重连仍未完成。**
+状态：**版本化帧编解码与负例完成；Scene/Patch/Input/Present/Close 已绑定真实
+Jasper Channel 与 CPL3 UI Service 三帧会话；分片、背压和重连仍未完成。**
 
 ## 边界
 
@@ -34,6 +34,7 @@ scripts/ui-process-check.sh
 Scene receive=495 bytes
 Present receive=16424 bytes (40-byte JSUI header + 16384 RGBA8 bytes)
 Input receive=8 bytes canonical Enter
+Versioned Patch advances the rendered background
 Second Present receive=16424 bytes
 PASS
 ```
@@ -43,7 +44,7 @@ PASS
 
 ## 尚未完成
 
-- Patch 帧与 Engine `HostInbox` 的长时间/多事件持续会话 adapter；
+- Engine `HostInbox` 的长时间/多事件持续会话 adapter；
 - 真实 Surface/Scene 分片、背压、取消、重连和旧 generation 拒绝的镜像级测试；
 - AsyncRing 服务提交与跨进程句柄转移的完整负例矩阵；
 - 生产协议登记和跨版本兼容矩阵。不能把本模块的单元测试当作 UI-OS-1 完成。
