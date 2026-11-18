@@ -13,6 +13,9 @@
   使用的退出字段不再默认成 `0`/`u64::MAX`，读取失败直接终止本次运行；
 - MMIO 指令仿真读取 `GUEST_CR3` 时不再回退到过时的软件 guest CR3；翻译失败或
   VMREAD 失败都会阻止错误地址被当作设备访问；
+- 未注册且不在架构 reset/default 表中的 guest RDMSR 不再返回伪造的 0，而是让
+  VMX 运行失败关闭；后续若要完整模拟 Linux `#GP`，必须在 guest 注入路径中显式
+  实现并单独验收；
 - 故障日志统一通过 `vmread_diagnostic`，读取失败显示 `u64::MAX`，并在注释和
   `hardcode-review-sources.tsv` 中登记为仅诊断用途；
 - `SYSCALL` MSR 未显式写入时的 0 保留：该组 MSR 的架构 reset 值就是 0，不是
@@ -35,7 +38,7 @@ findings=384, added=0, cleared=29
 
 ## 尚未完成
 
-- 仍需要可控 VMREAD 失败注入，证明每个运行路径返回
+- 仍需要可控 VMREAD/未知 RDMSR 故障注入，证明每个运行路径返回
   `hwvirt.vmx.error.vmread` 且不继续推进 RIP、不注入 IRQ、不访问推测 GPA；
 - 真实 KVM/TDX/厂商 CPU 的 VMCS 不可用、损坏 VMCS、EPT qualification 异常与
   host recovery 矩阵仍属于硬件验收；

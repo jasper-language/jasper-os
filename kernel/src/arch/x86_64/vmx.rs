@@ -1826,7 +1826,11 @@ impl VmxVm {
                 EXIT_MSR_READ => {
                     report.msr_reads += 1;
                     let index = self.gpr(1) as u32;
-                    let value = self.linux_msr_read(index, &linux);
+                    let value = self.linux_msr_read(index, &linux).ok_or(
+                        VmxError::InvalidState {
+                            code: u64::from(index),
+                        },
+                    )?;
                     self.set_gpr(0, value as u32 as u64);
                     self.set_gpr(2, (value >> 32) as u32 as u64);
                     self.advance_rip(length);
@@ -2316,11 +2320,11 @@ impl VmxVm {
         }
     }
 
-    fn linux_msr_read(&self, index: u32, linux: &LinuxRuntime) -> u64 {
+    fn linux_msr_read(&self, index: u32, linux: &LinuxRuntime) -> Option<u64> {
         if let Some(value) = linux.msr_read(index) {
-            return value;
+            return Some(value);
         }
-        match index {
+        Some(match index {
             0x10 => {
                 let (lo, hi) = self.guest_tsc();
                 (u64::from(hi) << 32) | u64::from(lo)
@@ -2330,8 +2334,8 @@ impl VmxVm {
             0x2ff => 0x800,
             0xc000_0080 => self.guest.efer,
             0xc000_0102 => linux.kernel_gs_base,
-            _ => 0,
-        }
+            _ => return None,
+        })
     }
 
     fn linux_msr_write(
