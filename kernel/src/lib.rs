@@ -68,6 +68,8 @@ pub mod exit_state;
 pub mod fault;
 #[cfg(feature = "user-programs")]
 pub(crate) mod first_program;
+#[cfg(all(feature = "ui-process-verify", target_arch = "x86_64"))]
+pub mod ui_process_demo;
 #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
 pub(crate) mod binder;
 #[cfg(feature = "linux-abi")]

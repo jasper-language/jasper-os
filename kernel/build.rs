@@ -613,7 +613,7 @@ fn dynamic_interpreter(bytes: &[u8]) -> Option<&[u8]> {
 /// 构建内嵌的用户程序：用独立的 target 目录调用 cargo，避免与外层构建争用同一目录的锁；
 /// 产物路径经环境变量（`JSR_USER_HELLO`、`JSR_USER_RING`、`JSR_USER_IPC`、`JSR_USER_PROG`、`JSR_USER_ROBUST`、
 /// `JSR_USER_RTDEMO`、`JSR_USER_LIBCHECK`、`JSR_USER_JASODEMO`、`JSR_USER_MODHOST`、`JSR_USER_SCHEDTEST`、
-/// `JSR_USER_BENCH`、`JSR_USER_ISOHOST`）交给内核源码 `include_bytes!`。
+/// `JSR_USER_BENCH`、`JSR_USER_ISOHOST`、`JSR_USER_UI_SERVICE`）交给内核源码 `include_bytes!`。
 /// Builds the embedded user programs with a separate target dir, verifies their ABI stamps, and exposes their paths.
 fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version::AbiVersion) {
     let mut all_programs: Vec<(&str, &str, &str)> = vec![
@@ -650,6 +650,9 @@ fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version:
         all_programs.push(("user/vmm", "user-vmm", "JSR_USER_VMM"));
         all_programs.push(("user/linuxprobe", "user-linuxprobe", "JSR_USER_LINUXPROBE"));
     }
+    let ui_process_verify =
+        std::env::var_os("CARGO_FEATURE_UI_PROCESS_VERIFY").is_some()
+            && std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64");
     let jasodemo_only = std::env::var_os("CARGO_FEATURE_JASO1_VERIFY").is_some();
     let programs: Vec<(&str, &str, &str)> = if jasodemo_only {
         all_programs
@@ -665,6 +668,20 @@ fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version:
             println!(
                 "cargo:rerun-if-changed={}",
                 root.join(dir).join(f).display()
+            );
+        }
+    }
+    if ui_process_verify {
+        for f in [
+            "src/main.rs",
+            "src/lib.rs",
+            "Cargo.toml",
+            "link.ld",
+            "build.rs",
+        ] {
+            println!(
+                "cargo:rerun-if-changed={}",
+                root.join("user/ui-service").join(f).display()
             );
         }
     }
@@ -711,7 +728,7 @@ fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version:
     let target_dir = out_dir.join("user-target");
     let triple = user_triple();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let mut cmd = std::process::Command::new(cargo);
+    let mut cmd = std::process::Command::new(&cargo);
     cmd.current_dir(root)
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
@@ -726,6 +743,30 @@ fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version:
         .status()
         .expect("无法启动 cargo 构建用户程序");
     assert!(status.success(), "用户程序构建失败");
+    if ui_process_verify {
+        let mut ui_cmd = std::process::Command::new(&cargo);
+        ui_cmd
+            .current_dir(root)
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_TARGET_DIR")
+            .args([
+                "build",
+                "--release",
+                "--target",
+                triple,
+                "-p",
+                "user-ui-service",
+                "--bin",
+                "ui-service",
+                "--features",
+                "native-transport",
+            ])
+            .arg("--target-dir")
+            .arg(&target_dir);
+        let status = ui_cmd.status().expect("无法启动 UI Service 用户程序构建");
+        assert!(status.success(), "UI Service 用户程序构建失败");
+    }
     let (machine, class) = elf_target();
     // 期望的章直接由构建脚本解析出的真源构造，避免「校验值来自另一份生成常量」的循环自证。
     let expected = kernel_core::abi_version::ProgramAbi {
@@ -769,6 +810,25 @@ fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version:
             }
         }
         println!("cargo:rustc-env={}={}", env, elf.display());
+    }
+    if ui_process_verify {
+        let elf = target_dir.join(triple).join("release").join("ui-service");
+        assert!(elf.exists(), "找不到用户程序产物 {}", elf.display());
+        let bytes = std::fs::read(&elf)
+            .unwrap_or_else(|e| panic!("读取 UI Service {} 失败：{}", elf.display(), e));
+        let parsed = kernel_core::elf::parse(&bytes, machine, class)
+            .unwrap_or_else(|e| panic!("UI Service ELF 不合法：{:?}", e));
+        assert_eq!(
+            parsed.abi(),
+            Some(expected),
+            "UI Service 的 ABI 章与 abi/abi-version.txt 不一致"
+        );
+        assert_eq!(
+            parsed.required_capabilities().iter().collect::<Vec<_>>(),
+            vec!["kernel.core"],
+            "UI Service capability note differs"
+        );
+        println!("cargo:rustc-env=JSR_USER_UI_SERVICE={}", elf.display());
     }
     if jasodemo_only {
         let elf = target_dir

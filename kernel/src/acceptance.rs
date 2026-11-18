@@ -752,6 +752,7 @@ const HIGHRES: &[Step] = &[st(Stage::HighRes)];
     feature = "arch2-verify",
     feature = "fs1-ext4-verify",
     feature = "blk1-verify",
+    feature = "ui-process-verify",
     feature = "fs0-journal-verify",
     feature = "native-install-block-verify",
     feature = "mod1-verify",
@@ -897,6 +898,7 @@ const FULL: &[Step] = &[
     feature = "arch2-verify",
     feature = "fs1-ext4-verify",
     feature = "blk1-verify",
+    feature = "ui-process-verify",
     feature = "fs0-journal-verify",
     feature = "native-install-block-verify",
     feature = "mod1-verify",
@@ -959,6 +961,7 @@ pub use full_selected::{NAME, PLAN};
     feature = "arch2-verify",
     feature = "fs1-ext4-verify",
     feature = "blk1-verify",
+    feature = "ui-process-verify",
     feature = "fs0-journal-verify",
     feature = "native-install-block-verify",
     feature = "mod1-verify",
@@ -1029,6 +1032,7 @@ const DEDICATED_SELECTED: usize = cfg!(feature = "rt1-verify") as usize
     + cfg!(feature = "arch2-verify") as usize
     + cfg!(feature = "fs1-ext4-verify") as usize
     + cfg!(feature = "blk1-verify") as usize
+    + cfg!(feature = "ui-process-verify") as usize
     + cfg!(feature = "fs0-journal-verify") as usize
     + cfg!(feature = "native-install-block-verify") as usize
     + cfg!(feature = "mod1-verify") as usize
@@ -1565,6 +1569,46 @@ mod dedicated {
     }
 
     pub const PLAN: &[&[Step]] = &[PREFIX, SMP_UP, &[PlanItem::Finish(finish)]];
+}
+
+#[cfg(feature = "ui-process-verify")]
+mod dedicated {
+    use super::*;
+
+    pub const NAME: &str = "ui-process";
+
+    #[cfg(target_arch = "x86_64")]
+    fn finish(_: &mut BootCtx) {
+        exit_on(u64::from(crate::ui_process_demo::run()));
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    fn finish(_: &mut BootCtx) {
+        kprintln!("[JSR-UI-PROCESS] unsupported_arch=true failed=1");
+        exit_on(1);
+    }
+
+    // The UI process drill only needs the production boot stages. It does not
+    // depend on unrelated mechanism, PCI, hardware-virtualisation or device
+    // acceptance cases in the shared PREFIX.
+    const STAGES: &[Step] = &[
+        st(Stage::Console),
+        st(Stage::Platform),
+        st(Stage::Timer),
+        st(Stage::Frames),
+        st(Stage::KernelMap),
+        st(Stage::Heap),
+        st(Stage::Capacity),
+        st(Stage::Devices),
+        st(Stage::Profile),
+        st(Stage::Assembly),
+        st(Stage::SchedMode),
+        st(Stage::Space),
+        st(Stage::Smp),
+        st(Stage::UserRuntime),
+    ];
+
+    pub const PLAN: &[&[Step]] = &[STAGES, &[PlanItem::Finish(finish)]];
 }
 
 #[cfg(feature = "fs0-journal-verify")]
@@ -2377,6 +2421,7 @@ mod dedicated {
     feature = "arch2-verify",
     feature = "fs1-ext4-verify",
     feature = "blk1-verify",
+    feature = "ui-process-verify",
     feature = "fs0-journal-verify",
     feature = "native-install-block-verify",
     feature = "mod1-verify",

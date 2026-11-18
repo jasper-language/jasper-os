@@ -12,6 +12,8 @@
 
 use jasper_rt::{entry, println, Handle};
 use jasper_ui_service::{EngineHost, EngineState, NativeUiEndpoint, UnavailableEngine};
+use kernel_core::ui_protocol::{UiFrameHeader, UiFrameKind};
+use kernel_core::ui_service::UI_ERROR_ENGINE_UNAVAILABLE;
 
 entry!(main);
 
@@ -32,17 +34,36 @@ fn main(channel_handle: u64, _: u64) -> i32 {
             EngineState::GpuReady => "gpu-ready",
         }
     );
-    // A broker probe may send a zero-length readiness request. We only report
-    // the exact blocker and never synthesize a scene/frame completion.
-    let mut request = [0u8; 256];
-    match endpoint.receive(&mut request) {
+    // The launcher sends one versioned scene request. Report the exact blocker
+    // in a versioned error frame and never synthesize a successful scene.
+    let mut request_bytes = [0u8; 512];
+    let request = match endpoint.receive_frame(&mut request_bytes) {
+        Ok(frame) if frame.header.kind == UiFrameKind::Scene => frame,
         Ok(_) => {
-            let _ = endpoint.send(b"service.ui.error.engine_unavailable");
-            69
+            println!("ui-service: refuse reason=invalid-frame-kind");
+            return 65;
         }
         Err(error) => {
             println!("ui-service: refuse reason={}", error.name());
-            69
+            return 68;
         }
+    };
+    let response = UiFrameHeader {
+        kind: UiFrameKind::Error,
+        flags: 0,
+        client: request.header.client,
+        request_id: request.header.request_id,
+        sequence: request.header.sequence,
+        payload_bytes: UI_ERROR_ENGINE_UNAVAILABLE.len() as u32,
+    };
+    let mut response_bytes = [0u8; 128];
+    if let Err(error) = endpoint.send_frame_into(
+        response,
+        UI_ERROR_ENGINE_UNAVAILABLE.as_bytes(),
+        &mut response_bytes,
+    ) {
+        println!("ui-service: refuse reason={}", error.name());
+        return 70;
     }
+    69
 }

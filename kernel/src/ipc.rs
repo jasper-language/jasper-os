@@ -648,6 +648,22 @@ pub fn queued(pid: ObjId, h: HandleId) -> Option<usize> {
     })
 }
 
+/// Copy the bounded body of the oldest queued message without delivering it.
+/// This is a kernel-only acceptance probe; it grants no new user-visible
+/// authority and never exposes handles from the message.
+#[cfg(feature = "ui-process-verify")]
+pub(crate) fn queued_body(pid: ObjId, h: HandleId, max: usize) -> Option<Vec<u8>> {
+    if max > MAX_MSG_BYTES {
+        return None;
+    }
+    kobj::with(|t| {
+        let id = proc::resolve_in(t, pid, h, ObjectType::Channel, Rights::NONE).ok()?;
+        ep_mut(t, id)
+            .and_then(|endpoint| endpoint.queue.front())
+            .map(|message| message.body.iter().take(max).copied().collect())
+    })
+}
+
 // ———————————————————————— 系统调用 ————————————————————————
 
 /// `system.channel.create(out_ptr)`：在当前进程建立一对端点，把两个句柄值（各 `HANDLE_BYTES` 字节）写到 `out_ptr`。返回 0。

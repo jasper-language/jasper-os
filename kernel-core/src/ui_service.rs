@@ -22,6 +22,11 @@ use crate::display_input::{
 /// Logical UI service contract version. This is not a kernel ABI ID.
 pub const UI_SERVICE_PROTOCOL_VERSION: u16 = 1;
 
+/// Stable response emitted when the pinned UI Engine cannot execute on the
+/// current native target. This is a service contract value, not a syscall errno.
+/// 固定 UI Engine 无法在当前原生目标执行时的稳定响应；它是服务契约值，不是 syscall errno。
+pub const UI_ERROR_ENGINE_UNAVAILABLE: &str = "service.ui.error.engine_unavailable";
+
 /// Stable service-level UI error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UiServiceError {

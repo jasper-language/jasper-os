@@ -148,6 +148,8 @@ usi2-verify = ["user-programs"]
 arch2-verify = ["user-programs"]
 # BLK-1 real virtio-blk persistence and lifecycle drill.
 blk1-verify = []
+# Real CPL3 UI Service launch, versioned engine-error response and reclaim.
+ui-process-verify = ["user-programs"]
 # FS-0 journal-to-virtio-blk integration and same-disk power-cut drill.
 fs0-journal-verify = []
 # Real virtio-blk persistence of package bytes and installation state across reboot.

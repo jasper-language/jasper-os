@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 use kernel_core::display_input::{DisplayInputError, KeyInput, SurfaceSpec};
 #[cfg(feature = "native-transport")]
 use kernel_core::ui_protocol::{decode_ui_frame, encode_ui_frame, UiFrame, UiFrameHeader};
-use kernel_core::ui_service::UI_SERVICE_PROTOCOL_VERSION;
+use kernel_core::ui_service::{UI_ERROR_ENGINE_UNAVAILABLE, UI_SERVICE_PROTOCOL_VERSION};
 
 /// UI Engine revision currently recorded by `ui-engine.lock.toml`.
 pub const PINNED_ENGINE_COMMIT: &str = "4194117011f13fdc063977683162fd5a145c85d7";
@@ -79,7 +79,7 @@ pub enum HostError {
 impl HostError {
     pub const fn name(self) -> &'static str {
         match self {
-            Self::EngineUnavailable => "service.ui.error.engine_unavailable",
+            Self::EngineUnavailable => UI_ERROR_ENGINE_UNAVAILABLE,
             Self::InvalidSurface => "service.ui.error.invalid_surface",
             Self::InvalidFrame => "service.ui.error.invalid_frame",
             Self::InvalidSequence => "service.ui.error.invalid_sequence",
@@ -282,6 +282,22 @@ impl NativeUiEndpoint {
         let len = encode_ui_frame(header, payload, &mut encoded)
             .map_err(|_| HostError::InvalidFrame)?;
         self.send(&encoded[..len])
+    }
+
+    /// Encode one bounded frame into caller-owned storage and send it without
+    /// allocating. The buffer must cover the header and the complete payload.
+    pub fn send_frame_into(
+        &self,
+        header: UiFrameHeader,
+        payload: &[u8],
+        output: &mut [u8],
+    ) -> Result<(), HostError> {
+        if payload.len() > kernel_core::ui_protocol::MAX_UI_FRAME_PAYLOAD {
+            return Err(HostError::InvalidFrame);
+        }
+        let len =
+            encode_ui_frame(header, payload, output).map_err(|_| HostError::InvalidFrame)?;
+        self.send(&output[..len])
     }
 }
 
