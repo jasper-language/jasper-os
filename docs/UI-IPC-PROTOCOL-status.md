@@ -2,13 +2,16 @@
 
 更新时间：2026-11-18。
 
-状态：**版本化帧编解码与负例完成；尚未绑定到真实 Channel/Ring 服务进程。**
+状态：**版本化帧编解码与负例完成；Scene/Present 已绑定真实 Jasper Channel 与
+CPL3 UI Service 首帧；Patch/Input、分片、背压和重连仍未完成。**
 
 ## 边界
 
 `kernel-core::ui_protocol` 只定义服务层消息，不登记 syscall、不包含指针地址或
 设备/Vulkan 句柄。实际传输复用现有 Channel/AsyncRing；Handle/Rights、
 MemoryObject 和完成事件仍由既有对象机制带外转移，不能藏进不透明载荷绕过授权。
+原生 Channel 端点额外以 `MSG_BYTES - JSUI_HEADER_BYTES` 限制单帧载荷，避免
+协议自身可表达但传输消息无法容纳的帧。
 
 ## 帧
 
@@ -26,6 +29,11 @@ MemoryObject 和完成事件仍由既有对象机制带外转移，不能藏进�
 ```text
 cargo test -p kernel-core ui_protocol
 4 passed; 0 failed
+
+scripts/ui-process-check.sh
+Scene receive=495 bytes
+Present receive=16424 bytes (40-byte JSUI header + 16384 RGBA8 bytes)
+PASS
 ```
 
 覆盖七类帧往返、magic/version/header/reserved/kind/flags/client/request 篡改、
@@ -33,7 +41,7 @@ cargo test -p kernel-core ui_protocol
 
 ## 尚未完成
 
-- 将编码器绑定到真实 `system.channel.*` / `system.async.ring.*` 服务提交；
+- Patch/Input 帧与 Engine `HostInbox` 持续会话的 adapter；
 - 真实 Surface/Scene 分片、背压、取消、重连和旧 generation 拒绝的镜像级测试；
-- 与锁定 UI Engine `HostInbox`/`Typed UiBatch` 的 adapter；
+- AsyncRing 服务提交与跨进程句柄转移的完整负例矩阵；
 - 生产协议登记和跨版本兼容矩阵。不能把本模块的单元测试当作 UI-OS-1 完成。

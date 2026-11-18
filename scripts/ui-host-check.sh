@@ -16,7 +16,7 @@ env -u CARGO_TARGET_DIR JASPER_BUILD_ALLOW_VBOX="${JASPER_BUILD_ALLOW_VBOX:-1}" 
 env -u CARGO_TARGET_DIR JASPER_BUILD_ALLOW_VBOX="${JASPER_BUILD_ALLOW_VBOX:-1}" \
   JASPER_BUILD_CPUS="${JASPER_BUILD_CPUS:-4-5}" \
   scripts/guarded-cargo.sh build --locked -p user-ui-service --bin ui-service \
-  --target x86_64-unknown-none --features native-transport --release \
+  --target x86_64-unknown-none --features native-transport,native-engine-core --release \
   >"$OUT/service-build.log" 2>&1
 env -u CARGO_TARGET_DIR JASPER_BUILD_ALLOW_VBOX="${JASPER_BUILD_ALLOW_VBOX:-1}" \
   JASPER_BUILD_CPUS="${JASPER_BUILD_CPUS:-4-5}" \
@@ -37,6 +37,6 @@ python3 scripts/check-gpu-abi-boundary.py --self-test >"$OUT/gpu-boundary.log"
 python3 scripts/check-gpu-abi-boundary.py >>"$OUT/gpu-boundary.log"
 
 printf '%s\n' \
-  "ui-host: PASS engine=blocked-no-std transport=channel frame=rgba8 kernel_linked=false" \
-  "engine_commit=4194117011f13fdc063977683162fd5a145c85d7" \
+  "ui-host: PASS engine=cpu transport=channel frame=rgba8 kernel_linked=false" \
+  "engine_commit=b21dec1ae504a06923defcc715722c7b9e9c1dc8" \
   "evidence=$OUT"

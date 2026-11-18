@@ -760,7 +760,7 @@ fn build_user_programs(root: &std::path::Path, native: kernel_core::abi_version:
                 "--bin",
                 "ui-service",
                 "--features",
-                "native-transport",
+                "native-transport,native-engine-core",
             ])
             .arg("--target-dir")
             .arg(&target_dir);

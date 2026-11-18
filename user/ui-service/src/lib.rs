@@ -2,29 +2,38 @@
 //!
 //! This crate owns no renderer or window policy. It validates the host surface,
 //! engine state, input and output generations around an engine supplied by the
-//! independent `jasper-ui-engine` repository. The current pinned engine target
-//! is blocked on `std`; this adapter therefore reports that state instead of
-//! fabricating a successful frame.
+//! independent `jasper-ui-engine` repository. The `native-engine-core` feature
+//! selects its real `no_std + alloc` CPU core; builds without that feature keep
+//! an explicit unavailable adapter rather than fabricating a successful frame.
 //!
 //! 本 crate 是固定版本 Jasper UI Engine 的 Jasper-OS 宿主边界；不拥有渲染器或窗口
-//! 策略。当前固定引擎尚未完成 `no_std` 目标构建，因此适配器必须明确返回阻塞状态，
-//! 不能伪造成功帧。
+//! 策略。`native-engine-core` 选择真实 `no_std + alloc` CPU 核心；未开启该特性时
+//! 明确返回不可用状态，不能伪造成功帧。
 
 #![no_std]
 
 extern crate alloc;
 
+#[cfg(feature = "native-engine-core")]
+use alloc::boxed::Box;
 use alloc::vec::Vec;
+#[cfg(feature = "native-engine-core")]
+use jasper_ui_engine::{
+    backend::HeadlessBackend, geometry::Size, ui_ir::NativeUiDocument, ui_ir::UiFrame as IrFrame,
+    LegacyEngine, SimpleTextEngine,
+};
 use kernel_core::display_input::{DisplayInputError, KeyInput, SurfaceSpec};
 #[cfg(feature = "native-transport")]
 use kernel_core::ui_protocol::{decode_ui_frame, encode_ui_frame, UiFrame, UiFrameHeader};
 use kernel_core::ui_service::{UI_ERROR_ENGINE_UNAVAILABLE, UI_SERVICE_PROTOCOL_VERSION};
 
 /// UI Engine revision currently recorded by `ui-engine.lock.toml`.
-pub const PINNED_ENGINE_COMMIT: &str = "4194117011f13fdc063977683162fd5a145c85d7";
+pub const PINNED_ENGINE_COMMIT: &str = "b21dec1ae504a06923defcc715722c7b9e9c1dc8";
+/// Largest JSUI payload that fits one Jasper native Channel message.
+pub const MAX_NATIVE_UI_FRAME_PAYLOAD: usize = kernel_core::config::bounds::MSG_BYTES
+    .saturating_sub(kernel_core::ui_protocol::UI_FRAME_HEADER_BYTES);
 
-/// Build-time engine availability. The independent engine repository must
-/// provide a target-buildable core before this changes to `CpuReady`.
+/// Build-time engine availability.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EngineState {
     BlockedNoStd,
@@ -32,8 +41,8 @@ pub enum EngineState {
     GpuReady,
 }
 
-/// Host-side engine operations. The implementation is supplied by the engine
-/// adapter once a `no_std + alloc` engine core is available.
+/// Host-side engine operations supplied by either the CPU core adapter or an
+/// explicit fail-closed adapter.
 pub trait EngineHost {
     fn state(&self) -> EngineState;
 
@@ -46,7 +55,7 @@ pub trait EngineHost {
     fn render_cpu(&mut self, scene_version: u64, pixels: &mut [u8]) -> Result<(), HostError>;
 }
 
-/// Explicit adapter used until the pinned engine can be built for Jasper-OS.
+/// Explicit adapter for builds that intentionally omit the Engine CPU core.
 #[derive(Debug, Default)]
 pub struct UnavailableEngine;
 
@@ -61,6 +70,74 @@ impl EngineHost for UnavailableEngine {
 
     fn render_cpu(&mut self, _scene_version: u64, _pixels: &mut [u8]) -> Result<(), HostError> {
         Err(HostError::EngineUnavailable)
+    }
+}
+
+/// Real Jasper UI Engine CPU core over an OS-owned RGBA8 surface.
+///
+/// The engine owns scene layout and paint state; Jasper-OS owns allocation,
+/// Surface lifecycle, Channel transport and presentation.
+///
+/// 真实 Jasper UI Engine CPU 核心运行在 Jasper-OS 拥有的 RGBA8 Surface 上；
+/// 引擎负责场景布局与绘制，Jasper-OS 负责分配、Surface 生命周期、Channel 和呈现。
+#[cfg(feature = "native-engine-core")]
+pub struct CpuEngineHost {
+    document: Option<NativeUiDocument>,
+    width: u32,
+    height: u32,
+}
+
+#[cfg(feature = "native-engine-core")]
+impl CpuEngineHost {
+    pub fn new(width: u32, height: u32) -> Result<Self, HostError> {
+        if width == 0 || height == 0 {
+            return Err(HostError::InvalidSurface);
+        }
+        Ok(Self {
+            document: None,
+            width,
+            height,
+        })
+    }
+}
+
+#[cfg(feature = "native-engine-core")]
+impl EngineHost for CpuEngineHost {
+    fn state(&self) -> EngineState {
+        EngineState::CpuReady
+    }
+
+    fn set_scene(&mut self, scene: &[u8]) -> Result<(), HostError> {
+        let frame = IrFrame::from_json_slice(scene).map_err(|_| HostError::InvalidFrame)?;
+        if frame.expected_revision == 1 {
+            self.document =
+                Some(NativeUiDocument::from_frame(&frame).map_err(|_| HostError::InvalidFrame)?);
+        } else {
+            self.document
+                .as_mut()
+                .ok_or(HostError::InvalidSequence)?
+                .apply_frame(&frame)
+                .map_err(|_| HostError::InvalidFrame)?;
+        }
+        Ok(())
+    }
+
+    fn render_cpu(&mut self, _scene_version: u64, pixels: &mut [u8]) -> Result<(), HostError> {
+        let document = self.document.as_ref().ok_or(HostError::InvalidSequence)?;
+        let mut engine = LegacyEngine::new(
+            Size::new(self.width as f32, self.height as f32),
+            HeadlessBackend::new(self.width, self.height),
+            Box::new(SimpleTextEngine),
+        );
+        engine
+            .render(document.scene())
+            .map_err(|_| HostError::InvalidFrame)?;
+        let rendered = engine.backend().canvas().pixels();
+        if rendered.len() != pixels.len() {
+            return Err(HostError::InvalidFrame);
+        }
+        pixels.copy_from_slice(rendered);
+        Ok(())
     }
 }
 
@@ -272,15 +349,15 @@ impl NativeUiEndpoint {
 
     /// Encode and send one versioned UI protocol frame over the native Channel.
     pub fn send_frame(&self, header: UiFrameHeader, payload: &[u8]) -> Result<(), HostError> {
-        if payload.len() > kernel_core::ui_protocol::MAX_UI_FRAME_PAYLOAD {
+        if payload.len() > MAX_NATIVE_UI_FRAME_PAYLOAD {
             return Err(HostError::InvalidFrame);
         }
         let mut encoded = alloc::vec![
             0u8;
             kernel_core::ui_protocol::UI_FRAME_HEADER_BYTES + payload.len()
         ];
-        let len = encode_ui_frame(header, payload, &mut encoded)
-            .map_err(|_| HostError::InvalidFrame)?;
+        let len =
+            encode_ui_frame(header, payload, &mut encoded).map_err(|_| HostError::InvalidFrame)?;
         self.send(&encoded[..len])
     }
 
@@ -292,11 +369,10 @@ impl NativeUiEndpoint {
         payload: &[u8],
         output: &mut [u8],
     ) -> Result<(), HostError> {
-        if payload.len() > kernel_core::ui_protocol::MAX_UI_FRAME_PAYLOAD {
+        if payload.len() > MAX_NATIVE_UI_FRAME_PAYLOAD {
             return Err(HostError::InvalidFrame);
         }
-        let len =
-            encode_ui_frame(header, payload, output).map_err(|_| HostError::InvalidFrame)?;
+        let len = encode_ui_frame(header, payload, output).map_err(|_| HostError::InvalidFrame)?;
         self.send(&output[..len])
     }
 }
@@ -375,11 +451,7 @@ mod tests {
             Ok(())
         }
 
-        fn render_cpu(
-            &mut self,
-            _scene_version: u64,
-            pixels: &mut [u8],
-        ) -> Result<(), HostError> {
+        fn render_cpu(&mut self, _scene_version: u64, pixels: &mut [u8]) -> Result<(), HostError> {
             self.renders = self.renders.saturating_add(1);
             pixels.fill(0x7f);
             Ok(())
@@ -410,5 +482,26 @@ mod tests {
             admit_key(KeyInput { code: 0, ..key }),
             Err(HostError::InputUnavailable)
         );
+    }
+
+    #[cfg(feature = "native-engine-core")]
+    #[test]
+    fn pinned_cpu_engine_renders_typed_ui_ir_into_host_pixels() {
+        const ENGINE_SURFACE: SurfaceSpec = SurfaceSpec {
+            width: 4,
+            height: 4,
+            stride: 4,
+            bytes_per_pixel: 4,
+            layout: PixelLayout::Rgba,
+        };
+        let scene = br##"{"ir_version":"0.1.0","identity_domain":"jasper-os/ui-test","owner":"test-host","session":"session-1","expected_revision":1,"next_revision":2,"ops":[{"op":"insert","parent":null,"index":0,"node":{"key":{"semantic_id":1,"generation":1},"element":{"kind":"container"},"semantics":{"role":"container","label":"Engine"},"style":{"box":{"width":{"unit":"px","value":4},"height":{"unit":"px","value":4}},"paint":{"background":"#0A84FFFF"}},"children":[]}}]}"##;
+
+        let engine = CpuEngineHost::new(4, 4).unwrap();
+        let mut host = UiHost::new(engine, ENGINE_SURFACE, 1).unwrap();
+        let scene_version = host.set_scene(scene).unwrap();
+        let mut frame = CpuFrame::new(ENGINE_SURFACE, 1, scene_version, 1, vec![0; 64]).unwrap();
+        assert_eq!(host.render(&mut frame), Ok(1));
+        assert_eq!(&frame.pixels()[..4], &[0x0a, 0x84, 0xff, 0xff]);
+        assert!(frame.pixels().chunks_exact(4).all(|pixel| pixel[3] == 0xff));
     }
 }

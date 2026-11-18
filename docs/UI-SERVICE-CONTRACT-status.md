@@ -2,7 +2,8 @@
 
 更新时间：2026-11-18。
 
-状态：**宿主契约软件切片通过；Jasper UI Engine 进程与真实系统镜像端到端仍未完成。**
+状态：**宿主契约与真实 CPL3 UI Service 首帧通过；持续输入、合成器显示、
+多应用窗口和重启链路仍未完成。**
 
 ## 本切片
 
@@ -30,6 +31,10 @@
 cargo test -p kernel-core ui_service -- --nocapture
 3 passed; 0 failed
 
+scripts/ui-process-check.sh
+engine=cpu rendered=true present=true exit=0 resources=true
+PASS
+
 python3 scripts/check-gpu-abi-boundary.py --self-test
 PASS
 ```
@@ -39,8 +44,7 @@ PASS
 
 ## 尚未完成
 
-- 把版本化帧接入真实 Jasper IPC/Ring 服务入口，不新增内核 syscall；
-- 集成锁定 commit 的 Jasper UI Engine 用户态 CPU 服务；
-- 在 Jasper-OS UEFI 系统镜像中完成首帧、真实键盘/指针输入、Surface 重配、服务
-  崩溃后 Terminal/Console 救援和重启资源回基线；
+- 把首帧 Surface 接入合成器采纳和物理显示；
+- 完成持续 Patch/Input、真实键盘/指针输入、Surface 重配和服务重连；
+- 在 Jasper-OS UEFI 系统镜像中完成服务崩溃后 Terminal/Console 救援和重启资源回基线；
 - 多应用窗口策略、IME、无障碍、字体资源、GPU/Vulkan 路径和 LC-2 组件更新。

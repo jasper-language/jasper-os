@@ -2,18 +2,18 @@ schema = 1
 
 [engine]
 repository = "https://github.com/jasper-language/jasper-ui-engine"
-commit = "4194117011f13fdc063977683162fd5a145c85d7"
+commit = "b21dec1ae504a06923defcc715722c7b9e9c1dc8"
 version = "0.1.0"
 license = "Apache-2.0"
-cargo_lock_sha256 = "dd733d3930c9e18224463ba3979997a86e589f272da79b46dbd26c166536f78e"
-cargo_manifest_sha256 = "428c56cf48ae7551055f07ea7befa9bc4deb157a270518600fd2c5624f1ce0b5"
+cargo_lock_sha256 = "a33a52b8b18b0333a732002d457d201d8c4779dadc4cea6df3438acecb973fcd"
+cargo_manifest_sha256 = "57ff18ba57ca6e11aeed7a9c6ea827d1dfbc4e9222817dd129a375f54acaf871"
 license_sha256 = "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
-features = ["native-engine-cpu"]
+features = ["no-std-core"]
 
 [jasper_os]
 target = "x86_64-unknown-none"
-status = "blocked-no-std"
-evidence = "evidence/ui-engine-pin-4194117/README.md"
+status = "integrated-cpu"
+evidence = "evidence/ui-engine-cpu-b21dec1/README.md"
 kernel_linked = false
 fallback = "rescue-console"
 

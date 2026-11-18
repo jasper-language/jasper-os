@@ -22,6 +22,7 @@ FORBIDDEN = (
     "parley",
     "wgpu",
 )
+UI_SERVICE_FORBIDDEN = FORBIDDEN[1:]
 
 
 def sha256(path: Path) -> str:
@@ -52,8 +53,8 @@ def validate(lock_path: Path, manifests: tuple[Path, ...]) -> list[str]:
         value = engine.get(field)
         if not isinstance(value, str) or len(value) != 64:
             findings.append(f"ui-engine-pin: invalid {field}")
-    if engine.get("features") != ["native-engine-cpu"]:
-        findings.append("ui-engine-pin: native-engine-cpu must remain the exact selected feature")
+    if engine.get("features") != ["no-std-core"]:
+        findings.append("ui-engine-pin: no-std-core must remain the exact selected feature")
     if target.get("target") != "x86_64-unknown-none":
         findings.append("ui-engine-pin: Jasper-OS target mismatch")
     if target.get("status") not in {
@@ -78,7 +79,10 @@ def validate(lock_path: Path, manifests: tuple[Path, ...]) -> list[str]:
             findings.append("ui-engine-pin: UI service source pin does not match lock")
     for manifest in manifests:
         text = manifest.read_text(encoding="utf-8", errors="replace")
-        for crate in FORBIDDEN:
+        forbidden = (
+            UI_SERVICE_FORBIDDEN if manifest == UI_SERVICE_MANIFEST else FORBIDDEN
+        )
+        for crate in forbidden:
             if crate in text:
                 display = (
                     manifest.relative_to(ROOT)
@@ -102,7 +106,7 @@ license = "Apache-2.0"
 cargo_lock_sha256 = "dd733d3930c9e18224463ba3979997a86e589f272da79b46dbd26c166536f78e"
 cargo_manifest_sha256 = "428c56cf48ae7551055f07ea7befa9bc4deb157a270518600fd2c5624f1ce0b5"
 license_sha256 = "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
-features = ["native-engine-cpu"]
+features = ["no-std-core"]
 [jasper_os]
 target = "x86_64-unknown-none"
 status = "blocked-no-std"

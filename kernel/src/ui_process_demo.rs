@@ -3,21 +3,24 @@
 //! This drill embeds the independent `user/ui-service` ELF, creates a real
 //! Channel pair between a host process and the service process, queues one
 //! versioned JSUI scene request, and schedules the service through CPL3. The
-//! pinned engine is still not buildable for Jasper-OS, so success means the
-//! service emitted the versioned engine-unavailable error and exited 69. It
-//! never treats that blocker as a rendered frame or UI-OS-1 completion.
+//! independent Engine CPU core parses the Typed UI IR scene, renders it into a
+//! host-owned RGBA8 Surface, and returns a JSUI Present frame. This proves the
+//! first engine-to-Surface path, not full UI-OS input or display completion.
 //!
 //! 本演练装载真实的 `user/ui-service` ELF，建立宿主与服务进程之间的 Channel，
-//! 投递一条 JSUI 场景请求并在 CPL3 调度服务。固定 Engine 仍不能构建 Jasper-OS
-//! 目标，因此通过条件是服务真实返回 engine-unavailable 错误帧并以 69 退出；
-//! 绝不把该阻塞状态冒充渲染帧或 UI-OS-1 完成。
+//! 投递一条 JSUI 场景请求并在 CPL3 调度服务。独立 Engine CPU 核心解析 Typed UI IR、
+//! 渲染到宿主拥有的 RGBA8 Surface，并返回 JSUI Present 帧；这只证明首帧 Engine 到
+//! Surface 路径，不冒充完整 UI-OS 输入或显示验收。
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel_core::frame::FRAME_SIZE;
 use kernel_core::paging::MapFlags;
-use kernel_core::ui_protocol::{decode_ui_frame, encode_ui_frame, UiFrameHeader, UiFrameKind};
-use kernel_core::ui_service::{UiClientKey, UI_ERROR_ENGINE_UNAVAILABLE};
+use kernel_core::ui_protocol::{
+    decode_ui_frame, encode_ui_frame, UiFrameHeader, UiFrameKind, MAX_UI_FRAME_PAYLOAD,
+    UI_FRAME_HEADER_BYTES,
+};
+use kernel_core::ui_service::UiClientKey;
 
 use crate::proc::{self, ProcState};
 use crate::syscall::{table as abi, SyscallSet};
@@ -27,8 +30,10 @@ static USER_UI_SERVICE: &[u8] = include_bytes!(env!("JSR_USER_UI_SERVICE"));
 
 const STACK_TOP_OFF: u64 = 0xC0_0000;
 const STACK_PAGES: u64 = 4;
-const REQUEST_PAYLOAD: &[u8] = b"jasper-ui-process-probe-v1";
-const SERVICE_EXIT: i64 = 69;
+const TEST_SURFACE_WIDTH: u32 = 64;
+const TEST_SURFACE_HEIGHT: u32 = 64;
+const SERVICE_EXIT: i64 = 0;
+const REQUEST_PAYLOAD: &[u8] = br##"{"ir_version":"0.1.0","identity_domain":"jasper-os/ui-probe","owner":"ui-host","session":"session-1","expected_revision":1,"next_revision":2,"ops":[{"op":"insert","parent":null,"index":0,"node":{"key":{"semantic_id":1,"generation":1},"element":{"kind":"container"},"semantics":{"role":"container","label":"Jasper OS"},"style":{"box":{"width":{"unit":"px","value":64},"height":{"unit":"px","value":64}},"paint":{"background":"#0A84FFFF"}},"children":[]}}]}"##;
 
 static CHECKS: AtomicU32 = AtomicU32::new(0);
 static FAILED: AtomicU32 = AtomicU32::new(0);
@@ -72,6 +77,10 @@ fn request_header(client: UiClientKey) -> UiFrameHeader {
     }
 }
 
+fn surface_argument() -> u64 {
+    (u64::from(TEST_SURFACE_WIDTH) << 32) | u64::from(TEST_SURFACE_HEIGHT)
+}
+
 fn launch_service(pid: kernel_core::objtable::ObjId, channel: u64) -> bool {
     let base = arch::USER_WINDOW.0;
     let entry = match proc::load_elf(pid, USER_UI_SERVICE) {
@@ -89,7 +98,15 @@ fn launch_service(pid: kernel_core::objtable::ObjId, channel: u64) -> bool {
             return false;
         }
     }
-    proc::spawn_thread(pid, "ui-service", entry, base + STACK_TOP_OFF, channel, 0).is_ok()
+    proc::spawn_thread(
+        pid,
+        "ui-service",
+        entry,
+        base + STACK_TOP_OFF,
+        channel,
+        surface_argument(),
+    )
+    .is_ok()
 }
 
 /// Initialize enough monotonic kernel heap capacity for the bounded request and
@@ -97,15 +114,19 @@ fn launch_service(pid: kernel_core::objtable::ObjId, channel: u64) -> bool {
 /// intentionally does not shrink; this does not create or retain process
 /// objects, so a real process/Channel leak cannot be hidden by the warm-up.
 fn warm_heap() {
-    let mut bytes = alloc::vec![0u8; 128 * 1024];
+    // Typed UI IR parsing, the 64 KiB maximum request, layout state and the
+    // returned RGBA8 frame all allocate from the process heap. Warm the
+    // monotonic kernel heap to a capacity derived from the transport bound.
+    let capacity = kernel_core::config::bounds::MSG_BYTES.saturating_mul(8);
+    let mut bytes = alloc::vec![0u8; capacity];
     bytes[0] = 1;
     let end = bytes.len() - 1;
     bytes[end] = 1;
     core::hint::black_box(bytes);
 }
 
-/// Launch the real UI Service, verify its versioned failure response and audit
-/// complete Channel/process/frame reclamation.
+/// Launch the real UI Service, verify its versioned CPU frame and audit complete
+/// Channel/process/frame reclamation.
 pub fn run() -> u32 {
     warm_heap();
     let before = crate::baseline::baseline();
@@ -132,7 +153,7 @@ pub fn run() -> u32 {
 
     let client = UiClientKey::from_raw((7u64 << 16) | 3).expect("nonzero UI client");
     let header = request_header(client);
-    let mut request = [0u8; 128];
+    let mut request = alloc::vec![0u8; UI_FRAME_HEADER_BYTES + REQUEST_PAYLOAD.len()];
     let request_len =
         encode_ui_frame(header, REQUEST_PAYLOAD, &mut request).expect("bounded UI process request");
     let sent = kobj::with(|table| {
@@ -161,23 +182,26 @@ pub fn run() -> u32 {
     let state = proc::state(service);
     check(
         state == Some(ProcState::Exited { code: SERVICE_EXIT }),
-        "UI Service did not return engine-unavailable exit code 69",
+        "UI Service did not return first-frame exit code 0",
     );
 
-    let response_bytes = ipc::queued_body(host, host_endpoint, 256);
+    let response_bytes = ipc::queued_body(host, host_endpoint, ipc::MAX_MSG_BYTES);
     let response_ok = response_bytes.as_deref().is_some_and(|bytes| {
         decode_ui_frame(bytes).is_ok_and(|frame| {
-            frame.header.kind == UiFrameKind::Error
+            let expected_bytes = TEST_SURFACE_WIDTH as usize * TEST_SURFACE_HEIGHT as usize * 4;
+            frame.header.kind == UiFrameKind::Present
                 && frame.header.flags == 0
                 && frame.header.client == client
                 && frame.header.request_id == header.request_id
                 && frame.header.sequence == header.sequence
-                && frame.payload == UI_ERROR_ENGINE_UNAVAILABLE.as_bytes()
+                && frame.payload.len() == expected_bytes
+                && frame.payload.starts_with(&[0x0a, 0x84, 0xff, 0xff])
+                && frame.payload.chunks_exact(4).all(|pixel| pixel[3] == 0xff)
         })
     });
     check(
         response_ok,
-        "versioned engine-unavailable response was not delivered",
+        "versioned CPU RGBA8 Present frame was not delivered",
     );
     check(
         ipc::queued(host, host_endpoint) == Some(1),
@@ -208,9 +232,9 @@ pub fn run() -> u32 {
     );
 
     // Reaching this marker proves the serial Console remains available after
-    // the failed service process and all of its objects were reclaimed.
+    // the service process and all of its objects were reclaimed.
     kprintln!(
-        "[JSR-UI-PROCESS] started={} channel=true request_queued={} blocked=true exit={} response={} terminal_alive=true resources={} checks={} failed={}",
+        "[JSR-UI-PROCESS] started={} channel=true request_queued={} engine=cpu rendered=true present=true exit={} response={} terminal_alive=true resources={} checks={} failed={}",
         started,
         sent == request_len as i64,
         SERVICE_EXIT,
