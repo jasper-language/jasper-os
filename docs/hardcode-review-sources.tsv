@@ -1,5 +1,6 @@
 # source	issue	kind	reference
 AOSP-ART-RegionSpace	32	spec	AOSP-ART-3c05e56adf5b268ec5b20bf8aec460815e45161c-region-space
+aarch64-el2-retain-probe	22	build	EL2-vector-residency-verification-feature
 authz-delegation-depth-policy	39	policy	Issue-39-bounded-delegation-depth
 Intel-SDM-Vol3-Vector-Fields	33	spec	Intel-SDM-Volume-3-APIC-vector-fields
 PCI-SIG-MSI-X	33	spec	PCI-Local-Bus-Specification-MSI-X

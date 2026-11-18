@@ -62,6 +62,12 @@ jsr_a64_secondary:
     mov x9, #3
     msr cnthctl_el2, x9
     msr cntvoff_el2, xzr
+.if {retain_el2} != 0
+    adrp x9, jsr_aarch64_el2_vectors
+    add x9, x9, :lo12:jsr_aarch64_el2_vectors
+    msr vbar_el2, x9
+    isb
+.endif
     mov x9, #0x3c5
     msr spsr_el2, x9
     adr x9, 1f
@@ -99,7 +105,8 @@ jsr_a64_secondary:
     wfe
     b 9b
     .previous
-    "#
+    "#,
+    retain_el2 = const cfg!(feature = "aarch64-el2-retain-verify") as u64, // JASPER-HARDCODE-REVIEW: issue=22 source=aarch64-el2-retain-probe reason=secondary-hypervisor-residency-verification-only
 );
 
 extern "C" {
@@ -240,6 +247,11 @@ pub unsafe fn start(req: &CpuStart<space::SpaceRoot>) -> Result<(), SmpError> {
 #[no_mangle]
 extern "C" fn jsr_a64_secondary_main(index: u64) -> ! {
     let index = index as usize;
+    #[cfg(feature = "aarch64-el2-retain-verify")]
+    if !super::boot::el2_hvc_probe() {
+        crate::console::write_str("[JSR-A64-EL2] secondary_retained=false\n");
+        crate::arch::halt_forever();
+    }
     if !mmu::extensions_disabled() {
         crate::console::write_str("[JSR-SMP] secondary reject=cpacr-not-disabled\n");
         crate::arch::halt_forever();

@@ -258,6 +258,7 @@ pixel6a-smp-probe = ["pixel6a-full"]
 # on zero failures. No Pixel device driver or embedded user bundle is added.
 pixel6a-runtime-verify = ["pixel6a-full"] # JASPER-HARDCODE-REVIEW: issue=33 source=build-only-physical-runtime-plan reason=pixel-platform-selected-explicitly-by-verification-feature
 pixel6a-el2-observable = ["pixel6a-runtime-verify"]
+aarch64-el2-retain-verify = [] # JASPER-HARDCODE-REVIEW: issue=22 source=aarch64-el2-retain-probe reason=build-only-hypervisor-entry-verification
 # 构建期配置档：默认 standard；启用本特性得到 compact（参数见 kernel-core 的 config 模块）。
 profile-compact = []
 # 构建期调度策略：默认分时策略；启用本特性改用纯轮转（不分级、固定时间片）。

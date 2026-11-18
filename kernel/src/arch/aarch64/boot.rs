@@ -36,6 +36,32 @@ pub fn entry_exception_level() -> u8 {
     ENTRY_EXCEPTION_LEVEL.load(Ordering::Relaxed)
 }
 
+#[cfg(feature = "aarch64-el2-retain-verify")]
+pub(crate) fn el2_hvc_probe() -> bool {
+    let status: u64;
+    let reply: u64;
+    // SAFETY: HVC is issued only after assembly installs the EL2 vector table.
+    unsafe {
+        core::arch::asm!(
+            "mov x0, #0",
+            "mov x1, #0",
+            "hvc #0x4a53",
+            "mov {status}, x0",
+            "mov {reply}, x1",
+            status = out(reg) status,
+            reply = out(reg) reply,
+            out("x0") _,
+            out("x1") _,
+            out("x9") _,
+            out("x10") _,
+            out("x11") _,
+            out("x12") _,
+            options(nostack),
+        );
+    }
+    status == 1 && reply == 0x4a54
+}
+
 #[cfg(feature = "pixel6a-el2-observable")] // JASPER-HARDCODE-REVIEW: issue=21 source=pixel-el2-observation-window reason=physical-boot-carrier-probe-only
 pub(crate) fn wait_el2_observation_window() {
     let frequency: u64;
@@ -253,6 +279,12 @@ _start:
     mov x9, #3
     msr cnthctl_el2, x9
     msr cntvoff_el2, xzr
+.if {retain_el2} != 0
+    adrp x9, jsr_aarch64_el2_vectors
+    add x9, x9, :lo12:jsr_aarch64_el2_vectors
+    msr vbar_el2, x9
+    isb
+.endif
     mov x9, #0x3c5
     msr spsr_el2, x9
     adr x9, 1f
@@ -288,6 +320,36 @@ _start:
     "#,
     stack = const BOOT_STACK_BYTES,
     skip_mpidr_gate = const cfg!(feature = "pixel6a-runtime-verify") as u64, // JASPER-HARDCODE-REVIEW: issue=33 source=physical-runtime-plan reason=pixel-selected-boot-cpu-verification-only
+    retain_el2 = const cfg!(feature = "aarch64-el2-retain-verify") as u64, // JASPER-HARDCODE-REVIEW: issue=22 source=aarch64-el2-retain-probe reason=hypervisor-residency-verification-only
+);
+
+#[cfg(feature = "aarch64-el2-retain-verify")]
+global_asm!(
+    r#"
+    .section .text.el2-vectors, "ax"
+    .balign 2048
+    .global jsr_aarch64_el2_vectors
+jsr_aarch64_el2_vectors:
+    .space 0x400
+    b jsr_aarch64_el2_sync
+    .space 0x3fc
+jsr_aarch64_el2_sync:
+    mrs x9, esr_el2
+    lsr x10, x9, #26
+    cmp x10, #0x16
+    b.ne 1f
+    and x11, x9, #0xffff
+    mov x12, #0x4a53
+    cmp x11, x12
+    b.ne 1f
+    mov x0, #1
+    mov x1, #0x4a54
+    eret
+1:
+    wfe
+    b 1b
+    .previous
+    "#
 );
 
 /// 在 MMU 已打开后，按物理地址取设备树：头部魔数正确且整棵树都在已映射的范围内才接受。
@@ -714,10 +776,22 @@ extern "C" fn jsr_aarch64_boot(
         }
     }
     crate::kprintln!(
-        "[JSR-A64-EL] entry={} execution=1 el2_available={} el2_retained=false",
+        "[JSR-A64-EL] entry={} execution=1 el2_available={} el2_retained={}",
         entry_exception_level,
-        entry_exception_level == 2
+        entry_exception_level == 2,
+        cfg!(feature = "aarch64-el2-retain-verify") && entry_exception_level == 2
     );
+    #[cfg(feature = "aarch64-el2-retain-verify")]
+    if entry_exception_level == 2 {
+        let round_trip = el2_hvc_probe();
+        crate::kprintln!(
+            "[JSR-A64-EL2] retained=true hvc_round_trip={} stage2=false driver_vm=false",
+            round_trip
+        );
+        if !round_trip {
+            semihost::exit(EXIT_FAILURE);
+        }
+    }
 
     // 严格校验：截断、越界、重复属性/节点、非法结构都在这里被拒绝。
     if let Err(error) = fdt.validate_strict() {
