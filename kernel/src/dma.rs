@@ -40,6 +40,7 @@ pub enum DmaError {
     Quota,
     Exhausted,
     Closed,
+    Iommu,
 }
 
 pub struct DmaMapping {
@@ -51,6 +52,7 @@ pub struct DmaMapping {
     pages: u64,
     iova: u64,
     writable: bool,
+    hardware_iommu: bool,
     closing: bool,
     _pin_charge: crate::mm::memory_quota::Charge,
 }
@@ -64,6 +66,7 @@ pub struct DmaView {
     pub pages: u64,
     pub iova: u64,
     pub writable: bool,
+    pub hardware_iommu: bool,
     pub closing: bool,
 }
 
@@ -105,7 +108,7 @@ pub fn create_for(
     memory_handle: HandleId,
     args: MapArgs,
 ) -> Result<(HandleId, u64), DmaError> {
-    kobj::with(|t| {
+    let (handle, iova, frames, bdf, writable) = kobj::with(|t| {
         if !proc::running_in(t, pid) {
             return Err(DmaError::Process(ProcError::NoSuchProcess));
         }
@@ -130,6 +133,12 @@ pub fn create_for(
         if !range.within(memory_pages) {
             return Err(DmaError::Range);
         }
+        let frames = match t.get(memory_id) {
+            Ok(KObject::Memory(memory)) => memory
+                .physical_range(range.offset_pages, range.pages)
+                .ok_or(DmaError::Range)?,
+            _ => return Err(DmaError::InvalidHandle),
+        };
 
         let device = HandleId::from_raw(args.device);
         let device_id = proc::resolve_in(t, pid, device, ObjectType::Device, Rights::CONTROL)
@@ -157,6 +166,7 @@ pub fn create_for(
             pages: range.pages,
             iova,
             writable: range.writable,
+            hardware_iommu: false,
             closing: false,
             _pin_charge: charge,
         };
@@ -167,14 +177,40 @@ pub fn create_for(
             ObjectType::DmaMapping,
             DMA_RIGHTS,
         ) {
-            Ok((handle, _)) => Ok((handle, iova)),
+            Ok((handle, _)) => Ok((handle, iova, frames, bdf, range.writable)),
             Err(error) => {
                 let _ = t.release_internal(memory_id);
                 let _ = t.release_internal(device_id);
                 Err(DmaError::Process(error))
             }
         }
-    })
+    })?;
+
+    match crate::arch::dma_iommu_map(bdf, iova, &frames, writable) {
+        Ok(false) => {}
+        Ok(true) => {
+            kobj::with(|t| {
+                let id = proc::resolve_in(
+                    t,
+                    pid,
+                    handle,
+                    ObjectType::DmaMapping,
+                    Rights::READ,
+                )
+                .map_err(DmaError::Process)?;
+                if let Some(mapping) = mapping_mut(t, id) {
+                    mapping.hardware_iommu = true;
+                }
+                Ok::<(), DmaError>(())
+            })
+            .map_err(|_| DmaError::Iommu)?;
+        }
+        Err(_) => {
+            let _ = proc::close_handle_for(pid, handle);
+            return Err(DmaError::Iommu);
+        }
+    }
+    Ok((handle, iova))
 }
 
 pub fn view(pid: ObjId, handle: HandleId) -> Result<DmaView, DmaError> {
@@ -189,6 +225,7 @@ pub fn view(pid: ObjId, handle: HandleId) -> Result<DmaView, DmaError> {
             pages: mapping.pages,
             iova: mapping.iova,
             writable: mapping.writable,
+            hardware_iommu: mapping.hardware_iommu,
             closing: mapping.closing,
         })
     })
@@ -219,8 +256,39 @@ pub fn physical_range(
     })
 }
 
+/// Walk the hardware translation used by this mapping. This is an internal
+/// acceptance hook; users receive only the opaque IOVA.
+///
+/// 遍历该映射实际使用的硬件转换；用户态仍只能看到 opaque IOVA。
+#[cfg(all(target_arch = "x86_64", feature = "iommu-dma-verify"))]
+pub fn translate_iova(
+    pid: ObjId,
+    handle: HandleId,
+    offset_pages: u64,
+) -> Result<Option<PhysFrame>, DmaError> {
+    let (bdf, iova, hardware_iommu) = kobj::with(|t| {
+        let id = resolve(t, pid, handle)?;
+        let mapping = mapping_mut(t, id).ok_or(DmaError::InvalidHandle)?;
+        if offset_pages >= mapping.pages {
+            return Err(DmaError::Range);
+        }
+        Ok((mapping.bdf, mapping.iova, mapping.hardware_iommu))
+    })?;
+    if !hardware_iommu {
+        return Ok(None);
+    }
+    let address = iova
+        .checked_add(
+            offset_pages
+                .checked_mul(kernel_core::memory_object::PAGE_BYTES)
+                .ok_or(DmaError::Range)?,
+        )
+        .ok_or(DmaError::Range)?;
+    crate::arch::dma_iommu_translate(bdf, address).map_err(|_| DmaError::Iommu)
+}
+
 pub fn close_in(t: &mut Table, id: ObjId) {
-    let (memory, device, bdf, offset_pages, pages) = {
+    let (memory, device, bdf, offset_pages, pages, iova, hardware_iommu) = {
         let Some(mapping) = mapping_mut(t, id) else {
             return;
         };
@@ -234,11 +302,15 @@ pub fn close_in(t: &mut Table, id: ObjId) {
             mapping.bdf,
             mapping.offset_pages,
             mapping.pages,
+            mapping.iova,
+            mapping.hardware_iommu,
         )
     };
     let quiesced = crate::pci::set_bus_master(bdf, false).is_ok()
         && matches!(crate::pci::bus_master_enabled(bdf), Ok(false));
-    if !quiesced {
+    let iommu_revoked =
+        !hardware_iommu || crate::arch::dma_iommu_unmap(bdf, iova, pages).is_ok();
+    if !quiesced || !iommu_revoked {
         if let Ok(KObject::Memory(memory)) = t.get(memory) {
             let _ = memory.quarantine_range(offset_pages, pages);
         }
@@ -254,6 +326,7 @@ pub fn error_code(error: DmaError) -> i64 {
         }
         DmaError::Process(_) | DmaError::Rights => err(SYSTEM_ERROR_RIGHTS_DENIED),
         DmaError::Quota => err(SYSTEM_ERROR_RIGHTS_DENIED),
+        DmaError::Iommu => err(SYSTEM_ERROR_RIGHTS_DENIED),
         DmaError::Exhausted | DmaError::Range => err(SYSTEM_ERROR_INVALID_ARGUMENT),
     }
 }

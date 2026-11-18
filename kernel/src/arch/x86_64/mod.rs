@@ -50,6 +50,8 @@ mod pit;
 pub mod second_level;
 pub mod svm;
 pub mod virtual_interrupt;
+#[cfg(feature = "iommu-dma-verify")]
+pub(crate) mod vtd_dma;
 pub(crate) mod space;
 mod syscall;
 mod port;

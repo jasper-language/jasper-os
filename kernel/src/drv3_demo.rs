@@ -94,6 +94,24 @@ pub fn run() {
             .is_ok_and(|frames| frames.len() == 1),
         "kernel DMA translation failed",
     );
+    #[cfg(feature = "iommu-dma-verify")]
+    {
+        let physical = dma::physical_range(pid, mapping, 0, 1)
+            .ok()
+            .and_then(|frames| frames.first().copied());
+        let translated = dma::translate_iova(pid, mapping, 0).ok().flatten();
+        check(view.hardware_iommu, "DMA mapping did not use hardware IOMMU");
+        check(
+            physical.is_some() && translated == physical,
+            "hardware IOMMU translation disagrees with the pinned frame",
+        );
+        kprintln!(
+            "[JSR-IOMMU-DMA] hardware_iommu={} iova=0x{:x} physical=0x{:x} translated=true",
+            view.hardware_iommu,
+            iova,
+            physical.map(|frame| frame.start()).unwrap_or(0)
+        );
+    }
     check(
         proc::memory_quota(pid).is_some_and(|usage| usage.pinned == 1),
         "DMA map did not reserve one pinned page",
@@ -120,6 +138,12 @@ pub fn run() {
     check(
         dma::view(pid, mapping).is_err(),
         "closed DMA handle remained usable",
+    );
+    #[cfg(feature = "iommu-dma-verify")]
+    check(
+        crate::arch::dma_iommu_translate(device.bdf, iova)
+            .is_ok_and(|translated| translated.is_none()),
+        "closed DMA mapping remained in hardware translation",
     );
     kobj::run_cleanup(usize::MAX);
     check(

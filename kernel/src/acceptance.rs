@@ -929,6 +929,7 @@ const FULL: &[Step] = &[
     feature = "native-install-abi-verify",
     feature = "update-agent-verify",
     feature = "driver-host-journal-verify",
+    feature = "iommu-dma-verify",
 )))]
 pub use full_selected::{NAME, PLAN};
 
@@ -1679,6 +1680,36 @@ mod dedicated {
     pub const PLAN: &[&[Step]] = &[PREFIX, STAGES, &[PlanItem::Finish(finish)]];
 }
 
+#[cfg(feature = "iommu-dma-verify")]
+mod dedicated {
+    use super::*;
+
+    pub const NAME: &str = "iommu-dma";
+
+    #[cfg(target_arch = "x86_64")]
+    fn finish(_: &mut BootCtx) {
+        let failed = crate::drv3_demo::failed();
+        kprintln!("[JSR-IOMMU-DMA] finish failed={}", failed);
+        exit_on(u64::from(failed));
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    fn finish(_: &mut BootCtx) {
+        kprintln!("[JSR-IOMMU-DMA] unsupported_arch=true failed=1");
+        exit_on(1);
+    }
+
+    const STAGES: &[Step] = &[
+        st(Stage::Space),
+        case("mm-space", Stage::Space, "mm", mm_space),
+        st(Stage::Smp),
+        case("smp-checks", Stage::Smp, "smp", smp_checks),
+        #[cfg(target_arch = "x86_64")]
+        case("drv3-dma", Stage::Smp, "drv3", drv3_dma),
+    ];
+    pub const PLAN: &[&[Step]] = &[PREFIX, STAGES, &[PlanItem::Finish(finish)]];
+}
+
 #[cfg(all(
     feature = "native-install-abi-verify",
     not(feature = "update-agent-verify")
@@ -2370,5 +2401,6 @@ mod dedicated {
     feature = "native-install-abi-verify",
     feature = "update-agent-verify",
     feature = "driver-host-journal-verify",
+    feature = "iommu-dma-verify",
 ))]
 pub use dedicated::{NAME, PLAN};

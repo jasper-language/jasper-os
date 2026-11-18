@@ -64,6 +64,37 @@ P0 集成切片使用与 lifecycle 服务相同的已验证 virtio-blk 设备，
 `qemu_rc=33`，且 `live_restored=false`。证据：
 `evidence/driver-host-journal-boot1`、`evidence/driver-host-journal-boot2`。
 
+### Opaque IOVA 到 VT-d translation
+
+在专用 `iommu-dma-verify` feature 下，`dma::create_for` 会把 opaque IOVA
+编程到运行时 VT-d 第二级页表，而不是只保存软件编号。默认 production 构建
+不会调用该实验后端：
+
+- 只接受 16 MiB～1 GiB 的显式 DMA 窗口，并检查页对齐、溢出和重叠；
+- 每个 PCI 请求者使用独立 domain/context，未覆盖请求者失败关闭；
+- 4 KiB PTE 绑定实际 pinned Memory 帧，writable 仅由映射请求决定；
+- 映射建立和撤销都执行 VT-d context/TLB invalidation；
+- DMA handle 关闭先停 bus master，再清除 PTE 并回收临时页表；
+- 无 DMAR 平台保持显式 `Disabled`；DMAR 损坏、多 unit 或硬件编程失败不会退回
+  软件 IOVA 成功。
+
+该后端当前只接受单 DMAR unit 的受控验收环境，并要求进入时全局翻译尚未开启。
+它尚未证明多 unit、多设备并行、既有 firmware 根表接管、热插拔或 crash/reset
+后的全局 DMA 安全，因此不能直接作为生产 IOMMU 策略启用。真实用户态 virtqueue
+仍必须等待这些全局接管边界完成。
+
+真实 QEMU Intel IOMMU 验收：
+
+```text
+[JSR-IOMMU-DMA] hardware_iommu=true iova=0x1000000 physical=0x10a8000 translated=true
+[JSR-DRV3] ... iova_opaque=true pinned=true owner_close=true reclaim=true failed=0
+qemu_rc=33
+```
+
+证据：`evidence/issue21-uefi-boot-20261118-010301/README.md`。该切片只证明
+DMA 映射翻译与撤销；用户态 Driver Host 仍未完成真实
+descriptor → notify → used-ring completion，因此 DC-1/LC-4 不能据此升级。
+
 ## 验证
 
 ```text

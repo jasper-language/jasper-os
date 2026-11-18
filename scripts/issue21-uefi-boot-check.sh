@@ -144,6 +144,7 @@ case "$MODE" in
   update-list) KERNEL_FEATURES=native-install-list-cli-verify ;;
   update-agent) KERNEL_FEATURES=lifecycle-ab-health,update-agent-verify ;;
   driver-host-journal) KERNEL_FEATURES=driver-host-journal-verify ;;
+  iommu-dma) KERNEL_FEATURES=iommu-dma-verify ;;
   android-ecosystem) KERNEL_FEATURES=lifecycle-root-exec-verify,android-ecosystem-verify ;;
   android-art) KERNEL_FEATURES=lifecycle-root-exec-verify,android-art-verify ;;
   vulkan-metal2vulkan) KERNEL_FEATURES=lifecycle-root-exec-verify,vulkan-metal2vulkan-verify ;;
@@ -155,7 +156,7 @@ if [ "${JASPER_ANDROID_ONLY:-0}" = 1 ]; then
   KERNEL_FEATURES="$KERNEL_FEATURES,android-fixture-verify"
 fi
 KERNEL_DEFAULT_FEATURES=()
-if [ "$MODE" = terminal-recovery ] || [ "$MODE" = update-agent ] || [ "$MODE" = driver-host-journal ]; then
+if [ "$MODE" = terminal-recovery ] || [ "$MODE" = update-agent ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ]; then
   KERNEL_DEFAULT_FEATURES=(--no-default-features)
 fi
 if [ "$PREBUILT" = 1 ]; then
@@ -281,13 +282,16 @@ QEMU_EXTRA=(-monitor none)
 if [ -n "${ISSUE21_MONITOR_SOCKET:-}" ]; then
   QEMU_EXTRA=(-monitor "unix:$ISSUE21_MONITOR_SOCKET,server=on,wait=off")
 fi
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
   CPU="${ISSUE21_QEMU_CPU:-max}"
   if [ "${ISSUE21_DISABLE_RDRAND:-0}" = 1 ]; then
     CPU=max,-rdrand,-rdseed
   fi
   QEMU_EXTRA+=(-cpu "$CPU" -device virtio-rng-pci
     -device isa-debug-exit,iobase=0xf4,iosize=0x04)
+  if [ "$MODE" = iommu-dma ]; then
+    QEMU_EXTRA+=(-device "intel-iommu,intremap=off,caching-mode=on,device-iotlb=on")
+  fi
 fi
 SERIAL_ARGS=(-serial "file:$OUT/serial.log")
 if { [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MODE" = update-list ]; } && [ "${ISSUE21_MANUAL_INPUT:-0}" != 1 ]; then
@@ -330,7 +334,7 @@ rc=$?
 set -e
 exec 9>&-
 printf '%s\n' "$rc" >"$OUT/qemu.rc"
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
   [ "$rc" -eq 33 ]
 else
   [ "$rc" -eq 124 ]
@@ -362,6 +366,14 @@ if [ "$MODE" = driver-host-journal ]; then
       ;;
   esac
   ! grep -aqE '^\[JSR-(PANIC|DRIVER-HOST-JOURNAL-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
+  echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
+  exit 0
+fi
+if [ "$MODE" = iommu-dma ]; then
+  grep -aq '^\[JSR-IOMMU-DMA\] hardware_iommu=true .* translated=true' "$OUT/serial.log"
+  grep -aq '^\[JSR-DRV3\].*iova_opaque=true .* failed=0' "$OUT/serial.log"
+  grep -aq '^\[JSR-IOMMU-DMA\] finish failed=0' "$OUT/serial.log"
+  ! grep -aqE '^\[JSR-(PANIC|DRV3-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
   echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
   exit 0
 fi

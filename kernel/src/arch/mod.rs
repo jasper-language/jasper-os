@@ -831,6 +831,58 @@ pub unsafe fn switch_space(root: SpaceRoot) {
 pub unsafe fn destroy_space(root: SpaceRoot, phys_offset: u64, frames: &mut dyn kernel_core::frame::FrameAllocator) {
     Current::destroy_space(root, phys_offset, frames)
 }
+
+/// Program a hardware translation for one opaque DMA IOVA.
+///
+/// `Ok(false)` means the platform has no active IOMMU backend. A platform that
+/// exposes one must fail closed rather than silently bypass translation.
+///
+/// 为一个 opaque DMA IOVA 编程硬件转换。`Ok(false)` 只表示平台没有启用的
+/// IOMMU；已发现 IOMMU 时任何失败都不得静默绕过。
+pub fn dma_iommu_map(
+    _bdf: kernel_core::pci::Bdf,
+    _iova: u64,
+    _frames: &[kernel_core::frame::PhysFrame],
+    _writable: bool,
+) -> Result<bool, ()> {
+    #[cfg(all(target_arch = "x86_64", feature = "iommu-dma-verify"))]
+    {
+        return x86_64::vtd_dma::map(_bdf, _iova, _frames, _writable).map_err(|_| ());
+    }
+    #[cfg(not(all(target_arch = "x86_64", feature = "iommu-dma-verify")))]
+    {
+        Ok(false)
+    }
+}
+
+pub fn dma_iommu_translate(
+    _bdf: kernel_core::pci::Bdf,
+    _iova: u64,
+) -> Result<Option<kernel_core::frame::PhysFrame>, ()> {
+    #[cfg(all(target_arch = "x86_64", feature = "iommu-dma-verify"))]
+    {
+        return x86_64::vtd_dma::translate(_bdf, _iova).map_err(|_| ());
+    }
+    #[cfg(not(all(target_arch = "x86_64", feature = "iommu-dma-verify")))]
+    {
+        Ok(None)
+    }
+}
+
+pub fn dma_iommu_unmap(
+    _bdf: kernel_core::pci::Bdf,
+    _iova: u64,
+    _pages: u64,
+) -> Result<(), ()> {
+    #[cfg(all(target_arch = "x86_64", feature = "iommu-dma-verify"))]
+    {
+        return x86_64::vtd_dma::unmap(_bdf, _iova, _pages).map_err(|_| ());
+    }
+    #[cfg(not(all(target_arch = "x86_64", feature = "iommu-dma-verify")))]
+    {
+        Ok(())
+    }
+}
 /// 见 [`Platform::prepare_kernel_space`]。
 ///
 /// # Safety
