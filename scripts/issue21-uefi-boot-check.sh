@@ -49,6 +49,7 @@ guarded_cargo() {
 
 OUT="${ISSUE21_UEFI_OUT:-$ROOT/evidence/issue21-uefi-boot-$(date '+%Y%m%d-%H%M%S')}"
 TARGET="${ISSUE21_UEFI_TARGET:-$ROOT/target/issue21-uefi-check}"
+BUILD_TARGET="${ISSUE21_UEFI_CARGO_TARGET:-$TARGET}"
 CARGO_TARGET="${CARGO_TARGET_DIR:-$ROOT/target}"
 case "$CARGO_TARGET" in
   /*) ;;
@@ -184,11 +185,16 @@ if [ "$PREBUILT" = 1 ]; then
   : >"$OUT/xtask-build.log"
   : >"$OUT/boot-manager-build.log"
 else
-  CARGO_TARGET_DIR="$TARGET" guarded_cargo build --locked --release --target x86_64-unknown-none \
+  CARGO_TARGET_DIR="$BUILD_TARGET" guarded_cargo build --locked --release --target x86_64-unknown-none \
     -p jasper-kernel "${KERNEL_DEFAULT_FEATURES[@]}" --features "$KERNEL_FEATURES" >"$OUT/kernel-build.log" 2>&1
   guarded_cargo build --locked --release -p xtask >"$OUT/xtask-build.log" 2>&1
-  CARGO_TARGET_DIR="$TARGET" guarded_cargo build --locked --release --target x86_64-unknown-uefi \
+  CARGO_TARGET_DIR="$BUILD_TARGET" guarded_cargo build --locked --release --target x86_64-unknown-uefi \
     -p jasper-boot-manager >"$OUT/boot-manager-build.log" 2>&1
+  if [ "$BUILD_TARGET" != "$TARGET" ]; then
+    mkdir -p "$(dirname "$KERNEL")" "$(dirname "$BOOT_MANAGER")"
+    install -m 0755 "$BUILD_TARGET/x86_64-unknown-none/release/jasper-kernel" "$KERNEL"
+    install -m 0644 "$BUILD_TARGET/x86_64-unknown-uefi/release/jasper-boot-manager.efi" "$BOOT_MANAGER"
+  fi
 fi
 
 run_lifecycle() {
@@ -224,7 +230,7 @@ ROOT_AOSP_BINDER_TEST="${JASPER_AOSP_BINDER_TEST:-}"
 ROOT_ANDROID_TREE="${JASPER_ANDROID_TREE:-}"
 ROOT_ANDROID_LINKER_CONFIG=""
 if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
-  ROOT_EXEC_PROBE=$(find "$TARGET/x86_64-unknown-none/release/build" \
+  ROOT_EXEC_PROBE=$(find "$BUILD_TARGET/x86_64-unknown-none/release/build" \
     -path '*/out/user-target/x86_64-unknown-none/release/user-linuxprobe' \
     -type f -print | sort | tail -n 1)
   [ -n "$ROOT_EXEC_PROBE" ]
@@ -394,13 +400,14 @@ if [ "$MODE" = update-agent ]; then
 fi
 if [ "$MODE" = driver-host-journal ]; then
   grep -aq '^\[JSR-DRIVER-HOST-JOURNAL\] mounted=true ' "$OUT/serial.log"
-  grep -aq '^\[JSR-DRIVER-HOST-JOURNAL\] summary .* sequence=2 .* live_restored=false ok=true' "$OUT/serial.log"
+  grep -aq '^\[JSR-DRIVER-HOST-JOURNAL\] summary .* sequence=5 .* live_restored=false ok=true' "$OUT/serial.log"
+  grep -aq '^\[JSR-DRIVER-HOST-JOURNAL\] mounted=true .* sequence=5 last=reset .* live_restored=false' "$OUT/serial.log"
   case "${ISSUE21_DRIVER_HOST_EXPECT:-}" in
     initialized)
-      grep -aq '^\[JSR-DRIVER-HOST-JOURNAL\] mounted=true initialized=true sequence=2 ' "$OUT/serial.log"
+      grep -aq '^\[JSR-DRIVER-HOST-JOURNAL\] mounted=true initialized=true sequence=5 last=reset ' "$OUT/serial.log"
       ;;
     reopened)
-      grep -aq '^\[JSR-DRIVER-HOST-JOURNAL\] mounted=true initialized=false sequence=2 ' "$OUT/serial.log"
+      grep -aq '^\[JSR-DRIVER-HOST-JOURNAL\] mounted=true initialized=false sequence=5 last=reset ' "$OUT/serial.log"
       ;;
     "")
       ;;

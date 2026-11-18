@@ -1,6 +1,6 @@
 # LC-4 驱动与固件生命周期
 
-更新日期：2026-11-17。
+更新日期：2026-11-18。
 
 状态：**core-passed；真实设备矩阵未完成**。
 
@@ -46,6 +46,22 @@ Driver Host 的 registration/admission 回执现已接入同一 P0 virtio-blk �
 OVMF 启动复用同一 P0/OVMF 后得到 `initialized=false` 和相同 receipt sequence，
 且明确 `live_restored=false`，不会复活旧 host、pass、request 或 capability。
 
+生命周期控制器现已和同一持久日志形成完整五段回执链：
+
+```text
+Registered → Admitted → Crashed → Recovered → Reset
+```
+
+第一次真实 OVMF 启动从 virtio-rng 设备取得实际 reset 结果，并读回 PCI
+bus-master 已关闭，将 DMA/IRQ 静默事实同时交给 Driver Host crash/recovery
+和 package lifecycle。准入 pass 在 crash 时被撤销，recovery 产生新 host
+generation，最终 orderly reset 再产生一代并持久写入。第二次启动只恢复
+`sequence=5 last=reset` 的审计历史，`initialized=false`、
+`live_restored=false`，不会复活旧 host/pass/package token。
+
+证据：
+`evidence/driver-host-lifecycle-20261118-r4/README.md`。
+
 ## Issue #39 授权与技术双门禁
 
 `evaluate_driver_admission` 把本地权限授权和设备技术准入拆成独立门禁：
@@ -78,9 +94,8 @@ cargo test -p kernel-core driver_host::tests
 
 ## 仍需完成
 
-- 将状态机接入真实 Driver Host 的 admission/reset/crash receipt；
-- 已完成持久 admission receipt 接 P0 磁盘；reset/crash/recovery 的真实设备
-  receipt 与硬件静默仍需接入；
+- 状态机已接入真实 Driver Host 的 admission/reset/crash/recovery receipt；
+- 已完成 P0 持久五段回执链、真实 virtio-rng reset 与 bus-master 读回；
 - 使用设备实际 vendor/device/class 能力和上游签名策略；
 - 在 Pixel 6a 与至少一种非 Pixel 设备/虚拟设备上完成驱动、固件、热插拔、
   降级、reset 和 recovery 矩阵；

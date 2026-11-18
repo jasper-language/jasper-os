@@ -103,6 +103,13 @@ pub struct PassToken {
     host_generation: u64,
 }
 
+impl PassToken {
+    /// Monotonic generation of this device pass.
+    pub const fn generation(self) -> u64 {
+        self.generation
+    }
+}
+
 /// One in-flight driver operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RequestToken {
