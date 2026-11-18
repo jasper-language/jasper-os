@@ -362,26 +362,38 @@ impl UpdateCoordinator {
             let record = current.slot(slot);
             record.digest() == manifest_sha256 && record.state() == SlotState::Failed
         });
+        let record_stage = record.stage();
         let terminal = match current.terminal() {
             jasper_lifecycle_model::boot::TransactionTerminal::None => None,
             jasper_lifecycle_model::boot::TransactionTerminal::Complete => {
-                if current.transaction_digest() != Some(manifest_sha256) {
+                if current.transaction_digest() == Some(manifest_sha256) {
+                    Some(UpdateStage::Complete)
+                } else if update_stage_rank(record_stage) <= update_stage_rank(UpdateStage::Prepared)
+                {
+                    // A prepared journal is newer than the last completed
+                    // control transaction. Its terminal belongs to the
+                    // previous transaction and must not be rebound to this
+                    // manifest.
+                    None
+                } else {
                     return Err(CoordinatorError::Control(
                         BootControlError::TerminalIdentityMismatch,
                     ));
                 }
-                Some(UpdateStage::Complete)
             }
             jasper_lifecycle_model::boot::TransactionTerminal::RolledBack => {
-                if current.transaction_digest() != Some(manifest_sha256) {
+                if current.transaction_digest() == Some(manifest_sha256) {
+                    Some(UpdateStage::RolledBack)
+                } else if update_stage_rank(record_stage) <= update_stage_rank(UpdateStage::Prepared)
+                {
+                    None
+                } else {
                     return Err(CoordinatorError::Control(
                         BootControlError::TerminalIdentityMismatch,
                     ));
                 }
-                Some(UpdateStage::RolledBack)
             }
         };
-        let record_stage = record.stage();
         let mut target = record_stage;
         if failed && update_stage_rank(record_stage) < update_stage_rank(UpdateStage::Rollback) {
             target = UpdateStage::Rollback;
@@ -1783,6 +1795,10 @@ impl UpdateService {
     }
 
     /// Recover the active transaction from journal plus boot-control state.
+    ///
+    /// Repeating recovery with the exact same stable target is idempotent: an
+    /// already recovered transaction is not replayed into a new service
+    /// generation. A different target still fails closed.
     pub fn recover(
         &mut self,
         staging_root: &Path,
@@ -1790,11 +1806,11 @@ impl UpdateService {
     ) -> Result<ServiceStatus, ServiceError> {
         let generation = self.peek_generation()?;
         if let Some(active) = self.active.as_ref() {
-            if !active.recovery_required {
-                return Err(ServiceError::Busy);
-            }
             if active.staging_root != staging_root || active.manifest_sha256 != manifest_sha256 {
                 return Err(ServiceError::RecoveryTargetMismatch);
+            }
+            if !active.recovery_required {
+                return Ok(self.status());
             }
         }
         let coordinator =
@@ -2015,7 +2031,11 @@ fn advance_update_machine(
             UpdateStage::Prepared if target == UpdateStage::Aborted => UpdateEvent::Cancel,
             UpdateStage::Prepared => UpdateEvent::Commit,
             UpdateStage::Committed => UpdateEvent::BeginTrial,
-            UpdateStage::Trial if target == UpdateStage::Rollback => UpdateEvent::FailHealth,
+            UpdateStage::Trial
+                if matches!(target, UpdateStage::Rollback | UpdateStage::RolledBack) =>
+            {
+                UpdateEvent::FailHealth
+            }
             UpdateStage::Trial => UpdateEvent::ConfirmHealth,
             UpdateStage::Confirmed => UpdateEvent::Finalize,
             UpdateStage::Rollback => UpdateEvent::FinishRollback,
@@ -2652,10 +2672,9 @@ mod tests {
         assert_eq!(committed.active_slot(), Slot::A);
         assert_eq!(committed.slot(Slot::B).state(), SlotState::Candidate);
         assert_eq!(committed.transaction_id(), 2);
-        assert_eq!(
-            FileControlStore::open(&control_root).unwrap().current(),
-            committed
-        );
+        drop(control);
+        let mut control = FileControlStore::open(&control_root).unwrap();
+        assert_eq!(control.current(), committed);
         assert_eq!(
             load_transaction_record(&staging_root).unwrap().stage(),
             UpdateStage::Committed
@@ -2936,6 +2955,187 @@ mod tests {
             )
             .unwrap();
         (service, status.generation, staging_root)
+    }
+
+    fn transaction_copies(root: &Path) -> [Vec<u8>; 2] {
+        TRANSACTION_COPIES.map(|name| fs::read(root.join(name)).unwrap())
+    }
+
+    fn restore_transaction_copies(root: &Path, copies: [Vec<u8>; 2]) {
+        for (name, bytes) in TRANSACTION_COPIES.into_iter().zip(copies) {
+            fs::write(root.join(name), bytes).unwrap();
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum CrashWindow {
+        Prepared,
+        Commit,
+        BeginTrial,
+        Confirm,
+        Finalize,
+        FailHealth,
+        FinishRollback,
+    }
+
+    fn cross_control_boundary(
+        service: &mut UpdateService,
+        generation: u64,
+        staging_root: &Path,
+        window: CrashWindow,
+    ) -> ([Vec<u8>; 2], UpdateStage) {
+        match window {
+            CrashWindow::Prepared => (transaction_copies(staging_root), UpdateStage::Prepared),
+            CrashWindow::Commit => {
+                let before = transaction_copies(staging_root);
+                service.commit(generation, Slot::B, 2).unwrap();
+                (before, UpdateStage::Committed)
+            }
+            CrashWindow::BeginTrial => {
+                service.commit(generation, Slot::B, 2).unwrap();
+                let before = transaction_copies(staging_root);
+                service.begin_trial(generation).unwrap();
+                (before, UpdateStage::Trial)
+            }
+            CrashWindow::Confirm => {
+                service.commit(generation, Slot::B, 2).unwrap();
+                service.begin_trial(generation).unwrap();
+                let before = transaction_copies(staging_root);
+                service.report_health(generation, true).unwrap();
+                (before, UpdateStage::Confirmed)
+            }
+            CrashWindow::Finalize => {
+                service.commit(generation, Slot::B, 2).unwrap();
+                service.begin_trial(generation).unwrap();
+                service.report_health(generation, true).unwrap();
+                let before = transaction_copies(staging_root);
+                service.finalize_confirmed(generation).unwrap();
+                (before, UpdateStage::Complete)
+            }
+            CrashWindow::FailHealth => {
+                service.commit(generation, Slot::B, 2).unwrap();
+                service.begin_trial(generation).unwrap();
+                let before = transaction_copies(staging_root);
+                service.report_health(generation, false).unwrap();
+                (before, UpdateStage::Rollback)
+            }
+            CrashWindow::FinishRollback => {
+                service.commit(generation, Slot::B, 2).unwrap();
+                service.begin_trial(generation).unwrap();
+                service.report_health(generation, false).unwrap();
+                let before = transaction_copies(staging_root);
+                service.finish_rollback(generation).unwrap();
+                (before, UpdateStage::RolledBack)
+            }
+        }
+    }
+
+    #[test]
+    fn restart_recovery_matrix_repairs_each_control_ahead_of_journal_window() {
+        let temp = TestDir::new("restart-matrix");
+        for (index, window) in [
+            CrashWindow::Prepared,
+            CrashWindow::Commit,
+            CrashWindow::BeginTrial,
+            CrashWindow::Confirm,
+            CrashWindow::Finalize,
+            CrashWindow::FailHealth,
+            CrashWindow::FinishRollback,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let tag = format!("restart-matrix-{index}");
+            let (mut service, generation, staging_root) = prepared_service(&temp, &tag);
+            let digest = service.status().manifest_sha256.unwrap();
+            let (journal_before_durable_step, expected) =
+                cross_control_boundary(&mut service, generation, &staging_root, window);
+            drop(service);
+
+            // The control record crossed its durable boundary while the
+            // transaction journal still names the preceding stage.
+            restore_transaction_copies(&staging_root, journal_before_durable_step);
+            let control_root = temp.path().join(format!("{tag}-control"));
+            let mut restarted = UpdateService::open(&control_root).unwrap();
+            let recovered = restarted
+                .recover(&staging_root, digest)
+                .unwrap_or_else(|error| panic!("window={window:?}: {error}"));
+            assert_eq!(recovered.stage, Some(expected), "window={window:?}");
+            let recovered_generation = recovered.generation;
+            if matches!(window, CrashWindow::Prepared) {
+                assert_eq!(recovered_generation, generation, "window={window:?}");
+            } else {
+                assert!(recovered_generation > generation, "window={window:?}");
+            }
+            assert!(!recovered.recovery_required, "window={window:?}");
+            assert_eq!(
+                load_transaction_record(&staging_root).unwrap().stage(),
+                expected,
+                "window={window:?}"
+            );
+
+            // A client retry after losing the first response must observe the
+            // same service generation and never apply the repair twice.
+            let replayed = restarted.recover(&staging_root, digest).unwrap();
+            assert_eq!(replayed, recovered, "window={window:?}");
+            assert!(matches!(
+                restarted.recover(&staging_root, [0xA5; 32]),
+                Err(ServiceError::RecoveryTargetMismatch)
+            ));
+        }
+    }
+
+    #[test]
+    fn restart_recovery_uses_newer_copy_after_each_torn_journal_replace() {
+        let temp = TestDir::new("torn-journal-matrix");
+        for (index, window) in [
+            CrashWindow::Commit,
+            CrashWindow::BeginTrial,
+            CrashWindow::Confirm,
+            CrashWindow::Finalize,
+            CrashWindow::FailHealth,
+            CrashWindow::FinishRollback,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let tag = format!("torn-journal-matrix-{index}");
+            let (mut service, generation, staging_root) = prepared_service(&temp, &tag);
+            let digest = service.status().manifest_sha256.unwrap();
+            let (previous, expected) =
+                cross_control_boundary(&mut service, generation, &staging_root, window);
+            let completed = transaction_copies(&staging_root);
+            drop(service);
+
+            // Simulate power loss after the first journal replacement became
+            // durable but before the second copy was written. Recovery may
+            // select the newer valid copy but must not regress or split state.
+            fs::write(staging_root.join(TRANSACTION_COPIES[0]), &previous[0]).unwrap();
+            fs::write(staging_root.join(TRANSACTION_COPIES[1]), &completed[1]).unwrap();
+            let control_root = temp.path().join(format!("{tag}-control"));
+            let mut restarted = UpdateService::open(&control_root).unwrap();
+            let recovered = restarted
+                .recover(&staging_root, digest)
+                .unwrap_or_else(|error| panic!("window={window:?}: {error}"));
+            assert_eq!(recovered.stage, Some(expected), "window={window:?}");
+            assert!(!recovered.recovery_required, "window={window:?}");
+            let replayed = restarted.recover(&staging_root, digest).unwrap();
+            assert_eq!(replayed, recovered, "window={window:?}");
+        }
+    }
+
+    #[test]
+    fn a_second_live_service_cannot_race_the_control_generation() {
+        let temp = TestDir::new("service-lease");
+        let control_root = temp.path().join("service-lease-control");
+        let initial = ControlBlock::initialize(Slot::A, 1, [1; 32], 1, 1, 1, 2).unwrap();
+        let service = UpdateService::initialize(&control_root, initial).unwrap();
+        assert!(matches!(
+            UpdateService::open(&control_root),
+            Err(CoordinatorError::ControlStore(ControlStoreError::Busy))
+        ));
+        drop(service);
+        assert_eq!(UpdateService::open(&control_root).unwrap().status().stage, None);
     }
 
     #[test]

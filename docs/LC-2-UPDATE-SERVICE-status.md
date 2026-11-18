@@ -210,6 +210,52 @@ recovery 已具备 path-free 数据/授权契约、`UpdateService` managed execu
 ABI syscall 和原生 Shell 消费。archive 已具备内核持久收据和正式 ABI；
 调用者不能选择终态、事务或归档路径。
 
+## 独占控制租约与重启恢复矩阵
+
+`FileControlStore` 现在对每个 control root 持有进程生命周期内的独占 `flock`
+租约。同一 root 的第二个存活服务在读取 generation 前即以 `Busy` 失败；进程
+退出或崩溃后由内核关闭文件描述符并自动释放租约，因此不会留下永久锁，也不能让
+两个服务同时基于同一旧 generation 提交不同结果。
+
+恢复路径同时修正了三个持久状态问题：
+
+- `Prepared` 新事务尚未写 boot control 时，control 中可能仍是上一笔 Completed
+  或 RolledBack transaction 的 terminal。恢复器现在只在 terminal digest 与当前
+  manifest 精确匹配时采用它，不会把旧 terminal 拼接到新事务。
+- `RolledBack` terminal 的状态重建必须先经过 `FailHealth → Rollback →
+  FinishRollback`；旧实现从 `Trial` 选择了健康路径并在 `Complete` 后失败。
+- 同一稳定 staging root 与 manifest digest 的恢复响应用于客户端超时重试时是
+  幂等的：已恢复服务返回同一 generation 与状态，不再产生第二次恢复事务；不同
+  target 仍失败关闭。
+
+新增确定性重启矩阵覆盖：
+
+- `Prepared`、`Committed`、`Trial`、`Confirmed`、`Complete`、`Rollback` 和
+  `RolledBack` 七类状态下，control 已越过 durable boundary、journal 仍停留前
+  一阶段的窗口；
+- `Committed` 到 `RolledBack` 六类 journal 双副本替换中断窗，即一份旧、一份新；
+- 每个窗口首次恢复后的同 target 重放结果逐字段一致，错误 digest 失败关闭。
+
+验证结果：
+
+```text
+cargo test -p jasper-lifecycle-staging --lib \
+  -- --skip formats_system_and_data_ext4_without_overwriting_existing_filesystems \
+     --skip installs_bootloader_fat_tree_into_empty_esp
+38 passed; 0 failed; 2 filtered out
+
+cargo test -p kernel-core update
+38 passed; 0 failed
+
+cargo clippy -p jasper-lifecycle-staging --lib -- -D warnings
+PASS
+```
+
+被过滤的两项依赖宿主 `mkfs` / `fsck` 工具，不是本切片代码失败；完整 CI/VM
+仍须执行。该矩阵是宿主文件系统与真实 `UpdateService` 的确定性故障注入，不替代
+OVMF/virtio-blk 断电实验或 Pixel UFS 安装矩阵，因此 LC-2 仍保持
+`core-passed`。
+
 ## 终态归档收据与持久后端
 
 新增 `jasper_lifecycle_model::archive` 的 128 字节固定归档收据：

@@ -15,8 +15,10 @@ use jasper_lifecycle_model::boot::{
     commit, recover, BootControlError, CommitError, ControlBlock, ControlIo, ControlIoError,
 };
 use jasper_lifecycle_model::CONTROL_RECORD_BYTES;
+use rustix::fs::{flock, FlockOperation};
 
 const CONTROL_COPIES: [&str; 2] = ["control.0", "control.1"];
+const CONTROL_LEASE: &str = ".control.lock";
 
 /// 两份控制记录的文件目录。
 /// Directory containing the two control-record copies.
@@ -99,12 +101,20 @@ impl ControlIo for FileControlIo {
 pub struct FileControlStore {
     io: FileControlIo,
     current: ControlBlock,
+    /// Exclusive process-lifetime lease for this control root.
+    ///
+    /// `flock` is tied to the open file description, so a crashed process
+    /// releases the lease automatically while a second live service cannot
+    /// read a generation and then race its durable commit.
+    _lease: File,
 }
 
 /// 控制存储打开、初始化或提交失败。
 /// Control-store open, initialization or commit failure.
 #[derive(Debug)]
 pub enum ControlStoreError {
+    /// Another live service owns this control root.
+    Busy,
     /// 文件系统操作失败。Filesystem operation failed.
     Io(io::Error),
     /// 两份记录均无效。Both records are invalid.
@@ -118,6 +128,7 @@ pub enum ControlStoreError {
 impl std::fmt::Display for ControlStoreError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Busy => write!(formatter, "control store is already owned by a live service"),
             Self::Io(error) => write!(formatter, "control-store I/O failed: {error}"),
             Self::Corrupt => write!(formatter, "both control records are invalid"),
             Self::Recovery(error) => write!(formatter, "control recovery failed: {error:?}"),
@@ -133,6 +144,7 @@ impl FileControlStore {
     /// Recovers the highest valid control record from an existing directory.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, ControlStoreError> {
         let root = root.into();
+        let lease = acquire_exclusive_lease(&root)?;
         let first = read_optional(&root.join(CONTROL_COPIES[0]))?;
         let second = read_optional(&root.join(CONTROL_COPIES[1]))?;
         let current =
@@ -140,6 +152,7 @@ impl FileControlStore {
         Ok(Self {
             io: FileControlIo::new(root),
             current,
+            _lease: lease,
         })
     }
 
@@ -151,6 +164,7 @@ impl FileControlStore {
     ) -> Result<Self, ControlStoreError> {
         let root = root.into();
         fs::create_dir(&root)?;
+        let lease = acquire_exclusive_lease(&root)?;
         let mut io = FileControlIo::new(root.clone());
         let bytes = block.encode();
         io.write_copy(0, &bytes)
@@ -161,7 +175,11 @@ impl FileControlStore {
                 let _ = fs::remove_file(root.join(CONTROL_COPIES[1]));
                 ControlStoreError::Io(io::Error::other("control initialization failed"))
             })?;
-        Ok(Self { io, current: block })
+        Ok(Self {
+            io,
+            current: block,
+            _lease: lease,
+        })
     }
 
     /// 当前控制记录快照。Current control-record snapshot.
@@ -211,6 +229,31 @@ fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, ControlStoreError> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
     Ok(Some(bytes))
+}
+
+fn acquire_exclusive_lease(root: &Path) -> Result<File, ControlStoreError> {
+    let path = root.join(CONTROL_LEASE);
+    let lease = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    match flock(&lease, FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(lease),
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                code if code == libc::EWOULDBLOCK || code == libc::EAGAIN
+            ) =>
+        {
+            Err(ControlStoreError::Busy)
+        }
+        Err(error) => Err(ControlStoreError::Io(io::Error::from_raw_os_error(
+            error.raw_os_error(),
+        ))),
+    }
 }
 
 fn now_nanos() -> u128 {
@@ -269,6 +312,19 @@ mod tests {
         let temp = TestDir::new("reopen");
         let root = temp.0.join("control");
         let store = FileControlStore::initialize(&root, initial()).unwrap();
+        drop(store);
+        assert_eq!(FileControlStore::open(&root).unwrap().current(), initial());
+    }
+
+    #[test]
+    fn one_live_store_exclusively_owns_the_control_root() {
+        let temp = TestDir::new("lease");
+        let root = temp.0.join("control");
+        let store = FileControlStore::initialize(&root, initial()).unwrap();
+        assert!(matches!(
+            FileControlStore::open(&root),
+            Err(ControlStoreError::Busy)
+        ));
         drop(store);
         assert_eq!(FileControlStore::open(&root).unwrap().current(), initial());
     }
