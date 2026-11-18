@@ -128,12 +128,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "1092ed25022adc3d99865b61b6577f17657890f44b9b2a96f3e5c617d2ee888c",
-      "path": "kernel-core/src/irq.rs",
-      "rules": "HC-G7"
-    },
-    {
-      "count": 1,
       "fingerprint": "112c4f82d776b49d7cb696b0b85bff7a962188ed4c2a18b89d2c55ccab35f890",
       "path": "kernel/build.rs",
       "rules": "HC-G3"
@@ -551,12 +545,6 @@
       "fingerprint": "4d383868a3b455aec1907e5595db29555a6d558d323cfa31d715f0c82a784909",
       "path": "compat-graphics/src/service.rs",
       "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "4d9d9dcef1681423cf8e4911d9f26cae76a1c9b92ccd008928b55378ea76212c",
-      "path": "kernel/src/arch/x86_64/gdt.rs",
-      "rules": "HC-G7"
     },
     {
       "count": 1,
@@ -988,12 +976,6 @@
       "count": 1,
       "fingerprint": "851d07bef48da61dd28029fb24cdf5f4e6913e256a9fa3cd4e18ed1f9c9ea3e2",
       "path": "kernel/src/arch/riscv/smp.rs",
-      "rules": "HC-G7"
-    },
-    {
-      "count": 1,
-      "fingerprint": "853503cda679481dc8ab31a29b9f32f83898c4f0feac26ca71a89048646dcab7",
-      "path": "kernel/src/arch/x86_64/vmx.rs",
       "rules": "HC-G7"
     },
     {
@@ -1791,5 +1773,5 @@
     "user",
     "xtask"
   ],
-  "total": 374
+  "total": 371
 }

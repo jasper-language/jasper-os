@@ -570,7 +570,10 @@ impl AffinityPolicy for Spread {
         for &i in order.iter() {
             let l = &lines[i];
             let cands = candidates(l, online);
-            let best = cands.iter().min_by_key(|&c| (proj[c], c)).unwrap_or(0);
+            let best = cands
+                .iter()
+                .min_by_key(|&c| (proj[c], c))
+                .ok_or(IrqError::Offline)?;
             let target = match l.current.filter(|&c| cands.contains(c)) {
                 Some(cur) if cur != best => {
                     let (a, b, load) = (proj[cur], proj[best], l.load);

@@ -1319,12 +1319,15 @@ impl LinuxRuntime {
                     self.pic_master_mask = 0xff;
                 } else if value & 0x20 != 0 {
                     let irq = if value & 0xe0 == 0x60 {
-                        (value & 7) as u8
+                        Some((value & 7) as u8)
                     } else {
-                        self.pic_in_service.trailing_zeros().min(15) as u8
+                        let bits = self.pic_in_service as u8;
+                        (bits != 0).then_some(bits.trailing_zeros() as u8)
                     };
-                    self.pic_in_service &= !(1u16 << irq);
-                    self.pic_eois = self.pic_eois.saturating_add(1);
+                    if let Some(irq) = irq {
+                        self.pic_in_service &= !(1u16 << irq);
+                        self.pic_eois = self.pic_eois.saturating_add(1);
+                    }
                 }
             }
             0x21 => self.pic_master_mask = value,
@@ -1333,14 +1336,12 @@ impl LinuxRuntime {
                     self.pic_init_stage[1] = 1;
                     self.pic_slave_mask = 0xff;
                 } else if value & 0x20 != 0 {
-                    let irq = self
-                        .pic_in_service
-                        .checked_shr(8)
-                        .map(|bits| bits.trailing_zeros().saturating_add(8))
-                        .unwrap_or(15)
-                        .min(15);
-                    self.pic_in_service &= !(1u16 << irq);
-                    self.pic_eois = self.pic_eois.saturating_add(1);
+                    let bits = self.pic_in_service >> 8;
+                    if bits != 0 {
+                        let irq = (bits.trailing_zeros() as u8).saturating_add(8);
+                        self.pic_in_service &= !(1u16 << irq);
+                        self.pic_eois = self.pic_eois.saturating_add(1);
+                    }
                 }
             }
             0xa1 => self.pic_slave_mask = value,

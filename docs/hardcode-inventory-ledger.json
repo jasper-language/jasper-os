@@ -1,5 +1,5 @@
 {
-  "baseline_total": 374,
+  "baseline_total": 371,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -14,7 +14,7 @@
     "platform-adapter": 27,
     "protocol-abi": 24,
     "runtime-resource-capacity": 57,
-    "unclassified": 86
+    "unclassified": 83
   },
   "entries": [
     {
@@ -1090,16 +1090,6 @@
     {
       "category": "unclassified",
       "count": 1,
-      "fingerprint": "1092ed25022adc3d99865b61b6577f17657890f44b9b2a96f3e5c617d2ee888c",
-      "line": 573,
-      "path": "kernel-core/src/irq.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let best = cands.iter().min_by_key(|&c| (proj[c], c)).unwrap_or(0);"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
       "fingerprint": "1e6129c5f837ab1cda3509f068e5cd5aeae8be110f802d6cf6c33293a5bb1b89",
       "line": 19,
       "path": "kernel-core/src/job.rs",
@@ -2000,16 +1990,6 @@
     {
       "category": "unclassified",
       "count": 1,
-      "fingerprint": "4d9d9dcef1681423cf8e4911d9f26cae76a1c9b92ccd008928b55378ea76212c",
-      "line": 164,
-      "path": "kernel/src/arch/x86_64/gdt.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": "let p = CPU_TSS.get(super::smp::cpu_index()).map(|t| t.load(Ordering::Acquire)).unwrap_or(core::ptr::null_mut());"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
       "fingerprint": "f83fc8de7fbc4dee4e0195efcd4c51cf3d33cf3f82e1cba51195d907e23903c9",
       "line": 270,
       "path": "kernel/src/arch/x86_64/ioapic.rs",
@@ -2070,18 +2050,8 @@
     {
       "category": "unclassified",
       "count": 1,
-      "fingerprint": "853503cda679481dc8ab31a29b9f32f83898c4f0feac26ca71a89048646dcab7",
-      "line": 1340,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
-      "rules": "HC-G7",
-      "source": ".unwrap_or(15)"
-    },
-    {
-      "category": "unclassified",
-      "count": 1,
       "fingerprint": "c92999fd79f301867386db0aedc058e5867b96e83cac1188b3c3557fcbc564cd",
-      "line": 2552,
+      "line": 2548,
       "path": "kernel/src/arch/x86_64/vmx.rs",
       "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
       "rules": "HC-G7",
@@ -2974,6 +2944,6 @@
     "platform-adapter": 43,
     "protocol-abi": 27,
     "runtime-resource-capacity": 96,
-    "unclassified": 90
+    "unclassified": 87
   }
 }
