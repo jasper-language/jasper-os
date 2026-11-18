@@ -16,14 +16,15 @@ pub const MANIFEST_SCHEMA_VERSION: u16 = 1;
 /// 单个确定性 CBOR 清单的最大长度。Maximum length of one deterministic CBOR manifest.
 pub const MAX_CANONICAL_MANIFEST_BYTES: usize = 8192;
 /// Maximum signatures admitted in one threshold set.
-pub const MAX_THRESHOLD_SIGNATURES: usize = 3;
+pub const MAX_THRESHOLD_SIGNATURES: usize = 3; // JASPER-HARDCODE-REVIEW: issue=21 source=release-threshold-policy-v1 reason=policy-bound
 /// Domain separator for a canonical threshold signature set.
 pub const SIGNATURE_SET_DOMAIN: &[u8] = b"JASPER-UPDATE-SIGSET-V1\0";
 /// Encoded bytes per threshold signature entry.
 pub const THRESHOLD_SIGNATURE_BYTES: usize = 32 + 64;
 /// Maximum encoded threshold signature set.
-pub const MAX_SIGNATURE_SET_BYTES: usize =
-    SIGNATURE_SET_DOMAIN.len() + 1 + MAX_THRESHOLD_SIGNATURES * THRESHOLD_SIGNATURE_BYTES;
+pub const MAX_SIGNATURE_SET_BYTES: usize = SIGNATURE_SET_DOMAIN.len() // JASPER-HARDCODE-REVIEW: issue=21 source=release-threshold-policy-v1 reason=wire-bound
+    + 1
+    + MAX_THRESHOLD_SIGNATURES * THRESHOLD_SIGNATURE_BYTES;
 
 /// 已由确定性 CBOR 解码器得到的清单声明和原始签名。
 /// Manifest claims produced by a canonical-CBOR decoder, together with the detached signature.
@@ -142,7 +143,9 @@ impl SignatureSet {
 
     /// Iterate over retained signatures in canonical signer order.
     pub fn entries(&self) -> impl Iterator<Item = ThresholdSignature> + '_ {
-        self.entries[..self.len as usize].iter().filter_map(|entry| *entry)
+        self.entries[..self.len as usize]
+            .iter()
+            .filter_map(|entry| *entry)
     }
 
     /// Encode the canonical fixed-layout signature set.
@@ -165,9 +168,7 @@ impl SignatureSet {
 
     /// Decode and reject duplicates, non-canonical order and trailing bytes.
     pub fn decode(bytes: &[u8]) -> Result<Self, ThresholdError> {
-        if bytes.len() <= SIGNATURE_SET_DOMAIN.len()
-            || !bytes.starts_with(SIGNATURE_SET_DOMAIN)
-        {
+        if bytes.len() <= SIGNATURE_SET_DOMAIN.len() || !bytes.starts_with(SIGNATURE_SET_DOMAIN) {
             return Err(ThresholdError::SignatureSetFormat);
         }
         let count = bytes[SIGNATURE_SET_DOMAIN.len()] as usize;
@@ -379,8 +380,7 @@ pub fn verify_manifest_threshold(
         envelope,
     )
     .map_err(ThresholdError::Manifest)?;
-    let (message, message_len) = signing_message(&envelope)
-        .map_err(ThresholdError::Manifest)?;
+    let (message, message_len) = signing_message(&envelope).map_err(ThresholdError::Manifest)?;
     for entry in signatures.entries() {
         let key = VerifyingKey::from_bytes(&entry.signer)
             .map_err(|_| ThresholdError::Manifest(ManifestError::Encoding))?;
