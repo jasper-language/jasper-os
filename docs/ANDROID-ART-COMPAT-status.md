@@ -1,6 +1,6 @@
 # Android ART Native Compatibility
 
-更新日期：2026-11-17。
+更新日期：2026-11-18。
 
 状态：**in progress**。本文件记录未修改 AOSP ART 在 Jasper x86_64
 Linux/Android 兼容环境中的真实执行边界。
@@ -22,6 +22,12 @@ Linux/Android 兼容环境中的真实执行边界。
   再用 `src2` 覆盖；`003-omnibus-opcodes` 特别依赖这一步骤把 `UnresStuff`
   替换成只有字段 `x` 的未解析成员夹具。可复现入口为
   `scripts/build-aosp-art-tests.sh`。
+- 上游 `AndroidAutoBuildAPK-v18.apk`（SHA-256
+  `22c31a97…c0d05`）通过 AOSP `aapt2` 的 ZIP、Manifest、包名、launcher
+  Activity、SDK 和 `classes.dex/classes2.dex/classes3.dex` 结构检查；
+  未修改 ART 在真实 Jasper UEFI/root image 中从该 APK 加载并执行
+  `androidx.constraintlayout.core.motion.parse.KeyParser`，退出 0，第二次
+  measured 运行 `resources=true`。
 
 Jasper x86_64 `MAP_32BIT` 低窗口已从 `[1 GiB, 2 GiB)` 扩展为
 `[128 MiB, 2 GiB)`。128 MiB 以下现有内核低映射保留；用户地址空间使用独立
@@ -46,3 +52,8 @@ PDPT/PD，不通过新增低地址映射修改共享内核页表。
   `resources=true`；
 - `android-art-official-003` 在 `InternedString.run` 后发生
   `addr=0x6d` 用户态缺页并终止。
+- APK 内的 DEX 与容器入口已经可执行，但 Activity、Framework、资源/配置、
+  graphics、input 和 audio 生命周期尚未接入，因此仍不能把 APK 节点标为完成。
+
+APK 专用证据：
+`evidence/issue21-uefi-boot-20261118-144543/README.md`。

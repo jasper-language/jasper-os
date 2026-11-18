@@ -122,15 +122,18 @@ The unmodified OpenJDK 21 host JVM ran a Java class and printed
 
 An unmodified AOSP Android 34 ART runtime was extracted from the system image
 and APEX payload. Its `dalvikvm64 -showversion` baseline printed
-`ART version 2.1.0 x86_64`. A D8-built APK with a `classes.dex` entry was
-produced; running its DEX in the isolated ART baseline reached the current
-ART boot-runtime staging limit and is not claimed as a Jasper pass.
+`ART version 2.1.0 x86_64`. The upstream multi-DEX APK
+`AndroidAutoBuildAPK-v18.apk` is now validated by AOSP `aapt2` and executed
+from a real Jasper UEFI System-root image through Bionic, Linux ABI and
+unmodified ART. The measured APK run exited 0 with `syscalls=23154` and
+`resources=true`. Android Activity/Framework lifecycle remains pending.
 
 ## Remaining Jasper work
 
 - Provide a general root-image namespace for Android `/system`, `/apex` and
   framework paths instead of the current bounded Linux fixture.
-- Run ART official tests and an unmodified APK through that path.
+- Run Android Activity/Framework lifecycle, resources/configuration, graphics,
+  input and audio for an installed APK through that path.
 - Stage Wine/DXVK/VKD3D and Metal2Vulkan in a Jasper guest with a real GPU or
   an explicit virtual Vulkan device; the current UEFI QEMU fixture has no
   virtio-gpu/Vulkan device.

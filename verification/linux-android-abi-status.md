@@ -52,10 +52,13 @@ removed interfaces.
 - The unmodified AOSP Binder `binderDriverInterfaceTest.cpp` passed **20/20**
   cases on the Jasper UEFI path, including transactions, death and freeze
   notifications, reference commands, ioctl errors, and nonblocking reads.
+- The upstream multi-DEX `AndroidAutoBuildAPK-v18.apk` passed AOSP `aapt2`
+  container/Manifest validation and one Java entry executed through unmodified
+  Bionic and ART in the Jasper UEFI root-image path with exit 0 and
+  `resources=true`. Android Activity lifecycle remains pending.
 - See [ecosystem-runtime-tests.md](ecosystem-runtime-tests.md) for exact
   evidence and for host-only Wine, DXVK/VKD3D-Proton, Metal2Vulkan, Darling,
-  OpenJDK, ART, and APK baselines. Host results are not counted as Jasper
-  passes.
+  OpenJDK and ART baselines. Host results are not counted as Jasper passes.
 
 ## Acceptance evidence
 

@@ -56,10 +56,22 @@ case "$CARGO_TARGET" in
 esac
 LIMIT="${ISSUE21_UEFI_TIMEOUT:-45}"
 MODE="${ISSUE21_UEFI_MODE:-normal}"
+if [ -z "${ISSUE21_UEFI_TIMEOUT:-}" ] &&
+  { [ "$MODE" = android-art ] || [ "$MODE" = android-apk ]; }; then
+  LIMIT=900
+fi
 PREBUILT="${ISSUE21_UEFI_PREBUILT:-0}"
 QEMU_LOCK="${ISSUE21_QEMU_LOCK:-/tmp/jasper-os-qemu.lock}"
 QEMU_CPUS="${ISSUE21_QEMU_CPUS:-0-1}"
 QEMU_SMP="${ISSUE21_QEMU_SMP:-1}"
+QEMU_MEMORY="${ISSUE21_QEMU_MEMORY:-}"
+if [ -z "$QEMU_MEMORY" ]; then
+  if [ "$MODE" = android-art ] || [ "$MODE" = android-apk ]; then
+    QEMU_MEMORY=2G
+  else
+    QEMU_MEMORY=512M
+  fi
+fi
 mkdir -p "$OUT"
 mkdir -p "$TARGET"
 IMAGE="$TARGET/p0.img"
@@ -147,6 +159,7 @@ case "$MODE" in
   iommu-dma) KERNEL_FEATURES=iommu-dma-verify ;;
   android-ecosystem) KERNEL_FEATURES=lifecycle-root-exec-verify,android-ecosystem-verify ;;
   android-art) KERNEL_FEATURES=lifecycle-root-exec-verify,android-art-verify ;;
+  android-apk) KERNEL_FEATURES=lifecycle-root-exec-verify,android-apk-verify ;;
   vulkan-metal2vulkan) KERNEL_FEATURES=lifecycle-root-exec-verify,vulkan-metal2vulkan-verify ;;
   vulkan-swiftshader) KERNEL_FEATURES=lifecycle-root-exec-verify,vulkan-metal2vulkan-verify,vulkan-compute-only ;;
   block-timeout) KERNEL_FEATURES=lifecycle-block-timeout-verify ;;
@@ -210,7 +223,7 @@ ROOT_ANDROID_TOYBOX="${JASPER_TOYBOX_BIN:-}"
 ROOT_AOSP_BINDER_TEST="${JASPER_AOSP_BINDER_TEST:-}"
 ROOT_ANDROID_TREE="${JASPER_ANDROID_TREE:-}"
 ROOT_ANDROID_LINKER_CONFIG=""
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
   ROOT_EXEC_PROBE=$(find "$TARGET/x86_64-unknown-none/release/build" \
     -path '*/out/user-target/x86_64-unknown-none/release/user-linuxprobe' \
     -type f -print | sort | tail -n 1)
@@ -236,16 +249,35 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native
     echo "issue21-uefi-boot: JASPER_AOSP_BINDER_TEST is required for android-ecosystem mode" >&2
     exit 64
   fi
-  if [ "$MODE" = android-art ] && [ -z "$ROOT_ANDROID_TREE" ]; then
-    echo "issue21-uefi-boot: JASPER_ANDROID_TREE is required for android-art mode" >&2
+  if { [ "$MODE" = android-art ] || [ "$MODE" = android-apk ]; } && [ -z "$ROOT_ANDROID_TREE" ]; then
+    echo "issue21-uefi-boot: JASPER_ANDROID_TREE is required for $MODE mode" >&2
     exit 64
   fi
   if { [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; } && [ -z "$ROOT_ANDROID_TREE" ]; then
     echo "issue21-uefi-boot: JASPER_ANDROID_TREE is required for $MODE mode" >&2
     exit 64
   fi
-  if [ "$MODE" = android-art ]; then
+  if [ "$MODE" = android-art ] || [ "$MODE" = android-apk ]; then
     ROOT_ANDROID_LINKER_CONFIG="$PWD/verification/fixtures/android/ld.config.txt"
+  fi
+  if [ "$MODE" = android-apk ]; then
+    APK="$ROOT_ANDROID_TREE/data/local/tmp/app.apk"
+    AAPT2="${ANDROID_AAPT2:-$(command -v aapt2 || true)}"
+    [ -f "$APK" ] || {
+      echo "issue21-uefi-boot: upstream APK is missing: $APK" >&2
+      exit 64
+    }
+    [ -n "$AAPT2" ] && [ -x "$AAPT2" ] || {
+      echo "issue21-uefi-boot: set ANDROID_AAPT2 to an executable AOSP aapt2" >&2
+      exit 64
+    }
+    python3 scripts/android-apk-preflight.py \
+      --apk "$APK" \
+      --aapt2 "$AAPT2" \
+      --expected-package "${ANDROID_APK_PACKAGE:-com.example.androidautobuildapk}" \
+      --expected-activity "${ANDROID_APK_ACTIVITY:-com.example.androidautobuildapk.MainActivity}" \
+      --expected-sha256 "${ANDROID_APK_SHA256:-22c31a97b1e551d2814df0e9d2f59c5da93f37c9b43e2e03ac0f84c4359c0d05}" \
+      | tee "$OUT/apk-preflight.log"
   fi
 fi
 if [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
@@ -282,7 +314,7 @@ QEMU_EXTRA=(-monitor none)
 if [ -n "${ISSUE21_MONITOR_SOCKET:-}" ]; then
   QEMU_EXTRA=(-monitor "unix:$ISSUE21_MONITOR_SOCKET,server=on,wait=off")
 fi
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
   CPU="${ISSUE21_QEMU_CPU:-max}"
   if [ "${ISSUE21_DISABLE_RDRAND:-0}" = 1 ]; then
     CPU=max,-rdrand,-rdseed
@@ -335,7 +367,7 @@ set +e
 nice -n 15 taskset -c "$QEMU_CPUS" timeout "$LIMIT" qemu-system-x86_64 \
   -accel tcg \
   -machine q35 \
-  -m "${ISSUE21_QEMU_MEMORY:-512M}" \
+  -m "$QEMU_MEMORY" \
   -smp "$QEMU_SMP" \
   -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
   -drive if=pflash,format=raw,file="$OVMF_VARS" \
@@ -346,7 +378,7 @@ rc=$?
 set -e
 exec 9>&-
 printf '%s\n' "$rc" >"$OUT/qemu.rc"
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
   [ "$rc" -eq 33 ]
 else
   [ "$rc" -eq 124 ]
@@ -526,6 +558,14 @@ if [ "$MODE" = android-ecosystem ]; then
   grep -aq '^\[JSR-ANDROID-TOYBOX\] program=android-toybox-sha256sum static=true mapped=true started=true syscalls=[1-9][0-9]* exit_zero=true' \
     "$OUT/serial.log"
   grep -aq '^\[JSR-ANDROID-TOYBOX\] program=aosp-binder-driver-test static=true mapped=true started=true syscalls=[1-9][0-9]* exit_zero=true' \
+    "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"
+  ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
+  echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
+  exit 0
+fi
+if [ "$MODE" = android-apk ]; then
+  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=android-apk-upstream path=/system/bin/dalvikvm64 interpreter=/system/bin/linker64 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true failed=0' \
     "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"
   ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"

@@ -910,7 +910,11 @@ fn install_root_android_files(
         ) {
             Ok(bytes) => bytes,
             Err(_) => {
-                #[cfg(any(feature = "android-art-verify", feature = "vulkan-metal2vulkan-verify"))]
+                #[cfg(any(
+                    feature = "android-apk-verify",
+                    feature = "android-art-verify",
+                    feature = "vulkan-metal2vulkan-verify"
+                ))]
                 crate::kprintln!(
                     "[JSR-ANDROID-ART] file-skip path={}",
                     core::str::from_utf8(path).unwrap_or("<non-utf8>")
@@ -920,7 +924,11 @@ fn install_root_android_files(
         };
         let byte_len = bytes.len();
         if !crate::linux_vfs::install_root_android_file(path, bytes) {
-            #[cfg(any(feature = "android-art-verify", feature = "vulkan-metal2vulkan-verify"))]
+            #[cfg(any(
+                feature = "android-apk-verify",
+                feature = "android-art-verify",
+                feature = "vulkan-metal2vulkan-verify"
+            ))]
             crate::kprintln!(
                 "[JSR-ANDROID-ART] file-install-fail path={}",
                 core::str::from_utf8(path).unwrap_or("<non-utf8>")
@@ -941,6 +949,7 @@ fn install_root_android_files(
 
 #[cfg(any(
     feature = "android-ecosystem-verify",
+    feature = "android-apk-verify",
     feature = "android-art-verify",
     feature = "vulkan-metal2vulkan-verify"
 ))]
@@ -1021,7 +1030,35 @@ fn execute_root_dynamic_programs(
         return Err(HealthError::RootExecute);
     }
     install_root_libraries(root)?;
-    #[cfg(feature = "android-art-verify")]
+    #[cfg(feature = "android-apk-verify")]
+    {
+        install_root_android_files(root, origin)?;
+        let apk_argv: [&[u8]; 6] = [
+            b"/system/bin/dalvikvm64",
+            b"-Xuse-stderr-logger",
+            b"-Xbootclasspath:/apex/com.android.art/javalib/core-oj.jar:/apex/com.android.art/javalib/core-libart.jar:/apex/com.android.i18n/javalib/core-icu4j.jar",
+            b"-cp",
+            b"/data/local/tmp/app.apk",
+            b"androidx.constraintlayout.core.motion.parse.KeyParser",
+        ];
+        let art_envp: [&[u8]; 5] = [
+            b"ANDROID_ROOT=/system",
+            b"ANDROID_DATA=/data",
+            b"ANDROID_ART_ROOT=/apex/com.android.art",
+            b"ANDROID_I18N_ROOT=/apex/com.android.i18n",
+            b"ANDROID_TZDATA_ROOT=/system/etc",
+        ];
+        run_root_android_program(
+            root,
+            "android-apk-upstream",
+            "/system/bin/dalvikvm64",
+            "/system/bin/linker64",
+            &apk_argv,
+            &art_envp,
+        )?;
+        return Ok(());
+    }
+    #[cfg(all(feature = "android-art-verify", not(feature = "android-apk-verify")))]
     {
         install_root_android_files(root, origin)?;
         let art_argv: [&[u8]; 6] = [
@@ -1212,6 +1249,8 @@ fn execute_root_dynamic_programs(
         let ppid_argv: [&[u8]; 1] = [b"/usr/bin/jasper-getppid"];
         return run_root_program(root, origin, "/usr/bin/jasper-getppid", &ppid_argv);
     }
+    #[cfg(not(feature = "android-apk-verify"))]
+    {
     let true_argv: [&[u8]; 1] = [b"/bin/true"];
     run_root_program(root, origin, "/bin/true", &true_argv)?;
     let getconf_argv: [&[u8]; 2] = [b"/usr/bin/getconf", b"GNU_LIBC_VERSION"];
@@ -1261,6 +1300,7 @@ fn execute_root_dynamic_programs(
     run_root_program(root, origin, "/bin/dash", &dash_argv)?;
     let signal_argv: [&[u8]; 1] = [b"/usr/bin/jasper-signal-basic"];
     run_root_program(root, origin, "/usr/bin/jasper-signal-basic", &signal_argv)
+    }
 }
 
 /// Read and recover the authoritative A/B control record without mutating it.
