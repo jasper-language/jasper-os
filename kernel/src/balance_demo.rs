@@ -323,7 +323,7 @@ fn spread(n: usize) {
     check(spawned, "铺满用例任务创建失败");
     sched::run();
     let busy = cores_busy("spread", n, WINDOW);
-    let covered = HOG_CPUS.load(Ordering::Relaxed) == all.bits();
+    let covered = u128::from(HOG_CPUS.load(Ordering::Relaxed)) == all.bits();
     let least_cpu = HOG_MIN_CPU.load(Ordering::Relaxed) as u64;
     check_timing(busy, format_args!("N 核 N 任务时有核空闲或空闲等待超过上界"));
     check(covered, "吃满处理器的任务没有铺到每一个核");
@@ -362,7 +362,7 @@ fn steal(n: usize) {
     sched::run();
     let busy = cores_busy("steal", n, WINDOW);
     let steals: u32 = (0..n).map(|c| sched::cpu_stats(c).steals).sum();
-    let covered = HOG_CPUS.load(Ordering::Relaxed) == all.bits();
+    let covered = u128::from(HOG_CPUS.load(Ordering::Relaxed)) == all.bits();
     check_timing(busy, format_args!("窃取用例中有核空闲或空闲等待超过上界"));
     check(steals as usize >= n - 1, "其他核应从引导处理器的队列窃取任务");
     check(covered, "窃取后任务没有铺到每一个核");

@@ -24,13 +24,24 @@ pub fn affinity_set(ptr:u64)->i64 {
  let Some(pid)=proc::current_process() else {return err(SYSTEM_ERROR_RIGHTS_DENIED);};
  let b=match read(ptr) {Ok(b)=>b,Err(e)=>return e};
  let Some(a)=kernel_core::rt_abi::AffinityArgs::decode(&b) else {return err(SYSTEM_ERROR_INVALID_ARGUMENT);};
- let mut set=CpuSet::EMPTY;for c in 0..32 {if a.cpus&(1u64<<c)!=0 {set.insert(c);}}
+ let mut set=CpuSet::EMPTY;
+ for c in 0..64 {
+  if a.cpus & (1u64 << c) != 0 && !set.insert(c) {
+   return err(SYSTEM_ERROR_INVALID_ARGUMENT);
+  }
+ }
  let result=kobj::with(|t|match target(t,pid,a.target) {Ok(id)=>sched::set_affinity_deferred(id,set).map_err(|_|err(SYSTEM_ERROR_INVALID_ARGUMENT)),Err(e)=>Err(e)});
  match result {Ok(stay)=>{if !stay {sched::yield_now();}0},Err(e)=>e}
 }
 pub fn affinity_get(raw:u64)->i64 {
  let Some(pid)=proc::current_process() else {return err(SYSTEM_ERROR_RIGHTS_DENIED);};
- kobj::with(|t|match target(t,pid,raw) {Ok(id)=>sched::task_affinity(id).map(|s|i64::from(s.bits())).unwrap_or(err(SYSTEM_HANDLE_ERROR_INVALID)),Err(e)=>e})
+ kobj::with(|t|match target(t,pid,raw) {
+  Ok(id)=>sched::task_affinity(id)
+   .and_then(|s|s.bits_u64())
+   .and_then(|bits|i64::try_from(bits).ok())
+   .unwrap_or(err(SYSTEM_HANDLE_ERROR_INVALID)),
+  Err(e)=>e
+ })
 }
 
 /// `system.task.syscalls.set(target, calls_ptr, flags)`：把任务的可用系统调用集合替换为

@@ -656,7 +656,7 @@ pub fn run() {
             let online = sched::online_cpus();
             kprintln!(
                 "[JSR-COMPAT-XSTATE-MATRIX] scheduler_online={:#x}",
-                u64::from(online.bits())
+                online.bits()
             );
             let _ = run_program_on(
                 "ubuntu-dynamic-xstate-matrix-warmup",

@@ -1706,12 +1706,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "da5f971f246bdfdeea59050b8dfafa9eb3dde17c057787b69b32a275ffaf6e4d",
-      "path": "compat-core/src/fd.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "da92953655d894ad3af9722542b637272e549cb75738a1d9f7dd54b3a6df2068",
       "path": "kernel/src/linux_abi.rs",
       "rules": "HC-G6"
@@ -2042,12 +2036,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "fd82b7bb6b7575f81b46851ecd62b1e87714933f0e9f0995c9b396857a1b30d4",
-      "path": "kernel-core/src/smp.rs",
-      "rules": "HC-G1,HC-G8"
-    },
-    {
-      "count": 1,
       "fingerprint": "fd892f1d25fad84c7c586621577d079979cae3afc7f82770b630572c51185f12",
       "path": "lifecycle-model/src/manifest.rs",
       "rules": "HC-G1"
@@ -2097,5 +2085,5 @@
     "user",
     "xtask"
   ],
-  "total": 437
+  "total": 435
 }

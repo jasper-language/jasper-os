@@ -27,6 +27,9 @@ const ESTAT_IPI: u64 = 1 << 12;
 
 static CPU_COUNT: AtomicU32 = AtomicU32::new(1);
 static CPU_DROPPED: AtomicU32 = AtomicU32::new(0);
+static CPU_DISCOVERED: AtomicU32 = AtomicU32::new(1);
+static CPU_CONVERSION_FAILURES: AtomicU32 = AtomicU32::new(0);
+static CPU_DISABLED: AtomicU32 = AtomicU32::new(0);
 static TIMER_HZ: AtomicU32 = AtomicU32::new(100);
 static HW_IDS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 
@@ -140,16 +143,32 @@ pub fn discover_fdt(efi_boot: bool, system_table: u64) -> Result<FirmwareFdt, &'
     let topology = cpus.topology;
     let discovered = topology.count();
     let admitted = discovered.min(MAX_CPUS);
+    let conversion_failures = topology.dropped;
+    let discovered_u32 =
+        u32::try_from(discovered).map_err(|_| "fdt-cpu-inventory-overflow")?;
+    let conversion_u32 =
+        u32::try_from(conversion_failures).map_err(|_| "fdt-cpu-conversion-overflow")?;
+    let disabled_u32 =
+        u32::try_from(topology.disabled).map_err(|_| "fdt-cpu-disabled-overflow")?;
+    let dropped_u32 = u32::try_from(kernel_core::smp::unadmitted_inventory(
+        discovered,
+        admitted,
+        conversion_failures,
+    ))
+    .map_err(|_| "fdt-cpu-dropped-overflow")?;
     // Preserve the firmware inventory overflow for the unified SMP gate.
     // Rebuilding from the fixed hardware-ID table must not make an unsupported
     // larger machine look like a complete smaller machine.
     // 保留固件原始库存溢出；从固定硬件 ID 表重建时，不能把超限机器伪装成
     // 完整但更小的机器。
-    CPU_DROPPED.store(
-        kernel_core::smp::unadmitted_inventory(discovered, admitted, topology.dropped) as u32,
+    CPU_DISCOVERED.store(discovered_u32, Ordering::Release);
+    CPU_CONVERSION_FAILURES.store(conversion_u32, Ordering::Release);
+    CPU_DISABLED.store(disabled_u32, Ordering::Release);
+    CPU_DROPPED.store(dropped_u32, Ordering::Release);
+    CPU_COUNT.store(
+        u32::try_from(admitted).map_err(|_| "fdt-cpu-admitted-overflow")?,
         Ordering::Release,
     );
-    CPU_COUNT.store(admitted as u32, Ordering::Release);
     for index in 0..admitted {
         HW_IDS[index].store(topology.hw_id(index).unwrap_or(0), Ordering::Release);
     }
@@ -231,6 +250,9 @@ fn topology() -> Topology {
     topology.dropped = topology
         .dropped
         .saturating_add(CPU_DROPPED.load(Ordering::Acquire) as usize);
+    topology.disabled = topology
+        .disabled
+        .saturating_add(CPU_DISABLED.load(Ordering::Acquire) as usize);
     topology
 }
 

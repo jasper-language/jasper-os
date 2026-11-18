@@ -4707,7 +4707,7 @@ fn linux_sched_getaffinity(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrn
     let affinity = sched::task_affinity(task)
         .ok_or(CompatErrno::NoProcess)?
         .intersect(sched::online_cpus());
-    let mask = u64::from(affinity.bits());
+    let mask = affinity.bits_u64().ok_or(CompatErrno::Invalid)?;
     copy_to_user(args[2], &mask.to_le_bytes(), KERNEL_MASK_BYTES)
         .map_err(|_| CompatErrno::Fault)?;
     Ok(KERNEL_MASK_BYTES as u64)

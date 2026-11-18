@@ -268,8 +268,9 @@ mod tests {
             b.stop(c, c as u64, 0).unwrap();
         }
         assert_eq!(b.stopped().len(), MAX_CPUS - 1);
+        let restart = MAX_CPUS as u64 + 100;
         for c in 1..MAX_CPUS {
-            assert_eq!(b.restart(c, 100, 0), Some(100 - c as u64));
+            assert_eq!(b.restart(c, restart, 0), Some(restart - c as u64));
         }
         assert!(b.stopped().is_empty());
     }

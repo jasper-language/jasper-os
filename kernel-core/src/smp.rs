@@ -25,7 +25,7 @@ use alloc::vec::Vec;
 
 /// 内核支持的逻辑处理器数上限（[`CpuSet`] 的位宽）。
 /// Maximum number of logical processors.
-pub const MAX_CPUS: usize = 32;
+pub const MAX_CPUS: usize = BOOTSTRAP_CPUS; // JASPER-HARDCODE-REVIEW: issue=35 source=bootstrap-cpu-inventory reason=runtime-admission-matches-preheap-inventory-with-explicit-overflow
 /// Bootstrap CPU inventory that must be usable before the kernel heap exists.
 ///
 /// 内核堆就绪前必须可用的处理器库存上限。
@@ -136,21 +136,30 @@ impl IpiKind {
 /// 逻辑处理器下标的位集合。
 /// Bit set of logical processor indices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct CpuSet(u32);
+pub struct CpuSet([u64; CPU_SET_WORDS]);
+
+const CPU_SET_WORDS: usize = MAX_CPUS.div_ceil(64);
 
 impl CpuSet {
     /// 空集合。
     /// Empty set.
-    pub const EMPTY: CpuSet = CpuSet(0);
+    pub const EMPTY: CpuSet = CpuSet([0; CPU_SET_WORDS]);
 
-    /// 前 `n` 个处理器（`n` 超过容量时截到容量）。
-    /// The first `n` processors.
+    /// 前 `n` 个处理器；`n` 超过容量时返回全部可表示成员。
+    /// The first `n` processors, capped to the explicit capacity.
     pub const fn first(n: usize) -> CpuSet {
-        if n >= MAX_CPUS {
-            CpuSet(u32::MAX >> (32 - MAX_CPUS))
-        } else {
-            CpuSet((1u32 << n) - 1)
+        let mut words = [0u64; CPU_SET_WORDS];
+        let full = n / 64;
+        let tail = n % 64;
+        let mut index = 0;
+        while index < full && index < CPU_SET_WORDS {
+            words[index] = u64::MAX;
+            index += 1;
         }
+        if index < CPU_SET_WORDS && tail != 0 {
+            words[index] = (1u64 << tail) - 1;
+        }
+        CpuSet(words)
     }
 
     /// 加入下标；超出容量返回 `false` 且集合不变。
@@ -159,7 +168,7 @@ impl CpuSet {
         if cpu >= MAX_CPUS {
             return false;
         }
-        self.0 |= 1 << cpu;
+        self.0[cpu / 64] |= 1u64 << (cpu % 64);
         true
     }
 
@@ -167,26 +176,39 @@ impl CpuSet {
     /// Remove `cpu`.
     pub fn remove(&mut self, cpu: usize) {
         if cpu < MAX_CPUS {
-            self.0 &= !(1 << cpu);
+            self.0[cpu / 64] &= !(1u64 << (cpu % 64));
         }
     }
 
     /// 是否包含下标。
     /// Whether `cpu` is a member.
     pub const fn contains(self, cpu: usize) -> bool {
-        cpu < MAX_CPUS && self.0 & (1 << cpu) != 0
+        cpu < MAX_CPUS && self.0[cpu / 64] & (1u64 << (cpu % 64)) != 0
     }
 
     /// 是否为空。
     /// Whether the set is empty.
     pub const fn is_empty(self) -> bool {
-        self.0 == 0
+        let mut index = 0;
+        while index < CPU_SET_WORDS {
+            if self.0[index] != 0 {
+                return false;
+            }
+            index += 1;
+        }
+        true
     }
 
     /// 成员数。
     /// Number of members.
     pub const fn len(self) -> usize {
-        self.0.count_ones() as usize
+        let mut total = 0;
+        let mut index = 0;
+        while index < CPU_SET_WORDS {
+            total += self.0[index].count_ones() as usize;
+            index += 1;
+        }
+        total
     }
 
     /// 去掉某个下标后的集合。
@@ -199,13 +221,47 @@ impl CpuSet {
     /// 交集。
     /// Intersection of two sets.
     pub const fn intersect(self, other: CpuSet) -> CpuSet {
-        CpuSet(self.0 & other.0)
+        let mut words = [0u64; CPU_SET_WORDS];
+        let mut index = 0;
+        while index < CPU_SET_WORDS {
+            words[index] = self.0[index] & other.0[index];
+            index += 1;
+        }
+        CpuSet(words)
     }
 
-    /// 原始位（诊断输出用）。
-    /// Raw bits.
-    pub const fn bits(self) -> u32 {
-        self.0
+    /// 原始位（诊断输出与测试用）。
+    /// Raw bits for diagnostics and tests.
+    pub const fn bits(self) -> u128 {
+        let mut value = 0u128;
+        let mut index = 0;
+        while index < CPU_SET_WORDS && index < 2 {
+            value |= (self.0[index] as u128) << (index * 64);
+            index += 1;
+        }
+        value
+    }
+
+    /// Low 64 bits, or `None` when a member cannot be represented by legacy
+    /// 64-bit affinity ABIs.
+    ///
+    /// 低 64 位；如果含旧 64 位亲和 ABI 无法表示的成员则返回 `None`。
+    pub const fn bits_u64(self) -> Option<u64> {
+        if CPU_SET_WORDS > 1 && self.0[1] != 0 {
+            return None;
+        }
+        Some(self.0[0])
+    }
+
+    /// One 64-bit word of the set for diagnostics that exceed the legacy ABI.
+    ///
+    /// 供超出旧 ABI 的诊断读取单个 64 位字。
+    pub const fn word(self, index: usize) -> u64 {
+        if index < CPU_SET_WORDS {
+            self.0[index]
+        } else {
+            0
+        }
     }
 
     /// 按升序遍历成员。
@@ -829,15 +885,26 @@ mod tests {
         assert_eq!(s.iter().collect::<Vec<_>>(), vec![0, 3, MAX_CPUS - 1]);
         assert_eq!(s.without(3).len(), 2);
         assert_eq!(CpuSet::first(4).bits(), 0b1111);
-        assert_eq!(CpuSet::first(100).len(), MAX_CPUS);
+        assert_eq!(CpuSet::first(100).len(), 100);
         assert!(CpuSet::first(0).is_empty());
     }
 
     #[test]
-    fn cpu_set_covers_all_slots() {
-        // HARDEN-1：CPU 容量不得超过位图宽度，否则 CpuSet 会静默截断。
-        assert!(MAX_CPUS <= 32, "CpuSet 是 u32 位图，MAX_CPUS 不能超过 32");
-        assert_eq!(CpuSet::first(MAX_CPUS).len(), MAX_CPUS);
+    fn cpu_set_covers_issue_35_topologies_without_silent_32_cpu_cap() {
+        for count in [1, 32, 33, 64, 128] {
+            let set = CpuSet::first(count);
+            assert_eq!(set.len(), count);
+            for cpu in 0..count {
+                assert!(set.contains(cpu), "missing cpu {cpu} in {count}-CPU set");
+            }
+        }
+        let all = CpuSet::first(MAX_CPUS);
+        assert_eq!(all.len(), MAX_CPUS);
+        assert!(!CpuSet::first(MAX_CPUS.saturating_add(1)).contains(MAX_CPUS));
+        assert_eq!(CpuSet::first(64).bits_u64(), Some(u64::MAX));
+        let high = CpuSet::first(65);
+        assert_eq!(high.bits_u64(), None);
+        assert_eq!(high.word(1), 1);
     }
 
     #[test]
@@ -865,6 +932,26 @@ mod tests {
             })
             .collect();
         assert_eq!(t.iter().collect::<Vec<_>>(), expected);
+    }
+
+    #[test]
+    fn topology_preserves_issue_35_inventory_widths_and_disabled_facts() {
+        for count in [1, 32, 33, 64, 128] {
+            let mut topology = Topology::boot_only(0);
+            for hw in 1..count {
+                topology.push(hw as u32);
+            }
+            assert_eq!(topology.count(), count);
+            assert_eq!(topology.dropped, 0);
+            assert_eq!(topology.index_of((count - 1) as u32), Some(count - 1));
+        }
+        let mut topology = Topology::boot_only(0);
+        for hw in 1..=32 {
+            topology.push(hw);
+        }
+        topology.disabled = 2;
+        assert_eq!(topology.count(), 33);
+        assert_eq!(topology.disabled, 2);
     }
 
     #[test]
