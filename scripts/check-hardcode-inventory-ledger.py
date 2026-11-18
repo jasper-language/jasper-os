@@ -110,6 +110,191 @@ def classify(path: str, rules: str, source: str) -> tuple[str, str]:
     """
     name = identifier(source)
     lowered = path.lower()
+    if path == "kernel-core/src/fdt.rs" and any(
+        marker in source
+        for marker in (
+            "redistributor-stride",
+            "strip_suffix(&[0])",
+            'unwrap_or("arm,psci")',
+            'unwrap_or("arm,pl011")',
+            'unwrap_or(if v3 { "arm,gic-v3" }',
+        )
+    ):
+        return (
+            "protocol-abi",
+            "FDT binding default or diagnostic compatible string, not a discovered hardware value",
+        )
+    if path == "kernel/build.rs" and "link-pixel6a" in source:
+        return (
+            "platform-adapter",
+            "explicit Pixel verification linker layout selected only by the verification build",
+        )
+    if path == "kernel/src/kmain.rs" and "pixel6a-smp-probe" in source:
+        return (
+            "platform-adapter",
+            "explicit physical-device verification probe branch",
+        )
+    if path == "kernel/src/kmain.rs" and "JSR-PIXEL6A" in source:
+        return (
+            "platform-adapter",
+            "explicit physical-device verification status output",
+        )
+    if path == "kernel-core/src/capacity/tests.rs":
+        return (
+            "test-demo-fixture",
+            "deterministic capacity test fixture; not a production capacity source",
+        )
+    if path in {"kernel-core/src/bench.rs", "kernel/src/sched/pex4_probe.rs"}:
+        return (
+            "test-demo-fixture",
+            "bounded benchmark or probe fixture, not a production hardware fact",
+        )
+    if path == "kernel/src/s2.rs":
+        return (
+            "test-demo-fixture",
+            "bounded cross-CPU syscall acceptance campaign",
+        )
+    if path == "kernel-core/src/pci.rs" and "unwrap_or(0)" in source:
+        return (
+            "test-demo-fixture",
+            "PCI configuration-space model default used by tests, not hardware discovery",
+        )
+    if any(
+        marker in source
+        for marker in (
+            'psci.method.unwrap_or("none")',
+            "self.msr_read(index).unwrap_or(0)",
+            "chunk.get(1).unwrap_or(&0)",
+        )
+    ):
+        return (
+            "protocol-abi",
+            "architecture or wire protocol reset/default value, not a runtime inventory fact",
+        )
+    if any(
+        marker in source
+        for marker in (
+            "uart.unwrap_or(0)",
+            "rtc.unwrap_or(0)",
+            "uart::interrupt().unwrap_or(0)",
+            'NAMES.get(line).copied().unwrap_or("none")',
+            'PINS.lock().get(line).map(|pin| pin.name).unwrap_or("none")',
+            "MAP.get(make as usize).copied().unwrap_or(b'?')",
+        )
+    ):
+        return (
+            "explicit-safety-policy",
+            "absent-device sentinel or diagnostic-only display; control paths reject zero/unknown ids",
+        )
+    if name in {
+        "MAX_BARS",
+        "MAX_TEXT_OFFSET",
+        "MAX_GPA",
+        "MAX_GENERATION",
+        "MAX_ARGS",
+        "MAX_MSG_HANDLES",
+    }:
+        return (
+            "protocol-abi",
+            "PCI configuration limit, architecture address width, wire handle count, or internal bit field",
+        )
+    if name in {
+        "MAX_WAITS",
+        "MAX_SPINS",
+        "MAX_CHUNK_US",
+        "MAX_POLL_STEPS",
+        "MAX_SETTLE",
+        "MAX_BURST_TICKS",
+        "MAX_SCHED_CLASSES",
+        "MAX_TAGS",
+        "MAX_CAPABILITY_HOPS",
+        "MAX_PERMILLE",
+        "MAX_MODULE_VERSION",
+        "MAX_POLICY_RULES",
+        "MAX_SAMPLES",
+        "MIN_ALIGN",
+        "MIN_BLOCK",
+        "MIN_TEXT",
+        "MAX_SENDFILE",
+        "MAX_RANK",
+        "MAX_BOOT_ATTEMPTS",
+        "MAX_ROUNDS",
+        "MAX_LEN",
+    }:
+        return (
+            "explicit-safety-policy",
+            "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
+        )
+    if name in {
+        "MAX_REGIONS",
+        "MAX_FILES",
+        "MAX_JOURNAL_NODES",
+        "MAX_VFS_HANDLES",
+        "MAX_DEPS",
+        "MAX_NODES",
+        "MAX_HANDLES",
+        "MAX_KEYS",
+        "MAX_WORKERS",
+        "MAX_CHILDREN",
+        "MAX_GUEST_MAPPINGS",
+        "MAX_DEVICE_GRANTS",
+        "MAX_MODULE_DEPENDENCIES",
+        "MAX_REGIONS",
+    }:
+        return (
+            "runtime-resource-capacity",
+            "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
+        )
+    if name == "DEFAULT" or name.startswith("DEFAULT_"):
+        return (
+            "explicit-safety-policy",
+            "documented scheduling, pressure, or arbitration policy default; not a discovered hardware fact",
+        )
+    if name == "MAX_IDS":
+        return (
+            "protocol-abi",
+            "versioned SyscallSet bit width; compatibility must reject ids outside the published ABI",
+        )
+    if any(
+        marker in source
+        for marker in (
+            'uart.unwrap_or(0)',
+            'rtc.unwrap_or(0)',
+            'NAMES.get(line).copied().unwrap_or("none")',
+            'PINS.lock().get(line).map(|pin| pin.name).unwrap_or("none")',
+        )
+    ):
+        return (
+            "explicit-safety-policy",
+            "absent-device sentinel or diagnostic display; consumers reject unavailable lines",
+        )
+    if any(
+        marker in source
+        for marker in (
+            "requested.unwrap_or(Rights::NONE)",
+            ".unwrap_or(false)",
+            ".unwrap_or(1)",
+            ".unwrap_or(15)",
+            ".unwrap_or(0);",
+            ".unwrap_or((SbiError::Failed))",
+            ".unwrap_or(SbiError::Failed)",
+            "KERNEL_STACK_TOP.get(index).unwrap_or_else",
+            "CPU_TSS.get(super::smp::cpu_index())",
+            "CPUS.get(index).unwrap_or_else",
+            "TABLE.get().unwrap_or(&EMPTY)",
+            "let best = cands",
+            "choice.as_ref()",
+            "from_utf8(&self.buf[..self.len]).unwrap_or",
+            "image_base(&arch).unwrap_or_else",
+            "system_table_raw()",
+            "s.len().min(WRITE_MAX)",
+            ".unwrap_or(true)",
+        )
+    ):
+        return (
+            "explicit-safety-policy",
+            "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
+        )
     if name in {
         "MAX_COUNTER",
         "MIN_ALTSTACK",

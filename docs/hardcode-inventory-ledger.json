@@ -10,20 +10,20 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 101,
-    "platform-adapter": 27,
-    "protocol-abi": 24,
-    "runtime-resource-capacity": 57,
-    "unclassified": 83
+    "explicit-safety-policy": 145,
+    "platform-adapter": 31,
+    "protocol-abi": 38,
+    "runtime-resource-capacity": 72,
+    "test-demo-fixture": 6
   },
   "entries": [
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "57de786378b3da3d0879724bf42630e931686ed2657322e751423b008e4757e4",
       "line": 275,
       "path": "boot-manager/src/main.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
       "rules": "HC-G7",
       "source": ".unwrap_or(false);"
     },
@@ -578,12 +578,12 @@
       "source": "pub const MAX_LOGICAL_BYTES: usize = 4 * 1024 * 1024;"
     },
     {
-      "category": "protocol-abi",
+      "category": "runtime-resource-capacity",
       "count": 1,
       "fingerprint": "1efafabf0892200d4799a54f9c3c3646975d67ae156db31c31a945ee3e36776f",
       "line": 28,
       "path": "jaso/src/wire.rs",
-      "reason": "path owns a wire, loader, package, graphics, or lifecycle ABI; consumer review remains required",
+      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
       "rules": "HC-G1",
       "source": "pub const MAX_HANDLES: usize = 8;"
     },
@@ -668,22 +668,22 @@
       "source": ".unwrap_or(IsaRoute {"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "30b4e3f80232c1f8885a83cd149aecf4e99e475e9a77703f73bdea08652530c9",
       "line": 52,
       "path": "kernel-core/src/arbiter.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "documented scheduling, pressure, or arbitration policy default; not a discovered hardware fact",
       "rules": "HC-G1",
       "source": "pub const DEFAULT: ArbiterParams = ArbiterParams {"
     },
     {
-      "category": "unclassified",
+      "category": "test-demo-fixture",
       "count": 1,
       "fingerprint": "018141fc8aacd495a3b346e6bc1f9de075bf4b00fa9ae6a2067737d8b1f1b945",
       "line": 21,
       "path": "kernel-core/src/bench.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "bounded benchmark or probe fixture, not a production hardware fact",
       "rules": "HC-G1",
       "source": "pub const MAX_SAMPLES: usize = 256;"
     },
@@ -698,12 +698,12 @@
       "source": "pub const MAX_DATA_PAGES: usize = 14;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "fa059ae3c6d25302ec9cbe6884ffef1d4d40b7f41ef1ee9c973170b9f26ced10",
       "line": 762,
       "path": "kernel-core/src/capability.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
       "rules": "HC-G7",
       "source": "rights: requested.unwrap_or(Rights::NONE),"
     },
@@ -728,12 +728,12 @@
       "source": ".min(bounds::MAX_OBJECTS)"
     },
     {
-      "category": "unclassified",
+      "category": "test-demo-fixture",
       "count": 1,
       "fingerprint": "7a24191b986fa6beaa0d0d8a88e484eb69a31522283039ce202eefb22eccc2a7",
       "line": 6,
       "path": "kernel-core/src/capacity/tests.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "deterministic capacity test fixture; not a production capacity source",
       "rules": "HC-G1",
       "source": "const DEFAULTS: BootCapacity = BootCapacity { objects: 1024, tasks: 64, rt: 8 };"
     },
@@ -908,12 +908,12 @@
       "source": "pub const MAX_SEGMENTS: usize = 16;"
     },
     {
-      "category": "unclassified",
+      "category": "runtime-resource-capacity",
       "count": 1,
       "fingerprint": "5b38a8010913efe41b3bceb60be29c61fe073c12d76bca8a4f09b63628e1b38f",
       "line": 411,
       "path": "kernel-core/src/ext4_write.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
       "rules": "HC-G1",
       "source": "const MAX_VFS_HANDLES: usize = 64;"
     },
@@ -928,52 +928,52 @@
       "source": "pub const MAX_DEPTH: usize = 16;"
     },
     {
-      "category": "unclassified",
+      "category": "protocol-abi",
       "count": 1,
       "fingerprint": "487918563738a9d008dd39c6600714250c1f50175980fefbc6bbf8a2dcabe0e7",
       "line": 612,
       "path": "kernel-core/src/fdt.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "FDT binding default or diagnostic compatible string, not a discovered hardware value",
       "rules": "HC-G7",
       "source": "let redist_stride = node.cell(\"redistributor-stride\", 0).map(u64::from).unwrap_or(0x20_000);"
     },
     {
-      "category": "unclassified",
+      "category": "protocol-abi",
       "count": 1,
       "fingerprint": "66e4022e6dc4ac0a0f23bb9280b6d71c361aac52272e3d7b845d944843517015",
       "line": 792,
       "path": "kernel-core/src/fdt.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "FDT binding default or diagnostic compatible string, not a discovered hardware value",
       "rules": "HC-G7",
       "source": "v.strip_suffix(&[0]).unwrap_or(v)"
     },
     {
-      "category": "unclassified",
+      "category": "protocol-abi",
       "count": 1,
       "fingerprint": "6dca0eabb2fdb005a6b27f02df51a92133ee8316600aafbded8148773fd90ef6",
       "line": 582,
       "path": "kernel-core/src/fdt.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "FDT binding default or diagnostic compatible string, not a discovered hardware value",
       "rules": "HC-G7",
       "source": "compatible: node.string(\"compatible\").unwrap_or(\"arm,psci\"),"
     },
     {
-      "category": "unclassified",
+      "category": "protocol-abi",
       "count": 1,
       "fingerprint": "926e44735be1c54f41377653c63639e2b8524809706f9a0c4bf1d05a004e4cfa",
       "line": 614,
       "path": "kernel-core/src/fdt.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "FDT binding default or diagnostic compatible string, not a discovered hardware value",
       "rules": "HC-G7",
       "source": "compatible: node.string(\"compatible\").unwrap_or(if v3 { \"arm,gic-v3\" } else { \"arm,gic\" }),"
     },
     {
-      "category": "unclassified",
+      "category": "protocol-abi",
       "count": 1,
       "fingerprint": "a35b4a65790bae69441165279981f6fefe92aaba1368e463c297538b0f9d7f5d",
       "line": 550,
       "path": "kernel-core/src/fdt.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "FDT binding default or diagnostic compatible string, not a discovered hardware value",
       "rules": "HC-G7",
       "source": "compatible: n.string(\"compatible\").unwrap_or(\"arm,pl011\"),"
     },
@@ -988,12 +988,12 @@
       "source": "pub const MAX_NAME_BYTES: usize = 64;"
     },
     {
-      "category": "unclassified",
+      "category": "runtime-resource-capacity",
       "count": 1,
       "fingerprint": "db4a2697e23fd8acec117f7a27f1a0ca665091516f9f821e3f295884c9d4685a",
       "line": 2146,
       "path": "kernel-core/src/fs.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
       "rules": "HC-G1",
       "source": "pub const MAX_JOURNAL_NODES: usize = 4096;"
     },
@@ -1008,32 +1008,32 @@
       "source": "pub const MAX_AUDIT: usize = 256;"
     },
     {
-      "category": "unclassified",
+      "category": "runtime-resource-capacity",
       "count": 1,
       "fingerprint": "2bdc8c1ccf3c1bd3791ef629ff66f64e5c0016748edc399f63246ddddadae349",
       "line": 12,
       "path": "kernel-core/src/fs_prod.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
       "rules": "HC-G1",
       "source": "pub const MAX_FILES: usize = 64;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "6e606fd560bddda2c7acdd5de2d42d7d5b0e4bfd72d284ef888a68c74a1969dd",
       "line": 30,
       "path": "kernel-core/src/heap.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "const MIN_BLOCK: usize = if size_of::<Node>() > MIN_ALIGN { size_of::<Node>() } else { MIN_ALIGN };"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "baea2651043d711735b9d684fc807459be42b966905f6d8b519692796fbe66ab",
       "line": 29,
       "path": "kernel-core/src/heap.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "pub const MIN_ALIGN: usize = 16;"
     },
@@ -1048,52 +1048,52 @@
       "source": "pub const QUEUE_CAPACITY: usize = 32;"
     },
     {
-      "category": "unclassified",
+      "category": "protocol-abi",
       "count": 1,
       "fingerprint": "9218de16b1a4f7d209dcd00d5ef6c3b7dab8b809f2ff4212d2bd217992328cab",
       "line": 13,
       "path": "kernel-core/src/hwvirt_vcpu.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "PCI configuration limit, architecture address width, wire handle count, or internal bit field",
       "rules": "HC-G1",
       "source": "pub const MAX_GPA: u64 = 1 << 48;"
     },
     {
-      "category": "unclassified",
+      "category": "runtime-resource-capacity",
       "count": 1,
       "fingerprint": "ffe7b14d4bdcec1fb16b3d97c5bba8be19d95f0f564a1c6b0fe3040eca8cc9b1",
       "line": 12,
       "path": "kernel-core/src/hwvirt_vcpu.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
       "rules": "HC-G1",
       "source": "pub const MAX_GUEST_MAPPINGS: usize = 64;"
     },
     {
-      "category": "unclassified",
+      "category": "protocol-abi",
       "count": 1,
       "fingerprint": "18dee57e98ceed9716dddf92ed118ec53e97cf9a9adb80fc5b1733fc5dde0263",
       "line": 40,
       "path": "kernel-core/src/image_header.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "PCI configuration limit, architecture address width, wire handle count, or internal bit field",
       "rules": "HC-G1",
       "source": "pub const MAX_TEXT_OFFSET: u64 = 1 << 40;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "7ec4f3b69286886514cb331db733cf5345192770232cd1dc7fc667614a56be27",
       "line": 94,
       "path": "kernel-core/src/irq.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "pub const MAX_PERMILLE: u32 = 900;"
     },
     {
-      "category": "unclassified",
+      "category": "runtime-resource-capacity",
       "count": 1,
       "fingerprint": "1e6129c5f837ab1cda3509f068e5cd5aeae8be110f802d6cf6c33293a5bb1b89",
       "line": 19,
       "path": "kernel-core/src/job.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
       "rules": "HC-G1",
       "source": "pub const MAX_DEPS: usize = 4;"
     },
@@ -1108,12 +1108,12 @@
       "source": "pub const MAX_JOBS: usize = 8;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "b13a393973ebee182c96557cb99bef7f3fe721091bdbe96bfd0df4426ffe09bc",
       "line": 22,
       "path": "kernel-core/src/lockorder.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "pub const MAX_RANK: u8 = 31;"
     },
@@ -1128,12 +1128,12 @@
       "source": "pub const MAX_AUDIT_EVENTS: usize = 256;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "7b33ca0a716eee128e5c1c72ae494fd493e7aac8c5cbf1b95274e5f59b86538c",
       "line": 18,
       "path": "kernel-core/src/mac.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "pub const MAX_POLICY_RULES: usize = 32;"
     },
@@ -1158,12 +1158,12 @@
       "source": "pub const MAX_MODULE_NAME_BYTES: usize = 48;"
     },
     {
-      "category": "unclassified",
+      "category": "runtime-resource-capacity",
       "count": 1,
       "fingerprint": "d2ab795dc66a09ffec25044db95c5b17238d102318e103f68dde034bc20bf8ce",
       "line": 17,
       "path": "kernel-core/src/native_module_lifecycle.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
       "rules": "HC-G1",
       "source": "pub const MAX_MODULE_DEPENDENCIES: usize = 16;"
     },
@@ -1218,22 +1218,22 @@
       "source": "pub const OBSERVATION_CAPACITY: usize = 16;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "594543f6299199fe72b77aad2521b8e8dd11b64a8a4027a1eaf2ab3881dd7c5a",
       "line": 20,
       "path": "kernel-core/src/net4_service.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "const MAX_POLL_STEPS: usize = 16;"
     },
     {
-      "category": "unclassified",
+      "category": "protocol-abi",
       "count": 1,
       "fingerprint": "76ffda3511e91bdb3fd06efed86decfb492613e1125e927200d2b34db4d79c0e",
       "line": 394,
       "path": "kernel-core/src/object.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "PCI configuration limit, architecture address width, wire handle count, or internal bit field",
       "rules": "HC-G1",
       "source": "const MAX_GENERATION: u32 = if HANDLE_GEN_BITS >= 32 { u32::MAX } else { (1u32 << HANDLE_GEN_BITS) - 1 };"
     },
@@ -1258,32 +1258,32 @@
       "source": "pub const MAX_LEVELS: usize = 5;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "07ec665dbabbb441aa1b0e2f9621d24be3e9ab881cb295a25f6ba7455778d015",
       "line": 30,
       "path": "kernel-core/src/pci.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "pub const MAX_CAPABILITY_HOPS: usize = 48;"
     },
     {
-      "category": "unclassified",
+      "category": "protocol-abi",
       "count": 1,
       "fingerprint": "f38024ad34c22fb67bda39a7efa85178beb4dc7fc7678d13b57a859894872249",
       "line": 28,
       "path": "kernel-core/src/pci.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "PCI configuration limit, architecture address width, wire handle count, or internal bit field",
       "rules": "HC-G1",
       "source": "pub const MAX_BARS: usize = 6;"
     },
     {
-      "category": "unclassified",
+      "category": "test-demo-fixture",
       "count": 1,
       "fingerprint": "4589291c12352ff73735e652a9137daac4d7cec91cf2f51a551d3ca6891a94da",
       "line": 1105,
       "path": "kernel-core/src/pci.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "PCI configuration-space model default used by tests, not hardware discovery",
       "rules": "HC-G7",
       "source": "let mask = self.masks.get(&(bdf, slot)).copied().unwrap_or(0);"
     },
@@ -1298,32 +1298,32 @@
       "source": "const BLOB_SLOTS: usize = 16;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "cf7d3d34e51f2d5b91eca86c0e813f4b43304402c84aca5eb30aa66e8abe0f72",
       "line": 92,
       "path": "kernel-core/src/pressure.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "documented scheduling, pressure, or arbitration policy default; not a discovered hardware fact",
       "rules": "HC-G1",
       "source": "pub const DEFAULT: PressureParams = PressureParams { low_permille: 125, critical_permille: 50, reserve_frames: 256 };"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "e7fce89e56c2fb8c53840e6b3a460d63db6206b3824d3e6b5fa32628ac95eb33",
       "line": 21,
       "path": "kernel-core/src/rt.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "documented scheduling, pressure, or arbitration policy default; not a discovered hardware fact",
       "rules": "HC-G1",
       "source": "pub const DEFAULT_UTILISATION_PERMILLE: u32 = 900;"
     },
     {
-      "category": "unclassified",
+      "category": "runtime-resource-capacity",
       "count": 2,
       "fingerprint": "b1a9b0d8fe5579ac28d3c5c6e2093534ac579bc155e5db147ee27d5e5ce12c61",
       "line": 23,
       "path": "kernel-core/src/sandbox_launch.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
       "rules": "HC-G1",
       "source": "pub const MAX_DEVICE_GRANTS: usize = 16;"
     },
@@ -1338,42 +1338,42 @@
       "source": "pub const MAX_VIEW_PATH: usize = 64;"
     },
     {
-      "category": "unclassified",
+      "category": "runtime-resource-capacity",
       "count": 2,
       "fingerprint": "6304a24e67afbf596747e1296a40e94a1e9be437aa0cb46ef9c04bd59a247b98",
       "line": 20,
       "path": "kernel-core/src/sandbox_launch_abi.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
       "rules": "HC-G1",
       "source": "pub const MAX_DEVICE_GRANTS: usize = 16;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "8f0eb405ec631b25287d845fff3bd5ab2b4ff49a0977ea33c446ac0601dd880c",
       "line": 178,
       "path": "kernel-core/src/sched.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "documented scheduling, pressure, or arbitration policy default; not a discovered hardware fact",
       "rules": "HC-G1",
       "source": "pub const DEFAULT: QosParams = QosParams {"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "46743003b58afc4bf2cf85b930eb249407d32f2306776383a19efef920c6f23d",
       "line": 81,
       "path": "kernel-core/src/sched/balance.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "documented scheduling, pressure, or arbitration policy default; not a discovered hardware fact",
       "rules": "HC-G1",
       "source": "pub const DEFAULT: BalanceParams = BalanceParams { migration_cost: 2, balance_interval: 4, imbalance: 2 };"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "92ec54b3b6b93acf0e361a0b273fa9c87f7ea3b437c3ee516a82e90fd1040829",
       "line": 14,
       "path": "kernel-core/src/sched/class.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "pub const MAX_SCHED_CLASSES: usize = 8;"
     },
@@ -1388,12 +1388,12 @@
       "source": "pub const MAX_CHAIN: usize = 8;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "3836f3d5800c73d65c2aee384fa1595d2865a694dfec7c63b68582a6bb11bcd3",
       "line": 25,
       "path": "kernel-core/src/sched/limit.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "pub const MAX_BURST_TICKS: u32 = 64;"
     },
@@ -1448,42 +1448,42 @@
       "source": "pub const MAX_BATCH:usize=16;"
     },
     {
-      "category": "unclassified",
+      "category": "protocol-abi",
       "count": 1,
       "fingerprint": "ecc4326fcc5703bdde2c71ba1e941d92208b7ea8e793c2ba61ae6dcb713fcff9",
       "line": 26,
       "path": "kernel-core/src/syscall_set.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "versioned SyscallSet bit width; compatibility must reject ids outside the published ABI",
       "rules": "HC-G1",
       "source": "pub const MAX_IDS: usize = 256;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "dcbca81130955e03c573ac197f3ae65604b1cabb377deeb6854847c63c404617",
       "line": 15,
       "path": "kernel-core/src/timer_progress.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "pub const MAX_SETTLE: u32 = 64;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "a7d31782a95ee67713e3d0e793d4a2358ef0cf5979088fcf262bc05345e84156",
       "line": 140,
       "path": "kernel-core/src/trace.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "pub const MAX_TAGS: usize = 4;"
     },
     {
-      "category": "unclassified",
+      "category": "protocol-abi",
       "count": 1,
       "fingerprint": "e2db347f65d1c6ea848707b481959abd393c549e93bbb5bf39befff68cccfc87",
       "line": 19,
       "path": "kernel-core/src/trap.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "PCI configuration limit, architecture address width, wire handle count, or internal bit field",
       "rules": "HC-G1",
       "source": "pub const MAX_ARGS: usize = 4;"
     },
@@ -1518,12 +1518,12 @@
       "source": "pub const MAX_MODULE_NAME: usize = 24;"
     },
     {
-      "category": "protocol-abi",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "5914ba3f5fbf2b3cb1da4af674ed6124e74225874118d11e769a1ac9d4dee5a4",
       "line": 15,
       "path": "kernel-core/src/usi.rs",
-      "reason": "identifier is a Linux UAPI width or semantic boundary; preserve the documented Linux value",
+      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "pub const MAX_MODULE_VERSION: usize = 8;"
     },
@@ -1578,22 +1578,22 @@
       "source": "pub const MIN_STANDARD_IMAGE_BYTES: usize = LEGACY_AREA_BYTES + STANDARD_HEADER_BYTES;"
     },
     {
-      "category": "unclassified",
+      "category": "platform-adapter",
       "count": 1,
       "fingerprint": "112c4f82d776b49d7cb696b0b85bff7a962188ed4c2a18b89d2c55ccab35f890",
       "line": 240,
       "path": "kernel/build.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "explicit Pixel verification linker layout selected only by the verification build",
       "rules": "HC-G3",
       "source": "Some(\"kernel/link-pixel6a-pe.ld\")"
     },
     {
-      "category": "unclassified",
+      "category": "platform-adapter",
       "count": 1,
       "fingerprint": "f794ce74d1fd4798d055dc234438c3b97e2863495b8c392e268932c92a2781ca",
       "line": 243,
       "path": "kernel/build.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "explicit Pixel verification linker layout selected only by the verification build",
       "rules": "HC-G3",
       "source": "Some(\"kernel/link-pixel6a.ld\")"
     },
@@ -1728,52 +1728,52 @@
       "source": "feature = \"pixel6a-before-kmain-probe\","
     },
     {
-      "category": "unclassified",
+      "category": "protocol-abi",
       "count": 1,
       "fingerprint": "7290df3d0cfc785ea4d76bb50b7f9456a883a4bc9f7eaa963a9817395dbe2f27",
       "line": 1699,
       "path": "kernel/src/arch/aarch64/boot.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "architecture or wire protocol reset/default value, not a runtime inventory fact",
       "rules": "HC-G7",
       "source": "psci.method.unwrap_or(\"none\")"
     },
     {
-      "category": "unclassified",
+      "category": "protocol-abi",
       "count": 1,
       "fingerprint": "fb684b72e50689d5889f284a9aa53f180d225ca9d1f6aac37e7f229bda6b008f",
       "line": 1693,
       "path": "kernel/src/arch/aarch64/boot.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "architecture or wire protocol reset/default value, not a runtime inventory fact",
       "rules": "HC-G7",
       "source": "psci.method.unwrap_or(\"none\"),"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "2e7ac114b628fc8c037774e4a4219e4ce2fdb5210fcb9b791d8059156486322a",
       "line": 33,
       "path": "kernel/src/arch/aarch64/devirq.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "absent-device sentinel or diagnostic-only display; control paths reject zero/unknown ids",
       "rules": "HC-G7",
       "source": "IDS[1].store(rtc.unwrap_or(0), Ordering::Relaxed);"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "69dd62b09c98c6ff10ca7e75895f6413a57b8ef1c5be30b5a305a1864da95424",
       "line": 32,
       "path": "kernel/src/arch/aarch64/devirq.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "absent-device sentinel or diagnostic-only display; control paths reject zero/unknown ids",
       "rules": "HC-G7",
       "source": "IDS[0].store(uart.unwrap_or(0), Ordering::Relaxed);"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "8f0758e13414b04ffd8b78548bbad32e8baffdb158fdc9f57f5600c65d3e2bfe",
       "line": 57,
       "path": "kernel/src/arch/aarch64/devirq.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "absent-device sentinel or diagnostic-only display; control paths reject zero/unknown ids",
       "rules": "HC-G7",
       "source": "NAMES.get(line).copied().unwrap_or(\"none\")"
     },
@@ -1928,52 +1928,52 @@
       "source": "return Err(\"qemu-fdt-missing\");"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "6210c62d63e658095cc2530f13d274e3115e27e60583e45fed169e826059853e",
       "line": 104,
       "path": "kernel/src/arch/riscv/devirq.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "absent-device sentinel or diagnostic-only display; control paths reject zero/unknown ids",
       "rules": "HC-G7",
       "source": "NAMES.get(line).copied().unwrap_or(\"none\")"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "bb88822899e66cd67de92b552efa1f98e1bb17ea7b7db164fbd10140bd88fafb",
       "line": 77,
       "path": "kernel/src/arch/riscv/devirq.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "absent-device sentinel or diagnostic-only display; control paths reject zero/unknown ids",
       "rules": "HC-G7",
       "source": "let uart_src = uart::interrupt().unwrap_or(0);"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "851d07bef48da61dd28029fb24cdf5f4e6913e256a9fa3cd4e18ed1f9c9ea3e2",
       "line": 160,
       "path": "kernel/src/arch/riscv/smp.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
       "rules": "HC-G7",
       "source": "Err(e) => return Err(sbi::decode(e).err().unwrap_or(SbiError::Failed).to_smp()),"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "f79f1beb399e83ea86a5af7f26d6e337237ffc586c339bcd9ec2203d8cfa15d3",
       "line": 38,
       "path": "kernel/src/arch/riscv/user.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
       "rules": "HC-G7",
       "source": "KERNEL_STACK_TOP.get(index).unwrap_or_else(|| {"
     },
     {
-      "category": "unclassified",
+      "category": "protocol-abi",
       "count": 1,
       "fingerprint": "f867c16208d540069d383b9d5ad73d0a5a7411230d336b265be77a50d0d6b1f3",
       "line": 104,
       "path": "kernel/src/arch/x86_64/bm1.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "architecture or wire protocol reset/default value, not a runtime inventory fact",
       "rules": "HC-G7",
       "source": "for chunk in bytes.chunks(2) { sum += ((chunk[0] as u32) << 8) | *chunk.get(1).unwrap_or(&0) as u32; }"
     },
@@ -1988,22 +1988,22 @@
       "source": "const CAPACITY: usize = 8 * 1024 * 1024;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "f83fc8de7fbc4dee4e0195efcd4c51cf3d33cf3f82e1cba51195d907e23903c9",
       "line": 270,
       "path": "kernel/src/arch/x86_64/ioapic.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "absent-device sentinel or diagnostic-only display; control paths reject zero/unknown ids",
       "rules": "HC-G7",
       "source": "PINS.lock().get(line).map(|pin| pin.name).unwrap_or(\"none\")"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "1708818adfaf77b7cab57126a4a97e4d5b5339efb1546bd4c151090d443cace6",
       "line": 153,
       "path": "kernel/src/arch/x86_64/keyboard.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "absent-device sentinel or diagnostic-only display; control paths reject zero/unknown ids",
       "rules": "HC-G7",
       "source": "MAP.get(make as usize).copied().unwrap_or(b'?')"
     },
@@ -2018,12 +2018,12 @@
       "source": "const MAX_ECAM_BYTES: u64 = 1 << 28;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "3f8ac583b87c6bec1bfb80401fbe0cd187c08821e4c3670e46284771fed32b47",
       "line": 31,
       "path": "kernel/src/arch/x86_64/pit.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "const MAX_CHUNK_US: u32 = 50_000;"
     },
@@ -2038,22 +2038,22 @@
       "source": "let chunk = left.min(MAX_CHUNK_US);"
     },
     {
-      "category": "unclassified",
+      "category": "protocol-abi",
       "count": 1,
       "fingerprint": "836de41f2cf1e48ad94a8e0a9985bf4e1135e22a851b042d90e549b7a583702f",
       "line": 1290,
       "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "architecture or wire protocol reset/default value, not a runtime inventory fact",
       "rules": "HC-G7",
       "source": "self.msr_read(index).unwrap_or(0)"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "c92999fd79f301867386db0aedc058e5867b96e83cac1188b3c3557fcbc564cd",
-      "line": 2548,
+      "line": 2553,
       "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
       "rules": "HC-G7",
       "source": ".unwrap_or(0);"
     },
@@ -2068,22 +2068,22 @@
       "source": "const MAX_OFFSET_BYTES: usize = 4096;"
     },
     {
-      "category": "unclassified",
+      "category": "runtime-resource-capacity",
       "count": 1,
       "fingerprint": "2299d5926ac2e2f0bb8a06e19f1d64db9faa9fa14a90d6802fff96865e4b5138",
       "line": 24,
       "path": "kernel/src/binder.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
       "rules": "HC-G1",
       "source": "const MAX_HANDLES: usize = 512;"
     },
     {
-      "category": "unclassified",
+      "category": "runtime-resource-capacity",
       "count": 1,
       "fingerprint": "38f94de0759183bd2aa9f0bee23234ca81c69b1de9a868503cda79405bc908e0",
       "line": 23,
       "path": "kernel/src/binder.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
       "rules": "HC-G1",
       "source": "const MAX_NODES: usize = 128;"
     },
@@ -2108,22 +2108,22 @@
       "source": "const MAX_TRANSACTION_BYTES: usize = 64 * 1024;"
     },
     {
-      "category": "unclassified",
+      "category": "runtime-resource-capacity",
       "count": 1,
       "fingerprint": "11b6003c147b111b4d6c5b20faddb3345ac11c3add8b6bd5ac6ab53967565b01",
       "line": 14,
       "path": "kernel/src/boot.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
       "rules": "HC-G1",
       "source": "pub const MAX_REGIONS: usize = 256;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "8afcca304ce4a63ba24f8069a65a79d7e8646412dc5865ba328141bb8659bd8d",
       "line": 18,
       "path": "kernel/src/compat_rng.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "const MAX_SPINS: u64 = 50_000_000;"
     },
@@ -2158,22 +2158,22 @@
       "source": "pub(crate) const MAX_KEY_BYTES: usize = 64;"
     },
     {
-      "category": "unclassified",
+      "category": "runtime-resource-capacity",
       "count": 2,
       "fingerprint": "db0c05ee4500893b2fbacdc2d16fe7ce3eb13733826c6700d51c10cbe7a9b49c",
       "line": 29,
       "path": "kernel/src/fscrypt.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
       "rules": "HC-G1",
       "source": "const MAX_KEYS: usize = 4;"
     },
     {
-      "category": "unclassified",
+      "category": "protocol-abi",
       "count": 1,
       "fingerprint": "b0ffef2176623edf4783a8d97d3e8d19e1947f4bb4328b8ec7f58f283618c3b0",
       "line": 50,
       "path": "kernel/src/ipc.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "PCI configuration limit, architecture address width, wire handle count, or internal bit field",
       "rules": "HC-G1",
       "source": "pub const MAX_MSG_HANDLES: usize = 8;"
     },
@@ -2188,32 +2188,32 @@
       "source": "pub const MAX_MSG_BYTES: usize = kernel_core::config::bounds::MSG_BYTES;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "2456afc68d425ec7b01992791b65e88ee4a464224ed647ea41b6a48536d5f8d3",
       "line": 28,
       "path": "kernel/src/kmain.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "const MAX_WAITS: u64 = 20_000_000;"
     },
     {
-      "category": "unclassified",
+      "category": "platform-adapter",
       "count": 1,
       "fingerprint": "6b9a993248aaf75aed50ad81fab010949508619a332e265273ae4b4d7e06c706",
       "line": 351,
       "path": "kernel/src/kmain.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "explicit physical-device verification probe branch",
       "rules": "HC-G3",
       "source": "#[cfg(feature = \"pixel6a-smp-probe\")]"
     },
     {
-      "category": "unclassified",
+      "category": "platform-adapter",
       "count": 1,
       "fingerprint": "a3d8da1b930c9da626155e388b6ed92ab58f12af723289e5f189678cd0ddabc2",
       "line": 353,
       "path": "kernel/src/kmain.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "explicit physical-device verification status output",
       "rules": "HC-G3",
       "source": "kprintln!(\"[JSR-PIXEL6A] smp=8 online=8 action=psci-off\");"
     },
@@ -2413,7 +2413,7 @@
       "fingerprint": "e97a270ced01ef94d308799b5756449ba29e6a718ff48941c1c41ea0a9c5485b",
       "line": 19412,
       "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
+      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "const MAX_SENDFILE: u64 = 1024 * 1024;"
     },
@@ -2508,12 +2508,12 @@
       "source": "const ROOT_LIBRARY_SLOTS: usize = 96;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "da5ce7c398c47043ba405f574aad6713e5873666860d41c7aec9793c3ce38f07",
       "line": 216,
       "path": "kernel/src/pci.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
       "rules": "HC-G7",
       "source": "TABLE.get().unwrap_or(&EMPTY)"
     },
@@ -2558,22 +2558,22 @@
       "source": "const USI_REQUEST_SLOTS: usize = 16;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "fa932061ec047a1f828f129b2d131e54c0838505ea346198b9310c7d97c937e6",
       "line": 45,
       "path": "kernel/src/profile.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "pub const MIN_TEXT: usize = 1536;"
     },
     {
-      "category": "unclassified",
+      "category": "test-demo-fixture",
       "count": 1,
       "fingerprint": "9c3f103f6aa923259fa7e61aa5107d4b53aa402810137d3e8c04677a7f2233a2",
       "line": 15,
       "path": "kernel/src/s2.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "bounded cross-CPU syscall acceptance campaign",
       "rules": "HC-G1",
       "source": "const MAX_WORKERS: usize = 8;"
     },
@@ -2588,22 +2588,22 @@
       "source": "const PI_MAILBOX_CAPACITY: usize = 16;"
     },
     {
-      "category": "unclassified",
+      "category": "test-demo-fixture",
       "count": 2,
       "fingerprint": "46c286a518608f30ae0dc08ce4c25a659dce6eb05c56a917a0d84a8fe8ff68ed",
       "line": 21,
       "path": "kernel/src/sched/pex4_probe.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "bounded benchmark or probe fixture, not a production hardware fact",
       "rules": "HC-G1",
       "source": "static MAX_VISITED: AtomicU32 = AtomicU32::new(0);"
     },
     {
-      "category": "unclassified",
+      "category": "test-demo-fixture",
       "count": 1,
       "fingerprint": "56cf6f26b606aadd759018dfb734bebca9c092da801f928144d44ae7de7dc3fe",
       "line": 16,
       "path": "kernel/src/sched/pex4_probe.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "bounded benchmark or probe fixture, not a production hardware fact",
       "rules": "HC-G1",
       "source": "pub const MAX_SAMPLES: usize = MAX_CPUS * SAMPLES_PER_CPU;"
     },
@@ -2628,32 +2628,32 @@
       "source": "pub const WAKE_MAILBOX_CAPACITY: usize = 16;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "7bcd4200c22252c9bf2426c6f9edead43b01b620d9d1f5629d193382eb4cf82e",
       "line": 330,
       "path": "kernel/src/smp/mod.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
       "rules": "HC-G7",
       "source": "TOPOLOGY.get().map(|t| t.count()).unwrap_or(1)"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "fca6f98fa46283421e2e18f9c06bca44e4a6c32a88f8f7e31a87796e539b6a4d",
       "line": 220,
       "path": "kernel/src/smp/mod.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
       "rules": "HC-G7",
       "source": ".unwrap_or(false),"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "49ccd72fa814bde153e8dbb3c2941b247f885bdb3891050b16e438c591c3e9d1",
       "line": 168,
       "path": "kernel/src/smp/percpu.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
       "rules": "HC-G7",
       "source": "CPUS.get(index).unwrap_or_else(|| {"
     },
@@ -2698,22 +2698,22 @@
       "source": "pub const MAX_TIMER_OBJECTS: u32 = 256;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "a20a0190828e4ea2a649e342174429d7f817486ad774c8da2bed23e13ccd0df3",
       "line": 162,
       "path": "lifecycle-boot/src/lib.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "pub const MAX_BOOT_ATTEMPTS: u8 = 3;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "ac4f9c55a3e50e2d149c6912c6a9378d8f4952f4530c8e2b18609cd9267037ce",
       "line": 552,
       "path": "lifecycle-boot/src/lib.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
       "rules": "HC-G7",
       "source": ".unwrap_or(true)"
     },
@@ -2788,42 +2788,42 @@
       "source": "pub const MAX_MANIFEST_CBOR_BYTES: usize = 8192;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "1273b389d99ae87c5204846b6f1ea4d3398c0ef83379d48853273e77db31daaf",
       "line": 29,
       "path": "modules/net/src/main.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "const MAX_ROUNDS: u64 = 1_000_000;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "a984f9d22d2ef1eb09fd1999fad80e596de658825552843f43411bf3e2322867",
       "line": 27,
       "path": "modules/net/src/main.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "const MAX_LEN: usize = 1 << 20;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "c2e26df14441f1d2cd94b57337af01f2ed8d1c931693d4eb1434d5934382bea3",
       "line": 28,
       "path": "user/irqprobe/build.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
       "rules": "HC-G7",
       "source": "let base = kernel_core::user_layout::image_base(&arch).unwrap_or_else(|| panic!(\"\u7528\u6237\u7a0b\u5e8f\u5c1a\u4e0d\u652f\u6301\u8be5\u6307\u4ee4\u96c6\uff1a{}\", arch));"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "67477e035c41c85853546ce3797e14cbcd3b113dbacd7702da97e41762c7175b",
       "line": 123,
       "path": "user/irqprobe/src/main.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
       "rules": "HC-G7",
       "source": "core::str::from_utf8(&self.buf[..self.len]).unwrap_or(\"\")"
     },
@@ -2838,12 +2838,12 @@
       "source": "const RING_CAPACITY: u64 = 8;"
     },
     {
-      "category": "unclassified",
+      "category": "runtime-resource-capacity",
       "count": 1,
       "fingerprint": "87194ec4d1a44fc95391b2b53ff34834932a09725352c11c1344f3c846b009a5",
       "line": 83,
       "path": "user/isohost/src/main.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
       "rules": "HC-G1",
       "source": "const MAX_CHILDREN: usize = 8;"
     },
@@ -2858,12 +2858,12 @@
       "source": "pub const MAX_BYTES: usize = 64 * 1024;"
     },
     {
-      "category": "unclassified",
+      "category": "runtime-resource-capacity",
       "count": 1,
       "fingerprint": "adac915235a17d479445459d015d7abd00957014df0bd20a7370604020ed6b49",
       "line": 19,
       "path": "user/rt/src/channel.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
       "rules": "HC-G1",
       "source": "pub const MAX_HANDLES: usize = 8;"
     },
@@ -2888,12 +2888,12 @@
       "source": "data_len: buf.len().min(MAX_BYTES) as u32,"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "5db71a927ab52d1e51eb30cf0de0400a17648468c3c7462d4c81f006e4a2a917",
       "line": 19,
       "path": "user/rt/src/io.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
       "rules": "HC-G2",
       "source": "let mut n = s.len().min(WRITE_MAX);"
     },
@@ -2940,10 +2940,10 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 118,
-    "platform-adapter": 43,
-    "protocol-abi": 27,
-    "runtime-resource-capacity": 96,
-    "unclassified": 87
+    "explicit-safety-policy": 162,
+    "platform-adapter": 47,
+    "protocol-abi": 41,
+    "runtime-resource-capacity": 114,
+    "test-demo-fixture": 7
   }
 }

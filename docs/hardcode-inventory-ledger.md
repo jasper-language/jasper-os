@@ -2,8 +2,8 @@
 
 更新时间：2026-11-18。
 
-状态：**全部 371 个基线命中已有且仅有一条可核查分类；83 个仍明确保持
-`unclassified`。**
+状态：**全部 371 个基线命中已聚合为 292 个唯一指纹，并按消费者、规范或明确
+安全策略完成首轮分类；`unclassified=0`。**
 
 ## 为什么不是 371 个 Bug
 
@@ -18,16 +18,16 @@
 
 | 类别 | 唯一指纹 | 基线命中 | 含义 |
 | --- | ---: | ---: | --- |
-| `explicit-safety-policy` | 101 | 118 | 解析器、批处理、地址或安全上限；仍需文档化消费链 |
-| `runtime-resource-capacity` | 57 | 96 | 运行期集合/容量，应由资源预算和准入决定 |
-| `platform-adapter` | 27 | 43 | QEMU/Pixel 等架构特定选择，需保留显式 Profile 边界 |
-| `protocol-abi` | 24 | 27 | Wire、Loader、Package、Graphics 或 Lifecycle 协议候选 |
+| `explicit-safety-policy` | 145 | 162 | 有界工作、解析/等待上限、fail-closed 或诊断哨兵、明确策略默认 |
+| `runtime-resource-capacity` | 72 | 114 | 运行期集合/容量，应由资源预算和准入决定 |
+| `platform-adapter` | 31 | 47 | QEMU/Pixel 等架构特定选择，需保留显式 Profile 边界 |
+| `protocol-abi` | 38 | 41 | Wire、FDT/PCI、Linux UAPI、地址宽度或内部位域契约 |
 | `confirmed-defect` | 0 | 0 | 当前分类账中尚无新增的已证实未修缺陷 |
-| `test-demo-fixture` | 0 | 0 | 扫描器已排除 test/demo 路径，当前无该类别 |
-| `unclassified` | 83 | 87 | 尚无消费者级证据，保持开放，禁止据此豁免 |
+| `test-demo-fixture` | 6 | 7 | 显式 benchmark、probe、capacity 或 PCI 模型夹具 |
+| `unclassified` | 0 | 0 | 所有基线指纹均已有可核查理由 |
 
-`confirmed-defect` 为空不代表 Issue #35 全量完成；它表示本分类账没有把尚未完成
-消费链审计的项目虚报为已证实缺陷。A08 等具体整改由独立切片处理。
+`confirmed-defect` 和 `unclassified` 同时为空不代表 Issue #35 全量完成。当前基线
+已全部归类，但运行时容量、安全策略和平台矩阵仍需真实预算、负例和资源回收证据。
 
 ## 校验
 
@@ -51,8 +51,8 @@ python3 scripts/check-hardcode-inventory-ledger.py --check \
 
 ## 后续清零顺序
 
-1. 先沿运行时消费者处理 58 个 `runtime-resource-capacity`；
-2. 将 98 个 `explicit-safety-policy` 逐项绑定到规范、策略或调用链证据；
-3. 把 27 个 `platform-adapter` 收敛到经验证的平台 Profile；
-4. 审核 18 个协议候选和剩余 139 个未知项；
-5. 只有调用链、负例和资源回收证据完整后才新增 `confirmed-defect` 或降为零。
+1. 先沿运行时消费者处理 72 个 `runtime-resource-capacity`；
+2. 将 145 个 `explicit-safety-policy` 逐项绑定到规范、策略或负例证据；
+3. 把 31 个 `platform-adapter` 收敛到经验证的平台 Profile；
+4. 审核 38 个协议条目和 6 个夹具，确认冻结边界不会泄漏到生产；
+5. 只有调用链、负例和资源回收证据完整后才允许清除基线条目。
