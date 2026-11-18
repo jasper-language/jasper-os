@@ -3,8 +3,8 @@
 更新时间：2026-11-18。
 
 状态：**精确版本与边界已锁定；`no_std-core` 已在 Jasper-OS CPL3 UI Service
-中完成 Typed UI IR → CPU RGBA8 → JSUI Present → 原生 Compositor/framebuffer
-首帧集成。持续输入、重启和物理显示资格仍未完成。**
+中完成 Typed UI IR → CPU RGBA8 → JSUI Scene/Input/Present 持续会话 →
+原生 Compositor/framebuffer 集成。硬件输入、重启和物理显示资格仍未完成。**
 
 ## 精确版本
 
@@ -30,16 +30,16 @@ cargo test -p user-ui-service --features native-engine-core --lib
 ```
 
 镜像级 `scripts/ui-process-check.sh` 通过真实 CPL3 Service、原生 Channel、
-16,384 字节 RGBA8 Present、Service 资源回收、原生 Compositor 第 3 层采纳和
-framebuffer 回读检查：
+16,384 字节 RGBA8 双 Present、焦点 Enter/Activate 准入、Close、Service 资源
+回收、原生 Compositor 第 3 层采纳和 framebuffer 回读检查：
 
 ```text
 ui-process: PASS cpl3=true channel=true jsui=true engine=cpu \
-  rendered=true present=true display=true exit=0 terminal=true resources=true
+  rendered=true present=true input=true frames=2 display=true exit=0 terminal=true resources=true
 qemu_rc=33
 ```
 
-证据为 `evidence/ui-process-20261118-205411/`，来源审计见
+证据为 `evidence/ui-process-20261118-214716/`，来源审计见
 `evidence/ui-engine-cpu-b21dec1/README.md`。这只关闭首帧集成，不关闭 UI-OS-1。
 
 ## 宿主映射
@@ -64,7 +64,8 @@ qemu_rc=33
    注入的 Jasper 宿主能力；不得在引擎中直接调用 Linux syscall。
 3. **首帧与原生合成器采纳已完成**：Jasper 用户态 UI Service 精确依赖固定
    Engine commit，通过原生 Channel 收场景、生成 RGBA8 Surface，并注册为原生
-   Compositor 图层写入 framebuffer。物理显示资格、持续输入和 Surface 重建仍未完成。
+   Compositor 图层写入 framebuffer；Input 帧可驱动焦点节点 Activate 并产生第二帧。
+   物理硬件输入、显示资格和 Surface 重建仍未完成。
 4. 在同一镜像完成首帧、输入、present、服务死亡、重启、资源回收、越权负例和
    Console 救援；之后才进入 LC-2 签名升级、回滚和跨版本验收。
 

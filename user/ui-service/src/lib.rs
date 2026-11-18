@@ -19,7 +19,12 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 #[cfg(feature = "native-engine-core")]
 use jasper_ui_engine::{
-    backend::HeadlessBackend, geometry::Size, ui_ir::NativeUiDocument, ui_ir::UiFrame as IrFrame,
+    backend::HeadlessBackend,
+    geometry::Size,
+    ui_ir::{
+        NativeActivationSource, NativeUiDocument, UiEventContext, UiFrame as IrFrame, UiKey,
+        UiPermission, UiPermissionContext,
+    },
     LegacyEngine, SimpleTextEngine,
 };
 use kernel_core::display_input::{DisplayInputError, KeyInput, SurfaceSpec};
@@ -100,6 +105,38 @@ impl CpuEngineHost {
             width,
             height,
         })
+    }
+
+    /// Admit a focused Enter key against the current Typed UI IR activation binding.
+    pub fn input_key(
+        &mut self,
+        code: u32,
+        pressed: bool,
+        _modifiers: u8,
+    ) -> Result<bool, HostError> {
+        if !pressed || code != 28 {
+            return Ok(false);
+        }
+        let document = self.document.as_ref().ok_or(HostError::InvalidSequence)?;
+        let target = UiKey::new(1, 1);
+        let node = document
+            .node_for_key(target)
+            .ok_or(HostError::InvalidSequence)?;
+        let context = UiEventContext {
+            target,
+            identity_domain: document.identity_domain().into(),
+            owner: document.owner().into(),
+            session: document.session().into(),
+            frame_revision: document.revision(),
+            permission_context: UiPermissionContext::new(
+                "jasper-os-ui-host",
+                [UiPermission::Activate],
+            ),
+        };
+        document
+            .admit_activation(&context, node, NativeActivationSource::Keyboard)
+            .map(|_| true)
+            .map_err(|_| HostError::InputUnavailable)
     }
 }
 
@@ -293,6 +330,10 @@ impl<E: EngineHost> UiHost<E> {
 
     pub fn engine_state(&self) -> EngineState {
         self.engine.state()
+    }
+
+    pub fn engine_mut(&mut self) -> &mut E {
+        &mut self.engine
     }
 
     pub fn set_scene(&mut self, scene: &[u8]) -> Result<u64, HostError> {
@@ -496,7 +537,7 @@ mod tests {
             bytes_per_pixel: 4,
             layout: PixelLayout::Rgba,
         };
-        let scene = br##"{"ir_version":"0.1.0","identity_domain":"jasper-os/ui-test","owner":"test-host","session":"session-1","expected_revision":1,"next_revision":2,"ops":[{"op":"insert","parent":null,"index":0,"node":{"key":{"semantic_id":1,"generation":1},"element":{"kind":"container"},"semantics":{"role":"container","label":"Engine"},"style":{"box":{"width":{"unit":"px","value":4},"height":{"unit":"px","value":4}},"paint":{"background":"#0A84FFFF"}},"children":[]}}]}"##;
+        let scene = br##"{"ir_version":"0.1.0","identity_domain":"jasper-os/ui-test","owner":"test-host","session":"session-1","expected_revision":1,"next_revision":2,"ops":[{"op":"insert","parent":null,"index":0,"node":{"key":{"semantic_id":1,"generation":1},"element":{"kind":"container"},"semantics":{"role":"container","label":"Engine","focusable":true},"style":{"box":{"width":{"unit":"px","value":4},"height":{"unit":"px","value":4}},"paint":{"background":"#0A84FFFF"}},"events":[{"event":"activate","action":"jasper.ui.activate"}],"children":[]}}]}"##;
 
         let engine = CpuEngineHost::new(4, 4).unwrap();
         let mut host = UiHost::new(engine, ENGINE_SURFACE, 1).unwrap();
@@ -505,5 +546,6 @@ mod tests {
         assert_eq!(host.render(&mut frame), Ok(1));
         assert_eq!(&frame.pixels()[..4], &[0x0a, 0x84, 0xff, 0xff]);
         assert!(frame.pixels().chunks_exact(4).all(|pixel| pixel[3] == 0xff));
+        assert_eq!(host.engine_mut().input_key(28, true, 0), Ok(true));
     }
 }

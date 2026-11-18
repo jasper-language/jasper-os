@@ -28,7 +28,7 @@ use jasper_ui_service::{EngineHost, EngineState, UnavailableEngine};
 use kernel_core::display_input::{PixelLayout, SurfaceSpec};
 #[cfg(feature = "native-engine-core")]
 use kernel_core::ui_protocol::MAX_UI_FRAME_PAYLOAD;
-use kernel_core::ui_protocol::{UiFrameHeader, UiFrameKind};
+use kernel_core::ui_protocol::{UiFrameHeader, UiFrameKind, UiInputRecord};
 #[cfg(not(feature = "native-engine-core"))]
 use kernel_core::ui_service::UI_ERROR_ENGINE_UNAVAILABLE;
 
@@ -140,7 +140,88 @@ fn run_cpu_engine(
         frame.pixels().len(),
         frame.sequence()
     );
-    0
+    let mut presents = 1usize;
+    let mut request_bytes = vec![0u8; MAX_UI_FRAME_PAYLOAD];
+    loop {
+        let input_request = match endpoint.receive_frame(&mut request_bytes) {
+            Ok(frame) => frame,
+            Err(error) => {
+                println!("ui-service: refuse reason={}", error.name());
+                return 68;
+            }
+        };
+        match input_request.header.kind {
+            UiFrameKind::Input => {
+                let input = match UiInputRecord::decode(input_request.payload) {
+                    Ok(input) => input,
+                    Err(error) => {
+                        return fail_response(&endpoint, input_request.header, error.name(), 69)
+                    }
+                };
+                let accepted =
+                    match host
+                        .engine_mut()
+                        .input_key(input.code, input.pressed, input.modifiers)
+                    {
+                        Ok(accepted) => accepted,
+                        Err(error) => {
+                            return fail_response(&endpoint, input_request.header, error.name(), 69)
+                        }
+                    };
+                if !accepted {
+                    return fail_response(
+                        &endpoint,
+                        input_request.header,
+                        HostError::InputUnavailable.name(),
+                        69,
+                    );
+                }
+                let mut next = match CpuFrame::new(
+                    surface,
+                    1,
+                    scene_version,
+                    u64::from(input_request.header.sequence),
+                    vec![0; expected],
+                ) {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        return fail_response(&endpoint, input_request.header, error.name(), 72)
+                    }
+                };
+                if let Err(error) = host.render(&mut next) {
+                    return fail_response(&endpoint, input_request.header, error.name(), 69);
+                }
+                let response = UiFrameHeader {
+                    kind: UiFrameKind::Present,
+                    flags: 0,
+                    client: input_request.header.client,
+                    request_id: input_request.header.request_id,
+                    sequence: input_request.header.sequence,
+                    payload_bytes: next.pixels().len() as u32,
+                };
+                if endpoint.send_frame(response, next.pixels()).is_err() {
+                    return 70;
+                }
+                presents += 1;
+                println!(
+                    "ui-service: input accepted code={} presents={}",
+                    input.code, presents
+                );
+            }
+            UiFrameKind::Close => {
+                println!("ui-service: closed presents={presents}");
+                return 0;
+            }
+            _ => {
+                return fail_response(
+                    &endpoint,
+                    input_request.header,
+                    HostError::InvalidFrame.name(),
+                    65,
+                )
+            }
+        }
+    }
 }
 
 fn main(channel_handle: u64, surface_argument: u64) -> i32 {

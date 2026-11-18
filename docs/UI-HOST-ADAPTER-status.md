@@ -3,8 +3,8 @@
 更新时间：2026-11-18。
 
 状态：**Jasper-OS 用户态宿主 crate、RGBA Surface 和真实 CPL3 Service 已接入固定
-UI Engine `no_std-core`，首帧已由原生 Compositor 写入 framebuffer；完整输入、
-物理显示资格和重启链路仍未完成。**
+UI Engine `no_std-core`，Scene/Input/Present 会话和原生 framebuffer 采纳已通过；
+物理硬件输入、显示资格和重启链路仍未完成。**
 
 ## 已实现
 
@@ -21,7 +21,8 @@ UI Engine `no_std-core`，首帧已由原生 Compositor 写入 framebuffer；完
 - `ui-service` 进程从启动者接收一个预打开 Channel，消费真实 JSUI Scene 请求；
   开启 `native-engine-core` 时，`CpuEngineHost` 使用固定 Engine 严格解析 Typed UI IR、
   执行布局/绘制并写入宿主拥有的 RGBA8 Surface，随后返回携带相同
-  client/request/sequence 的 JSUI Present 帧并以 0 正常退出；
+  client/request/sequence 的 JSUI Present 帧；随后消费 JSUI Input，
+  Engine 校验焦点节点 Activate 权限/身份/代际并渲染第二帧，Close 后正常退出；
 - 未开启 `native-engine-core` 的构建保留显式 `UnavailableEngine` 失败关闭路径；
   任何帧发送都受单条原生 Channel 消息上限约束，不把 JSUI 头之外的载荷按
   64 KiB 独立计算；
@@ -61,13 +62,13 @@ cargo test -p kernel-core 'display_'
 
 bash scripts/ui-process-check.sh
 ui-process: PASS cpl3=true channel=true jsui=true \
-  engine=cpu rendered=true present=true display=true exit=0 terminal=true resources=true
+  engine=cpu rendered=true present=true input=true frames=2 display=true exit=0 terminal=true resources=true
 qemu_rc=33
 ```
 
 ## 尚未完成
 
-- 完成物理显示资格和真实键盘/指针/IME 输入；
+- 完成物理显示资格和真实键盘/指针/IME 设备输入；
 - 接入 Engine `HostInbox` 的持续会话、背压、取消、重连和 Surface 重建；
 - 完成 Service 崩溃、Console 救援和重启后的连续帧；
 - 把 UI service 接入 LC-2 签名组件安装、健康检查和回滚；

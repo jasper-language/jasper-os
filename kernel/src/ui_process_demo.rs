@@ -18,7 +18,8 @@ use kernel_core::display_input::{PixelLayout, SurfaceSpec};
 use kernel_core::frame::FRAME_SIZE;
 use kernel_core::paging::MapFlags;
 use kernel_core::ui_protocol::{
-    decode_ui_frame, encode_ui_frame, UiFrameHeader, UiFrameKind, UI_FRAME_HEADER_BYTES,
+    decode_ui_frame, encode_ui_frame, UiFrameHeader, UiFrameKind, UiInputRecord,
+    UI_FRAME_HEADER_BYTES,
 };
 use kernel_core::ui_service::UiClientKey;
 
@@ -33,7 +34,7 @@ const STACK_PAGES: u64 = 4;
 const TEST_SURFACE_WIDTH: u32 = 64;
 const TEST_SURFACE_HEIGHT: u32 = 64;
 const SERVICE_EXIT: i64 = 0;
-const REQUEST_PAYLOAD: &[u8] = br##"{"ir_version":"0.1.0","identity_domain":"jasper-os/ui-probe","owner":"ui-host","session":"session-1","expected_revision":1,"next_revision":2,"ops":[{"op":"insert","parent":null,"index":0,"node":{"key":{"semantic_id":1,"generation":1},"element":{"kind":"container"},"semantics":{"role":"container","label":"Jasper OS"},"style":{"box":{"width":{"unit":"px","value":64},"height":{"unit":"px","value":64}},"paint":{"background":"#0A84FFFF"}},"children":[]}}]}"##;
+const REQUEST_PAYLOAD: &[u8] = br##"{"ir_version":"0.1.0","identity_domain":"jasper-os/ui-probe","owner":"ui-host","session":"session-1","expected_revision":1,"next_revision":2,"ops":[{"op":"insert","parent":null,"index":0,"node":{"key":{"semantic_id":1,"generation":1},"element":{"kind":"container"},"semantics":{"role":"container","label":"Jasper OS","focusable":true},"style":{"box":{"width":{"unit":"px","value":64},"height":{"unit":"px","value":64}},"paint":{"background":"#0A84FFFF"}},"events":[{"event":"activate","action":"jasper.ui.activate"}],"children":[]}}]}"##;
 
 static CHECKS: AtomicU32 = AtomicU32::new(0);
 static FAILED: AtomicU32 = AtomicU32::new(0);
@@ -169,9 +170,65 @@ pub fn run() -> u32 {
         sent == request_len as i64,
         "host request was not queued on the service endpoint",
     );
+    let mut input_payload = [0u8; 8];
+    UiInputRecord {
+        code: 28,
+        pressed: true,
+        modifiers: 0,
+    }
+    .encode_into(&mut input_payload)
+    .expect("encode UI input probe");
+    let input_header = UiFrameHeader {
+        kind: UiFrameKind::Input,
+        flags: 0,
+        client,
+        request_id: 12,
+        sequence: 2,
+        payload_bytes: input_payload.len() as u32,
+    };
+    let mut input_request = alloc::vec![0u8; UI_FRAME_HEADER_BYTES + input_payload.len()];
+    let input_len = encode_ui_frame(input_header, &input_payload, &mut input_request)
+        .expect("bounded UI input request");
+    let input_sent = kobj::with(|table| {
+        ipc::send_in(
+            table,
+            host,
+            host_endpoint,
+            input_request[..input_len].to_vec(),
+            &[],
+        )
+    });
     check(
-        ipc::queued(service, service_endpoint) == Some(1),
-        "service endpoint did not receive exactly one request",
+        input_sent == input_len as i64,
+        "host input was not queued on the service endpoint",
+    );
+    let close_header = UiFrameHeader {
+        kind: UiFrameKind::Close,
+        flags: 0,
+        client,
+        request_id: 13,
+        sequence: 3,
+        payload_bytes: 0,
+    };
+    let mut close_request = [0u8; UI_FRAME_HEADER_BYTES];
+    let close_len =
+        encode_ui_frame(close_header, &[], &mut close_request).expect("bounded UI close request");
+    let close_sent = kobj::with(|table| {
+        ipc::send_in(
+            table,
+            host,
+            host_endpoint,
+            close_request[..close_len].to_vec(),
+            &[],
+        )
+    });
+    check(
+        close_sent == close_len as i64,
+        "host close was not queued on the service endpoint",
+    );
+    check(
+        ipc::queued(service, service_endpoint) == Some(3),
+        "service endpoint did not receive Scene/Input/Close",
     );
 
     let started = launch_service(service, service_endpoint.raw());
@@ -182,7 +239,7 @@ pub fn run() -> u32 {
     let state = proc::state(service);
     check(
         state == Some(ProcState::Exited { code: SERVICE_EXIT }),
-        "UI Service did not return first-frame exit code 0",
+        "UI Service did not complete the Scene/Input/Close loop",
     );
 
     let response_bytes = ipc::queued_body(host, host_endpoint, ipc::MAX_MSG_BYTES);
@@ -204,9 +261,24 @@ pub fn run() -> u32 {
         response_ok,
         "versioned CPU RGBA8 Present frame was not delivered",
     );
+    let input_response_bytes = ipc::queued_body_at(host, host_endpoint, 1, ipc::MAX_MSG_BYTES);
+    let input_response_frame = input_response_bytes
+        .as_deref()
+        .and_then(|bytes| decode_ui_frame(bytes).ok());
+    let input_response_ok = input_response_frame.as_ref().is_some_and(|frame| {
+        frame.header.kind == UiFrameKind::Present
+            && frame.header.client == client
+            && frame.header.request_id == input_header.request_id
+            && frame.header.sequence == input_header.sequence
+            && frame.payload.len() == TEST_SURFACE_WIDTH as usize * TEST_SURFACE_HEIGHT as usize * 4
+    });
     check(
-        ipc::queued(host, host_endpoint) == Some(1),
-        "host endpoint did not retain the service response",
+        input_response_ok,
+        "input-driven second Present frame was not delivered",
+    );
+    check(
+        ipc::queued(host, host_endpoint) == Some(2),
+        "host endpoint did not retain both Present responses",
     );
 
     let host_exit = proc::exit_idle(host, 0);
@@ -251,7 +323,7 @@ pub fn run() -> u32 {
     // Reaching this marker proves the serial Console remains available after
     // the service process and all of its objects were reclaimed.
     kprintln!(
-        "[JSR-UI-PROCESS] started={} channel=true request_queued={} engine=cpu rendered=true present=true display={} exit={} response={} terminal_alive=true resources={} checks={} failed={}",
+        "[JSR-UI-PROCESS] started={} channel=true request_queued={} engine=cpu rendered=true present=true input=true frames=2 display={} exit={} response={} terminal_alive=true resources={} checks={} failed={}",
         started,
         sent == request_len as i64,
         display_ok,

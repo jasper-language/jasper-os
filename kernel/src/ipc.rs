@@ -653,13 +653,19 @@ pub fn queued(pid: ObjId, h: HandleId) -> Option<usize> {
 /// authority and never exposes handles from the message.
 #[cfg(feature = "ui-process-verify")]
 pub(crate) fn queued_body(pid: ObjId, h: HandleId, max: usize) -> Option<Vec<u8>> {
+    queued_body_at(pid, h, 0, max)
+}
+
+/// Copy the bounded body of the nth queued message without delivering it.
+#[cfg(feature = "ui-process-verify")]
+pub(crate) fn queued_body_at(pid: ObjId, h: HandleId, index: usize, max: usize) -> Option<Vec<u8>> {
     if max > MAX_MSG_BYTES {
         return None;
     }
     kobj::with(|t| {
         let id = proc::resolve_in(t, pid, h, ObjectType::Channel, Rights::NONE).ok()?;
         ep_mut(t, id)
-            .and_then(|endpoint| endpoint.queue.front())
+            .and_then(|endpoint| endpoint.queue.get(index))
             .map(|message| message.body.iter().take(max).copied().collect())
     })
 }
