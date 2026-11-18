@@ -110,6 +110,32 @@ def classify(path: str, rules: str, source: str) -> tuple[str, str]:
     """
     name = identifier(source)
     lowered = path.lower()
+    if name in {"MAX_COUNTER", "MIN_ALTSTACK"}:
+        return (
+            "protocol-abi",
+            "identifier is a Linux UAPI width or semantic boundary; preserve the documented Linux value",
+        )
+    if path == "kernel-core/src/acpi.rs" and "IsaRoute" in source:
+        return (
+            "protocol-abi",
+            "ISA route fallback is the explicitly documented ACPI bus-default policy",
+        )
+    if name in {
+        "MAX_TABLE_LEN",
+        "MAX_DMAR_UNITS",
+        "MAX_DMAR_SCOPES",
+        "MAX_DMAR_PATH",
+        "MAX_CONTEXT",
+        "MAX_WRITE",
+        "MAX_GETDENTS",
+        "MAX_MESSAGES",
+        "MAX_SENDFILE",
+        "MAX_ENTRIES",
+    }:
+        return (
+            "explicit-safety-policy",
+            "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
+        )
     if "/arch/" in lowered and re.search(r"pixel|qemu", source, re.IGNORECASE):
         return (
             "platform-adapter",
@@ -252,6 +278,9 @@ def self_test(gate) -> None:
         ("jaso/src/wire.rs", "HC-G1", "pub const MAX_MESSAGE: usize = 65536;"),
         ("kernel/src/arch/aarch64/platform.rs", "HC-G3", "#[cfg(feature = \"pixel6a-smoke\")]"),
         ("kernel-core/src/acpi.rs", "HC-G1", "pub const MAX_DEPTH: usize = 8;"),
+        ("kernel-core/src/acpi.rs", "HC-G1", "pub const MAX_DMAR_UNITS: usize = 8;"),
+        ("kernel/src/linux_abi.rs", "HC-G1", "const MAX_WRITE: usize = 1024 * 1024;"),
+        ("kernel/src/linux_abi.rs", "HC-G1", "const MIN_ALTSTACK: u64 = 2048;"),
     ]
     observed = {classify(path, rules, source)[0] for path, rules, source in cases}
     assert {"runtime-resource-capacity", "protocol-abi", "platform-adapter", "explicit-safety-policy"} <= observed

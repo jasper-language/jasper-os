@@ -1,5 +1,5 @@
 {
-  "baseline_total": 413,
+  "baseline_total": 412,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,11 +10,11 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 96,
+    "explicit-safety-policy": 104,
     "platform-adapter": 27,
-    "protocol-abi": 18,
+    "protocol-abi": 21,
     "runtime-resource-capacity": 57,
-    "unclassified": 131
+    "unclassified": 119
   },
   "entries": [
     {
@@ -628,42 +628,42 @@
       "source": "pub const MAX_CHUNK: usize = MAX_MESSAGE - 16;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 2,
       "fingerprint": "2c245047733c5a26c83a1bac639134ed6844e9342cf9a00c56450f980ec6a477",
       "line": 403,
       "path": "kernel-core/src/acpi.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
       "rules": "HC-G1",
       "source": "pub const MAX_DMAR_UNITS: usize = 8;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "cb30c713ee6828381682e1e46c604ca2f0dc3bc2d64d361aa7b7375e8bb8defb",
       "line": 405,
       "path": "kernel-core/src/acpi.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
       "rules": "HC-G1",
       "source": "pub const MAX_DMAR_SCOPES: usize = 32;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "ddfdf2e125861136367346aecad3408095d59517145985544c28acd986040052",
       "line": 28,
       "path": "kernel-core/src/acpi.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
       "rules": "HC-G1",
       "source": "pub const MAX_TABLE_LEN: u32 = 1 << 20;"
     },
     {
-      "category": "unclassified",
+      "category": "protocol-abi",
       "count": 1,
       "fingerprint": "c6e740a92bf92d4057a397480abb95dc8b1e59da102bcf5f0fa453ac107ec0cf",
       "line": 135,
       "path": "kernel-core/src/acpi.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "ISA route fallback is the explicitly documented ACPI bus-default policy",
       "rules": "HC-G7",
       "source": ".unwrap_or(IsaRoute {"
     },
@@ -2581,19 +2581,19 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "000d188c021a044a0b0eba0dd80ebbeb2509c1ada97c6c2f1623b343047f86ec",
-      "line": 14137,
+      "line": 14131,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
       "source": "const MAX_CONTROL_BYTES: usize = 16 * 1024;"
     },
     {
-      "category": "unclassified",
+      "category": "protocol-abi",
       "count": 1,
       "fingerprint": "020b3317f9b83ac259f9c0e6ac426713c715fad8b5628576dda98b0dc9725b03",
-      "line": 12354,
+      "line": 12348,
       "path": "kernel/src/linux_abi.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "identifier is a Linux UAPI width or semantic boundary; preserve the documented Linux value",
       "rules": "HC-G1",
       "source": "const MAX_COUNTER: u64 = u64::MAX - 1;"
     },
@@ -2601,7 +2601,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "2f7c287eeed2f26aa9460881ac4ac518994c726a86619bfa6292d9301f528639",
-      "line": 5028,
+      "line": 5022,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
@@ -2611,19 +2611,19 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "3a8dbb67509a21358932b44cf5e03efd2bffa8c4106b3db8006303ebeaa9466a",
-      "line": 13210,
+      "line": 13204,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
       "source": "const MAX_EVENTS: usize = 8;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "3af1e6502dcd353efec6f5267b895350363f008196d29af1566bbad84a3e071d",
-      "line": 17908,
+      "line": 17898,
       "path": "kernel/src/linux_abi.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
       "rules": "HC-G1",
       "source": "const MAX_ENTRIES: u32 = 64;"
     },
@@ -2638,12 +2638,12 @@
       "source": "const MAX_PROCESS_SIGNAL_SETS: usize = 16;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 2,
       "fingerprint": "72091f65c819a9895fc80a28dde4ac4c679e65c22ee35913cb583a524edc67a1",
-      "line": 3815,
+      "line": 3814,
       "path": "kernel/src/linux_abi.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
       "rules": "HC-G1",
       "source": "const MAX_GETDENTS: usize = 64 * 1024;"
     },
@@ -2658,12 +2658,12 @@
       "source": "const MAX_PENDING_SIGNAL_RECORDS: usize = 256;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 9,
       "fingerprint": "806b471ecdcd39a6fb07a09e63d61e3d0dd1106b9eca27a558923c5b3830e5f1",
       "line": 3619,
       "path": "kernel/src/linux_abi.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
       "rules": "HC-G1",
       "source": "const MAX_WRITE: usize = 1024 * 1024;"
     },
@@ -2681,19 +2681,19 @@
       "category": "runtime-resource-capacity",
       "count": 2,
       "fingerprint": "8ce9da0c2fad3644bb26927ce1eb8639b54a9f3685ec5e5653d824a227692e49",
-      "line": 11828,
+      "line": 11822,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
       "rules": "HC-G1",
       "source": "const MAX_PAGES: usize = 1024;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 2,
       "fingerprint": "aac4e14f880b706e7de0fe71e069499bb0fa18668fc986756c1022b2bf8518d6",
-      "line": 14475,
+      "line": 14469,
       "path": "kernel/src/linux_abi.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
       "rules": "HC-G1",
       "source": "const MAX_MESSAGES: u32 = 16;"
     },
@@ -2701,19 +2701,19 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "b727cb2514e39b364a1e6bf5e12336e4dd89cbaca542c1adc710c7c5decc9dfa",
-      "line": 13662,
+      "line": 13656,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
       "source": "const MAX_BYTES: u64 = 16 * 1024 * 1024;"
     },
     {
-      "category": "unclassified",
+      "category": "protocol-abi",
       "count": 1,
       "fingerprint": "b94eae05bdaaf356a3f58213bca24c2a48fa0e07d08a621e133425500e3262cb",
       "line": 1100,
       "path": "kernel/src/linux_abi.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "identifier is a Linux UAPI width or semantic boundary; preserve the documented Linux value",
       "rules": "HC-G1",
       "source": "const MIN_ALTSTACK: u64 = 2048;"
     },
@@ -2721,29 +2721,29 @@
       "category": "explicit-safety-policy",
       "count": 3,
       "fingerprint": "bfd7af257b3da22342e9b6a656a14499958c18b5b3105327ab3a80784404b459",
-      "line": 5399,
+      "line": 5393,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
       "source": "const MAX_REMAP_BYTES: u64 = 64 * 1024 * 1024;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "e8c96b9588af1eb0d8a2e0a2a513b5b9610e8b045cccbd21d5fb6b40ea53f4b7",
-      "line": 11175,
+      "line": 11169,
       "path": "kernel/src/linux_abi.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
       "rules": "HC-G1",
       "source": "const MAX_CONTEXT: usize = 4096;"
     },
     {
-      "category": "unclassified",
+      "category": "explicit-safety-policy",
       "count": 2,
       "fingerprint": "e97a270ced01ef94d308799b5756449ba29e6a718ff48941c1c41ea0a9c5485b",
-      "line": 19414,
+      "line": 19412,
       "path": "kernel/src/linux_abi.rs",
-      "reason": "baseline has no consumer-level classification yet; keep open rather than granting an exception",
+      "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
       "rules": "HC-G1",
       "source": "const MAX_SENDFILE: u64 = 1024 * 1024;"
     },
@@ -2761,7 +2761,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "7ac867494100e7f919fe0c2e6157a0c1cf654a74b751fbc793290694eb36ea68",
-      "line": 12623,
+      "line": 12617,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G2,HC-G6",
@@ -2771,7 +2771,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "8c18eb56c36c2172e212690f296b473cb183f3e0cbac0d77e19f394fcd4b0542",
-      "line": 18774,
+      "line": 18772,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G2,HC-G6",
@@ -2781,7 +2781,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "c3bdd178d15b9cff2b4f096b7a09e64ad1f794ae3b8fc8ce729caa17606dba1e",
-      "line": 19435,
+      "line": 19433,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G2,HC-G6",
@@ -2791,7 +2791,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "d8c3103588f39e35a618b2c824d864934163f8e5b4cadfb7afc32b45fc787f28",
-      "line": 13227,
+      "line": 13221,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G2,HC-G6",
@@ -2801,7 +2801,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "dc7025deaeb7e1c5533875d42b1f12573a6df19dd51a3303af2715fb68febf55",
-      "line": 19542,
+      "line": 19540,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G2,HC-G6",
@@ -2810,18 +2810,8 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "9f8ddaf6a9a98aa8d9dc741ae33c6a05601c3c20f0f1286f71cdacbccbe0fa82",
-      "line": 17922,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G6",
-      "source": ".clamp(1, MAX_ENTRIES);"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
       "fingerprint": "da92953655d894ad3af9722542b637272e549cb75738a1d9f7dd54b3a6df2068",
-      "line": 5808,
+      "line": 5802,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G6",
@@ -2831,7 +2821,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "ea3a521b8d37120236fe6ab33a99370a8d320b29e1284c2f3c49d3e8111c6fb0",
-      "line": 13309,
+      "line": 13303,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G6",
@@ -3310,10 +3300,10 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 101,
+    "explicit-safety-policy": 121,
     "platform-adapter": 43,
-    "protocol-abi": 21,
+    "protocol-abi": 24,
     "runtime-resource-capacity": 96,
-    "unclassified": 152
+    "unclassified": 128
   }
 }

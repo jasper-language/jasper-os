@@ -3618,10 +3618,9 @@ fn linux_uname(args: [u64; 6]) -> Result<u64, CompatErrno> {
 fn linux_write(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const MAX_WRITE: usize = 1024 * 1024;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
-    let len = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    if len > MAX_WRITE {
-        return Err(CompatErrno::Invalid);
-    }
+    let len = usize::try_from(args[2])
+        .map_err(|_| CompatErrno::Invalid)?
+        .min(MAX_WRITE); // JASPER-HARDCODE-REVIEW: issue=35 source=linux-batch-partial-policy reason=return-bounded-write-prefix
     if let Some(entry) = proc::linux_fd(pid, fd) {
         if linux_cache_file_id(entry.handle).is_some() {
             if !entry.rights.contains(kernel_core::object::Rights::WRITE) {
@@ -3817,9 +3816,7 @@ fn linux_getdents64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const DT_REG: u8 = 8;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let capacity = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    if capacity > MAX_GETDENTS {
-        return Err(CompatErrno::Invalid);
-    }
+    let capacity = capacity.min(MAX_GETDENTS); // JASPER-HARDCODE-REVIEW: issue=35 source=linux-batch-partial-policy reason=return-bounded-directory-prefix
     let (handle, start) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::BadFd)?;
     if linux_cache_dir_id(handle).is_some() {
         return linux_cache_getdents64(pid, fd, handle, args[1], capacity, start);
@@ -3889,9 +3886,7 @@ fn linux_getdents(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const DT_REG: u8 = 8;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let capacity = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    if capacity > MAX_GETDENTS {
-        return Err(CompatErrno::Invalid);
-    }
+    let capacity = capacity.min(MAX_GETDENTS); // JASPER-HARDCODE-REVIEW: issue=35 source=linux-batch-partial-policy reason=return-bounded-directory-prefix
     let (handle, start) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::BadFd)?;
     let directory = crate::linux_vfs::DirectoryId::from_handle(handle).ok_or(CompatErrno::BadFd)?;
     let children = crate::linux_vfs::directory_entries(directory);
@@ -4248,10 +4243,9 @@ fn linux_proc_stat_read(
 fn linux_pwrite64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const MAX_WRITE: usize = 1024 * 1024;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
-    let len = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    if len > MAX_WRITE {
-        return Err(CompatErrno::Invalid);
-    }
+    let len = usize::try_from(args[2])
+        .map_err(|_| CompatErrno::Invalid)?
+        .min(MAX_WRITE); // JASPER-HARDCODE-REVIEW: issue=35 source=linux-batch-partial-policy reason=return-bounded-pwrite-prefix
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if entry.kind != compat_core::fd::CompatKind::Device
         || proc::linux_ashmem_is_regular(pid, entry.handle) != Some(true)
@@ -14476,9 +14470,7 @@ fn linux_sendmmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     let count = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    if count > MAX_MESSAGES {
-        return Err(CompatErrno::Invalid);
-    }
+    let count = count.min(MAX_MESSAGES); // JASPER-HARDCODE-REVIEW: issue=35 source=linux-batch-partial-policy reason=return-bounded-sendmmsg-prefix
     let mut sent = 0u32;
     while sent < count {
         let base = args[1]
@@ -14515,9 +14507,7 @@ fn linux_recvmmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     let count = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    if count > MAX_MESSAGES {
-        return Err(CompatErrno::Invalid);
-    }
+    let count = count.min(MAX_MESSAGES); // JASPER-HARDCODE-REVIEW: issue=35 source=linux-batch-partial-policy reason=return-bounded-recvmmsg-prefix
     let wait_for_one = args[3] & MSG_WAITFORONE != 0;
     let flags = args[3] & !MSG_WAITFORONE;
     let mut received = 0u32;
@@ -17917,9 +17907,17 @@ fn linux_io_uring_setup(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
     if flags & !(IORING_SETUP_CLAMP | IORING_SETUP_SINGLE_ISSUER) != 0 {
         return Err(CompatErrno::Invalid);
     }
-    let entries = requested
-        .next_power_of_two()
-        .clamp(1, MAX_ENTRIES);
+    let rounded = requested
+        .checked_next_power_of_two()
+        .ok_or(CompatErrno::Invalid)?;
+    let entries = if rounded > MAX_ENTRIES {
+        if flags & IORING_SETUP_CLAMP == 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        MAX_ENTRIES
+    } else {
+        rounded
+    };
     let cq_entries = entries
         .checked_mul(2)
         .ok_or(CompatErrno::Invalid)?;
