@@ -238,7 +238,11 @@ fn acquire_exclusive_lease(root: &Path) -> Result<File, ControlStoreError> {
         .write(true)
         .create(true)
         .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
+        // Do not let helper processes inherit a control-root lease. Rust tests
+        // run in parallel and some production clients spawn short-lived tools;
+        // an inherited descriptor would keep the previous owner alive after
+        // the service itself has closed.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)?;
     match flock(&lease, FlockOperation::NonBlockingLockExclusive) {
         Ok(()) => Ok(lease),
