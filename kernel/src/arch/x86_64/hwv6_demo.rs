@@ -151,8 +151,8 @@ impl Vtd {
         }
         let sid = bdf_sid(authority);
         let unit = *dmar
-            .unit_for(0, authority.bus(), authority.device(), authority.function())
-            .ok_or("no_drhd_scope")?;
+            .unit_for_unique(0, authority.bus(), authority.device(), authority.function())
+            .map_err(|selection| selection.name())?;
         let reg = mm::phys_to_virt(unit.register_base).ok_or("register_unmapped")?;
         let first = mm::frame::allocate_contiguous(5).map_err(|_| "table_allocation")?;
         let frames: [PhysFrame; 5] =

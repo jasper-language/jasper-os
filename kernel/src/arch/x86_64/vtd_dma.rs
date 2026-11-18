@@ -39,7 +39,7 @@ const WAIT_SPINS: usize = 6_000_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     Unsupported,
-    MultipleUnits,
+    AmbiguousScope,
     Firmware,
     DeviceUnit,
     Range,
@@ -53,7 +53,7 @@ impl Error {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Unsupported => "system.iommu.error.unsupported",
-            Self::MultipleUnits => "system.iommu.error.multiple_units",
+            Self::AmbiguousScope => "system.iommu.error.ambiguous_scope",
             Self::Firmware => "system.iommu.error.firmware",
             Self::DeviceUnit => "system.iommu.error.device_unit",
             Self::Range => "system.iommu.error.range",
@@ -269,22 +269,17 @@ struct Vtd {
 // 寄存器指针来自稳定直接映射，所有访问都由全局中断安全锁串行化。
 unsafe impl Send for Vtd {}
 
-struct Manager {
-    state: State,
+/// All usable DMAR hardware units for the current platform.
+///
+/// 当前平台的可用 DMAR hardware unit 集合。Each requester must be claimed by
+/// exactly one unit; a zero-match or overlapping scope is never resolved by
+/// table order.
+struct Units {
+    dmar: acpi::Dmar,
+    items: Vec<Vtd>,
 }
 
-enum State {
-    Uninitialized,
-    Disabled,
-    Failed(Error),
-    Ready(Vtd),
-}
-
-static MANAGER: IrqSpinLock<Manager> = IrqSpinLock::new(Manager {
-    state: State::Uninitialized,
-});
-
-impl Vtd {
+impl Units {
     fn firmware() -> Result<Option<Self>, Error> {
         let Some(boot) = boot::get() else {
             return Ok(None);
@@ -300,13 +295,55 @@ impl Vtd {
             Err(acpi::AcpiError::NoDmar) => return Ok(None),
             Err(_) => return Err(Error::Firmware),
         };
-        if dmar.dropped != 0 {
+        if dmar.dropped != 0 || dmar.units().is_empty() {
             return Err(Error::Firmware);
         }
-        if dmar.units().len() != 1 {
-            return Err(Error::MultipleUnits);
+        if dmar.units().iter().any(|unit| unit.segment != 0) {
+            // The PCI object identifies a bus/device/function but no PCI
+            // segment. Mapping a nonzero-segment scope onto segment zero
+            // would select the wrong requester, so keep it unsupported.
+            return Err(Error::Unsupported);
         }
-        let unit = dmar.units()[0];
+        let mut items = Vec::new();
+        items
+            .try_reserve(dmar.units().len())
+            .map_err(|_| Error::Capacity)?;
+        for unit in dmar.units() {
+            items.push(Vtd::new(*unit)?);
+        }
+        Ok(Some(Self {
+            dmar,
+            items,
+        }))
+    }
+
+    fn select(&self, bdf: Bdf) -> Result<usize, Error> {
+        self.dmar
+            .unit_index_for_unique(0, bdf.bus(), bdf.device(), bdf.function())
+            .map_err(|selection| match selection {
+                acpi::DmarUnitSelection::Missing => Error::DeviceUnit,
+                acpi::DmarUnitSelection::Ambiguous => Error::AmbiguousScope,
+            })
+    }
+}
+
+struct Manager {
+    state: State,
+}
+
+enum State {
+    Uninitialized,
+    Disabled,
+    Failed(Error),
+    Ready(Units),
+}
+
+static MANAGER: IrqSpinLock<Manager> = IrqSpinLock::new(Manager {
+    state: State::Uninitialized,
+});
+
+impl Vtd {
+    fn new(unit: DmarUnit) -> Result<Self, Error> {
         let reg = mm::phys_to_virt(unit.register_base).ok_or(Error::Hardware)?;
         let cap = read64(reg, REG_CAP);
         let ecap = read64(reg, REG_ECAP);
@@ -317,7 +354,7 @@ impl Vtd {
         if (cap >> 34) & 0xf == 0 {
             return Err(Error::Unsupported);
         }
-        Ok(Some(Self {
+        Ok(Self {
             unit,
             reg,
             cap,
@@ -327,7 +364,7 @@ impl Vtd {
             contexts: Vec::new(),
             domains: Vec::new(),
             next_domain: 1,
-        }))
+        })
     }
 
     fn units_match(&self, bdf: Bdf) -> bool {
@@ -552,8 +589,8 @@ fn wait(mut condition: impl FnMut() -> bool) -> bool {
 
 fn ensure(manager: &mut Manager, bdf: Bdf) -> Result<bool, Error> {
     if matches!(manager.state, State::Uninitialized) {
-        manager.state = match Vtd::firmware() {
-            Ok(Some(vtd)) => State::Ready(vtd),
+        manager.state = match Units::firmware() {
+            Ok(Some(units)) => State::Ready(units),
             Ok(None) => State::Disabled,
             Err(error) => State::Failed(error),
         };
@@ -562,7 +599,10 @@ fn ensure(manager: &mut Manager, bdf: Bdf) -> Result<bool, Error> {
         State::Uninitialized => Err(Error::Hardware),
         State::Disabled => Ok(false),
         State::Failed(error) => Err(*error),
-        State::Ready(vtd) => Ok(vtd.units_match(bdf)),
+        State::Ready(units) => {
+            units.select(bdf)?;
+            Ok(true)
+        }
     }
 }
 
@@ -571,9 +611,11 @@ pub fn map(bdf: Bdf, iova: u64, frames: &[PhysFrame], writable: bool) -> Result<
     if !ensure(&mut manager, bdf)? {
         return Ok(false);
     }
-    let State::Ready(vtd) = &mut manager.state else {
+    let State::Ready(units) = &mut manager.state else {
         return Err(Error::Hardware);
     };
+    let index = units.select(bdf)?;
+    let vtd = &mut units.items[index];
     if let Err(error) = vtd.map(bdf, iova, frames, writable) {
         crate::kprintln!("[JSR-IOMMU-DMA] map_error={}", error.name());
         let _ = vtd.release_if_empty();
@@ -587,15 +629,24 @@ pub fn translate(bdf: Bdf, iova: u64) -> Result<Option<PhysFrame>, Error> {
     match &mut manager.state {
         State::Uninitialized | State::Disabled => Ok(None),
         State::Failed(error) => Err(*error),
-        State::Ready(vtd) if vtd.root.is_some() => vtd.translate(bdf, iova),
-        State::Ready(_) => Ok(None),
+        State::Ready(units) => {
+            let index = units.select(bdf)?;
+            let vtd = &mut units.items[index];
+            if vtd.root.is_some() {
+                vtd.translate(bdf, iova)
+            } else {
+                Ok(None)
+            }
+        }
     }
 }
 
 pub fn unmap(bdf: Bdf, iova: u64, pages: u64) -> Result<(), Error> {
     let mut manager = MANAGER.lock();
-    let State::Ready(vtd) = &mut manager.state else {
+    let State::Ready(units) = &mut manager.state else {
         return Err(Error::Stale);
     };
+    let index = units.select(bdf)?;
+    let vtd = &mut units.items[index];
     vtd.unmap(bdf, iova, pages)
 }

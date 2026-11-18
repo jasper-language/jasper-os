@@ -471,8 +471,32 @@ impl DmarUnit {
                 return false;
             }
             let last = scope.path[scope.path_len - 1];
-            last == (device, function) && (scope.path_len > 1 || scope.start_bus == bus)
+            // A multi-hop bridge path cannot be resolved from the final bus
+            // number and endpoint alone: intermediate secondary/subordinate
+            // buses are not encoded in the path. Treating the last path entry
+            // as a direct match would assign a device to the wrong IOMMU unit.
+            // Multi-hop scopes therefore remain fail-closed until PCI bridge
+            // topology is supplied to this pure parser.
+            scope.path_len == 1 && scope.start_bus == bus && last == (device, function)
         })
+    }
+}
+
+/// Result of selecting the unique hardware unit that owns one PCI requester.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DmarUnitSelection {
+    /// No DRHD scope owns the requester.
+    Missing,
+    /// More than one DRHD claims the requester.
+    Ambiguous,
+}
+
+impl DmarUnitSelection {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Missing => "system.iommu.error.device_unit",
+            Self::Ambiguous => "system.iommu.error.ambiguous_scope",
+        }
     }
 }
 
@@ -494,10 +518,38 @@ impl Dmar {
         &self.units[..self.unit_count]
     }
 
-    pub fn unit_for(&self, segment: u16, bus: u8, device: u8, function: u8) -> Option<&DmarUnit> {
-        self.units()
-            .iter()
-            .find(|unit| unit.covers(segment, bus, device, function))
+    /// Select a unit only when exactly one DRHD owns the requester.
+    ///
+    /// Overlapping DRHD scopes are firmware ambiguity, not a reason to use the
+    /// first table entry. The returned index follows [`Self::units`] order.
+    pub fn unit_index_for_unique(
+        &self,
+        segment: u16,
+        bus: u8,
+        device: u8,
+        function: u8,
+    ) -> Result<usize, DmarUnitSelection> {
+        let mut selected = None;
+        for (index, unit) in self.units().iter().enumerate() {
+            if unit.covers(segment, bus, device, function) {
+                if selected.is_some() {
+                    return Err(DmarUnitSelection::Ambiguous);
+                }
+                selected = Some(index);
+            }
+        }
+        selected.ok_or(DmarUnitSelection::Missing)
+    }
+
+    pub fn unit_for_unique(
+        &self,
+        segment: u16,
+        bus: u8,
+        device: u8,
+        function: u8,
+    ) -> Result<&DmarUnit, DmarUnitSelection> {
+        self.unit_index_for_unique(segment, bus, device, function)
+            .map(|index| &self.units[index])
     }
 }
 
@@ -1011,10 +1063,14 @@ mod tests {
         assert!(unit.covers(0, 0, 2, 0));
         assert!(!unit.covers(0, 0, 3, 0));
         assert_eq!(
-            dmar.unit_for(0, 0, 2, 0).map(|u| u.register_base),
-            Some(0xFED9_0000)
+            dmar.unit_for_unique(0, 0, 2, 0)
+                .map(|unit| unit.register_base),
+            Ok(0xFED9_0000)
         );
-        assert!(dmar.unit_for(0, 0, 3, 0).is_none());
+        assert_eq!(
+            dmar.unit_for_unique(0, 0, 3, 0),
+            Err(DmarUnitSelection::Missing)
+        );
     }
 
     #[test]
@@ -1025,6 +1081,48 @@ mod tests {
         ioapic[16] = 3;
         let dmar = parse_dmar(&image_with_dmar(ioapic), 0x100).unwrap();
         assert!(!dmar.units()[0].covers(0, 0, 0, 0));
+    }
+
+    #[test]
+    fn dmar_selects_exactly_one_hardware_unit_or_fails_closed() {
+        let first = drhd_with_scope(false, &[(2, 0)]);
+        let mut second = drhd_with_scope(false, &[(3, 0)]);
+        second[8..16].copy_from_slice(&0xFED9_1000u64.to_le_bytes());
+        let mut entries = first;
+        entries.extend(second);
+        let dmar = parse_dmar(&image_with_dmar(entries), 0x100).unwrap();
+        assert_eq!(dmar.units().len(), 2);
+        assert_eq!(dmar.unit_index_for_unique(0, 0, 2, 0), Ok(0));
+        assert_eq!(dmar.unit_index_for_unique(0, 0, 3, 0), Ok(1));
+        assert_eq!(
+            dmar.unit_index_for_unique(0, 0, 4, 0),
+            Err(DmarUnitSelection::Missing)
+        );
+
+        let first = drhd_with_scope(false, &[(2, 0)]);
+        let mut second = drhd_with_scope(false, &[(2, 0)]);
+        second[8..16].copy_from_slice(&0xFED9_1000u64.to_le_bytes());
+        let mut overlap = first;
+        overlap.extend(second);
+        let dmar = parse_dmar(&image_with_dmar(overlap), 0x100).unwrap();
+        assert_eq!(
+            dmar.unit_index_for_unique(0, 0, 2, 0),
+            Err(DmarUnitSelection::Ambiguous)
+        );
+        assert_eq!(DmarUnitSelection::Ambiguous.name(), "system.iommu.error.ambiguous_scope");
+    }
+
+    #[test]
+    fn dmar_multihop_scope_is_not_matched_without_bridge_topology() {
+        let dmar =
+            parse_dmar(&image_with_dmar(drhd_with_scope(false, &[(1, 0), (2, 0)])), 0x100)
+                .unwrap();
+        assert!(!dmar.units()[0].covers(0, 0, 2, 0));
+        assert!(!dmar.units()[0].covers(0, 5, 2, 0));
+        assert_eq!(
+            dmar.unit_index_for_unique(0, 0, 2, 0),
+            Err(DmarUnitSelection::Missing)
+        );
     }
 
     #[test]

@@ -75,13 +75,16 @@ P0 集成切片使用与 lifecycle 服务相同的已验证 virtio-blk 设备，
 - 4 KiB PTE 绑定实际 pinned Memory 帧，writable 仅由映射请求决定；
 - 映射建立和撤销都执行 VT-d context/TLB invalidation；
 - DMA handle 关闭先停 bus master，再清除 PTE 并回收临时页表；
-- 无 DMAR 平台保持显式 `Disabled`；DMAR 损坏、多 unit 或硬件编程失败不会退回
-  软件 IOVA 成功。
+- 无 DMAR 平台保持显式 `Disabled`；DMAR 损坏、无匹配 unit、重叠 scope 或硬件
+  编程失败不会退回软件 IOVA 成功；
+- DMAR 的全部可用 hardware unit 都由同一管理器持有，每个 PCI 请求者必须恰好
+  匹配一个 unit；多 unit 不再使用“表项第一项”选择。多跳 bridge scope 在缺少
+  实际桥拓扑输入时失败关闭，避免把末级 endpoint 错绑到其他 bus。
 
-该后端当前只接受单 DMAR unit 的受控验收环境，并要求进入时全局翻译尚未开启。
-它尚未证明多 unit、多设备并行、既有 firmware 根表接管、热插拔或 crash/reset
-后的全局 DMA 安全，因此不能直接作为生产 IOMMU 策略启用。真实用户态 virtqueue
-仍必须等待这些全局接管边界完成。
+多 unit 选择、重叠拒绝、无匹配拒绝和多跳 bridge scope 的 fail-closed 行为已有
+host 契约测试。QEMU x86 明确不支持多个 vIOMMU，因此真实多 unit 运行证据仍需
+物理 Intel VT-d 平台；既有 firmware 根表接管、热插拔和 crash/reset 后的全局
+DMA 安全也尚未证明。该后端不能直接作为生产 IOMMU 策略启用。
 
 真实 QEMU Intel IOMMU 验收：
 
