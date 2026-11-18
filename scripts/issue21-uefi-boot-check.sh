@@ -344,9 +344,11 @@ if { [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MO
   SERIAL_READER=$!
   (
     exec 8>"$OUT/serial.in"
-    # UEFI/TCG can drop individual prompt bytes under serial load. Wait for the
-    # CLI read syscall as the semantic readiness signal, not a byte-perfect prompt.
-    while ! grep -aqE '^jasper> |\[JSR-SYSCALL\] enter name=system\.terminal\.read' "$OUT/serial.log"; do
+    # UEFI/TCG can drop individual prompt bytes under serial load. Prefer a
+    # semantic readiness marker, but never let damaged logging stall the guest.
+    ready_deadline=$(($(date +%s) + ${ISSUE21_SERIAL_READY_TIMEOUT:-90}))
+    while ! grep -aqE 'jasper> |Jasper-OS native CLI|terminal[.]read|JSR-PROD' "$OUT/serial.log" &&
+      [ "$(date +%s)" -lt "$ready_deadline" ]; do
       sleep 1
     done
     feed() {
