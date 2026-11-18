@@ -929,8 +929,7 @@ fn decode_state<R: SnapshotSource>(
                     .map(|record| record.package)
                     .ok_or(PersistentInstallError::Corrupt)?
             } else {
-                PackageKey::from_raw(cursor.get_u64()?)
-                    .ok_or(PersistentInstallError::Corrupt)?
+                PackageKey::from_raw(cursor.get_u64()?).ok_or(PersistentInstallError::Corrupt)?
             };
             let kind = get_principal_kind(cursor.get_u8()?)?;
             let subject = get_subject(&mut cursor)?;
@@ -1617,10 +1616,7 @@ mod tests {
                 12,
             )
             .unwrap();
-        assert_eq!(
-            reopened.runtime(new_runtime).unwrap().package,
-            new_package
-        );
+        assert_eq!(reopened.runtime(new_runtime).unwrap().package, new_package);
         reopened.stop_runtime(old_runtime).unwrap();
         reopened.destroy_package(old_package).unwrap();
     }

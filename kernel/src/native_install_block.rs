@@ -468,12 +468,8 @@ fn exercise(device: &mut BlockDevice) -> Result<(&'static str, usize), InstallSe
             None,
         )?;
         let runtime = service.start(user, first, PrincipalKind::User, 1, 11)?;
-        let data = service.create_data(
-            user,
-            first,
-            Subject::User(7),
-            DataOwnerKind::PrivateUser,
-        )?;
+        let data =
+            service.create_data(user, first, Subject::User(7), DataOwnerKind::PrivateUser)?;
         check(
             service.query(other, first, 12).is_err(),
             "cross-user query was admitted",

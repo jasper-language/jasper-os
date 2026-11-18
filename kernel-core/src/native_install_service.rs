@@ -717,10 +717,7 @@ mod tests {
         );
         assert_eq!(service.store().data(data).unwrap().package, new_package);
         assert_eq!(
-            service
-                .query(owner, installation, 11)
-                .unwrap()
-                .package,
+            service.query(owner, installation, 11).unwrap().package,
             new_package
         );
     }

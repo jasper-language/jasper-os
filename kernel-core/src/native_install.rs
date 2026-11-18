@@ -857,9 +857,12 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
         if next_package.spec.version <= current_package.spec.version {
             return Err(InstallError::VersionNotNewer);
         }
-        if self.data.iter().flatten().any(|data| {
-            data.package == current.package && data.installation.is_none()
-        }) {
+        if self
+            .data
+            .iter()
+            .flatten()
+            .any(|data| data.package == current.package && data.installation.is_none())
+        {
             return Err(InstallError::AmbiguousDataScope);
         }
         for data in self.data.iter_mut().flatten() {
@@ -1039,7 +1042,11 @@ impl<const P: usize, const I: usize, const G: usize, const R: usize, const D: us
             .flatten()
             .any(|installation| installation.package == key)
             || self.data.iter().flatten().any(|data| data.package == key)
-            || self.runtimes.iter().flatten().any(|runtime| runtime.package == key)
+            || self
+                .runtimes
+                .iter()
+                .flatten()
+                .any(|runtime| runtime.package == key)
         {
             return Err(InstallError::InUse);
         }
@@ -1479,11 +1486,7 @@ mod tests {
             .start(Actor::new(&actor), installation, principal(10), 1)
             .unwrap();
         let data = model
-            .create_data(
-                installation,
-                Subject::User(10),
-                DataOwnerKind::PrivateUser,
-            )
+            .create_data(installation, Subject::User(10), DataOwnerKind::PrivateUser)
             .unwrap();
         let other_data = model
             .create_data(
@@ -1506,10 +1509,7 @@ mod tests {
             old_package
         );
         assert_eq!(model.data(data).unwrap().package, old_package);
-        assert_eq!(
-            model.runtime(old_runtime).unwrap().package,
-            old_package
-        );
+        assert_eq!(model.runtime(old_runtime).unwrap().package, old_package);
 
         model
             .upgrade(Actor::new(&actor), installation, new_package)
@@ -1569,22 +1569,14 @@ mod tests {
             })
             .unwrap();
         let data = model
-            .create_data(
-                installation,
-                Subject::User(10),
-                DataOwnerKind::PrivateUser,
-            )
+            .create_data(installation, Subject::User(10), DataOwnerKind::PrivateUser)
             .unwrap();
         model.data[data.slot as usize]
             .as_mut()
             .unwrap()
             .installation = None;
         assert_eq!(
-            model.upgrade(
-                Actor::new(&[Subject::User(10)]),
-                installation,
-                new_package
-            ),
+            model.upgrade(Actor::new(&[Subject::User(10)]), installation, new_package),
             Err(InstallError::AmbiguousDataScope)
         );
         assert_eq!(
