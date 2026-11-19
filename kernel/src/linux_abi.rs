@@ -18779,16 +18779,20 @@ fn linux_epoll_wait(
     const EPOLLHUP: u32 = 0x010;
     const EPOLLONESHOT: u32 = 1 << 30;
     const EPOLLET: u32 = 1 << 31;
-    const MAX_EVENTS: usize = 64;
 
     let epfd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let requested_events = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
     if requested_events == 0 {
         return Err(CompatErrno::Invalid);
     }
-    // The kernel ring and user copy are bounded. Accept every Linux-valid
-    // positive maxevents value and report at most the capacity in one call.
-    let max_events = requested_events.min(MAX_EVENTS);
+    let output_bytes = requested_events
+        .checked_mul(12)
+        .ok_or(CompatErrno::NoMemory)?;
+    let mut output = alloc::vec::Vec::new();
+    output
+        .try_reserve_exact(output_bytes)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    output.resize(output_bytes, 0);
     let deadline = linux_epoll_deadline(args, pwait2)?;
     let old_mask = current_signal_mask(pid).ok_or(CompatErrno::NoSys)?;
     let mut restore_mask = false;
@@ -18808,7 +18812,6 @@ fn linux_epoll_wait(
         let registrations = proc::linux_epoll_registrations(pid, epoll_entry.handle)
             .ok_or(CompatErrno::BadFd)?;
         loop {
-            let mut output = [0u8; MAX_EVENTS * 12];
             let mut ready = 0usize;
             {
                 let mut registrations = registrations.lock();
@@ -18816,7 +18819,7 @@ fn linux_epoll_wait(
                     proc::linux_handle_fd_count(pid, registration.handle) != 0
                 });
                 for registration in registrations.iter_mut() {
-                    if !registration.armed || ready == max_events {
+                    if !registration.armed || ready == requested_events {
                         continue;
                     }
                     let Some(selected) = linux_epoll_readiness(pid, *registration) else {

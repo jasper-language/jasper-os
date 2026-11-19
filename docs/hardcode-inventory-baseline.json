@@ -943,7 +943,7 @@
       "rules": "HC-G1"
     },
     {
-      "count": 10,
+      "count": 9,
       "fingerprint": "89e5f4b00dcf46110fa49d6418af23ad0e2f1d685b844041e195ed2ec50d3ab7",
       "path": "kernel/src/linux_abi.rs",
       "rules": "HC-G1"
@@ -959,12 +959,6 @@
       "fingerprint": "8b753aa3046998e1b117b9c2d550cd35a7cccc7b5b6fffd77ee116b47666f714",
       "path": "kernel-core/src/native_module_lifecycle.rs",
       "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "8c18eb56c36c2172e212690f296b473cb183f3e0cbac0d77e19f394fcd4b0542",
-      "path": "kernel/src/linux_abi.rs",
-      "rules": "HC-G2,HC-G6"
     },
     {
       "count": 2,
@@ -1707,5 +1701,5 @@
     "user",
     "xtask"
   ],
-  "total": 359
+  "total": 357
 }

@@ -1,5 +1,5 @@
 {
-  "baseline_total": 359,
+  "baseline_total": 357,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,7 +10,7 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 138,
+    "explicit-safety-policy": 137,
     "platform-adapter": 28,
     "protocol-abi": 38,
     "runtime-resource-capacity": 71,
@@ -2279,7 +2279,7 @@
     },
     {
       "category": "runtime-resource-capacity",
-      "count": 10,
+      "count": 9,
       "fingerprint": "89e5f4b00dcf46110fa49d6418af23ad0e2f1d685b844041e195ed2ec50d3ab7",
       "line": 52,
       "path": "kernel/src/linux_abi.rs",
@@ -2351,7 +2351,7 @@
       "category": "explicit-safety-policy",
       "count": 2,
       "fingerprint": "e97a270ced01ef94d308799b5756449ba29e6a718ff48941c1c41ea0a9c5485b",
-      "line": 19431,
+      "line": 19434,
       "path": "kernel/src/linux_abi.rs",
       "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
@@ -2370,18 +2370,8 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "8c18eb56c36c2172e212690f296b473cb183f3e0cbac0d77e19f394fcd4b0542",
-      "line": 18791,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G2,HC-G6",
-      "source": "let max_events = requested_events.min(MAX_EVENTS);"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
       "fingerprint": "c3bdd178d15b9cff2b4f096b7a09e64ad1f794ae3b8fc8ce729caa17606dba1e",
-      "line": 19452,
+      "line": 19455,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G2,HC-G6",
@@ -2401,7 +2391,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "dc7025deaeb7e1c5533875d42b1f12573a6df19dd51a3303af2715fb68febf55",
-      "line": 19559,
+      "line": 19562,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G2,HC-G6",
@@ -2830,10 +2820,10 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 155,
+    "explicit-safety-policy": 154,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 112,
+    "runtime-resource-capacity": 111,
     "test-demo-fixture": 7
   }
 }
