@@ -20,7 +20,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 use kernel_core::fdt::Fdt;
 use kernel_core::psci::{self, Conduit, PsciError};
-use kernel_core::smp::{IpiKind, SmpError, Topology, MAX_CPUS};
+use kernel_core::smp::{IpiKind, SmpError, Topology};
 use spin::Once;
 
 use super::cpu::{self, read_sysreg};
@@ -243,7 +243,7 @@ fn clean_to_poc(va: u64, len: u64) {
 /// # Safety
 /// 同 `Platform::cpu_start`。
 pub unsafe fn start(req: &CpuStart<space::SpaceRoot>) -> Result<(), SmpError> {
-    if req.index == 0 || req.index >= MAX_CPUS || affinity_id(u64::from(req.hw_id)).is_none() {
+    if req.index == 0 || affinity_id(u64::from(req.hw_id)).is_none() {
         return Err(SmpError::NoSuchCpu);
     }
     let conduit = conduit().ok_or(SmpError::StartFailed)?;
@@ -303,9 +303,6 @@ pub fn cpu_index() -> usize {
 
 /// 向逻辑下标 `cpu` 发送核间中断。
 pub fn send_ipi(target: usize, kind: IpiKind) -> Result<(), SmpError> {
-    if target >= MAX_CPUS {
-        return Err(SmpError::NoSuchCpu);
-    }
     if target == cpu_index() {
         return Err(SmpError::SelfTarget);
     }
