@@ -197,7 +197,7 @@ pub struct SchedEntity<S> {
     /// 累计运行的 tick 数（诊断与验收：后台任务是否有进展）。由每核队列逐 tick 记账，策略不改。
     pub cpu_ticks: u64,
     /// 所在运行队列（处理器下标）；`None` = 不在任何队列（新建尚未入队、睡眠、已退出）。
-    queue: Option<u8>,
+    queue: Option<usize>,
     /// 策略私有状态。
     pub state: S,
 }
@@ -211,10 +211,7 @@ impl<S> SchedEntity<S> {
     /// 所在运行队列（处理器下标）；不在队列时 `None`。
     /// Run queue (processor index) this entity is on, if any.
     pub const fn queue(&self) -> Option<usize> {
-        match self.queue {
-            Some(q) => Some(q as usize),
-            None => None,
-        }
+        self.queue
     }
 }
 

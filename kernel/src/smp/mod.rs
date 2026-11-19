@@ -237,6 +237,14 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
         );
         arch::halt_forever();
     }
+    if let Err(error) = crate::sched::prepare_cpu_leaves(topo.count()) {
+        crate::kprintln!(
+            "[JSR-SMP] reject=scheduler_leaf_storage cpus={} reason={}",
+            topo.count(),
+            error.name()
+        );
+        arch::halt_forever();
+    }
     let per_cpu_bytes = IDLE_STACK_SIZE as u64;
     let available_bytes =
         mm::frame::free_frames() as u64 * kernel_core::frame::FRAME_SIZE as u64;

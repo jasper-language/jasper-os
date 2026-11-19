@@ -655,6 +655,13 @@ pub fn prepare_nohz_cpus(
     with_mut(|scheduler| scheduler.prepare_nohz_cpus(cpus))
 }
 
+/// Reserve scheduler run leaves before any secondary CPU starts.
+pub fn prepare_cpu_leaves(
+    cpus: usize,
+) -> Result<(), scheduler::LeafReserveError> {
+    scheduler::reserve_cpu_leaves(cpus)
+}
+
 /// 设置空闲停表的最大间隔（< 2 关闭），返回之前的设置（演练对照测量用，结束时以返回值恢复）。
 /// Set the tickless-idle divisor; returns the previous one.
 pub fn set_idle_tick(divisor: u32) -> u32 {

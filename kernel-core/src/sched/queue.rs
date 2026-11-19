@@ -30,13 +30,13 @@ pub enum QueueError {
 #[derive(Debug, Clone, Copy)]
 pub struct CoreQueue<P> {
     policy: P,
-    id: u8,
+    id: usize,
     queued: u32,
 }
 
 impl<P: SchedPolicy> CoreQueue<P> {
     /// 以策略实例与处理器编号构造（`const`，可放进 `static`）。
-    pub const fn new(policy: P, id: u8) -> Self {
+    pub const fn new(policy: P, id: usize) -> Self {
         CoreQueue { policy, id, queued: 0 }
     }
 
@@ -46,7 +46,7 @@ impl<P: SchedPolicy> CoreQueue<P> {
         let mut q = [CoreQueue::new(policy, 0); M];
         let mut i = 0;
         while i < M {
-            q[i].id = i as u8;
+            q[i].id = i;
             i += 1;
         }
         q
@@ -69,7 +69,7 @@ impl<P: SchedPolicy> CoreQueue<P> {
 
     /// 处理器编号。
     pub const fn id(&self) -> usize {
-        self.id as usize
+        self.id
     }
 
     /// 本队列上的实体数（可运行 + 运行中）。

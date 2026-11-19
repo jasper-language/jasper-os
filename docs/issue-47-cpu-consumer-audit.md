@@ -162,4 +162,9 @@
 - `kernel/src/sched/scheduler.rs`：AP 启动前同时重建 wake、RT 和纳秒预算三个 forest
   及其按 CPU 步长排列的 entries，迁移现存期限事件后整体替换。timer/RT 热路径
   不在持锁时扩容，也不再依赖 `DeadlineForest<128>` 作为最终 CPU 上限。
-- 其余调度器 per-CPU run leaves、共享 CpuSet 门面、部分诊断和亲和 ABI 尚未迁移。
+- 调度器运行队列身份已从 `u8` 迁移到 `usize`，slot 链表的队列归属使用无符号
+  非零整数编码而不是 `u8::MAX` 哨兵，双队列迁移的 CPU 对也不再经过 `u16` 截断。
+  这移除了队列身份和规范化锁序上的 255/65535 上限，但每个 leaf 的 RunLists 表头和
+  其余调度器固定表仍需后续迁移，不能据此宣称动态调度完成。
+- 其余调度器 per-CPU run leaves 的 RunLists 表头、共享 CpuSet 门面、部分诊断和
+  亲和 ABI 尚未迁移。

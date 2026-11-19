@@ -40,6 +40,7 @@
 //!   每 tick 的到期唤醒与实时预算补充只在最早到期时刻到达时才扫描（缓存最早时刻）。
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use crate::arch::TaskContext;
 use crate::task::{Task, TaskAffinity, TaskId, TaskState};
 use kernel_core::deadline::{Deadline, ABSENT as NO_DEADLINE};
@@ -63,6 +64,7 @@ use super::KernelPolicy;
 use super::slots::{BootSlots, TrackedSlots};
 use kernel_core::sched::{Link, RunLists};
 use super::stack::{ReserveError, StackPool, STATIC_STACKS};
+use spin::Once;
 
 /// 堆就绪之前的内联槽位数（与静态内核栈数一致：那时只有这些槽位有栈）。
 pub const INLINE_SLOTS: usize = STATIC_STACKS;
@@ -156,7 +158,7 @@ pub(super) struct LeafTransition {
     pub(super) cause: &'static str,
 }
 impl RunLeaf {
-    const fn new(cpu: u8) -> Self {
+    const fn new(cpu: usize) -> Self {
         let mut hot = inline_hot_slots();
         if cpu == 0 {
             hot[BOOT_SLOT] = HotSlot::initial(
@@ -191,7 +193,7 @@ impl RunLeaf {
 macro_rules! run_leaves {
     ($($cpu:expr),+ $(,)?) => { [$(kernel_core::ticket::TicketLock::new(RunLeaf::new($cpu))),+] };
 }
-static RUN_LEAVES: [kernel_core::ticket::TicketLock<RunLeaf>; MAX_CPUS] = run_leaves![
+static BOOTSTRAP_RUN_LEAVES: [kernel_core::ticket::TicketLock<RunLeaf>; MAX_CPUS] = run_leaves![
     0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
     16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,
     32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,
@@ -201,6 +203,52 @@ static RUN_LEAVES: [kernel_core::ticket::TicketLock<RunLeaf>; MAX_CPUS] = run_le
     96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,
     112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,
 ];
+
+static EXTRA_RUN_LEAVES: Once<Result<Vec<kernel_core::ticket::TicketLock<RunLeaf>>, LeafReserveError>> =
+    Once::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeafReserveError {
+    Allocation,
+    AlreadyReservedTooSmall,
+}
+
+impl LeafReserveError {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Allocation => "system.sched.error.leaf_allocation",
+            Self::AlreadyReservedTooSmall => "system.sched.error.leaf_capacity",
+        }
+    }
+}
+
+fn leaf(cpu: usize) -> Option<&'static kernel_core::ticket::TicketLock<RunLeaf>> {
+    if let Some(leaf) = BOOTSTRAP_RUN_LEAVES.get(cpu) {
+        return Some(leaf);
+    }
+    let index = cpu.checked_sub(MAX_CPUS)?;
+    EXTRA_RUN_LEAVES.get()?.as_ref().ok()?.get(index)
+}
+
+/// Reserve scheduler leaves for every admitted logical CPU before AP startup.
+pub(super) fn reserve_cpu_leaves(cpus: usize) -> Result<(), LeafReserveError> {
+    let needed = cpus.saturating_sub(MAX_CPUS);
+    let leaves = EXTRA_RUN_LEAVES.call_once(|| {
+        let mut leaves = Vec::new();
+        leaves
+            .try_reserve_exact(needed)
+            .map_err(|_| LeafReserveError::Allocation)?;
+        for cpu in MAX_CPUS..cpus {
+            leaves.push(kernel_core::ticket::TicketLock::new(RunLeaf::new(cpu)));
+        }
+        Ok(leaves)
+    });
+    match leaves {
+        Ok(leaves) if leaves.len() >= needed => Ok(()),
+        Ok(_) => Err(LeafReserveError::AlreadyReservedTooSmall),
+        Err(error) => Err(*error),
+    }
+}
 
 #[cfg(feature = "krn3-fast-tick-verify")]
 static LEAF_FINISHES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -388,7 +436,9 @@ pub(super) fn leaf_local_switch_count() -> u32 {
 }
 
 fn with_leaf<R>(cpu: usize, f: impl FnOnce(&mut RunLeaf) -> R) -> R {
-    let mut guard = RUN_LEAVES[cpu].lock();
+    let mut guard = leaf(cpu)
+        .expect("admitted CPU has a prepared scheduler leaf")
+        .lock();
     let result = f(&mut guard);
     drop(guard);
     result
@@ -463,11 +513,13 @@ impl Iterator for LeafSlots {
     }
 }
 fn with_leaf_pair<R>(source: usize, destination: usize, f: impl FnOnce(&mut RunLeaf, &mut RunLeaf) -> R) -> R {
-    let pair = kernel_core::percpu_migration::CpuPair::ordered(source as u16, destination as u16)
+    let pair = kernel_core::percpu_migration::CpuPair::ordered(source, destination)
         .expect("run-leaf pair requires distinct CPUs");
-    let mut first = RUN_LEAVES[pair.first as usize].lock();
-    let mut second = RUN_LEAVES[pair.second as usize].lock();
-    let result = if source == pair.first as usize { f(&mut first, &mut second) } else { f(&mut second, &mut first) };
+    let first_lock = leaf(pair.first).expect("admitted source scheduler leaf");
+    let second_lock = leaf(pair.second).expect("admitted destination scheduler leaf");
+    let mut first = first_lock.lock();
+    let mut second = second_lock.lock();
+    let result = if source == pair.first { f(&mut first, &mut second) } else { f(&mut second, &mut first) };
     drop(second);
     drop(first);
     result
@@ -2504,7 +2556,7 @@ impl Scheduler {
         let source = self.tasks.get(i).and_then(|t| t.as_ref()).and_then(|t| t.sched.queue());
         let mut transaction = source.filter(|&q| q != home).map(|q| {
             kernel_core::percpu_migration::Migration::begin(
-                token, kernel_core::percpu_migration::Owner::Cpu(q as u16), home as u16,
+                token, kernel_core::percpu_migration::Owner::Cpu(q), home,
             ).expect("distinct in-range CPU migration")
         });
         if let Some(tx) = transaction.as_mut() { tx.detach().expect("new migration is source-owned"); }

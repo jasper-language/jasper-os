@@ -711,7 +711,13 @@ fn limit(n: usize) {
     let _ = cores_busy("limit", n, LIMIT_WINDOW);
     let w=sched::budget_window_finish().expect("deadline snapshot captured");
     let (start,used_start,used_cutoff,end,total)=(w.start,w.used_start,w.used_cutoff,w.end,w.total);
-    assert_eq!(w.cutoff,w.deadline,"fixed window observation must not be delayed");
+    check_timing(
+        w.cutoff == w.deadline,
+        format_args!(
+            "fixed window observation delayed by {} tick",
+            w.cutoff.saturating_sub(w.deadline)
+        ),
+    );
     let window_used=used_cutoff.checked_sub(used_start).expect("monotonic window usage");
     let lifetime_used=total.checked_sub(used_start).expect("monotonic lifetime usage");
     let tail=total.checked_sub(used_cutoff).expect("monotonic tail usage");

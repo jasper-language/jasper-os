@@ -13,8 +13,6 @@
 
 /// 链表结束标记。
 const NIL: u32 = u32::MAX;
-/// 「不在任何列表上」标记。
-const NONE: u8 = u8::MAX;
 
 /// 一个槽位的链接（由调用者按槽位数分配，初值为 [`Link::EMPTY`]）。
 /// Per-slot link storage.
@@ -22,21 +20,28 @@ const NONE: u8 = u8::MAX;
 pub struct Link {
     prev: u32,
     next: u32,
-    queue: u8,
+    /// Encoded as `queue + 1` so zero remains available for queue 0.
+    queue: Option<core::num::NonZeroUsize>,
 }
 
 impl Link {
     /// 不在任何列表上的链接。
     /// A link that is on no list.
-    pub const EMPTY: Link = Link { prev: NIL, next: NIL, queue: NONE };
+    pub const EMPTY: Link = Link { prev: NIL, next: NIL, queue: None };
+
+    const fn encoded_queue(queue: usize) -> Option<core::num::NonZeroUsize> {
+        match queue.checked_add(1) {
+            Some(encoded) => core::num::NonZeroUsize::new(encoded),
+            None => None,
+        }
+    }
 
     /// 所在队列（不在任何列表上为 `None`）。
     /// The queue this slot is listed on.
     pub const fn queue(&self) -> Option<usize> {
-        if self.queue == NONE {
-            None
-        } else {
-            Some(self.queue as usize)
+        match self.queue {
+            Some(queue) => Some(queue.get() - 1),
+            None => None,
         }
     }
 }
@@ -97,12 +102,13 @@ impl<const M: usize> RunLists<M> {
     /// 按槽位号升序插入队列 `q`。已在任何列表上、或下标越界时拒绝。
     /// Insert `slot` into list `q`, keeping slot order.
     pub fn insert(&mut self, links: &mut [Link], q: usize, slot: usize) -> Result<(), RunListError> {
-        if q >= M || q >= NONE as usize {
+        if q >= M {
             return Err(RunListError::NoSuchQueue);
         }
         if slot >= links.len() || slot >= NIL as usize {
             return Err(RunListError::NoSuchSlot);
         }
+        let queue = Link::encoded_queue(q).ok_or(RunListError::NoSuchQueue)?;
         if let Some(on) = links[slot].queue() {
             return Err(RunListError::AlreadyListed(on));
         }
@@ -114,7 +120,7 @@ impl<const M: usize> RunLists<M> {
             prev = at;
             at = links[at as usize].next;
         }
-        links[slot] = Link { prev, next: at, queue: q as u8 };
+        links[slot] = Link { prev, next: at, queue: Some(queue) };
         if prev == NIL {
             self.head[q] = s;
         } else {
@@ -157,7 +163,7 @@ impl<const M: usize> RunLists<M> {
             return Ok(false);
         }
         if let Some(q) = want {
-            if q >= M || q >= NONE as usize {
+            if q >= M || Link::encoded_queue(q).is_none() {
                 return Err(RunListError::NoSuchQueue);
             }
             if slot >= NIL as usize {
@@ -239,6 +245,18 @@ mod tests {
         assert_eq!(r.total(), 5);
         assert!(r.is_empty(0));
         assert_eq!(l[5].queue(), Some(2));
+    }
+
+    #[test]
+    fn queue_identity_is_not_limited_to_u8() {
+        let mut l = vec![Link::EMPTY; 4];
+        let mut r = RunLists::<512>::new();
+        let queue = 300;
+        r.insert(&mut l, queue, 2).unwrap();
+        assert_eq!(l[2].queue(), Some(queue));
+        assert_eq!(r.first(queue), Some(2));
+        assert_eq!(r.remove(&mut l, 2), Ok(queue));
+        assert_eq!(l[2].queue(), None);
     }
 
     #[test]

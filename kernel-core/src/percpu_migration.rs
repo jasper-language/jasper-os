@@ -12,12 +12,12 @@ pub struct TaskToken {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CpuPair {
-    pub first: u16,
-    pub second: u16,
+    pub first: usize,
+    pub second: usize,
 }
 
 impl CpuPair {
-    pub fn ordered(source: u16, destination: u16) -> Option<Self> {
+    pub fn ordered(source: usize, destination: usize) -> Option<Self> {
         if source == destination { return None; }
         Some(Self { first: source.min(destination), second: source.max(destination) })
     }
@@ -25,7 +25,7 @@ impl CpuPair {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Owner {
-    Cpu(u16),
+    Cpu(usize),
     /// Detached while both ordered queue locks remain held by this transaction.
     Transit,
 }
@@ -36,13 +36,13 @@ pub enum MigrationError { SameCpu, WrongOwner, WrongPhase }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Migration {
     pub token: TaskToken,
-    source: u16,
-    destination: u16,
+    source: usize,
+    destination: usize,
     owner: Owner,
 }
 
 impl Migration {
-    pub fn begin(token: TaskToken, owner: Owner, destination: u16) -> Result<Self, MigrationError> {
+    pub fn begin(token: TaskToken, owner: Owner, destination: usize) -> Result<Self, MigrationError> {
         let Owner::Cpu(source) = owner else { return Err(MigrationError::WrongOwner); };
         CpuPair::ordered(source, destination).ok_or(MigrationError::SameCpu)?;
         Ok(Self { token, source, destination, owner })
@@ -145,6 +145,15 @@ mod tests {
         assert_eq!(m.commit(), Err(MigrationError::WrongPhase));
     }
     #[test]
+    fn cpu_identity_is_not_limited_to_u16() {
+        let source = u16::MAX as usize + 17;
+        let mut m = Migration::begin(token(9), Owner::Cpu(source), 3).unwrap();
+        assert_eq!(m.locks(), CpuPair { first: 3, second: source });
+        m.detach().unwrap();
+        m.commit().unwrap();
+        assert_eq!(m.owner(), Owner::Cpu(3));
+    }
+    #[test]
     fn abort_restores_source_and_pi_is_single_consume() {
         let mut m = Migration::begin(token(4), Owner::Cpu(0), 1).unwrap();
         m.detach().unwrap(); m.abort().unwrap(); assert_eq!(m.owner(), Owner::Cpu(0));
@@ -181,7 +190,7 @@ mod proofs {
     use super::*;
     #[kani::proof]
     fn ordered_pair_is_strict_and_migration_has_one_owner() {
-        let source: u16 = kani::any(); let destination: u16 = kani::any();
+        let source: usize = kani::any(); let destination: usize = kani::any();
         let token = TaskToken { slot: kani::any(), generation: kani::any() };
         if source == destination {
             assert_eq!(
