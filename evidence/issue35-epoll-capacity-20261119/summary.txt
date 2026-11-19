@@ -1,0 +1,12 @@
+jasper-os 一键验收  20261119-132252
+提交：5ea2c84（工作区有未提交改动）
+配置档：standard
+加速方式：kvm
+CPU 亲和：4-11
+验收层：定点（x86_64 单处理器；检查：compatsyscall；宿主测试：vm）——不代表全量通过
+架构范围：x86_64（AArch64 / RISC-V64 / RISC-V32 冻结，按 N/A 记录）
+QEMU 退出码：33（4 处理器：-1，8 处理器：-1，q35 ECAM：-1，S-2：-1）
+
+里程碑 结果 说明
+COMPAT-SYSCALL PASS 真实 CPL3 静态 Linux ET_EXEC 经 flavor 分发执行 write/getpid/gettid，并在同一进程/共享页上完成 epoll ONESHOT、futex 阻塞唤醒、mmap/mprotect/munmap、io_uring NOP/fixed-file register；退出、未授权 getppid 拒绝与页帧回收通过
+JASO-1/多架构 N/A  未设置 JASPER_ARCHES=all；四 ISA 多镜像 QEMU 验收未运行，不计入通过

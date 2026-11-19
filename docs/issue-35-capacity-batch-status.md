@@ -2,8 +2,8 @@
 
 更新时间：2026-11-18。
 
-状态：**配置上限与四个兼容批次语义已裁决；poll 超限 errno 已修复，其余
-高规模运行证据仍待补。**
+状态：**配置上限与四个兼容批次语义已裁决；poll 超限 errno 和每进程 epoll
+实例固定上限已修复；其余高规模运行证据仍待补。**
 
 ## 配置容量（HC-A10）
 
@@ -36,12 +36,29 @@
 `poll` 的 64 条上限仍不是最终产品目标。后续应由 Workload IO/CPU 预算动态授予
 扫描容量，并取得超过 64 个 fd 的未修改 Linux 程序、取消/超时和资源回收证据。
 
+### epoll 实例数量
+
+`linux_epoll_create1` 原先除 fd 表预算外还有一个独立的每进程 8 实例上限。
+该上限没有协议或安全依据，现由以下既有资源链统一决定：
+
+- 每进程 FdTable 的运行时 soft/hard 预算；
+- epoll 元数据 `Vec::try_reserve` 的堆准入；
+- `Rights::READ | Rights::WRITE` 和兼容句柄世代。
+
+真实静态 Linux ET_EXEC 在一个进程中创建 12 个 epoll fd，再全部关闭；成功退出，
+未授权 syscall 拒绝仍保持，进程退出后页帧回到基线。证据见
+`evidence/issue35-epoll-capacity-20261119/`。
+
 ## 验证
 
 ```text
 cargo check -p jasper-kernel --target x86_64-unknown-none \
   --features compat-syscall-verify
 PASS
+
+JASPER_ACCEPT=spot JASPER_CHECKS=compatsyscall \
+  bash scripts/accept.sh
+accept: SPOT PASS
 
 python3 scripts/check-hardcode-gate.py --self-test
 python3 scripts/check-hardcode-gate.py --base HEAD^
@@ -52,6 +69,6 @@ python3 scripts/check-hardcode-inventory-ledger.py --check \
 ## 未完成
 
 - 配置上限的更高容量实现、真实 256/1024 Task 和 65536 Object 压力矩阵；
-- poll、signalfd、fanotify、epoll、sendfile/copy 在真实 Ubuntu/Android 程序中的
+- poll、signalfd、fanotify、epoll 大规模批次、sendfile/copy 在真实 Ubuntu/Android 程序中的
   大规模分批、取消和资源回基线；
 - 所有固定批次值最终应与 Workload/Profile 资源预算统一，而不是成为跨设备 ABI。

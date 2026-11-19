@@ -3414,9 +3414,6 @@ pub(crate) fn linux_fs_context_ready(pid: ObjId, fd: u32) -> bool {
 pub(crate) fn linux_epoll_create(pid: ObjId, close_on_exec: bool) -> Option<u32> {
     with_proc(pid, |process| {
         let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
-        if linux.epolls.len() >= 8 {
-            return Err(ProcError::NoTaskSlot);
-        }
         linux
             .epolls
             .try_reserve(1)

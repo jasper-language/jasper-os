@@ -212,6 +212,26 @@ unsafe fn test_epoll() -> bool {
 }
 
 #[cfg(target_arch = "x86_64")]
+unsafe fn test_many_epolls() -> bool {
+    const COUNT: usize = 12;
+    let mut fds = [-1i64; COUNT];
+    for index in 0..COUNT {
+        fds[index] = syscall1(SYS_EPOLL_CREATE1, 0);
+        if fds[index] < 0 {
+            for opened in &fds[..index] {
+                let _ = syscall1(SYS_CLOSE, *opened as u64);
+            }
+            return false;
+        }
+    }
+    let mut closed = true;
+    for fd in fds {
+        closed &= syscall1(SYS_CLOSE, fd as u64) == 0;
+    }
+    closed
+}
+
+#[cfg(target_arch = "x86_64")]
 unsafe fn test_mmap() -> bool {
     let address = syscall6(
         SYS_MMAP,
@@ -462,6 +482,9 @@ pub extern "C" fn _start() -> ! {
     if !unsafe { test_epoll() } {
         unsafe { exit(97) }
     }
+    if !unsafe { test_many_epolls() } {
+        unsafe { exit(102) }
+    }
     if !unsafe { test_mmap() } {
         unsafe { exit(98) }
     }
@@ -471,7 +494,8 @@ pub extern "C" fn _start() -> ! {
     if !unsafe { test_io_uring() } {
         unsafe { exit(100) }
     }
-    let summary = b"linux-native: epoll=true futex=true mmap=true io_uring=true\n";
+    let summary =
+        b"linux-native: epoll=true many_epolls=true futex=true mmap=true io_uring=true\n";
     if !unsafe { write_bytes(1, summary) } {
         unsafe { exit(101) }
     }
