@@ -934,10 +934,17 @@ mod tests {
         ));
         let mut supported_plan = main_plan.clone();
         supported_plan.relocations.retain(|relocation| {
-            relocation
-                .symbol
-                .as_deref()
-                .is_none_or(|name| symbols.resolve(name).is_some_and(|symbol| !symbol.is_ifunc))
+            let Some(name) = relocation.symbol.as_deref() else {
+                return true;
+            };
+            if relocation.kind == RelocationKind::Copy {
+                return symbols
+                    .resolve_copy(name, 1)
+                    .is_some_and(|symbol| symbol.module_id != 1 && !symbol.is_ifunc);
+            }
+            symbols.resolve(name).is_some_and(|symbol| !symbol.is_ifunc)
+                || (!relocation.symbol_defined
+                    && relocation.symbol_binding == Some(SymbolBinding::Weak))
         });
         let patches = prepare_relocations(
             &mut memory,
