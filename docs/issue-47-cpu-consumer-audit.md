@@ -170,6 +170,10 @@
 - `kernel/src/arch/aarch64/user.rs`：每核用户返回内核栈记录改为 bootstrap 加
   AP 启动前堆扩展。Pixel 6a 无损 runtime 在 `4.49s` 到达 PSCI reset，恢复到同一
   Android build，`sys.boot_completed=1` 且 slot 仍为 `a`。
+- `kernel/src/arch/aarch64/gic.rs`：每核 GICv2 interface 目标、GICv3 affinity 与
+ 注册状态合并为 bootstrap 加堆后备记录，并在 AP 启动前一次性预留。SGI/IPI、
+  SPI target 和中断记录路径只查询已发布 CPU 状态；下一次 Pixel 无损 runtime
+  在 `4.48s` 到达 reset 并恢复 Android。
 - `kernel/src/sched/scheduler.rs`：`cpu_stats`、`cpu_residency`、类别仲裁窗口和
   idle context 改用调度器内联 bootstrap + 堆后备扩展表，在 AP 启动前与 CPU
   容量一起原子预留。运行期这些每核统计与上下文不再由固定 128 槽决定容量。

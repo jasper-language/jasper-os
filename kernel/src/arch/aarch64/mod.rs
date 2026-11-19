@@ -115,6 +115,7 @@ impl Platform for Aarch64 {
     }
 
     fn prepare_cpu_runtime(cpus: usize) -> Result<(), &'static str> {
+        gic::prepare(cpus).map_err(user::RuntimeStorageError::name)?;
         user::prepare(cpus).map_err(user::RuntimeStorageError::name)
     }
 

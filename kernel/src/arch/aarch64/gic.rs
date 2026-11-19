@@ -6,7 +6,9 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
+use alloc::vec::Vec;
 use kernel_core::smp::{IpiKind, MAX_CPUS};
+use spin::Once;
 
 use super::cpu::{read_sysreg, write_sysreg};
 
@@ -56,9 +58,55 @@ static CPU: AtomicU64 = AtomicU64::new(0);
 static REDIST: AtomicU64 = AtomicU64::new(0);
 static REDIST_SIZE: AtomicU64 = AtomicU64::new(0);
 static REDIST_STRIDE: AtomicU64 = AtomicU64::new(0x20_000);
-static INTERFACE: [AtomicU8; MAX_CPUS] = [const { AtomicU8::new(0) }; MAX_CPUS];
-static AFFINITY: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
-static REGISTERED: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+
+struct CpuGicState {
+    interface: AtomicU8,
+    affinity: AtomicU32,
+    registered: AtomicBool,
+}
+
+impl CpuGicState {
+    const fn new() -> Self {
+        Self {
+            interface: AtomicU8::new(0),
+            affinity: AtomicU32::new(0),
+            registered: AtomicBool::new(false),
+        }
+    }
+}
+
+static BOOTSTRAP_GIC_STATE: [CpuGicState; MAX_CPUS] =
+    [const { CpuGicState::new() }; MAX_CPUS];
+static EXTRA_GIC_STATE: Once<Result<Vec<CpuGicState>, super::user::RuntimeStorageError>> =
+    Once::new();
+
+fn cpu_state(index: usize) -> Option<&'static CpuGicState> {
+    if let Some(state) = BOOTSTRAP_GIC_STATE.get(index) {
+        return Some(state);
+    }
+    let extra = index.checked_sub(MAX_CPUS)?;
+    EXTRA_GIC_STATE.get()?.as_ref().ok()?.get(extra)
+}
+
+/// Reserve every CPU's GIC interface routing state before AP startup.
+pub(super) fn prepare(cpus: usize) -> Result<(), super::user::RuntimeStorageError> {
+    let needed = cpus.saturating_sub(MAX_CPUS);
+    let states = EXTRA_GIC_STATE.call_once(|| {
+        let mut states = Vec::new();
+        states
+            .try_reserve_exact(needed)
+            .map_err(|_| super::user::RuntimeStorageError::Allocation)?;
+        for _ in MAX_CPUS..cpus {
+            states.push(CpuGicState::new());
+        }
+        Ok(states)
+    });
+    match states {
+        Ok(states) if states.len() >= needed => Ok(()),
+        Ok(_) => Err(super::user::RuntimeStorageError::AlreadyPreparedTooSmall),
+        Err(error) => Err(*error),
+    }
+}
 
 pub fn set_bases(dist: u64, cpu: u64, redist: u64, redist_size: u64, stride: u64) {
     DIST.store(dist, Ordering::Relaxed);
@@ -207,8 +255,10 @@ pub fn init(ppi: u32) -> bool {
         }
         let ready = init_v3_cpu(ppi);
         if ready {
-            AFFINITY[0].store(affinity(), Ordering::Release);
-            REGISTERED[0].store(true, Ordering::Release);
+            if let Some(state) = cpu_state(0) {
+                state.affinity.store(affinity(), Ordering::Release);
+                state.registered.store(true, Ordering::Release);
+            }
         }
         unsafe {
             w32(dist, GICD_CTLR, (1 << 1) | (1 << 4));
@@ -225,8 +275,12 @@ pub fn init(ppi: u32) -> bool {
             w32(dist, GICD_CTLR, 0);
             init_v2_banked(dist, cpu, ppi);
             w32(dist, GICD_CTLR, 1);
-            INTERFACE[0].store(r32(dist, GICD_ITARGETSR) as u8, Ordering::Release);
-            REGISTERED[0].store(true, Ordering::Release);
+            if let Some(state) = cpu_state(0) {
+                state
+                    .interface
+                    .store(r32(dist, GICD_ITARGETSR) as u8, Ordering::Release);
+                state.registered.store(true, Ordering::Release);
+            }
         }
         true
     }
@@ -247,15 +301,15 @@ pub fn init_cpu(ppi: u32) -> bool {
 }
 
 pub fn record_interface(index: usize) -> u8 {
-    if index >= MAX_CPUS {
+    let Some(state) = cpu_state(index) else {
         return 0;
-    }
+    };
     if is_v3() {
         if find_current_redist().is_none() {
             return 0;
         }
-        AFFINITY[index].store(affinity(), Ordering::Release);
-        REGISTERED[index].store(true, Ordering::Release);
+        state.affinity.store(affinity(), Ordering::Release);
+        state.registered.store(true, Ordering::Release);
         return 1;
     }
     let dist = DIST.load(Ordering::Relaxed);
@@ -264,22 +318,22 @@ pub fn record_interface(index: usize) -> u8 {
     }
     // SAFETY: GICv2 target register group0 is banked and readable.
     let bit = unsafe { r32(dist, GICD_ITARGETSR) } as u8;
-    INTERFACE[index].store(bit, Ordering::Release);
-    REGISTERED[index].store(bit != 0, Ordering::Release);
+    state.interface.store(bit, Ordering::Release);
+    state.registered.store(bit != 0, Ordering::Release);
     bit
 }
 
 pub fn send_sgi(index: usize, kind: IpiKind) -> bool {
-    if index >= MAX_CPUS {
+    let Some(state) = cpu_state(index) else {
         return false;
-    }
+    };
     let id = match kind {
         IpiKind::Reschedule => SGI_RESCHEDULE,
         IpiKind::TlbShootdown => SGI_SHOOTDOWN,
         IpiKind::Call => SGI_CALL,
     };
     if is_v3() {
-        let hw = AFFINITY[index].load(Ordering::Acquire);
+        let hw = state.affinity.load(Ordering::Acquire);
         let aff0 = hw & 0xff;
         if aff0 >= 16 {
             return false;
@@ -297,7 +351,7 @@ pub fn send_sgi(index: usize, kind: IpiKind) -> bool {
         true
     } else {
         let d = DIST.load(Ordering::Relaxed);
-        let bit = INTERFACE[index].load(Ordering::Acquire);
+        let bit = state.interface.load(Ordering::Acquire);
         if d == 0 || bit == 0 {
             return false;
         }
@@ -363,7 +417,10 @@ pub fn spi_configure(id: u32) -> bool {
     }
     let dist = DIST.load(Ordering::Relaxed);
     let (word, bit) = bit_of(id);
-    let target = INTERFACE[0].load(Ordering::Acquire);
+    let Some(boot_state) = cpu_state(0) else {
+        return false;
+    };
+    let target = boot_state.interface.load(Ordering::Acquire);
     // SAFETY: id was range-checked against GICD_TYPER.
     unsafe {
         w32(dist, GICD_ICENABLER + word, bit);
@@ -380,7 +437,11 @@ pub fn spi_configure(id: u32) -> bool {
         w32(config, 0, value);
         ((dist + GICD_IPRIORITYR + u64::from(id)) as *mut u8).write_volatile(PRIORITY);
         if is_v3() {
-            w64(dist, GICD_IROUTER + u64::from(id) * 8, u64::from(AFFINITY[0].load(Ordering::Acquire)));
+            w64(
+                dist,
+                GICD_IROUTER + u64::from(id) * 8,
+                u64::from(boot_state.affinity.load(Ordering::Acquire)),
+            );
         } else {
             if target == 0 {
                 return false;
@@ -392,20 +453,23 @@ pub fn spi_configure(id: u32) -> bool {
 }
 
 pub fn spi_set_target(id: u32, index: usize) -> bool {
-    if !spi_supported(id) || index >= MAX_CPUS {
+    if !spi_supported(id) {
         return false;
     }
+    let Some(state) = cpu_state(index) else {
+        return false;
+    };
     let dist = DIST.load(Ordering::Relaxed);
     if is_v3() {
-        let hw = AFFINITY[index].load(Ordering::Acquire);
-        if !REGISTERED[index].load(Ordering::Acquire) {
+        let hw = state.affinity.load(Ordering::Acquire);
+        if !state.registered.load(Ordering::Acquire) {
             return false;
         }
         // SAFETY: route register affects exactly one SPI.
         unsafe { w64(dist, GICD_IROUTER + u64::from(id) * 8, u64::from(hw)) };
     } else {
-        let bit = INTERFACE[index].load(Ordering::Acquire);
-        if !REGISTERED[index].load(Ordering::Acquire) {
+        let bit = state.interface.load(Ordering::Acquire);
+        if !state.registered.load(Ordering::Acquire) {
             return false;
         }
         // SAFETY: byte access changes only this interrupt's target.
