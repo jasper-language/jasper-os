@@ -122,7 +122,7 @@ const fn inline_hot_slots() -> [HotSlot<LeafTaskHot>; INLINE_SLOTS] {
 
 struct RunLeaf {
     queue: CoreQueue<KernelPolicy>,
-    runs: RunLists<MAX_CPUS>,
+    runs: RunLists<1>,
     links: BootSlots<Link, INLINE_SLOTS>,
     /// Generation-bound scheduling state owned by this CPU. During the
     /// migration checkpoint it mirrors the canonical Task fields; the local
@@ -339,7 +339,7 @@ pub(super) fn fast_leaf_competing_tick(
             _ => return FastLeafTick::Rejected,
         }
         let mut waiting = ClassMask::EMPTY;
-        for slot in leaf.runs.iter(&leaf.links, cpu) {
+        for slot in leaf.runs.iter(&leaf.links, LEAF_QUEUE) {
             let Some(generation) = leaf.hot[slot].generation() else { return FastLeafTick::Rejected; };
             let hot_token = kernel_core::task_index::Token { slot, generation };
             let Ok(owner) = leaf.hot[slot].get(hot_token) else { return FastLeafTick::Rejected; };
@@ -372,7 +372,7 @@ pub(super) fn fast_leaf_competing_tick(
         }
         let choice = {
             let RunLeaf { queue, runs, links, hot, .. } = leaf;
-            let mut runnable = runs.iter(links, cpu).filter_map(|slot| {
+            let mut runnable = runs.iter(links, LEAF_QUEUE).filter_map(|slot| {
                 let generation = hot[slot].generation()?;
                 let owner = hot[slot].get(kernel_core::task_index::Token { slot, generation }).ok()?;
                 (owner.local_switchable && owner.state == TaskState::Runnable
@@ -500,7 +500,7 @@ struct LeafSlots {
 }
 impl LeafSlots {
     fn new(cpu: usize) -> Self {
-        let next = with_leaf(cpu, |leaf| leaf.runs.first(cpu));
+        let next = with_leaf(cpu, |leaf| leaf.runs.first(LEAF_QUEUE));
         Self { cpu, next }
     }
 }
@@ -590,6 +590,10 @@ pub const IDLE: usize = crate::smp::percpu::IDLE_SLOT;
 const fn is_worker(slot: usize) -> bool {
     slot != BOOT_SLOT && slot != IDLE
 }
+
+/// Each scheduler leaf owns one run queue.  The external CPU identity lives in
+/// `CoreQueue`; the leaf's local RunLists table therefore remains constant-size.
+const LEAF_QUEUE: usize = 0;
 
 /// 执行本代码的处理器下标（平台保证小于 `MAX_CPUS`；越界属平台缺陷，按引导处理器处理而不越界访问）。
 fn this_cpu() -> usize {
@@ -1052,7 +1056,7 @@ fn prepare_deadline_layout(
     ),
     kernel_core::tickless::StopStorageError,
 > {
-    let target_cpus = cpus.max(MAX_CPUS).max(forest.capacity());
+    let target_cpus = cpus.max(forest.capacity());
     let mut next = DeadlineForest::<MAX_CPUS>::new();
     let extra = next
         .prepare_capacity(target_cpus)
@@ -2568,7 +2572,7 @@ impl Scheduler {
                     let result = queue.migrate_to(&mut dst.queue, &mut owner.sched);
                     if result.is_ok() {
                         runs.remove(links, i).expect("source run-list member");
-                        dst.runs.insert(&mut dst.links, home, i).expect("destination run-list capacity");
+                        dst.runs.insert(&mut dst.links, LEAF_QUEUE, i).expect("destination run-list capacity");
                     }
                     result
                 })
@@ -2610,11 +2614,11 @@ impl Scheduler {
             (a, b) if a == b => Ok(false),
             (Some(from), Some(to)) => with_leaf_pair(from, to, |src, dst| {
                 src.runs.remove(&mut src.links, i)?;
-                dst.runs.insert(&mut dst.links, to, i)?;
+                dst.runs.insert(&mut dst.links, LEAF_QUEUE, i)?;
                 Ok(true)
             }),
             (Some(from), None) => with_leaf(from, |leaf| leaf.runs.remove(&mut leaf.links, i).map(|_| true)),
-            (None, Some(to)) => with_leaf(to, |leaf| leaf.runs.insert(&mut leaf.links, to, i).map(|_| true)),
+            (None, Some(to)) => with_leaf(to, |leaf| leaf.runs.insert(&mut leaf.links, LEAF_QUEUE, i).map(|_| true)),
             (None, None) => Ok(false),
         };
         if result.is_err() {
@@ -2711,7 +2715,7 @@ impl Scheduler {
             let Some(t) = t.as_ref().filter(|_| is_worker(i)) else { continue };
             let live = matches!(t.state, TaskState::Runnable | TaskState::Running);
             match (live, t.sched.queue()) {
-                (true, Some(q)) if q == t.home => expect[q.min(MAX_CPUS - 1)] += 1,
+                (true, Some(q)) if q == t.home && q < MAX_CPUS => expect[q] += 1,
                 (false, None) => {}
                 _ => misplaced += 1,
             }
@@ -2720,7 +2724,7 @@ impl Scheduler {
         let mut count_mismatch = 0;
         let mut list_mismatch = self.list_errors;
         for (c, e) in expect.into_iter().enumerate() {
-            let (q, run_len) = with_leaf(c, |leaf| (leaf.queue.queued(), leaf.runs.len(c)));
+            let (q, run_len) = with_leaf(c, |leaf| (leaf.queue.queued(), leaf.runs.len(LEAF_QUEUE)));
             queued += q;
             if q != e {
                 count_mismatch += 1;
@@ -3045,7 +3049,7 @@ impl Scheduler {
         let current = leaf_current(c);
         with_leaf(c, |leaf| {
             let mut m = ClassMask::EMPTY;
-            for i in leaf.runs.iter(&leaf.links, c) {
+            for i in leaf.runs.iter(&leaf.links, LEAF_QUEUE) {
                 let Some(t) = self.task(i) else { continue };
                 let Some(token) = self.epochs[i].history().map(|r| r.token()) else { continue };
                 let Ok(hot) = leaf.hot[i].get(token) else { continue };
@@ -4193,7 +4197,7 @@ impl Scheduler {
         // 类别仲裁在借用 tasks 之前完成（它会修改仲裁器状态）。
         let wanted = self.pick_arb_class(c, prev);
         // 只遍历本处理器的运行列表（与任务表容量无关）；记下遍历长度供验收核对
-        let visited = with_leaf(c, |leaf| leaf.runs.len(c)) as u32;
+        let visited = with_leaf(c, |leaf| leaf.runs.len(LEAF_QUEUE)) as u32;
         self.scan.picks += 1;
         self.scan.visited += visited as u64;
         self.scan.max_visited = self.scan.max_visited.max(visited);
@@ -4213,7 +4217,7 @@ impl Scheduler {
                 let hot = &leaf.hot;
                 let queue = &leaf.queue;
                 let runnable = |skip_prev: bool| {
-                    runs.iter(links, c).filter_map(move |i| {
+                    runs.iter(links, LEAF_QUEUE).filter_map(move |i| {
                         let t = tasks[i].as_ref()?;
                         let token = epochs[i].history()?.token();
                         let owner = hot[i].get(token).ok()?;
@@ -4435,7 +4439,7 @@ impl Scheduler {
         }
         if let Some((qos, delay)) = latency { self.latency[qos.index()].record(delay); }
         self.scan.picks = self.scan.picks.saturating_add(1);
-        let visited = with_leaf(cpu, |leaf| leaf.runs.len(cpu)) as u32;
+        let visited = with_leaf(cpu, |leaf| leaf.runs.len(LEAF_QUEUE)) as u32;
         self.scan.visited = self.scan.visited.saturating_add(u64::from(visited));
         self.scan.max_visited = self.scan.max_visited.max(visited);
         self.switches = self.switches.saturating_add(1);

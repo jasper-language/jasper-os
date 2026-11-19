@@ -226,7 +226,7 @@ impl VectorPool {
     }
 
     fn check_cpu(&self, cpu: usize) -> Result<(), MsiError> {
-        if cpu >= self.capacity() {
+        if cpu >= self.cpu_capacity()? {
             return Err(MsiError::NoSuchCpu);
         }
         if !self.online.contains(cpu) {
@@ -236,14 +236,16 @@ impl VectorPool {
         }
     }
 
-    fn capacity(&self) -> usize {
+    fn cpu_capacity(&self) -> Result<usize, MsiError> {
         #[cfg(any(test, feature = "cpu-dynamic"))]
         {
-            self.online.capacity_bits().unwrap_or(0)
+            self.online
+                .capacity_bits()
+                .map_err(|_| MsiError::Allocation)
         }
         #[cfg(not(any(test, feature = "cpu-dynamic")))]
         {
-            MAX_CPUS
+            Ok(MAX_CPUS)
         }
     }
 

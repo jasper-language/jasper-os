@@ -145,7 +145,10 @@ pub fn discover_fdt(efi_boot: bool, system_table: u64) -> Result<FirmwareFdt, &'
     }
     let topology = cpus.topology;
     let discovered = topology.count();
-    let admitted = discovered.min(MAX_CPUS);
+    if discovered > MAX_CPUS {
+        return Err("fdt-cpu-capacity-exceeded");
+    }
+    let admitted = discovered;
     let conversion_failures = topology.dropped;
     let discovered_u32 =
         u32::try_from(discovered).map_err(|_| "fdt-cpu-inventory-overflow")?;
@@ -153,14 +156,16 @@ pub fn discover_fdt(efi_boot: bool, system_table: u64) -> Result<FirmwareFdt, &'
         u32::try_from(conversion_failures).map_err(|_| "fdt-cpu-conversion-overflow")?;
     let disabled_u32 =
         u32::try_from(topology.disabled).map_err(|_| "fdt-cpu-disabled-overflow")?;
-    let mut dropped = kernel_core::smp::unadmitted_inventory(
+    let dropped = kernel_core::smp::unadmitted_inventory(
         discovered,
         admitted,
         conversion_failures,
     );
     let disabled_ids = topology.disabled_ids();
-    let disabled_stored = disabled_ids.len().min(MAX_CPUS);
-    dropped = dropped.saturating_add(disabled_ids.len().saturating_sub(disabled_stored));
+    if disabled_ids.len() > MAX_CPUS {
+        return Err("fdt-disabled-cpu-capacity-exceeded");
+    }
+    let disabled_stored = disabled_ids.len();
     let dropped_u32 = u32::try_from(dropped).map_err(|_| "fdt-cpu-dropped-overflow")?;
     // Preserve the firmware inventory overflow for the unified SMP gate.
     // Rebuilding from the fixed hardware-ID table must not make an unsupported

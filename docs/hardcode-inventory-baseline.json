@@ -302,12 +302,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "2b6b233e98461cf880809a69b61e0e7d74a9bba978e5fce0c9bef0c484502349",
-      "path": "kernel/src/sched/scheduler.rs",
-      "rules": "HC-G6"
-    },
-    {
-      "count": 1,
       "fingerprint": "2bdc8c1ccf3c1bd3791ef629ff66f64e5c0016748edc399f63246ddddadae349",
       "path": "kernel-core/src/fs_prod.rs",
       "rules": "HC-G1"
@@ -440,12 +434,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "3b92c87b7e0e7c5b0f3cb7eaaa987cc6aceba2ae50fb56e022d444f0f01b3a3d",
-      "path": "kernel/src/arch/loongarch64/smp.rs",
-      "rules": "HC-G2,HC-G6"
-    },
-    {
-      "count": 1,
       "fingerprint": "3df9866394ee7023f08ca80cc41d9c16b1092952bb2275c68618311bf2c7c274",
       "path": "kernel/src/arch/loongarch64/smp.rs",
       "rules": "HC-G3"
@@ -521,12 +509,6 @@
       "fingerprint": "48d1a7c796bc4541288d6a2b18e0e77ff70d2f42187ce23709d49c6ca23cb621",
       "path": "kernel/src/arch/aarch64/boot.rs",
       "rules": "HC-G3"
-    },
-    {
-      "count": 1,
-      "fingerprint": "49ccd72fa814bde153e8dbb3c2941b247f885bdb3891050b16e438c591c3e9d1",
-      "path": "kernel/src/smp/percpu.rs",
-      "rules": "HC-G7"
     },
     {
       "count": 1,
@@ -812,12 +794,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "6c3c0d80f6c23f2fe4472fa6704ffc7c25fce6ebcc3ae1bec6caec0dff9bcbdc",
-      "path": "kernel-core/src/shard.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "6dca0eabb2fdb005a6b27f02df51a92133ee8316600aafbded8148773fd90ef6",
       "path": "kernel-core/src/fdt.rs",
       "rules": "HC-G7"
@@ -923,12 +899,6 @@
       "fingerprint": "7b33ca0a716eee128e5c1c72ae494fd493e7aac8c5cbf1b95274e5f59b86538c",
       "path": "kernel-core/src/mac.rs",
       "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "7bcd4200c22252c9bf2426c6f9edead43b01b620d9d1f5629d193382eb4cf82e",
-      "path": "kernel/src/smp/mod.rs",
-      "rules": "HC-G7"
     },
     {
       "count": 1,
@@ -1724,12 +1694,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "fca6f98fa46283421e2e18f9c06bca44e4a6c32a88f8f7e31a87796e539b6a4d",
-      "path": "kernel/src/smp/mod.rs",
-      "rules": "HC-G7"
-    },
-    {
-      "count": 1,
       "fingerprint": "fce8d754df33f904e384350b818bfe94bbced3c0dec6d8eb461c10475c4fb378",
       "path": "compat-loader/src/lib.rs",
       "rules": "HC-G1"
@@ -1773,5 +1737,5 @@
     "user",
     "xtask"
   ],
-  "total": 371
+  "total": 365
 }

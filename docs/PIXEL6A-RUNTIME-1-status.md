@@ -6,14 +6,14 @@
 
 ## 构建与设备
 
-- 公开代码：`4d1fdbc` 加本轮调度 RunLeaf/队列身份迁移
+- 公开代码：`6efcb84` 加本轮单队列 RunLeaf 与 fail-closed CPU 消费迁移
 - 目标：`aarch64-unknown-none-softfloat`
 - 特性：`pixel6a-runtime-verify`
 - 设备：`bluejay` / Pixel 6a
 - Android build：`google/bluejay/bluejay:16/BP4A.251205.006/14401865:user/release-keys`
 - stock boot carrier：匹配该 build 的 factory `boot.img`
-- 内核 ELF SHA-256：`b85577e3becd63ef815b122c2141af9cb2368167b1b64a4fe26ab0bb715cc8a1`
-- 临时 boot image SHA-256：`59c5f6f70f32d52f595b7813c5eddb4d0da8745dd0f2d4236534e009972681b4`
+- 内核 ELF SHA-256：`dd84b6416964b007023526cc381d945f262d37e1ab1c18358fe491ea3d6882f1`
+- 临时 boot image SHA-256：`d878ae2d65bce41cc63ae2f6cfd7789bef3801f461be53576dc9ac376a8163e2`
 
 ## 执行方式
 
@@ -28,7 +28,7 @@ fastboot boot <temporary-runtime-boot.img>
 ```
 
 没有执行 `flash`、`erase` 或分区写入。fastboot 成功后设备实际离开 FASTBOOT，
-Jasper runtime 在 `4.45 s` 到达唯一成功 PSCI reset 路径，随后重新进入 FASTBOOT，
+Jasper runtime 在 `4.46 s` 到达唯一成功 PSCI reset 路径，随后重新进入 FASTBOOT，
 脚本执行 `fastboot reboot`。
 
 ## 恢复结果
@@ -42,7 +42,7 @@ sys.boot_completed=1
 slot=_a
 ```
 
-证据保存在本地 `evidence/pixel6a-runtime-20261119-190156/`。
+证据保存在本地 `evidence/pixel6a-runtime-20261119-191226-leaf-single/`。
 
 ## 验证边界
 

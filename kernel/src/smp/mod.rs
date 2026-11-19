@@ -306,9 +306,15 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
     let identity = topo.count() > 1 && arch::CPU_START_FRAME_LIMIT.is_some();
     // 平台要求：启动期间启动帧在内核空间中「虚拟地址 = 物理地址」可写可执行
     let mapped = match frame {
-        Some(f) if identity => VirtPage::from_start(f.start())
-            .map(|p| mm::map::map(p, f, MapFlags::WRITE.union(MapFlags::EXECUTE)).is_ok())
-            .unwrap_or(false),
+        Some(f) if identity => match VirtPage::from_start(f.start()) {
+            Some(page) => {
+                mm::map::map(page, f, MapFlags::WRITE.union(MapFlags::EXECUTE)).is_ok()
+            }
+            None => {
+                crate::kprintln!("[JSR-SMP] reject=start_frame_page invalid=true");
+                false
+            }
+        },
         _ => !identity,
     };
     let space = arch::current_space();
@@ -430,10 +436,10 @@ pub fn on_ipi(kind: IpiKind) {
 /// 拓扑中的处理器数（未启动多处理器时为 1）。
 /// Number of processors in the topology.
 pub fn cpu_count() -> usize {
-    CPU_RUNTIME
-        .get()
-        .map(|runtime| runtime.lock().identities().len())
-        .unwrap_or(1)
+    match CPU_RUNTIME.get() {
+        Some(runtime) => runtime.lock().identities().len(),
+        None => 1,
+    }
 }
 
 fn runtime_hw_id(cpu: usize) -> Option<u32> {

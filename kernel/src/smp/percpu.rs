@@ -218,16 +218,19 @@ pub fn get(cpu: usize) -> Option<&'static PerCpu> {
 /// Per-CPU record of the executing processor.
 pub fn this() -> &'static PerCpu {
     let index = arch::cpu_index();
-    get(index).unwrap_or_else(|| {
-        crate::kprintln!(
-            "[JSR-SMP] reject=cpu_index_out_of_range index={} max={}",
-            index,
-            BOOTSTRAP_CPUS
-                + EXTRA_CPUS
-                    .get()
-                    .and_then(|records| records.as_ref().ok())
-                    .map_or(0, |records| records.len())
-        );
-        arch::halt_forever()
-    })
+    match get(index) {
+        Some(record) => record,
+        None => {
+            crate::kprintln!(
+                "[JSR-SMP] reject=cpu_index_out_of_range index={} max={}",
+                index,
+                BOOTSTRAP_CPUS
+                    + EXTRA_CPUS
+                        .get()
+                        .and_then(|records| records.as_ref().ok())
+                        .map_or(0, |records| records.len())
+            );
+            arch::halt_forever()
+        }
+    }
 }

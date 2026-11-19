@@ -34,8 +34,8 @@ cargo test -p kernel-core irq -- --nocapture
 cargo check -p jasper-kernel --target x86_64-unknown-none --no-default-features
 PASS
 
-hardcode inventory: findings=371, added=0
-hardcode ledger: 292 unique fingerprints, 83 unique / 87 occurrences unclassified
+hardcode inventory: findings=365, added=0
+hardcode ledger: 286 classified fingerprints; no unclassified baseline entries
 ```
 
 ## 尚未完成
