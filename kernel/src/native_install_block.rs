@@ -742,7 +742,6 @@ pub fn run() {
         check(false, error.name());
         return;
     }
-    let before = baseline::baseline();
     let Some(device) = pci::table().devices().find(|device| {
         device.header.vendor == virtio::VIRTIO_VENDOR && virtio::is_blk_device(device.header.device)
     }) else {
@@ -750,6 +749,20 @@ pub fn run() {
         return;
     };
     kprintln!("[JSR-NATIVE-INSTALL] step=device-found");
+    // Warm one complete block-device lifetime before taking the resource
+    // baseline. Establishing the first virtio MMIO mapping creates persistent
+    // kernel page-table frames; the device's RAM, DMA, process and objects are
+    // still reclaimed by Drop, so subsequent lifetimes must return to this
+    // post-warm baseline.
+    match BlockDevice::new(device, DATA_PAGES) {
+        Ok(warm) => drop(warm),
+        Err(error) => {
+            kprintln!("[JSR-NATIVE-INSTALL-FAIL] warmup={}", error.name());
+            check(false, "block device warmup");
+            return;
+        }
+    }
+    let before = baseline::baseline();
     let result = {
         kprintln!("[JSR-NATIVE-INSTALL] step=block-setup");
         let mut blockdev = match BlockDevice::new(device, DATA_PAGES) {
@@ -779,6 +792,11 @@ pub fn run() {
         }
     }
     let after = baseline::baseline();
+    kprintln!(
+        "[JSR-NATIVE-INSTALL] resources before={:?} after={:?}",
+        before,
+        after
+    );
     check(after == before, "resources did not return to baseline");
     kprintln!(
         "[JSR-NATIVE-INSTALL] summary failed={} resources={}",

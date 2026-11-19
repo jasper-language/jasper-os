@@ -122,6 +122,13 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         );
         return (None, false);
     }
+    // Include the first heap-page-table growth in the baseline. Later heap
+    // growth is accounted by mapped heap frames, but the persistent page-table
+    // frame created while establishing that mapping has no separate counter.
+    if crate::mm::heap::ensure_free(256 * 1024).is_err() {
+        kprintln!("[JSR-PROD-DIAG] first_program heap_prepare=false");
+        return (None, false);
+    }
     let free_before = frame::free_frames();
     let (heap_total_before, heap_free_before, _, heap_mapped_before) = crate::mm::heap::stats();
     let heap_used_before = heap_total_before.saturating_sub(heap_free_before);

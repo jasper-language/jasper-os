@@ -270,9 +270,6 @@ unsafe fn test_many_eventfds() -> bool {
         value.as_ptr() as u64,
         value.len() as u64,
     ) == 8;
-    if !wrote {
-        let _ = write_bytes(2, b"eventfd-debug: write\n");
-    }
     let read = wrote
         && syscall3(
             SYS_READ,
@@ -281,15 +278,9 @@ unsafe fn test_many_eventfds() -> bool {
             read_value.len() as u64,
         ) == 8
         && u64::from_le_bytes(read_value) == 7;
-    if wrote && !read {
-        let _ = write_bytes(2, b"eventfd-debug: read\n");
-    }
     let mut closed = true;
     for fd in fds {
         closed &= syscall1(SYS_CLOSE, fd as u64) == 0;
-    }
-    if read && !closed {
-        let _ = write_bytes(2, b"eventfd-debug: close\n");
     }
     read && closed
 }
@@ -348,16 +339,7 @@ unsafe fn test_many_pipes() -> bool {
     const COUNT: usize = 40;
     let mut pairs = [[-1i32; 2]; COUNT];
     for index in 0..COUNT {
-        if syscall6(
-            SYS_PIPE2,
-            pairs[index].as_mut_ptr() as u64,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ) != 0
-        {
+        if syscall6(SYS_PIPE2, pairs[index].as_mut_ptr() as u64, 0, 0, 0, 0, 0) != 0 {
             for pair in &pairs[..index] {
                 let _ = syscall1(SYS_CLOSE, pair[0] as u64);
                 let _ = syscall1(SYS_CLOSE, pair[1] as u64);
@@ -366,12 +348,7 @@ unsafe fn test_many_pipes() -> bool {
         }
         let byte = [index as u8];
         let mut read_back = [0u8; 1];
-        if syscall3(
-            SYS_WRITE,
-            pairs[index][1] as u64,
-            byte.as_ptr() as u64,
-            1,
-        ) != 1
+        if syscall3(SYS_WRITE, pairs[index][1] as u64, byte.as_ptr() as u64, 1) != 1
             || syscall3(
                 SYS_READ,
                 pairs[index][0] as u64,

@@ -8514,12 +8514,24 @@ fn linux_dup(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         .ok_or(CompatErrno::NoSpace)
 }
 
+/// Converts an x86_64 syscall argument to a non-negative Linux `int` fd.
+///
+/// x86_64 zero-extends negative `int` arguments into a 64-bit register. Values
+/// outside `0..=i32::MAX` therefore cannot name a valid descriptor.
+fn linux_fd_argument(value: u64) -> Result<u32, CompatErrno> {
+    let fd = u32::try_from(value).map_err(|_| CompatErrno::BadFd)?;
+    if fd > i32::MAX as u32 {
+        return Err(CompatErrno::BadFd);
+    }
+    Ok(fd)
+}
+
 /// Implements `dup2(2)`, including same-fd and exact-target replacement semantics.
 ///
 /// 实现精确目标 fd 的复制；同一 fd 成功返回，目标已占用时原子替换且清除 CLOEXEC。
 fn linux_dup2(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    let source = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
-    let target = u32::try_from(args[1]).map_err(|_| CompatErrno::BadFd)?;
+    let source = linux_fd_argument(args[0])?;
+    let target = linux_fd_argument(args[1])?;
     proc::linux_fd(pid, source).ok_or(CompatErrno::BadFd)?;
     if source == target {
         return Ok(u64::from(target));
@@ -8534,8 +8546,8 @@ fn linux_dup2(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 /// 实现 `dup3(2)`；只接受 `O_CLOEXEC`，同一 fd 和未知标志均返回 EINVAL。
 fn linux_dup3(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const O_CLOEXEC: u64 = 0x80000;
-    let source = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
-    let target = u32::try_from(args[1]).map_err(|_| CompatErrno::BadFd)?;
+    let source = linux_fd_argument(args[0])?;
+    let target = linux_fd_argument(args[1])?;
     let flags = args[2];
     proc::linux_fd(pid, source).ok_or(CompatErrno::BadFd)?;
     if source == target || flags & !O_CLOEXEC != 0 {
@@ -14470,7 +14482,9 @@ fn linux_sendmmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     let count = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    let count = count.min(MAX_MESSAGES); // JASPER-HARDCODE-REVIEW: issue=35 source=linux-batch-partial-policy reason=return-bounded-sendmmsg-prefix
+    if count > MAX_MESSAGES {
+        return Err(CompatErrno::Invalid);
+    }
     let mut sent = 0u32;
     while sent < count {
         let base = args[1]
@@ -14507,7 +14521,9 @@ fn linux_recvmmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     let count = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    let count = count.min(MAX_MESSAGES); // JASPER-HARDCODE-REVIEW: issue=35 source=linux-batch-partial-policy reason=return-bounded-recvmmsg-prefix
+    if count > MAX_MESSAGES {
+        return Err(CompatErrno::Invalid);
+    }
     let wait_for_one = args[3] & MSG_WAITFORONE != 0;
     let flags = args[3] & !MSG_WAITFORONE;
     let mut received = 0u32;

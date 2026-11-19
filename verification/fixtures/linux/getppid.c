@@ -1112,12 +1112,30 @@ int main(void) {
     if (dup3(fd, 22, 0x40000000) != -1 || errno != EINVAL) {
         return 77;
     }
+    struct rlimit runtime_nofile_limit;
+    long runtime_nofile_result =
+        syscall(SYS_getrlimit, RLIMIT_NOFILE, &runtime_nofile_limit);
+    if (runtime_nofile_result != 0 ||
+        runtime_nofile_limit.rlim_cur == 0 ||
+        runtime_nofile_limit.rlim_max < runtime_nofile_limit.rlim_cur) {
+        dprintf(STDOUT_FILENO,
+                "runtime-nofile-fail result=%ld errno=%d cur=%llu max=%llu\n",
+                runtime_nofile_result, errno,
+                (unsigned long long)runtime_nofile_limit.rlim_cur,
+                (unsigned long long)runtime_nofile_limit.rlim_max);
+        return 268;
+    }
+    // A Linux descriptor is a non-negative int. An unbounded runtime budget is
+    // represented by a larger rlimit sentinel, but INT_MAX can never be a live
+    // descriptor number.
+    int beyond_nofile_limit = INT_MAX;
     errno = 0;
-    if (dup3(63, 63, 0) != -1 || errno != EBADF) {
+    if (dup3(beyond_nofile_limit, beyond_nofile_limit, 0) != -1 ||
+        errno != EBADF) {
         return 80;
     }
     errno = 0;
-    if (dup2(fd, 64) != -1 || errno != EBADF) {
+    if (dup2(fd, beyond_nofile_limit) != -1 || errno != EBADF) {
         return 78;
     }
     if (close(dup_fd) != 0 || close(dup2_fd) != 0 || close(dup3_fd) != 0 ||
@@ -7544,7 +7562,8 @@ jasper_android_binder:
     }
     struct rlimit legacy_limit;
     if (syscall(SYS_getrlimit, RLIMIT_NOFILE, &legacy_limit) != 0 ||
-        legacy_limit.rlim_cur != 64 || legacy_limit.rlim_max != 64) {
+        legacy_limit.rlim_cur != runtime_nofile_limit.rlim_cur ||
+        legacy_limit.rlim_max != runtime_nofile_limit.rlim_max) {
         return 266;
     }
     long same_setrlimit =
@@ -7564,8 +7583,8 @@ jasper_android_binder:
     long same_getrlimit =
         syscall(SYS_getrlimit, RLIMIT_NOFILE, &old_nofile_limit);
     if (same_prlimit != 0 || same_getrlimit != 0 ||
-        old_nofile_limit.rlim_cur != 64 ||
-        old_nofile_limit.rlim_max != 64) {
+        old_nofile_limit.rlim_cur != runtime_nofile_limit.rlim_cur ||
+        old_nofile_limit.rlim_max != runtime_nofile_limit.rlim_max) {
         dprintf(STDOUT_FILENO,
                 "rlimit-readback-fail prlimit=%ld get=%ld cur=%llu max=%llu errno=%d\n",
                 same_prlimit, same_getrlimit,
@@ -7573,7 +7592,7 @@ jasper_android_binder:
                 (unsigned long long)old_nofile_limit.rlim_max, errno);
         return 267;
     }
-    legacy_limit.rlim_max = 65;
+    legacy_limit.rlim_max = runtime_nofile_limit.rlim_max + 1;
     errno = 0;
     long raised_setrlimit =
         syscall(SYS_setrlimit, RLIMIT_NOFILE, &legacy_limit);

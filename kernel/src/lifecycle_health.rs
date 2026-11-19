@@ -702,6 +702,7 @@ fn execute_root_linux_probe(root: &Ext4Reader, enforce_resources: bool) -> Resul
     let frames_before = crate::mm::frame::free_frames();
     let calls_before = crate::syscall::call_count();
     let calls = compat_core::syscall::LinuxSyscallSet::of(&[
+        compat_core::syscall::LinuxSyscall::Read,
         compat_core::syscall::LinuxSyscall::Write,
         compat_core::syscall::LinuxSyscall::Close,
         compat_core::syscall::LinuxSyscall::Mmap,
@@ -716,6 +717,9 @@ fn execute_root_linux_probe(root: &Ext4Reader, enforce_resources: bool) -> Resul
         compat_core::syscall::LinuxSyscall::EpollWait,
         compat_core::syscall::LinuxSyscall::EpollCtl,
         compat_core::syscall::LinuxSyscall::EpollCreate1,
+        compat_core::syscall::LinuxSyscall::EventFd2,
+        compat_core::syscall::LinuxSyscall::TimerFdCreate,
+        compat_core::syscall::LinuxSyscall::Signalfd4,
         compat_core::syscall::LinuxSyscall::Pipe2,
         compat_core::syscall::LinuxSyscall::IoUringSetup,
         compat_core::syscall::LinuxSyscall::IoUringEnter,
