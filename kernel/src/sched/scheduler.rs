@@ -1023,6 +1023,19 @@ impl<T, const N: usize> CpuTable<T, N> {
     fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
         self.inline.iter_mut().chain(self.extra.iter_mut())
     }
+
+    fn iter(&self) -> impl Iterator<Item = &T> {
+        self.inline.iter().chain(self.extra.iter())
+    }
+
+    fn fill(&mut self, value: T)
+    where
+        T: Clone,
+    {
+        for slot in self.iter_mut() {
+            *slot = value.clone();
+        }
+    }
 }
 
 impl<T, const N: usize> core::ops::Index<usize> for CpuTable<T, N> {
@@ -1146,13 +1159,13 @@ pub struct Scheduler {
     /// 同步运行列表时被拒绝的次数（正常运行时恒为 0）。
     list_errors: u32,
     /// 睡眠任务中最早的定时唤醒时刻（`u64::MAX` = 没有；可能偏早，不会偏晚）。
-    next_wake: [u64; MAX_CPUS],
+    next_wake: CpuTable<u64, MAX_CPUS>,
     wake_heap: DeadlineForest<MAX_CPUS>,
     wake_entries: BootSlots<Deadline, {INLINE_SLOTS * MAX_CPUS}>,
     wake_positions: BootSlots<usize, INLINE_SLOTS>,
     wake_owners: BootSlots<usize, INLINE_SLOTS>,
     /// 实时任务中最早的预算补充时刻（`u64::MAX` = 没有；可能偏早，不会偏晚）。
-    next_rt: [u64; MAX_CPUS],
+    next_rt: CpuTable<u64, MAX_CPUS>,
     rt_heap: DeadlineForest<MAX_CPUS>,
     rt_entries: BootSlots<Deadline, {INLINE_SLOTS * MAX_CPUS}>,
     rt_positions: BootSlots<usize, INLINE_SLOTS>,
@@ -1161,13 +1174,13 @@ pub struct Scheduler {
     ns_entries: BootSlots<Deadline,{INLINE_SLOTS*MAX_CPUS}>,
     ns_positions: BootSlots<usize,INLINE_SLOTS>,
     ns_owners: BootSlots<usize,INLINE_SLOTS>,
-    ns_roots: [Option<u64>;MAX_CPUS],
-    ns_at: [u64;MAX_CPUS],
-    ns_credit: [Option<kernel_core::timer_units::CreditLedger>;MAX_CPUS],
-    ns_need_tick:[bool;MAX_CPUS],
+    ns_roots: CpuTable<Option<u64>, MAX_CPUS>,
+    ns_at: CpuTable<u64, MAX_CPUS>,
+    ns_credit: CpuTable<Option<kernel_core::timer_units::CreditLedger>, MAX_CPUS>,
+    ns_need_tick: CpuTable<bool, MAX_CPUS>,
     ns_now:u64,
     ns_active:bool,
-    ns_programmed:[Option<u64>;MAX_CPUS],
+    ns_programmed: CpuTable<Option<u64>, MAX_CPUS>,
     /// 任务纳秒唤醒、预算期限与 Ring 期限等待共用的身份来源。
     /// Shared identity source for task ns wakeups, budget deadlines and Ring waits.
     timer_table: TimerTable<TIMER_SLOTS>,
@@ -1200,14 +1213,14 @@ pub struct Scheduler {
     cpu_stats: CpuTable<CpuStats, MAX_CPUS>,
     // Separate reference-clock residency; legacy local IRQ statistics stay unchanged.
     cpu_residency: CpuTable<kernel_core::cpu_time::Ledger, MAX_CPUS>,
-    deadline_wakes: [u32; MAX_CPUS],
-    deadline_refills: [u32; MAX_CPUS],
+    deadline_wakes: CpuTable<u32, MAX_CPUS>,
+    deadline_refills: CpuTable<u32, MAX_CPUS>,
     #[cfg(feature = "fault-inject")]
     delayed_deadline_timer: CpuSet,
     #[cfg(feature = "fault-inject")]
     deadline_trace: [DeadlineTrace; MAX_CPUS],
     /// 每个处理器的本地 tick 计数（周期均衡的检查点）。
-    local_ticks: [u64; MAX_CPUS],
+    local_ticks: CpuTable<u64, MAX_CPUS>,
     switches: u64,
     observer: Option<SwitchObserver>,
     /// 调度器看到的当前时刻（tick；由 [`Scheduler::tick`] 推进）。
@@ -1339,12 +1352,12 @@ impl Scheduler {
             workers: 0,
             budget_tick_charges: [0; 2],
             budget_window: None,
-            next_wake: [u64::MAX; MAX_CPUS],
+            next_wake: CpuTable::new([u64::MAX; MAX_CPUS]),
             wake_heap: DeadlineForest::new(),
             wake_entries: BootSlots::Inline([Deadline::EMPTY; INLINE_SLOTS * MAX_CPUS]),
             wake_positions: BootSlots::Inline([NO_DEADLINE; INLINE_SLOTS]),
             wake_owners: BootSlots::Inline([NO_DEADLINE; INLINE_SLOTS]),
-            next_rt: [u64::MAX; MAX_CPUS],
+            next_rt: CpuTable::new([u64::MAX; MAX_CPUS]),
             rt_heap: DeadlineForest::new(),
             rt_entries: BootSlots::Inline([Deadline::EMPTY; INLINE_SLOTS * MAX_CPUS]),
             rt_positions: BootSlots::Inline([NO_DEADLINE; INLINE_SLOTS]),
@@ -1353,9 +1366,13 @@ impl Scheduler {
             ns_entries:BootSlots::Inline([Deadline::EMPTY;INLINE_SLOTS*MAX_CPUS]),
             ns_positions:BootSlots::Inline([NO_DEADLINE;INLINE_SLOTS]),
             ns_owners:BootSlots::Inline([NO_DEADLINE;INLINE_SLOTS]),
-            ns_roots:[None;MAX_CPUS],ns_at:[0;MAX_CPUS],ns_credit:[None;MAX_CPUS],
-            ns_need_tick:[false;MAX_CPUS],
-            ns_now:0,ns_active:false,ns_programmed:[None;MAX_CPUS],
+            ns_roots: CpuTable::new([None; MAX_CPUS]),
+            ns_at: CpuTable::new([0; MAX_CPUS]),
+            ns_credit: CpuTable::new([None; MAX_CPUS]),
+            ns_need_tick: CpuTable::new([false; MAX_CPUS]),
+            ns_now:0,
+            ns_active:false,
+            ns_programmed: CpuTable::new([None; MAX_CPUS]),
             timer_table: TimerTable::new(),
             timer_budget: OwnerBudget::new(TIMER_SLOTS as u32),
             timer_stale_rejections: 0,
@@ -1376,15 +1393,15 @@ impl Scheduler {
             online: CpuSet::BOOTSTRAP_CPU0,
             balancer: Balancer::new(BalanceParams::DEFAULT),
             kicks: CpuSet::EMPTY,
-            deadline_wakes: [0; MAX_CPUS],
-            deadline_refills: [0; MAX_CPUS],
+            deadline_wakes: CpuTable::new([0; MAX_CPUS]),
+            deadline_refills: CpuTable::new([0; MAX_CPUS]),
             #[cfg(feature = "fault-inject")]
             delayed_deadline_timer: CpuSet::EMPTY,
             #[cfg(feature = "fault-inject")]
             deadline_trace: [DeadlineTrace::EMPTY; MAX_CPUS],
             cpu_stats: CpuTable::new([CpuStats { busy_ticks: 0, idle_ticks: 0, idle_waiting: 0, max_idle_waiting: 0, steals: 0, pulls: 0, pull_hot: 0 }; MAX_CPUS]),
             cpu_residency: CpuTable::new([kernel_core::cpu_time::Ledger::new(0,false); MAX_CPUS]),
-            local_ticks: [0; MAX_CPUS],
+            local_ticks: CpuTable::new([0; MAX_CPUS]),
             switches: 0,
             observer: None,
             now: 0,
@@ -2872,7 +2889,12 @@ impl Scheduler {
         Some(((self.wake_owners[i] != NO_DEADLINE).then_some(self.wake_owners[i]),
             (self.rt_owners[i] != NO_DEADLINE).then_some(self.rt_owners[i])))
     }
-    pub fn deadline_stats(&self) -> ([u32; MAX_CPUS], [u32; MAX_CPUS]) { (self.deadline_wakes, self.deadline_refills) }
+    pub fn deadline_stats(&self) -> (Vec<u32>, Vec<u32>) {
+        (
+            self.deadline_wakes.iter().copied().collect(),
+            self.deadline_refills.iter().copied().collect(),
+        )
+    }
     pub fn ns_sleeping(&self,id:TaskId)->bool {self.live_slot(id).and_then(|i|self.task(i)).is_some_and(|t|t.state==TaskState::Blocked && t.wake_ns.is_some())}
     pub fn rt_ns_state(&self,id:TaskId)->Option<kernel_core::ns_budget::Budget>{self.task(self.live_slot(id)?)?.ns_budget}
     pub fn task_affinity(&self,id:TaskId)->Option<CpuSet> {
@@ -3385,10 +3407,17 @@ impl Scheduler {
     /// Rejection leaves old partition, period, budget and deadline untouched.
     pub fn enable_highres(&mut self,now:u64) {
         assert!(!self.tasks.iter().flatten().any(|t|t.rt_period!=0 && t.state!=TaskState::Exited),"enable before RT admission");
-        self.ns_now=now;self.ns_at=[now;MAX_CPUS];self.ns_active=true;
+        self.ns_now=now;
+        self.ns_at.fill(now);
+        self.ns_active=true;
         // 启用前的状态迁移没有发布过事件：第一轮全部同步一次。
         self.tasks.mark_all_dirty();
-        self.ns_credit=[Some(kernel_core::timer_units::CreditLedger::new(now,crate::hrtime::tick_ns()).unwrap());MAX_CPUS];
+        for credit in self.ns_credit.iter_mut() {
+            *credit = Some(
+                kernel_core::timer_units::CreditLedger::new(now, crate::hrtime::tick_ns())
+                    .expect("high-resolution tick period is valid"),
+            );
+        }
     }
     /// 结算一个启用纳秒预算的任务；`start..end` 是该 CPU 自上次检查点以来的运行区间，
     /// 非运行态补充固定以 `now..now` 结算。
@@ -3915,6 +3944,46 @@ impl Scheduler {
             .idle_ctx
             .prepare_tail(cpus, || crate::arch::EMPTY_CONTEXT)
             .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
+        let next_wake_tail = self
+            .next_wake
+            .prepare_tail(cpus, || u64::MAX)
+            .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
+        let next_rt_tail = self
+            .next_rt
+            .prepare_tail(cpus, || u64::MAX)
+            .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
+        let ns_root_tail = self
+            .ns_roots
+            .prepare_tail(cpus, || None)
+            .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
+        let ns_at_tail = self
+            .ns_at
+            .prepare_tail(cpus, || 0)
+            .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
+        let ns_credit_tail = self
+            .ns_credit
+            .prepare_tail(cpus, || None)
+            .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
+        let ns_need_tick_tail = self
+            .ns_need_tick
+            .prepare_tail(cpus, || false)
+            .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
+        let ns_programmed_tail = self
+            .ns_programmed
+            .prepare_tail(cpus, || None)
+            .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
+        let deadline_wakes_tail = self
+            .deadline_wakes
+            .prepare_tail(cpus, || 0)
+            .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
+        let deadline_refills_tail = self
+            .deadline_refills
+            .prepare_tail(cpus, || 0)
+            .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
+        let local_ticks_tail = self
+            .local_ticks
+            .prepare_tail(cpus, || 0)
+            .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
         let wake_layout = prepare_deadline_layout(
             &self.wake_heap,
             &self.wake_entries,
@@ -3964,6 +4033,16 @@ impl Scheduler {
         self.cpu_residency.commit_tail(residency_tail);
         self.arb_windows.commit_tail(arbiter_tail);
         self.idle_ctx.commit_tail(idle_tail);
+        self.next_wake.commit_tail(next_wake_tail);
+        self.next_rt.commit_tail(next_rt_tail);
+        self.ns_roots.commit_tail(ns_root_tail);
+        self.ns_at.commit_tail(ns_at_tail);
+        self.ns_credit.commit_tail(ns_credit_tail);
+        self.ns_need_tick.commit_tail(ns_need_tick_tail);
+        self.ns_programmed.commit_tail(ns_programmed_tail);
+        self.deadline_wakes.commit_tail(deadline_wakes_tail);
+        self.deadline_refills.commit_tail(deadline_refills_tail);
+        self.local_ticks.commit_tail(local_ticks_tail);
         let (wake_heap, wake_entries, wake_positions, wake_owners) = wake_layout;
         self.wake_heap = wake_heap;
         self.wake_entries = BootSlots::Heap(wake_entries);

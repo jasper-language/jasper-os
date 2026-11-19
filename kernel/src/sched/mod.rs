@@ -39,6 +39,7 @@ pub mod turnstile;
 
 pub use turnstile::{KMutex, KMutexGuard};
 
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use spin::Once;
 
@@ -371,7 +372,7 @@ pub fn fault_delay_deadline_timer(c: usize, enable: bool) { with_mut(|s| s.fault
 #[cfg(feature = "fault-inject")]
 pub fn fault_deadline_trace(c: usize) -> Option<scheduler::DeadlineTrace> { with(|s| s.fault_deadline_trace(c)) }
 pub fn deadline_owners(id: TaskId) -> Option<(Option<usize>, Option<usize>)> { with(|s| s.deadline_owners(id)) }
-pub fn deadline_stats() -> ([u32; kernel_core::smp::MAX_CPUS], [u32; kernel_core::smp::MAX_CPUS]) { with(|s| s.deadline_stats()) }
+pub fn deadline_stats() -> (Vec<u32>, Vec<u32>) { with(|s| s.deadline_stats()) }
 pub fn rt_utilisation()->u32 {with(|s|s.rt_utilisation())}
 pub fn rt_state(id: TaskId) -> Option<(u32,u32,u64)> { with(|s| s.rt_state(id)) }
 pub fn remote_wake_stats() -> (u32, u32) {
