@@ -66,6 +66,13 @@ FdTable、metadata `try_reserve` 和 Rights 决定，现一并移除。真实 Li
 以 0 退出且进程资源回基线。证据见
 `evidence/issue35-timerfd-signalfd-capacity-20261119/`。
 
+### pipe 实例数量
+
+pipe endpoint 记录的每进程 32 上限已移除。每个 pipe2 仍需由运行时 FdTable
+分配两个描述符，并保持 READ/WRITE Rights 和失败原子安装。真实 Linux ELF 同时
+创建 40 对 pipe，共 80 个端点；每对完成单字节写回读，再全部关闭并继续其余
+兼容测试。资源回基线。证据见 `evidence/issue35-pipe-capacity-20261119/`。
+
 ## 验证
 
 ```text
@@ -86,7 +93,7 @@ python3 scripts/check-hardcode-inventory-ledger.py --check \
 ## 未完成
 
 - 配置上限的更高容量实现、真实 256/1024 Task 和 65536 Object 压力矩阵；
-- poll、signalfd 投递、fanotify、epoll/eventfd/timerfd 大规模批次、
+- poll、signalfd 投递、fanotify、epoll/eventfd/timerfd/pipe 大规模批次、
   sendfile/copy 在真实 Ubuntu/Android 程序中的
   大规模分批、取消和资源回基线；
 - 所有固定批次值最终应与 Workload/Profile 资源预算统一，而不是成为跨设备 ABI。

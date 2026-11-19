@@ -1199,9 +1199,6 @@ pub(crate) fn linux_pipe2(
 ) -> Option<(u32, u32)> {
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
-        if linux.pipes.len() >= 32 {
-            return Err(ProcError::NoTaskSlot);
-        }
         let reader_handle = linux.next_pipe_handle;
         let writer_handle = reader_handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
         linux.next_pipe_handle = writer_handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;

@@ -344,6 +344,58 @@ unsafe fn test_many_signalfds() -> bool {
 }
 
 #[cfg(target_arch = "x86_64")]
+unsafe fn test_many_pipes() -> bool {
+    const COUNT: usize = 40;
+    let mut pairs = [[-1i32; 2]; COUNT];
+    for index in 0..COUNT {
+        if syscall6(
+            SYS_PIPE2,
+            pairs[index].as_mut_ptr() as u64,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ) != 0
+        {
+            for pair in &pairs[..index] {
+                let _ = syscall1(SYS_CLOSE, pair[0] as u64);
+                let _ = syscall1(SYS_CLOSE, pair[1] as u64);
+            }
+            return false;
+        }
+        let byte = [index as u8];
+        let mut read_back = [0u8; 1];
+        if syscall3(
+            SYS_WRITE,
+            pairs[index][1] as u64,
+            byte.as_ptr() as u64,
+            1,
+        ) != 1
+            || syscall3(
+                SYS_READ,
+                pairs[index][0] as u64,
+                read_back.as_mut_ptr() as u64,
+                1,
+            ) != 1
+            || read_back[0] != index as u8
+        {
+            for pair in &pairs[..=index] {
+                let _ = syscall1(SYS_CLOSE, pair[0] as u64);
+                let _ = syscall1(SYS_CLOSE, pair[1] as u64);
+            }
+            return false;
+        }
+    }
+    let mut closed = true;
+    for pair in pairs {
+        closed &= syscall1(SYS_CLOSE, pair[0] as u64) == 0;
+        closed &= syscall1(SYS_CLOSE, pair[1] as u64) == 0;
+    }
+    closed
+}
+
+#[cfg(target_arch = "x86_64")]
 unsafe fn test_mmap() -> bool {
     let address = syscall6(
         SYS_MMAP,
@@ -606,6 +658,9 @@ pub extern "C" fn _start() -> ! {
     if !unsafe { test_many_signalfds() } {
         unsafe { exit(105) }
     }
+    if !unsafe { test_many_pipes() } {
+        unsafe { exit(106) }
+    }
     if !unsafe { test_mmap() } {
         unsafe { exit(98) }
     }
@@ -615,7 +670,7 @@ pub extern "C" fn _start() -> ! {
     if !unsafe { test_io_uring() } {
         unsafe { exit(100) }
     }
-    let summary = b"linux-native: epoll=true many_epolls=true many_eventfds=true many_timerfds=true many_signalfds=true futex=true mmap=true io_uring=true\n";
+    let summary = b"linux-native: epoll=true many_epolls=true many_eventfds=true many_timerfds=true many_signalfds=true many_pipes=true futex=true mmap=true io_uring=true\n";
     if !unsafe { write_bytes(1, summary) } {
         unsafe { exit(101) }
     }
