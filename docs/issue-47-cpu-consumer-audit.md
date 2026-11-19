@@ -167,6 +167,9 @@
   bootstrap 加 AP 启动前堆扩展。4 处理器 RISC-V64 QEMU 中 SMP 汇总与
   `kstack per_cpu set/kept/restored=3/3` 通过；同轮已有的 IRQ 路由/PIC 失败另行
   保留，不能据此宣称 RISC-V 全量验收通过。
+- `kernel/src/arch/aarch64/user.rs`：每核用户返回内核栈记录改为 bootstrap 加
+  AP 启动前堆扩展。Pixel 6a 无损 runtime 在 `4.49s` 到达 PSCI reset，恢复到同一
+  Android build，`sys.boot_completed=1` 且 slot 仍为 `a`。
 - `kernel/src/sched/scheduler.rs`：`cpu_stats`、`cpu_residency`、类别仲裁窗口和
   idle context 改用调度器内联 bootstrap + 堆后备扩展表，在 AP 启动前与 CPU
   容量一起原子预留。运行期这些每核统计与上下文不再由固定 128 槽决定容量。

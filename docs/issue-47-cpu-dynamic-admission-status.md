@@ -73,7 +73,8 @@ CPU 维度和三个 deadline forest 也已预分配扩展；scheduler per-CPU ru
 RunLists 解耦；x86 syscall 入口块与用户态返回帧也已采用 AP 启动前的堆后备扩展。
 x86 GDT/TSS 指针表、双重错误栈和启动 rsp0 栈也已完成 AP 启动前全量预留。
 RISC-V 用户返回内核栈记录也已迁移到同一两阶段存储。共享 CpuSet 门面、其余
-AArch64/RISC-V 每核表和 LoongArch 硬件 ID 表仍受固定表约束。因此：
+AArch64/RISC-V 每核表（AArch64 用户返回栈记录已迁移）、LoongArch 硬件 ID 表仍受
+固定表约束。因此：
 
 - 不能把 128 改成 256/1024 后声称“动态支持”；
 - 不能把本切片中的 4096-CPU 软件准入测试冒充真实内核运行；
