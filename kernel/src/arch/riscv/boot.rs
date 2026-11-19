@@ -13,6 +13,7 @@ use core::arch::global_asm;
 
 use kernel_core::fdt::{self, Fdt, Node};
 use kernel_core::frame::{PhysRegion, RegionKind};
+use kernel_core::smp::Topology;
 
 use super::{devirq, mmu, plic, smp, testdev, timer, uart};
 use crate::boot::{self, BootSpec};
@@ -127,6 +128,38 @@ fn plic_context(node: &Node<'_>, intc: u32) -> Option<u32> {
     None
 }
 
+/// Register every logical CPU's supervisor PLIC context after the heap-backed
+/// topology is available.
+pub(super) fn configure_plic_contexts(fdt: &Fdt<'static>, topology: &Topology) {
+    if let Err(error) = plic::prepare(topology.count()) {
+        crate::kprintln!(
+            "[JSR-PLIC] reject=context_storage cpus={} reason={}",
+            topology.count(),
+            error.name()
+        );
+        return;
+    }
+    let Some(plic_node) = fdt
+        .find_compatible("riscv,plic0")
+        .ok()
+        .flatten()
+        .or_else(|| fdt.find_compatible("sifive,plic-1.0.0").ok().flatten())
+    else {
+        return;
+    };
+    for index in 0..topology.count() {
+        let Some(hart) = topology.hw_id(index) else {
+            continue;
+        };
+        if let Some(context) = boot_cpu_info(fdt, hart as u64)
+            .1
+            .and_then(|intc| plic_context(&plic_node, intc))
+        {
+            plic::set_cpu_context(index, context);
+        }
+    }
+}
+
 /// 由设备树配置串口、中断控制器、计数器频率与测试设备；缺少任一必需设备返回其名字。
 fn configure_devices(fdt: &Fdt<'static>, hart: u64) -> Result<(), &'static str> {
     let uart_node = fdt.find_compatible("ns16550a").ok().flatten().ok_or("ns16550a")?;
@@ -148,13 +181,6 @@ fn configure_devices(fdt: &Fdt<'static>, hart: u64) -> Result<(), &'static str> 
 
     // 处理器拓扑（只记录，启动其他处理器在内核主流程里经 Platform 契约进行）
     smp::configure(*fdt, hart as u32);
-    // 其他处理器的监管态上下文（找不到的处理器不能作为设备中断的目标）
-    for index in 1..kernel_core::smp::MAX_CPUS {
-        let Some(h) = smp::hart_of(index) else { break };
-        if let Some(ctx) = boot_cpu_info(fdt, h as u64).1.and_then(|intc| plic_context(&plic_node, intc)) {
-            plic::set_cpu_context(index, ctx);
-        }
-    }
 
     // 实时时钟是可选的设备中断源（没有时只有串口一条设备中断线）
     if let Some(n) = fdt.find_compatible("google,goldfish-rtc").ok().flatten() {

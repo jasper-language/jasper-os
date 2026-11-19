@@ -9,8 +9,9 @@
 
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
+use alloc::vec::Vec;
 use kernel_core::smp::MAX_CPUS;
-use spin::Mutex;
+use spin::{Mutex, Once};
 
 use super::{cpu, smp, uart};
 
@@ -31,26 +32,65 @@ const SELF_TEST_SPINS: u32 = 100_000;
 /// 寄存器块的虚拟地址（0 = 未知）。
 static BASE: AtomicUsize = AtomicUsize::new(0);
 /// 各处理器（逻辑下标）监管态的上下文编号（`u32::MAX` = 未知）。
-static CONTEXT_OF: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(u32::MAX) }; MAX_CPUS];
+static BOOTSTRAP_CONTEXT: [AtomicU32; MAX_CPUS] =
+    [const { AtomicU32::new(u32::MAX) }; MAX_CPUS];
+static EXTRA_CONTEXT: Once<Result<Vec<AtomicU32>, super::user::RuntimeStorageError>> = Once::new();
 /// 使能位图读改写的串行化。
 static ENABLE_LOCK: Mutex<()> = Mutex::new(());
+
+fn context_slot(index: usize) -> Option<&'static AtomicU32> {
+    if let Some(slot) = BOOTSTRAP_CONTEXT.get(index) {
+        return Some(slot);
+    }
+    let extra = index.checked_sub(MAX_CPUS)?;
+    EXTRA_CONTEXT.get()?.as_ref().ok()?.get(extra)
+}
+
+/// Reserve CPU context slots before mappings are published.
+pub(super) fn prepare(cpus: usize) -> Result<(), super::user::RuntimeStorageError> {
+    let needed = cpus.saturating_sub(MAX_CPUS);
+    let slots = EXTRA_CONTEXT.call_once(|| {
+        let mut slots = Vec::new();
+        slots
+            .try_reserve_exact(needed)
+            .map_err(|_| super::user::RuntimeStorageError::Allocation)?;
+        for _ in MAX_CPUS..cpus {
+            slots.push(AtomicU32::new(u32::MAX));
+        }
+        Ok(slots)
+    });
+    match slots {
+        Ok(slots) if slots.len() >= needed => Ok(()),
+        Ok(_) => Err(super::user::RuntimeStorageError::AlreadyPreparedTooSmall),
+        Err(error) => Err(*error),
+    }
+}
 
 /// 设置寄存器块的虚拟地址与启动处理器的上下文编号（引导适配层解析设备树后调用）。
 pub fn set_base(va: u64, context: u32) {
     BASE.store(va as usize, Ordering::Relaxed);
-    CONTEXT_OF[0].store(context, Ordering::Relaxed);
+    if let Some(slot) = context_slot(0) {
+        slot.store(context, Ordering::Relaxed);
+    }
 }
 
 /// 登记逻辑下标 `index` 的处理器的上下文编号（引导适配层按设备树为其他处理器调用）。
 pub fn set_cpu_context(index: usize, context: u32) {
-    if let Some(c) = CONTEXT_OF.get(index) {
+    if let Some(c) = context_slot(index) {
         c.store(context, Ordering::Relaxed);
+        crate::kprintln!(
+            "[JSR-PLIC] context cpu={} context={} source=fdt",
+            index,
+            context
+        );
     }
 }
 
 /// 处理器 `index` 的上下文编号。
 fn context_of(index: usize) -> Option<u32> {
-    CONTEXT_OF.get(index).map(|c| c.load(Ordering::Relaxed)).filter(|&c| c != u32::MAX)
+    context_slot(index)
+        .map(|slot| slot.load(Ordering::Relaxed))
+        .filter(|&context| context != u32::MAX)
 }
 
 /// 处理器 `index` 是否有已知的上下文（可作为中断的目标）。
@@ -118,14 +158,28 @@ pub fn complete(source: u32) {
 /// 其他处理器：本上下文阈值置 0、打开监管态外部中断。上下文未知时返回 `false`，什么都不改。
 pub fn init_cpu() -> bool {
     let Some(ctx) = context_of(smp::cpu_index()) else {
+        crate::kprintln!(
+            "[JSR-PLIC] init_cpu cpu={} context=missing",
+            smp::cpu_index()
+        );
         return false;
     };
     if BASE.load(Ordering::Relaxed) == 0 {
+        crate::kprintln!(
+            "[JSR-PLIC] init_cpu cpu={} context={} base=missing",
+            smp::cpu_index(),
+            ctx
+        );
         return false;
     }
     // SAFETY：阈值寄存器属于本处理器的上下文。
     unsafe { context_reg(ctx, THRESHOLD).write_volatile(0) };
     cpu::enable_sources(cpu::SIE_SEIE);
+    crate::kprintln!(
+        "[JSR-PLIC] init_cpu cpu={} context={} enabled=true",
+        smp::cpu_index(),
+        ctx
+    );
     true
 }
 

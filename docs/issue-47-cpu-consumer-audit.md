@@ -165,8 +165,12 @@
   和 AP 入口只查询已发布表，不在中断路径扩容。
 - `kernel/src/arch/riscv/user.rs`：RV32/RV64 共用的每核用户返回内核栈记录改为
   bootstrap 加 AP 启动前堆扩展。4 处理器 RISC-V64 QEMU 中 SMP 汇总与
-  `kstack per_cpu set/kept/restored=3/3` 通过；同轮已有的 IRQ 路由/PIC 失败另行
-  保留，不能据此宣称 RISC-V 全量验收通过。
+  `kstack per_cpu set/kept/restored=3/3` 通过。
+- `kernel/src/arch/riscv/{boot,plic,smp}.rs`：PLIC context 注册从堆前
+  `configure_devices` 移到堆后 `init_boot` 拓扑发布阶段，修复 CPU 1–3 context
+  全缺失、设备中断只能落到 CPU0 的真实缺陷。context 存储改为 bootstrap 加堆扩展；
+  4 vCPU QEMU 中每个 CPU 的两条中断均精确送达，`delivered_exact=4/4`，IRQ 汇总
+  `failed=0`。该轮仍保留既有 PCI/KRN0 失败，不等于 RISC-V 全量验收完成。
 - `kernel/src/arch/aarch64/user.rs`：每核用户返回内核栈记录改为 bootstrap 加
   AP 启动前堆扩展。Pixel 6a 无损 runtime 在 `4.49s` 到达 PSCI reset，恢复到同一
   Android build，`sys.boot_completed=1` 且 slot 仍为 `a`。

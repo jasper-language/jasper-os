@@ -28,7 +28,7 @@ use spin::Once;
 
 use super::mode::{xlen_asm_begin, xlen_asm_end};
 use super::trap::WB;
-use super::{cpu, devirq, mmu, plic, sbi as fw, space, timer, trap};
+use super::{boot, cpu, devirq, mmu, plic, sbi as fw, space, timer, trap};
 use crate::arch::{CpuDiscovery, CpuStart};
 use crate::irq::{self, IrqLine};
 
@@ -121,6 +121,9 @@ pub fn init_boot(boot_hart: u32) -> CpuDiscovery {
         }
         None => (Topology::boot_only(boot_hart), "boot_only", false),
     };
+    if let Some((fdt, _)) = FIRMWARE_FDT.get() {
+        boot::configure_plic_contexts(fdt, &found.0);
+    }
     let (topology, source, inventory_complete) = FIRMWARE
         .call_once(|| found)
         .clone(); // JASPER-HARDCODE-REVIEW: issue=33 source=boot-handshake reason=boot-hart-identity-is-an-architectural-fact-and-admission-fails-closed
