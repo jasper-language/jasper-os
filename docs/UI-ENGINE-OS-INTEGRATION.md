@@ -11,7 +11,7 @@ JSUI Input 的键盘路径；同一镜像内两个 Service 会话已顺序重建
 ## 精确版本
 
 - 仓库：`https://github.com/jasper-language/jasper-ui-engine`
-- commit：`b21dec1ae504a06923defcc715722c7b9e9c1dc8`
+- commit：`8adb6d4432c8385250192304eef04a07b22594d2`
 - 版本/许可：`0.1.0` / Apache-2.0
 - Cargo feature：只选择 `no-std-core`
 - `Cargo.lock`、`Cargo.toml`、许可证 digest 固定在 `ui-engine.lock.toml`
@@ -45,7 +45,8 @@ qemu_rc=33
 
 键盘证据为 `evidence/ui-native-keyboard-20261118/`，双会话证据为
 `evidence/ui-restart-20261118/`，来源审计见
-`evidence/ui-engine-cpu-b21dec1/README.md`。这只关闭首帧集成，不关闭 UI-OS-1。
+`evidence/ui-engine-cpu-8adb6d4/README.md`。这只关闭三帧 CPU 会话集成，不关闭
+UI-OS-1。
 
 ## 宿主映射
 

@@ -87,6 +87,6 @@ printf 'PASS\n' >"$OUT/PASS"
 
 printf '%s\n' \
   "ui-process: PASS cpl3=true channel=true jsui=true engine=cpu rendered=true present=true patch=true input=true native_keyboard=true frames=6 display=true exit=0 terminal=true restart=true resources=true" \
-  "engine_commit=b21dec1ae504a06923defcc715722c7b9e9c1dc8" \
+  "engine_commit=8adb6d4432c8385250192304eef04a07b22594d2" \
   "qemu_rc=$rc" \
   "evidence=$OUT"

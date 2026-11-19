@@ -987,7 +987,7 @@ dependencies = [
 [[package]]
 name = "jasper-ui-engine"
 version = "0.1.0"
-source = "git+https://github.com/jasper-language/jasper-ui-engine?rev=b21dec1ae504a06923defcc715722c7b9e9c1dc8#b21dec1ae504a06923defcc715722c7b9e9c1dc8"
+source = "git+https://github.com/jasper-language/jasper-ui-engine?rev=8adb6d4432c8385250192304eef04a07b22594d2#8adb6d4432c8385250192304eef04a07b22594d2"
 dependencies = [
  "libm",
  "serde",

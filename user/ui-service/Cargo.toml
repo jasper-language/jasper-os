@@ -19,7 +19,7 @@ required-features = ["native-transport"]
 [dependencies]
 jasper-rt = { path = "../rt", optional = true }
 kernel-core = { path = "../../kernel-core" }
-jasper-ui-engine = { git = "https://github.com/jasper-language/jasper-ui-engine", rev = "b21dec1ae504a06923defcc715722c7b9e9c1dc8", default-features = false, features = ["no-std-core"], optional = true }
+jasper-ui-engine = { git = "https://github.com/jasper-language/jasper-ui-engine", rev = "8adb6d4432c8385250192304eef04a07b22594d2", default-features = false, features = ["no-std-core"], optional = true }
 
 [build-dependencies]
 kernel-core = { path = "../../kernel-core" }

@@ -38,5 +38,5 @@ python3 scripts/check-gpu-abi-boundary.py >>"$OUT/gpu-boundary.log"
 
 printf '%s\n' \
   "ui-host: PASS engine=cpu transport=channel frame=rgba8 kernel_linked=false" \
-  "engine_commit=b21dec1ae504a06923defcc715722c7b9e9c1dc8" \
+  "engine_commit=8adb6d4432c8385250192304eef04a07b22594d2" \
   "evidence=$OUT"

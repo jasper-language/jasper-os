@@ -19,14 +19,14 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 #[cfg(feature = "native-engine-core")]
 use jasper_ui_engine::{
-    backend::HeadlessBackend,
+    core_renderer::CoreRgbaRenderer,
     geometry::Size,
     scene::Node,
     ui_ir::{
         NativeActivationSource, NativeUiDocument, UiEventContext, UiEventKind, UiFrame as IrFrame,
         UiPermission, UiPermissionContext,
     },
-    LegacyEngine, SimpleTextEngine,
+    SimpleTextEngine,
 };
 use kernel_core::display_input::{DisplayInputError, KeyInput, SurfaceSpec};
 #[cfg(feature = "native-transport")]
@@ -34,7 +34,7 @@ use kernel_core::ui_protocol::{decode_ui_frame, encode_ui_frame, UiFrame, UiFram
 use kernel_core::ui_service::{UI_ERROR_ENGINE_UNAVAILABLE, UI_SERVICE_PROTOCOL_VERSION};
 
 /// UI Engine revision currently recorded by `ui-engine.lock.toml`.
-pub const PINNED_ENGINE_COMMIT: &str = "b21dec1ae504a06923defcc715722c7b9e9c1dc8";
+pub const PINNED_ENGINE_COMMIT: &str = "8adb6d4432c8385250192304eef04a07b22594d2";
 /// Largest JSUI payload that fits one Jasper native Channel message.
 pub fn max_native_ui_frame_payload() -> usize {
     kernel_core::config::bounds::MSG_BYTES
@@ -180,19 +180,21 @@ impl EngineHost for CpuEngineHost {
 
     fn render_cpu(&mut self, _scene_version: u64, pixels: &mut [u8]) -> Result<(), HostError> {
         let document = self.document.as_ref().ok_or(HostError::InvalidSequence)?;
-        let mut engine = LegacyEngine::new(
+        let renderer = CoreRgbaRenderer::new(
             Size::new(self.width as f32, self.height as f32),
-            HeadlessBackend::new(self.width, self.height),
             Box::new(SimpleTextEngine),
-        );
-        engine
+        )
+        .with_max_frame_bytes(pixels.len());
+        let frame = renderer
             .render(document.scene())
             .map_err(|_| HostError::InvalidFrame)?;
-        let rendered = engine.backend().canvas().pixels();
-        if rendered.len() != pixels.len() {
+        if frame.width != self.width
+            || frame.height != self.height
+            || frame.pixels.len() != pixels.len()
+        {
             return Err(HostError::InvalidFrame);
         }
-        pixels.copy_from_slice(rendered);
+        pixels.copy_from_slice(&frame.pixels);
         Ok(())
     }
 }

@@ -1,11 +1,11 @@
 # Jasper UI Engine 宿主适配骨架
 
-更新时间：2026-11-18。
+更新时间：2026-11-19。
 
 状态：**Jasper-OS 用户态宿主 crate、RGBA Surface 和真实 CPL3 Service 已接入固定
 UI Engine `no_std-core`，Scene/Patch/Input/Present 会话和原生 framebuffer 采纳已通过；
-QEMU i8042/PS-2 键盘到 JSUI Input 的原生路径已通过；物理键盘、显示资格和重启
-链路仍未完成。**
+QEMU i8042/PS-2 键盘到 JSUI Input 的原生路径及两次顺序 Service 重建已通过；
+物理键盘、物理显示资格和崩溃恢复仍未完成。**
 
 ## 已实现
 
@@ -21,7 +21,7 @@ QEMU i8042/PS-2 键盘到 JSUI Input 的原生路径已通过；物理键盘、�
   generation、request id、截断和尾随数据由协议层失败关闭；
 - `ui-service` 进程从启动者接收一个预打开 Channel，消费真实 JSUI Scene 请求；
   开启 `native-engine-core` 时，`CpuEngineHost` 使用固定 Engine 严格解析 Typed UI IR、
-  执行布局/绘制并写入宿主拥有的 RGBA8 Surface，随后返回携带相同
+  经有界 `CoreRgbaRenderer` 执行布局/绘制并写入宿主拥有的 RGBA8 Surface，随后返回携带相同
   client/request/sequence 的 JSUI Present 帧；随后消费 JSUI Patch 并渲染新 revision，
   再消费 JSUI Input，
   Engine 校验焦点节点 Activate 权限/身份/代际并渲染第二帧，Close 后正常退出；
@@ -44,7 +44,7 @@ QEMU i8042/PS-2 键盘到 JSUI Input 的原生路径已通过；物理键盘、�
 固定 Engine 仍为：
 
 ```text
-commit=b21dec1ae504a06923defcc715722c7b9e9c1dc8
+commit=8adb6d4432c8385250192304eef04a07b22594d2
 feature=no-std-core
 target-status=integrated-cpu
 ```
