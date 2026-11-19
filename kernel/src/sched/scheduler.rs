@@ -978,6 +978,31 @@ struct CpuTable<T, const N: usize> {
     extra: alloc::vec::Vec<T>,
 }
 
+enum LoadSnapshot {
+    Inline([CoreLoad; MAX_CPUS]),
+    Heap(Vec<CoreLoad>),
+}
+
+impl LoadSnapshot {
+    fn as_slice(&self) -> &[CoreLoad] {
+        match self {
+            Self::Inline(loads) => loads,
+            Self::Heap(loads) => loads,
+        }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [CoreLoad] {
+        match self {
+            Self::Inline(loads) => loads,
+            Self::Heap(loads) => loads,
+        }
+    }
+
+    fn get(&self, cpu: usize) -> Option<&CoreLoad> {
+        self.as_slice().get(cpu)
+    }
+}
+
 impl<T, const N: usize> CpuTable<T, N> {
     const fn new(inline: [T; N]) -> Self {
         Self {
@@ -1209,6 +1234,8 @@ pub struct Scheduler {
     balancer: Balancer,
     /// 待发的重新调度请求（门面层放锁后对这些处理器发核间中断）。
     kicks: CpuSet,
+    /// Reusable per-CPU load snapshot; capacity is reserved before AP startup.
+    load_scratch: Vec<CoreLoad>,
     /// 每个处理器的调度统计。
     cpu_stats: CpuTable<CpuStats, MAX_CPUS>,
     // Separate reference-clock residency; legacy local IRQ statistics stay unchanged.
@@ -1393,6 +1420,7 @@ impl Scheduler {
             online: CpuSet::BOOTSTRAP_CPU0,
             balancer: Balancer::new(BalanceParams::DEFAULT),
             kicks: CpuSet::EMPTY,
+            load_scratch: Vec::new(),
             deadline_wakes: CpuTable::new([0; MAX_CPUS]),
             deadline_refills: CpuTable::new([0; MAX_CPUS]),
             #[cfg(feature = "fault-inject")]
@@ -1855,18 +1883,30 @@ impl Scheduler {
         };
         let current = self.cur();
         let creator_slot = is_worker(current).then_some(current);
+        let creator = if is_worker(current) {
+            self.task(current)
+                .map(|task| (task.base_qos, task.qos_ceiling, task.cpu_group))
+        } else {
+            None
+        };
+        let loads = self.loads();
         let placement = match affinity.as_ref() {
             Some(set) => CpuMembershipRef::Bootstrap(set.clone()),
             None => creator_slot
                 .and_then(|slot| self.affinity_view(slot))
                 .unwrap_or(CpuMembershipRef::Bootstrap(CpuSet::first(1))),
         };
-        let base = creator_slot
-            .and_then(|slot| self.task(slot))
-            .map(|task| task.base_qos)
+        let base = creator
+            .map(|(base, _, _)| base)
             .unwrap_or(Qos::UserInitiated);
-        let loads = self.loads();
-        let home = self.balancer.place(placement, None, base, None, self.now, &loads).map_err(|_| SpawnError::BadAffinity)?;
+        let home = self.balancer.place(placement, None, base, None, self.now, loads.as_slice());
+        let home_is_idle = home
+            .as_ref()
+            .ok()
+            .and_then(|&home| loads.get(home))
+            .is_some_and(CoreLoad::idle);
+        self.restore_loads(loads);
+        let home = home.map_err(|_| SpawnError::BadAffinity)?;
         // 空槽位或「已退出且已被完全换下」的槽位都可复用：
         // 已退出任务一旦被切走（`on_cpu` 清除），就再也不会在它的栈上执行，栈与 TCB 可以安全覆盖。
         self.ensure_id_index();
@@ -1915,15 +1955,14 @@ impl Scheduler {
             self.retire_hot(task.home, old.token());
         }
         self.epochs[slot].publish(reservation).expect("publish current reservation");
-        let creator = if is_worker(current) { self.task(current) } else { None };
         let mut task = Task::new(id, name);
         task.entry = Some(entry);
         task.timer = Some(timer);
-        if let Some(creator) = creator {
-            task.sched = new_entity(creator.base_qos);
-            task.base_qos = creator.base_qos;
-            task.qos_ceiling = creator.qos_ceiling;
-            task.cpu_group = creator.cpu_group;
+        if let Some((base_qos, ceiling, cpu_group)) = creator {
+            task.sched = new_entity(base_qos);
+            task.base_qos = base_qos;
+            task.qos_ceiling = ceiling;
+            task.cpu_group = cpu_group;
         }
         task.affinity = if self.dynamic_affinities.is_some() {
             if let Some(set) = affinity {
@@ -1959,7 +1998,7 @@ impl Scheduler {
         let r = self.update_hot_sched(slot, |queue, sched| queue.enqueue(sched, Enqueue::Spawn));
         self.note(r);
         self.relist(slot);
-        if home != this_cpu() && loads[home].idle() {
+        if home != this_cpu() && home_is_idle {
             self.kicks.insert(home);
         }
         Ok(slot)
@@ -2579,9 +2618,10 @@ impl Scheduler {
                 task.sched.qos,
                 task.last_ran,
                 self.now,
-                &loads,
+                loads.as_slice(),
             )
         };
+        self.restore_loads(loads);
         if let Ok(home) = home {
             self.rehome(i, home);
         }
@@ -3051,7 +3091,9 @@ impl Scheduler {
         self.cpu_stats[c].idle_waiting = 0;
         if self.balancer.due(self.local_ticks[c]) {
             let loads = self.loads();
-            match self.balancer.pull(c, self.now, &loads, self.candidates()) {
+            let pulled = self.balancer.pull(c, self.now, loads.as_slice(), self.candidates());
+            self.restore_loads(loads);
+            match pulled {
                 Ok(slot) => {
                     self.rehome(slot, c);
                     self.cpu_stats[c].pulls += 1;
@@ -3121,9 +3163,17 @@ impl Scheduler {
     }
 
     /// 各处理器的负载快照。
-    fn loads(&self) -> [CoreLoad; MAX_CPUS] {
-        let mut l = [CoreLoad::OFFLINE; MAX_CPUS];
-        for (c, load) in l.iter_mut().enumerate() {
+    fn loads(&mut self) -> LoadSnapshot {
+        let mut snapshot = if self.load_scratch.capacity() == 0 {
+            LoadSnapshot::Inline([CoreLoad::OFFLINE; MAX_CPUS])
+        } else {
+            let mut loads = core::mem::take(&mut self.load_scratch);
+            loads.clear();
+            loads.resize(self.cpu_stats.len(), CoreLoad::OFFLINE);
+            LoadSnapshot::Heap(loads)
+        };
+        let loads = snapshot.as_mut_slice();
+        for (c, load) in loads.iter_mut().enumerate() {
             if self.online.contains(c) {
                 let cur = leaf_current(c);
                 load.online = true;
@@ -3131,11 +3181,18 @@ impl Scheduler {
             }
         }
         for k in self.candidates() {
-            if let Some(load) = l.get_mut(k.home) {
+            if let Some(load) = loads.get_mut(k.home) {
                 load.queued += 1;
             }
         }
-        l
+        snapshot
+    }
+
+    fn restore_loads(&mut self, loads: LoadSnapshot) {
+        if let LoadSnapshot::Heap(mut loads) = loads {
+            loads.clear();
+            self.load_scratch = loads;
+        }
     }
 
     /// 处理器 `c` 参与调度（进入空闲执行流之前调用；重复调用无副作用）。
@@ -3188,7 +3245,14 @@ impl Scheduler {
         }
         let loads = self.loads();
         let (qos, last_ran) = self.task(i).map(|t| (t.sched.qos, t.last_ran)).unwrap_or((Qos::Background, None));
-        let new_home = self.balancer.place(CpuMembershipRef::Bootstrap(set.clone()), None, qos, last_ran, self.now, &loads).map_err(|_| AffinityError::NoOnlineCpu)?;
+        let new_home = self.balancer.place(CpuMembershipRef::Bootstrap(set.clone()), None, qos, last_ran, self.now, loads.as_slice()).map_err(|_| AffinityError::NoOnlineCpu);
+        let new_home_is_idle = new_home
+            .as_ref()
+            .ok()
+            .and_then(|&home| loads.get(home))
+            .is_some_and(CoreLoad::idle);
+        self.restore_loads(loads);
+        let new_home = new_home?;
         if dynamic {
             assert!(self.copy_affinity_set(i, set.clone()), "preallocated affinity storage");
         }
@@ -3201,7 +3265,7 @@ impl Scheduler {
         if let Some(c) = on_cpu.filter(|&c| c != me) {
             self.kicks.insert(c);
         }
-        if new_home != me && loads[new_home].idle() {
+        if new_home != me && new_home_is_idle {
             self.kicks.insert(new_home);
         }
         Ok(on_cpu != Some(me))
@@ -3984,6 +4048,12 @@ impl Scheduler {
             .local_ticks
             .prepare_tail(cpus, || 0)
             .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
+        let mut load_scratch = Vec::new();
+        let load_capacity = cpus.max(self.cpu_stats.len());
+        load_scratch
+            .try_reserve_exact(load_capacity)
+            .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
+        load_scratch.resize(load_capacity, CoreLoad::OFFLINE);
         let wake_layout = prepare_deadline_layout(
             &self.wake_heap,
             &self.wake_entries,
@@ -4043,6 +4113,7 @@ impl Scheduler {
         self.deadline_wakes.commit_tail(deadline_wakes_tail);
         self.deadline_refills.commit_tail(deadline_refills_tail);
         self.local_ticks.commit_tail(local_ticks_tail);
+        self.load_scratch = load_scratch;
         let (wake_heap, wake_entries, wake_positions, wake_owners) = wake_layout;
         self.wake_heap = wake_heap;
         self.wake_entries = BootSlots::Heap(wake_entries);
@@ -4199,7 +4270,9 @@ impl Scheduler {
         }
         if worker && self.balancer.due(self.local_ticks[c]) {
             let loads = self.loads();
-            match self.balancer.pull(c, now, &loads, self.candidates()) {
+            let pulled = self.balancer.pull(c, now, loads.as_slice(), self.candidates());
+            self.restore_loads(loads);
+            match pulled {
                 Ok(slot) => {
                     self.rehome(slot, c);
                     self.cpu_stats[c].pulls += 1;
@@ -4307,7 +4380,9 @@ impl Scheduler {
         let own_empty = self.waiting(c) == ClassMask::EMPTY && !(prev_runnable && self.task(prev).is_some_and(|t| t.home == c && self.eligible(t)));
         if own_empty && self.online.contains(c) {
             let loads = self.loads();
-            if let Ok(slot) = self.balancer.steal(c, now, &loads, self.candidates()) {
+            let stolen = self.balancer.steal(c, now, loads.as_slice(), self.candidates());
+            self.restore_loads(loads);
+            if let Ok(slot) = stolen {
                 self.rehome(slot, c);
                 self.cpu_stats[c].steals += 1;
             }
