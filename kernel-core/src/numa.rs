@@ -4,7 +4,15 @@
 //! 候选顺序。边界：不实现页帧分配器、迁移或性能策略。
 //! Responsibility: validated NUMA facts and deterministic locality ordering.
 
+#[cfg(any(test, feature = "cpu-dynamic"))]
+use crate::cpu_bitmap::CpuBitmap;
+#[cfg(not(any(test, feature = "cpu-dynamic")))]
 use crate::smp::CpuSet;
+
+#[cfg(any(test, feature = "cpu-dynamic"))]
+type NumaCpuSet = CpuBitmap;
+#[cfg(not(any(test, feature = "cpu-dynamic")))]
+type NumaCpuSet = CpuSet;
 
 pub const LOCAL_DISTANCE: u8 = 10;
 
@@ -15,10 +23,10 @@ impl NodeId {
     pub const NONE: Self = Self(u32::MAX);
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NumaNode {
     pub id: NodeId,
-    pub cpus: CpuSet,
+    pub cpus: NumaCpuSet,
     pub memory_bytes: u64,
     pub online: bool,
 }
@@ -83,7 +91,7 @@ impl<const N: usize> PlacementOrder<N> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NumaTopology<const N: usize> {
     nodes: [Option<NumaNode>; N],
     distances: [[u8; N]; N],
@@ -94,7 +102,7 @@ pub struct NumaTopology<const N: usize> {
 impl<const N: usize> NumaTopology<N> {
     pub const fn new() -> Self {
         Self {
-            nodes: [None; N],
+            nodes: [const { None }; N],
             distances: [[0; N]; N],
             count: 0,
             generation: 1,
@@ -113,7 +121,7 @@ impl<const N: usize> NumaTopology<N> {
             return Err(NumaError::InvalidDistance);
         }
         let mut next = Self::new();
-        for (index, node) in nodes.iter().copied().enumerate() {
+        for (index, node) in nodes.iter().cloned().enumerate() {
             if node.cpus.is_empty() {
                 return Err(NumaError::InvalidCpuSet);
             }
@@ -159,15 +167,15 @@ impl<const N: usize> NumaTopology<N> {
         self.generation
     }
 
-    pub fn nodes(&self) -> impl Iterator<Item = NumaNode> + '_ {
-        self.nodes[..self.count].iter().flatten().copied()
+    pub fn nodes(&self) -> impl Iterator<Item = &NumaNode> + '_ {
+        self.nodes[..self.count].iter().flatten()
     }
 
-    pub fn node(&self, id: NodeId) -> Option<NumaNode> {
+    pub fn node(&self, id: NodeId) -> Option<&NumaNode> {
         self.nodes().find(|node| node.id == id)
     }
 
-    pub fn node_for_cpu(&self, cpu: usize) -> Option<NumaNode> {
+    pub fn node_for_cpu(&self, cpu: usize) -> Option<&NumaNode> {
         self.nodes().find(|node| node.cpus.contains(cpu))
     }
 
@@ -219,7 +227,11 @@ impl<const N: usize> NumaTopology<N> {
 
     pub fn set_online(&mut self, id: NodeId, online: bool) -> Result<(), NumaError> {
         let position = self.position(id).ok_or(NumaError::UnknownNode)?;
-        if online && self.nodes[position].is_none_or(|node| node.memory_bytes == 0) {
+        if online
+            && self.nodes[position]
+                .as_ref()
+                .is_none_or(|node| node.memory_bytes == 0)
+        {
             return Err(NumaError::InvalidNode);
         }
         let next_generation = self
@@ -251,10 +263,10 @@ impl<const N: usize> Default for NumaTopology<N> {
 mod tests {
     use super::*;
 
-    fn cpus(first: usize, second: usize) -> CpuSet {
-        let mut set = CpuSet::EMPTY;
+    fn cpus(first: usize, second: usize) -> NumaCpuSet {
+        let mut set = CpuBitmap::empty();
         for cpu in first..second {
-            assert!(set.insert(cpu));
+            set.insert(cpu).unwrap();
         }
         set
     }
@@ -310,21 +322,22 @@ mod tests {
     #[test]
     fn malformed_topologies_are_rejected_without_partial_state() {
         let mut topology = topology();
-        let before = topology;
+        let before = topology.clone();
         assert_eq!(
             topology.configure(&nodes(), &[10, 20, 19, 10]),
             Err(NumaError::InvalidDistance)
         );
         assert_eq!(topology, before);
         let mut overlapping = nodes();
-        overlapping[1].cpus.insert(3);
+        overlapping[1].cpus.insert(3).unwrap();
         assert_eq!(
             topology.configure(&overlapping, &[10, 20, 20, 10]),
             Err(NumaError::DuplicateCpu)
         );
         assert_eq!(topology, before);
+        let repeated: [NumaNode; 5] = core::array::from_fn(|_| nodes()[0].clone());
         assert_eq!(
-            topology.configure(&[nodes()[0]; 5], &[10; 25]),
+            topology.configure(&repeated, &[10; 25]),
             Err(NumaError::Capacity)
         );
     }
@@ -342,5 +355,32 @@ mod tests {
         );
         topology.set_online(NodeId(0), true).unwrap();
         assert_eq!(topology.recommend(0, 1024).unwrap(), NodeId(0));
+    }
+
+    #[test]
+    fn sparse_high_cpu_has_numa_locality() {
+        let mut high = CpuBitmap::empty();
+        high.insert(4096).unwrap();
+        let nodes = [
+            NumaNode {
+                id: NodeId(0),
+                cpus: cpus(0, 1),
+                memory_bytes: 1024,
+                online: true,
+            },
+            NumaNode {
+                id: NodeId(1),
+                cpus: high,
+                memory_bytes: 2048,
+                online: true,
+            },
+        ];
+        let mut topology = NumaTopology::<2>::new();
+        topology.configure(&nodes, &[10, 20, 20, 10]).unwrap();
+        assert_eq!(topology.node_for_cpu(4096).unwrap().id, NodeId(1));
+        assert_eq!(
+            topology.placement_order(4096).unwrap().as_slice(),
+            &[NodeId(1), NodeId(0)]
+        );
     }
 }

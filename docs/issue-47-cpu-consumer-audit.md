@@ -125,4 +125,7 @@
   调度器在 AP 启动前的静止事务中完成停表表和唤醒扫描暂存区预分配；`stop`/
   `restart` 与计时器 `kick_stopped` 路径不再临时扩容。宿主测试覆盖 129 和 4096
   号 CPU；无堆轻量构建保留 `CpuSet` 兼容路径。
+- `kernel-core/src/numa.rs`：NUMA 节点的 CPU 本地域在生产 `cpu-dynamic` 构建中
+  使用 `CpuBitmap`，节点查询与跨节点重复 CPU 校验消费同一动态成员集合。CPU 4096
+  的本地节点和距离优先顺序已有宿主测试；无堆轻量构建保留 `CpuSet` 兼容路径。
 - 其余 IRQ 全局路由、调度器、per-CPU、架构入口和亲和 ABI 尚未迁移。
