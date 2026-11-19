@@ -254,12 +254,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "2329b049e840fd2d5630796b86af4329d5117c5868296f8a164269781ad9ef42",
-      "path": "kernel-core/src/smp.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "238225317332e4157e295fae880cb2eba1a80fe07147ecb192ab997a650a13e1",
       "path": "kernel-core/src/config.rs",
       "rules": "HC-G5"
@@ -893,12 +887,6 @@
       "fingerprint": "806b471ecdcd39a6fb07a09e63d61e3d0dd1106b9eca27a558923c5b3830e5f1",
       "path": "kernel/src/linux_abi.rs",
       "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "8214121e5130b762aa5d6b0a4745a0319f7f0d5c5da7a3b612ee58f09f4f5ba9",
-      "path": "kernel-core/src/msi.rs",
-      "rules": "HC-G1,HC-G8"
     },
     {
       "count": 1,
@@ -1629,5 +1617,5 @@
     "user",
     "xtask"
   ],
-  "total": 343
+  "total": 341
 }

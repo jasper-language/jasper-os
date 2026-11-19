@@ -132,7 +132,7 @@ pub const fn unadmitted_inventory(
 
 /// 一次击落允许的最大页数（超过时调用者应改为整体作废）。
 /// Maximum pages in a single shootdown request.
-pub const MAX_SHOOTDOWN_PAGES: u64 = 512;
+pub const MAX_SHOOTDOWN_PAGES: u64 = 512; // JASPER-HARDCODE-REVIEW: issue=35 source=smp-shootdown-batch-policy reason=larger-ranges-use-one-whole-table-flush-request
 
 /// 页大小（击落范围按页对齐）。
 const PAGE: u64 = 4096;

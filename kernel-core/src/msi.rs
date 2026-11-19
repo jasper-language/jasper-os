@@ -34,7 +34,7 @@ type VectorBits = [SpinLock<[u64; WORDS]>; MAX_CPUS];
 
 /// 向量编号的取值上限（`u8` 的全部取值）。
 /// Number of representable vector numbers.
-pub const MAX_SLOTS: usize = 256;
+pub const MAX_SLOTS: usize = 256; // JASPER-HARDCODE-REVIEW: issue=33 source=Intel-SDM-Vol3-Vector-Fields reason=u8-msi-vector-index-space
 
 /// 每核位图的 64 位字数。
 /// Number of 64-bit words per CPU bitmap.

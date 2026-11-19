@@ -1,5 +1,5 @@
 {
-  "baseline_total": 343,
+  "baseline_total": 341,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -13,7 +13,7 @@
     "explicit-safety-policy": 129,
     "platform-adapter": 28,
     "protocol-abi": 38,
-    "runtime-resource-capacity": 67,
+    "runtime-resource-capacity": 65,
     "test-demo-fixture": 6
   },
   "entries": [
@@ -1118,16 +1118,6 @@
       "source": "pub const MAX_POLICY_RULES: usize = 32;"
     },
     {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "8214121e5130b762aa5d6b0a4745a0319f7f0d5c5da7a3b612ee58f09f4f5ba9",
-      "line": 37,
-      "path": "kernel-core/src/msi.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
-      "rules": "HC-G1,HC-G8",
-      "source": "pub const MAX_SLOTS: usize = 256;"
-    },
-    {
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "8b753aa3046998e1b117b9c2d550cd35a7cccc7b5b6fffd77ee116b47666f714",
@@ -1376,16 +1366,6 @@
       "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "pub const MAX_BURST_TICKS: u32 = 64;"
-    },
-    {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "2329b049e840fd2d5630796b86af4329d5117c5868296f8a164269781ad9ef42",
-      "line": 135,
-      "path": "kernel-core/src/smp.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
-      "rules": "HC-G1",
-      "source": "pub const MAX_SHOOTDOWN_PAGES: u64 = 512;"
     },
     {
       "category": "runtime-resource-capacity",
@@ -2703,7 +2683,7 @@
     "explicit-safety-policy": 145,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 106,
+    "runtime-resource-capacity": 104,
     "test-demo-fixture": 7
   }
 }
