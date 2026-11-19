@@ -154,4 +154,7 @@
   逻辑 CPU 截断到 bootstrap 宽度。该快路径不能取 runtime 的 IRQ 安全锁，否则会
   形成 `lock -> per-CPU -> cpu_index -> lock` 自依赖；x86/LoongArch 的硬件 ID
   映射表仍需后续单独迁移。
-- 其余调度器每核数组、架构入口和亲和 ABI 尚未迁移。
+- `kernel/src/sched/scheduler.rs`：`cpu_stats`、`cpu_residency`、类别仲裁窗口和
+  idle context 改用调度器内联 bootstrap + 堆后备扩展表，在 AP 启动前与 CPU
+  容量一起原子预留。运行期这些每核统计与上下文不再由固定 128 槽决定容量。
+- 其余调度器 timer/RT deadline heap、共享 CpuSet 门面、部分诊断和亲和 ABI 尚未迁移。

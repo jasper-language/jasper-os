@@ -916,6 +916,76 @@ impl CpuAffinityTable {
     }
 }
 
+/// Per-CPU value table with a const-friendly bootstrap area and heap overflow.
+struct CpuTable<T, const N: usize> {
+    inline: [T; N],
+    extra: alloc::vec::Vec<T>,
+}
+
+impl<T, const N: usize> CpuTable<T, N> {
+    const fn new(inline: [T; N]) -> Self {
+        Self {
+            inline,
+            extra: alloc::vec::Vec::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        N + self.extra.len()
+    }
+
+    fn get(&self, cpu: usize) -> Option<&T> {
+        if cpu < N {
+            self.inline.get(cpu)
+        } else {
+            self.extra.get(cpu - N)
+        }
+    }
+
+    fn prepare_tail(
+        &self,
+        total: usize,
+        mut fill: impl FnMut() -> T,
+    ) -> Result<alloc::vec::Vec<T>, kernel_core::cpu_bitmap::CpuBitmapError> {
+        if total <= self.len() {
+            return Ok(alloc::vec::Vec::new());
+        }
+        let needed = total - self.len();
+        let mut tail = alloc::vec::Vec::new();
+        tail.try_reserve_exact(needed)
+            .map_err(|_| kernel_core::cpu_bitmap::CpuBitmapError::Allocation)?;
+        for _ in 0..needed {
+            tail.push(fill());
+        }
+        Ok(tail)
+    }
+
+    fn commit_tail(&mut self, tail: alloc::vec::Vec<T>) {
+        self.extra.extend(tail);
+    }
+
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.inline.iter_mut().chain(self.extra.iter_mut())
+    }
+}
+
+impl<T, const N: usize> core::ops::Index<usize> for CpuTable<T, N> {
+    type Output = T;
+    fn index(&self, cpu: usize) -> &T {
+        self.get(cpu).expect("admitted CPU index")
+    }
+}
+
+impl<T, const N: usize> core::ops::IndexMut<usize> for CpuTable<T, N> {
+    fn index_mut(&mut self, cpu: usize) -> &mut T {
+        if cpu < N {
+            &mut self.inline[cpu]
+        } else {
+            &mut self.extra[cpu - N]
+        }
+    }
+}
+
 /// 调度机制本体。槽位总数（含引导线程）在启动期决定，见 [`Scheduler::grow`]。
 pub struct Scheduler {
     #[cfg(feature = "krn2-observe")]
@@ -1009,7 +1079,7 @@ pub struct Scheduler {
     hook_errors: u32,
     last_hook_error: Option<QueueError>,
     /// 其他处理器空闲执行流被切走时保存上下文的位置。
-    idle_ctx: [TaskContext; MAX_CPUS],
+    idle_ctx: CpuTable<TaskContext, MAX_CPUS>,
     /// 参与调度的处理器（引导处理器总在其中；其他处理器进入空闲执行流时加入）。
     online: CpuSet,
     /// 放置 / 窃取 / 周期均衡的决定者。
@@ -1017,9 +1087,9 @@ pub struct Scheduler {
     /// 待发的重新调度请求（门面层放锁后对这些处理器发核间中断）。
     kicks: CpuSet,
     /// 每个处理器的调度统计。
-    cpu_stats: [CpuStats; MAX_CPUS],
+    cpu_stats: CpuTable<CpuStats, MAX_CPUS>,
     // Separate reference-clock residency; legacy local IRQ statistics stay unchanged.
-    cpu_residency: [kernel_core::cpu_time::Ledger; MAX_CPUS],
+    cpu_residency: CpuTable<kernel_core::cpu_time::Ledger, MAX_CPUS>,
     deadline_wakes: [u32; MAX_CPUS],
     deadline_refills: [u32; MAX_CPUS],
     #[cfg(feature = "fault-inject")]
@@ -1057,7 +1127,7 @@ pub struct Scheduler {
     /// 类别仲裁器（POL-5）：决定本 tick 归哪一类；关闭时行为与接入前完全一致。
     arbiter: kernel_core::arbiter::Arbiter,
     /// 每个处理器的类别用量窗口（按 tick 记账）。
-    arb_windows: [kernel_core::arbiter::Window; MAX_CPUS],
+    arb_windows: CpuTable<kernel_core::arbiter::Window, MAX_CPUS>,
     /// 是否启用类别仲裁（由演练显式打开，默认关闭）。
     arbiter_on: bool,
     /// 空闲停表的登记（计时处理器 = 引导处理器，永不停表）。
@@ -1191,7 +1261,7 @@ impl Scheduler {
             scan: ScanStats { picks: 0, visited: 0, max_visited: 0, wake_scans: 0, ticks: 0 },
             hook_errors: 0,
             last_hook_error: None,
-            idle_ctx: [const { crate::arch::EMPTY_CONTEXT }; MAX_CPUS],
+            idle_ctx: CpuTable::new([const { crate::arch::EMPTY_CONTEXT }; MAX_CPUS]),
             online: CpuSet::first(1),
             balancer: Balancer::new(BalanceParams::DEFAULT),
             kicks: CpuSet::EMPTY,
@@ -1201,8 +1271,8 @@ impl Scheduler {
             delayed_deadline_timer: CpuSet::EMPTY,
             #[cfg(feature = "fault-inject")]
             deadline_trace: [DeadlineTrace::EMPTY; MAX_CPUS],
-            cpu_stats: [CpuStats { busy_ticks: 0, idle_ticks: 0, idle_waiting: 0, max_idle_waiting: 0, steals: 0, pulls: 0, pull_hot: 0 }; MAX_CPUS],
-            cpu_residency: [kernel_core::cpu_time::Ledger::new(0,false); MAX_CPUS],
+            cpu_stats: CpuTable::new([CpuStats { busy_ticks: 0, idle_ticks: 0, idle_waiting: 0, max_idle_waiting: 0, steals: 0, pulls: 0, pull_hot: 0 }; MAX_CPUS]),
+            cpu_residency: CpuTable::new([kernel_core::cpu_time::Ledger::new(0,false); MAX_CPUS]),
             local_ticks: [0; MAX_CPUS],
             switches: 0,
             observer: None,
@@ -1221,7 +1291,7 @@ impl Scheduler {
             watchdog: Watchdog::new(super::policy::WATCHDOG_THRESHOLD),
             watchdog_log: WatchdogLog::new(),
             arbiter: kernel_core::arbiter::Arbiter::new(kernel_core::arbiter::ArbiterParams::DEFAULT),
-            arb_windows: [kernel_core::arbiter::Window { ticks: 0, realtime: 0, interactive: 0, batch: 0 }; MAX_CPUS],
+            arb_windows: CpuTable::new([kernel_core::arbiter::Window { ticks: 0, realtime: 0, interactive: 0, batch: 0 }; MAX_CPUS]),
             nohz: StopBoard::new(0),
             nohz_wake_scratch: kernel_core::cpu_bitmap::CpuBitmap::empty(),
             nohz_divisor: 0,
@@ -3004,8 +3074,12 @@ impl Scheduler {
 
     /// 清零全部处理器的调度统计（每个测量场景开始前调用）。
     pub fn reset_cpu_stats(&mut self) {
-        self.cpu_stats = [CpuStats::default(); MAX_CPUS];
-        for ledger in &mut self.cpu_residency { ledger.reset(self.now).expect("monotonic CPU residency reset"); }
+        for stats in self.cpu_stats.iter_mut() {
+            *stats = CpuStats::default();
+        }
+        for ledger in self.cpu_residency.iter_mut() {
+            ledger.reset(self.now).expect("monotonic CPU residency reset");
+        }
         #[cfg(feature="s3-nohz-verify")]
         { self.nohz_diag_start=self.now;self.nohz_diag_local=self.local_ticks;self.nohz_diag_missed=[0;MAX_CPUS]; }
     }
@@ -3668,6 +3742,27 @@ impl Scheduler {
         }
         let scratch = kernel_core::cpu_bitmap::CpuBitmap::with_capacity(cpus)
             .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
+        let stats_tail = self
+            .cpu_stats
+            .prepare_tail(cpus, CpuStats::default)
+            .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
+        let residency_tail = self
+            .cpu_residency
+            .prepare_tail(cpus, || kernel_core::cpu_time::Ledger::new(self.now, false))
+            .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
+        let arbiter_tail = self
+            .arb_windows
+            .prepare_tail(cpus, || kernel_core::arbiter::Window {
+                ticks: 0,
+                realtime: 0,
+                interactive: 0,
+                batch: 0,
+            })
+            .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
+        let idle_tail = self
+            .idle_ctx
+            .prepare_tail(cpus, || crate::arch::EMPTY_CONTEXT)
+            .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
         let mut next_nohz = self.nohz.clone();
         next_nohz.reserve_capacity(cpus)?;
         let mut next_affinities = CpuAffinityTable::new(self.tasks.len(), cpus)
@@ -3695,6 +3790,10 @@ impl Scheduler {
         self.nohz = next_nohz;
         self.nohz_wake_scratch = scratch;
         self.dynamic_affinities = Some(next_affinities);
+        self.cpu_stats.commit_tail(stats_tail);
+        self.cpu_residency.commit_tail(residency_tail);
+        self.arb_windows.commit_tail(arbiter_tail);
+        self.idle_ctx.commit_tail(idle_tail);
         for slot in 0..self.tasks.len() {
             if let Some(task) = self.task_mut(slot) {
                 task.affinity = TaskAffinity::Dynamic;

@@ -67,7 +67,8 @@ NOHZ 均通过。任务亲和也已迁移：`Task` 只保留 bootstrap/dynamic �
 
 当前生产 `CpuSet` 仍是 128 位静态位图；调度器的每核队列、per-CPU 状态、
 IRQ handler 数组、TLB/IPI、定时器和诊断中仍有由该宽度派生的静态数组。per-CPU
-数据本体已增加堆后备记录表，但调度器 per-CPU 状态和四架构入口仍受固定表约束。因此：
+数据本体和调度器统计/驻留/仲裁/idle context 已增加堆后备扩展，但 timer/RT
+deadline heap、共享 CpuSet 门面和四架构硬件 ID 表仍受固定表约束。因此：
 
 - 不能把 128 改成 256/1024 后声称“动态支持”；
 - 不能把本切片中的 4096-CPU 软件准入测试冒充真实内核运行；
