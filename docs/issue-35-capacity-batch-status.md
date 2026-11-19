@@ -49,6 +49,15 @@
 未授权 syscall 拒绝仍保持，进程退出后页帧回到基线。证据见
 `evidence/issue35-epoll-capacity-20261119/`。
 
+### eventfd 实例数量
+
+每进程 32 个 eventfd 的独立上限同样已移除。实例元数据由
+`Vec::try_reserve` 和运行时 FdTable 预算准入，不增加固定数组。真实静态
+Linux ET_EXEC 一次创建 40 个 eventfd，完成 write/read，再全部 close；进程继续
+执行 futex/mmap/io_uring 并以 0 退出，资源回基线。探针先前误用只传一个参数的
+`syscall1` 调用 `eventfd2`，未初始化 flags 在第三轮变成 2 并被内核正确拒绝；
+修正为显式 `flags=0`。证据见 `evidence/issue35-eventfd-capacity-20261119/`。
+
 ## 验证
 
 ```text
@@ -69,6 +78,6 @@ python3 scripts/check-hardcode-inventory-ledger.py --check \
 ## 未完成
 
 - 配置上限的更高容量实现、真实 256/1024 Task 和 65536 Object 压力矩阵；
-- poll、signalfd、fanotify、epoll 大规模批次、sendfile/copy 在真实 Ubuntu/Android 程序中的
+- poll、signalfd、fanotify、epoll/eventfd 大规模批次、sendfile/copy 在真实 Ubuntu/Android 程序中的
   大规模分批、取消和资源回基线；
 - 所有固定批次值最终应与 Workload/Profile 资源预算统一，而不是成为跨设备 ABI。

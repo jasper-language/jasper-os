@@ -10,6 +10,7 @@
 use core::arch::asm;
 
 const SYS_WRITE: u64 = 1;
+const SYS_READ: u64 = 0;
 const SYS_CLOSE: u64 = 3;
 const SYS_MMAP: u64 = 9;
 const SYS_MPROTECT: u64 = 10;
@@ -24,6 +25,7 @@ const SYS_FUTEX: u64 = 202;
 const SYS_EPOLL_WAIT: u64 = 232;
 const SYS_EPOLL_CTL: u64 = 233;
 const SYS_EPOLL_CREATE1: u64 = 291;
+const SYS_EVENTFD2: u64 = 290;
 const SYS_PIPE2: u64 = 293;
 const SYS_IO_URING_SETUP: u64 = 425;
 const SYS_IO_URING_ENTER: u64 = 426;
@@ -229,6 +231,65 @@ unsafe fn test_many_epolls() -> bool {
         closed &= syscall1(SYS_CLOSE, fd as u64) == 0;
     }
     closed
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe fn test_many_eventfds() -> bool {
+    const COUNT: usize = 40;
+    let mut fds = [-1i64; COUNT];
+    for index in 0..COUNT {
+        fds[index] = syscall3(SYS_EVENTFD2, 0, 0, 0);
+        if fds[index] < 0 {
+            let mut digits = [b'0'; 20];
+            let mut value = index;
+            let mut at = digits.len();
+            loop {
+                at -= 1;
+                digits[at] = b'0' + (value % 10) as u8;
+                value /= 10;
+                if value == 0 {
+                    break;
+                }
+            }
+            let _ = write_bytes(2, b"eventfd-debug: create index=");
+            let _ = write_bytes(2, &digits[at..]);
+            let _ = write_bytes(2, b"\n");
+            for opened in &fds[..index] {
+                let _ = syscall1(SYS_CLOSE, *opened as u64);
+            }
+            return false;
+        }
+    }
+    let value = 7u64.to_le_bytes();
+    let mut read_value = [0u8; 8];
+    let wrote = syscall3(
+        SYS_WRITE,
+        fds[0] as u64,
+        value.as_ptr() as u64,
+        value.len() as u64,
+    ) == 8;
+    if !wrote {
+        let _ = write_bytes(2, b"eventfd-debug: write\n");
+    }
+    let read = wrote
+        && syscall3(
+            SYS_READ,
+            fds[0] as u64,
+            read_value.as_mut_ptr() as u64,
+            read_value.len() as u64,
+        ) == 8
+        && u64::from_le_bytes(read_value) == 7;
+    if wrote && !read {
+        let _ = write_bytes(2, b"eventfd-debug: read\n");
+    }
+    let mut closed = true;
+    for fd in fds {
+        closed &= syscall1(SYS_CLOSE, fd as u64) == 0;
+    }
+    if read && !closed {
+        let _ = write_bytes(2, b"eventfd-debug: close\n");
+    }
+    read && closed
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -485,6 +546,9 @@ pub extern "C" fn _start() -> ! {
     if !unsafe { test_many_epolls() } {
         unsafe { exit(102) }
     }
+    if !unsafe { test_many_eventfds() } {
+        unsafe { exit(103) }
+    }
     if !unsafe { test_mmap() } {
         unsafe { exit(98) }
     }
@@ -494,8 +558,7 @@ pub extern "C" fn _start() -> ! {
     if !unsafe { test_io_uring() } {
         unsafe { exit(100) }
     }
-    let summary =
-        b"linux-native: epoll=true many_epolls=true futex=true mmap=true io_uring=true\n";
+    let summary = b"linux-native: epoll=true many_epolls=true many_eventfds=true futex=true mmap=true io_uring=true\n";
     if !unsafe { write_bytes(1, summary) } {
         unsafe { exit(101) }
     }

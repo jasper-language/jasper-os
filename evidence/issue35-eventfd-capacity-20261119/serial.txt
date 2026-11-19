@@ -1,0 +1,422 @@
+INFO : Framebuffer info: FrameBufferInfo { byte_len: 2764800, width: 1280, height: 720, pixel_format: Bgr, bytes_per_pixel: 3, stride: 1280 }
+INFO : 4th Stage
+INFO : BiosInfo { stage_4: Region { start: 130000, len: 25068 }, kernel: Region { start: 1000000, len: 3ce668 }, ramdisk: Region { start: 13cf000, len: 0 }, config_file: Region { start: 13cf000, len: 0 }, last_used_addr: 13cefff, framebuffer: BiosFramebufferInfo { region: Region { start: fd000000, len: 2a3000 }, width: 500, height: 2d0, bytes_per_pixel: 3, stride: 500, pixel_format: Bgr }, memory_map_addr: 1207c, memory_map_len: 7 }
+INFO : BIOS boot
+INFO : Elf file loaded at Pointer {
+    addr: 0x0000000001000000,
+    metadata: 3991144,
+}
+INFO : virtual_address_offset: 0x8000000000
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(4), offset: 0, virtual_addr: 0, physical_addr: 0, file_size: 3dbf4, mem_size: 3dbf4, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(5), offset: 3dc00, virtual_addr: 3ec00, physical_addr: 3ec00, file_size: 1a0d3f, mem_size: 1a0d3f, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 1de940, virtual_addr: 1e0940, physical_addr: 1e0940, file_size: 12ce8, mem_size: 136c0, align: 1000 })
+INFO : Mapping bss section
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 1f1640, virtual_addr: 1f4640, physical_addr: 1f4640, file_size: 154b90, mem_size: 26dbe8, align: 1000 })
+INFO : Mapping bss section
+INFO : Entry point at: 0x800003ee80
+INFO : Creating GDT at PhysAddr(0x1541000)
+INFO : Map framebuffer
+INFO : Map physical memory
+INFO : Allocate bootinfo
+INFO : Create Memory Map
+INFO : Create bootinfo
+INFO : Jumping to kernel entry point at VirtAddr(0x800003ee80)
+[JSR-BOOT] jasper-os rust kernel 0.0.1 x86_64
+[JSR-CONFIG] profile=standard valid=ok params=29
+[JSR-CONFIG] timer_hz=100
+[JSR-CONFIG] boot_ticks=25
+[JSR-CONFIG] quantum.0=2
+[JSR-CONFIG] quantum.1=2
+[JSR-CONFIG] quantum.2=4
+[JSR-CONFIG] quantum.3=4
+[JSR-CONFIG] decay_period=8
+[JSR-CONFIG] max_tasks=64
+[JSR-CONFIG] max_rt=8
+[JSR-CONFIG] kernel_stack_bytes=131072
+[JSR-CONFIG] watchdog_ticks=50
+[JSR-CONFIG] watchdog_log=16
+[JSR-CONFIG] cpu_burst_ticks=4
+[JSR-CONFIG] heap_grow_step=65536
+[JSR-CONFIG] heap_budget_permille=250
+[JSR-CONFIG] pressure_low_permille=125
+[JSR-CONFIG] pressure_critical_permille=50
+[JSR-CONFIG] pressure_reserve_frames=256
+[JSR-CONFIG] max_process_frames=0
+[JSR-CONFIG] max_vm_guest_frames=32768
+[JSR-CONFIG] max_map_pages=1024
+[JSR-CONFIG] max_objects=1024
+[JSR-CONFIG] handles_per_process=64
+[JSR-CONFIG] max_endpoints_per_process=64
+[JSR-CONFIG] ipc_max_queue_bytes=1048576
+[JSR-CONFIG] ipc_max_process_bytes=4194304
+[JSR-CONFIG] ipc_max_total_bytes=16777216
+[JSR-CONFIG] trace_capacity=32
+[JSR-CONFIG] irq_queue_len=64
+[JSR-CAP] cpus=128 tasks=64 objects=1024 handles=64 frames=0 rings=0 endpoints=64
+[JSR-BOOT-STAGE] done stage=console done_mask=0x1
+[JSR-GDT] ok
+[JSR-XSAVE] enabled=true avx=true avx_size=256 capacity=832
+[JSR-IDT] ok
+[JSR-EXC] breakpoint handler verified
+[JSR-BOOT-STAGE] done stage=platform done_mask=0x3
+[JSR-TICK] n=1
+[JSR-TICK] n=2
+[JSR-TICK] n=3
+[JSR-TICK] n=4
+[JSR-TICK] n=5
+[JSR-TICK] n=6
+[JSR-TICK] n=7
+[JSR-TICK] n=8
+[JSR-TICK] n=9
+[JSR-TICK] n=10
+[JSR-TICK] n=11
+[JSR-TICK] n=12
+[JSR-TICK] n=13
+[JSR-TICK] n=14
+[JSR-TICK] n=15
+[JSR-TICK] n=16
+[JSR-TICK] n=17
+[JSR-TICK] n=18
+[JSR-TICK] n=19
+[JSR-TICK] n=20
+[JSR-TICK] n=21
+[JSR-TICK] n=22
+[JSR-TICK] n=23
+[JSR-TICK] n=24
+[JSR-TICK] n=25
+[JSR-BOOT-STAGE] done stage=timer done_mask=0x7
+[JSR-PLAN] case name=sched-cooperative
+[JSR-SCHED] switch from=boot to=A n=1 cause=yield
+[JSR-TASK] name=A step=1 task_id=1
+[JSR-SCHED] switch from=A to=B n=2 cause=yield
+[JSR-TASK] name=B step=1 task_id=2
+[JSR-SCHED] switch from=B to=C n=3 cause=yield
+[JSR-TASK] name=C step=1 task_id=3
+[JSR-SCHED] switch from=C to=A n=4 cause=yield
+[JSR-TASK] name=A step=2 task_id=1
+[JSR-SCHED] switch from=A to=B n=5 cause=yield
+[JSR-TASK] name=B step=2 task_id=2
+[JSR-SCHED] switch from=B to=C n=6 cause=yield
+[JSR-TASK] name=C step=2 task_id=3
+[JSR-SCHED] switch from=C to=A n=7 cause=yield
+[JSR-TASK] name=A step=3 task_id=1
+[JSR-SCHED] switch from=A to=B n=8 cause=yield
+[JSR-TASK] name=B step=3 task_id=2
+[JSR-SCHED] switch from=B to=C n=9 cause=yield
+[JSR-TASK] name=C step=3 task_id=3
+[JSR-SCHED] switch from=C to=A n=10 cause=yield
+[JSR-SCHED] switch from=A to=B n=11 cause=exit
+[JSR-SCHED] switch from=B to=C n=12 cause=exit
+[JSR-SCHED] switch from=C to=boot n=13 cause=exit
+[JSR-SCHED] all tasks exited switches=13 policy=timeshare
+[JSR-PLAN] case name=sched-preemptive
+[JSR-SCHED] preemptive demo start
+[JSR-SCHED] switch from=boot to=P n=14 cause=yield
+[JSR-TASK] name=P step=1 task_id=11
+[JSR-SCHED] switch from=P to=Q n=15 cause=tick
+[JSR-TASK] name=Q step=1 task_id=12
+[JSR-SCHED] switch from=Q to=R n=16 cause=tick
+[JSR-TASK] name=R step=1 task_id=13
+[JSR-SCHED] switch from=R to=P n=17 cause=tick
+[JSR-TASK] name=P step=2 task_id=11
+[JSR-TASK] name=P step=3 task_id=11
+[JSR-SCHED] switch from=P to=Q n=18 cause=tick
+[JSR-TASK] name=Q step=2 task_id=12
+[JSR-TASK] name=Q step=3 task_id=12
+[JSR-SCHED] switch from=Q to=R n=19 cause=tick
+[JSR-TASK] name=R step=2 task_id=13
+[JSR-TASK] name=R step=3 task_id=13
+[JSR-SCHED] switch from=R to=P n=20 cause=tick
+[JSR-TASK] name=P step=4 task_id=11
+[JSR-TASK] name=P step=5 task_id=11
+[JSR-SCHED] switch from=P to=Q n=21 cause=tick
+[JSR-TASK] name=Q step=4 task_id=12
+[JSR-TASK] name=Q step=5 task_id=12
+[JSR-SCHED] switch from=Q to=R n=22 cause=tick
+[JSR-TASK] name=R step=4 task_id=13
+[JSR-TASK] name=R step=5 task_id=13
+[JSR-SCHED] switch from=R to=P n=23 cause=tick
+[JSR-TASK] name=P step=6 task_id=11
+[JSR-TASK] name=P step=7 task_id=11
+[JSR-SCHED] switch from=P to=Q n=24 cause=tick
+[JSR-TASK] name=Q step=6 task_id=12
+[JSR-TASK] name=Q step=7 task_id=12
+[JSR-SCHED] switch from=Q to=R n=25 cause=tick
+[JSR-TASK] name=R step=6 task_id=13
+[JSR-TASK] name=R step=7 task_id=13
+[JSR-SCHED] switch from=R to=P n=26 cause=tick
+[JSR-TASK] name=P step=8 task_id=11
+[JSR-SCHED] switch from=P to=Q n=27 cause=exit
+[JSR-TASK] name=Q step=8 task_id=12
+[JSR-SCHED] switch from=Q to=R n=28 cause=exit
+[JSR-TASK] name=R step=8 task_id=13
+[JSR-SCHED] switch from=R to=boot n=29 cause=exit
+[JSR-SCHED] preemptive demo done tick_switches=12 quantum_ticks=2 policy=timeshare
+[JSR-PLAN] case name=counter64
+[JSR-COUNTER64] case=wide impl=native crossed_2_32=true ok=9 failed=0
+[JSR-COUNTER64] case=isr_shared reads=17590525 ticks=10 ticks_monotonic=true cycles_monotonic=true completed=true
+[JSR-COUNTER64] summary impl=native checks=10 failed=0
+[JSR-BOOT-STAGE] done stage=frames done_mask=0xf
+[JSR-PLAN] case name=mm-frames
+[JSR-FRAME] regions=10 discovered=11 admitted=11 merged=1 invalid=0 usable_frames=64038 usable_mib=250 ignored=0 dropped_regions=0 phys_offset=mapped
+[JSR-FRAME] alloc frames=3 addrs=0x1000,0x2000,0x3000
+[JSR-FRAME] rw ok=true bytes_per_frame=4096
+[JSR-FRAME] free+alloc reuse=true frame=0x2000
+[JSR-FRAME] double free rejected err=system.memory.error.double_free
+[JSR-FRAME] checks=13 failed=0 free_frames=64038
+[JSR-BOOT-STAGE] done stage=kernel_map done_mask=0x1f
+[JSR-PLAN] case name=mm-map
+[JSR-MAP] map va=0x400000000000 frame=0x2000 flags=write,nx translate_ok=true
+[JSR-MAP] write via va, read via phys same=true
+[JSR-MAP] protect read_only ok=true
+[JSR-MAP] errors double_map=system.memory.error.already_mapped invalid_addr=system.memory.error.invalid_address
+[JSR-MAP] unmap returned_frame=true translate_after=none again=system.memory.error.not_mapped
+[JSR-MAP] checks=25 failed=0
+[JSR-TERM] capacity input=16384 output=16384 uart_pump=256 available=65568768
+[JSR-DISPLAY-COMPOSITOR] layers=2 visible=2 primary=terminal overlays=bounded alpha=true full_frame=false damage=true overlay_damage=true text_full=true input_capacity=675
+[JSR-BOOT-STAGE] done stage=heap done_mask=0x3f
+[JSR-PLAN] case name=mm-heap
+[JSR-HEAP] init total=65536 free=29488 blocks=1 mapped=65536
+[JSR-HEAP] box ok vec_len=10000 vec_sum=149985000 string="内核堆可用：中文 UTF-8 ✓" chars=16 bytes=34
+[JSR-HEAP] grow big_bytes=524288 mapped_before=65536 mapped_after=864256
+[JSR-HEAP] after free total=864256 free=828208 blocks=1 mapped=864256 baseline_ok=true
+[JSR-HEAP] checks=32 failed=0
+[JSR-PLAN] case name=mechanisms
+[JSR-SCHED] switch from=boot to=mech n=30 cause=yield
+[JSR-OBJ] handle=1 rights=WAIT|CONTROL type=Event id=1
+[JSR-OBJ] restrict handle=2 rights=WAIT control=system.handle.error.rights_denied
+[JSR-OBJ] stale handle=1 rejected err=system.handle.error.invalid new_handle=4294967297
+[JSR-WAIT] event signalled index=0
+[JSR-WAIT] timer fired index=1 waited_ticks=3
+[JSR-WAIT] timeout ok waited_ticks=2
+[JSR-IO] op=READ cancelled err=system.async.error.cancelled
+[JSR-IO] op=WRITE bytes=4 ok=true backend=mem
+[JSR-IO] ring completions=2 pending=0
+[JSR-VM] map anon size=64 base=0x10000000 aligned=4096 prot=rw-
+[JSR-VM] protect prot=r-- unmap ok regions=0
+[JSR-MOD] loaded module=syscall-core
+[JSR-MOD] loaded module=hello-syscall
+[JSR-MOD] loaded module=discard
+[JSR-MOD] withdraw module=discard bits=0x1
+[JSR-MOD] stopped module=discard
+[JSR-MOD] loaded module=broken-base
+[JSR-SYSCALL] enter name=x.demo.ping task=21
+[JSR-SYSCALL] exit name=x.demo.ping ret=OK value=42
+[JSR-SYSCALL] enter name=system.demo.missing task=21
+[JSR-SYSCALL] exit name=system.demo.missing ret=system.error.unsupported
+[JSR-SYNC] irq spinlock ok irq_off_inside=true irq_restored=true
+[JSR-TRACE] ring buffer count=8 total=8 last="seq=8 system.module.loaded module=broken-base"
+[JSR-SCHED] switch from=mech to=boot n=31 cause=exit
+[JSR-MECH] checks=36 failed=0
+[JSR-SPAWN] child_limit=8 tasks=64 source=boot_capacity
+[JSR-WORKLOAD] capacity workloads=64 members=256 tasks=64 budget=65568768 dynamic=true
+[JSR-SCHED] qos quantum=[1, 1, 1, 1] decay=8 owed_cap=2000 timer_hz=100 tasks=64 dynamic=true
+[JSR-RING] capacity rings=64 in_flight=1024 tasks=64 objects=1024 dynamic=true
+[JSR-IPC] capacity endpoints=8 queue_bytes=65712 process_bytes=256128 total_bytes=4098048 tasks=64 objects=1024 budget=65568768 dynamic=true
+[JSR-SANDBOX] capacity sandboxes=64 workloads=64 budget=65568768 dynamic=true
+[JSR-SANDBOX-STORAGE] capacity images=117 layers=800 volumes=250 sandboxes=64 budget=65568768 dynamic=true
+[JSR-BOOT-STAGE] done stage=capacity done_mask=0x7f
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=720 stride=1280 bpp=3 frames=1 keys=0 input_capacity=675 dropped=0 compositor_layers=2 pressed=0 released=0
+[JSR-BOOT-STAGE] done stage=devices done_mask=0xff
+[JSR-PROFILE] table idx=0 name=headless valid=true modules=9 services=25 capabilities=10 min_tasks=32 min_objects=256 hot_load=0
+[JSR-PROFILE] table idx=1 name=headless-min valid=true modules=5 services=20 capabilities=5 min_tasks=32 min_objects=128 hot_load=0
+[JSR-PROFILE] active name=headless valid=true params=standard modules=9 services=25 capabilities=10 guarantees=2 dynamic=true
+[JSR-BOOT-STAGE] done stage=profile done_mask=0x1ff
+[JSR-ASSEMBLY] capacity modules=9 capabilities=10 services=25 metadata=1870 budget=64032 dynamic=true
+[JSR-LIFE] release_dispatch closing_locks=true outside_lock=5 none=11 none_empty=true destroyed_when_none=0 hooks_match_registry=true
+[JSR-ASSEMBLY] activate module=core objects=1024
+[JSR-ASSEMBLY] activate module=sched tasks=64 stacks=64
+[JSR-ASSEMBLY] activate module=realtime rt=8
+[JSR-ASSEMBLY] activate module=job queue=empty
+[JSR-PCI] dev bdf=00:00.0 vendor=0x8086 device=0x1237 class=0x060000 bars=0 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:01.0 vendor=0x8086 device=0x7000 class=0x060100 bars=0 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:01.1 vendor=0x8086 device=0x7010 class=0x010180 bars=1 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:01.3 vendor=0x8086 device=0x7113 class=0x068000 bars=0 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:02.0 vendor=0x1234 device=0x1111 class=0x030000 bars=2 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:03.0 vendor=0x1af4 device=0x1005 class=0x00ff00 bars=3 caps_discovered=5 caps_admitted=5 caps_truncated=0
+[JSR-PCI] dev bdf=00:04.0 vendor=0x1af4 device=0x1000 class=0x020000 bars=3 caps_discovered=5 caps_admitted=5 caps_truncated=0
+[JSR-PCI] dev bdf=00:05.0 vendor=0x1af4 device=0x1001 class=0x010000 bars=3 caps_discovered=5 caps_admitted=5 caps_truncated=0
+[JSR-ASSEMBLY] activate module=devices pci=port functions=8
+[JSR-ASSEMBLY] module=core order=0 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=memory order=1 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=time order=2 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=sched order=3 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=channel order=4 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=realtime order=5 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=job order=6 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=async order=7 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=devices order=8 state=ready reason= version=1.0.0
+[JSR-CAP] boot source=derived objects=1024 tasks=64 rt=8 task_stacks=64 mem_limit=49176576
+[JSR-K06] profile=headless ops=109 kernel_base=72 module_service=37 active_unavailable=0 unclaimed=0 gate_mismatch=0 ring=available time=available sync=available
+[JSR-ASSEMBLY] summary profile=headless modules=9 ready=9 failed=0 blocked=0 declared=10 published=10 pre_publish=0 audit=ok restart=system.module.error.already_started stop_core=system.module.error.in_use stop_devices=system.module.error.permanent generation=0 readers=0
+[JSR-BOOT-STAGE] done stage=assembly done_mask=0x3ff
+[JSR-PLAN] case name=pci-table
+[JSR-PCI] demo host_bridge=true isa_bridge=true virtio=3 invalid_bdf=true bars_restored=true
+[JSR-PCI] summary mechanism=port functions=8 bars=12 checks=10 failed=0
+[JSR-PLAN] case name=capacity-report
+[JSR-SCHED] capacity slots=64 static_stacks=4 max=64 policy=timeshare preemption=default_on
+[JSR-PLAN] case name=profile-checks
+[JSR-ASSEMBLY] health module=devices from=healthy to=unhealthy removed=0x2 published=0x3fd readers=0
+[JSR-ASSEMBLY] health module=devices from=unhealthy to=healthy removed=0x0 published=0x3ff readers=0
+[JSR-ASSEMBLY] runtime stop_dependent=in_use stop_permanent=permanent health=healthy->unhealthy->healthy published=0x3ff->withdrawn->0x3ff lease_enter=true reader_drain=true
+[JSR-PROFILE] effective name=headless params=standard services=25 capabilities=10 min_tasks=32 min_objects=256
+[JSR-PROFILE] service name=system.abi
+[JSR-PROFILE] service name=system.async
+[JSR-PROFILE] service name=system.channel
+[JSR-PROFILE] service name=system.console
+[JSR-PROFILE] service name=system.device
+[JSR-PROFILE] service name=system.diagnostic
+[JSR-PROFILE] service name=system.error
+[JSR-PROFILE] service name=system.event
+[JSR-PROFILE] service name=system.execution
+[JSR-PROFILE] service name=system.handle
+[JSR-PROFILE] service name=system.info
+[JSR-PROFILE] service name=system.install
+[JSR-PROFILE] service name=system.io
+[JSR-PROFILE] service name=system.job
+[JSR-PROFILE] service name=system.memory
+[JSR-PROFILE] service name=system.module
+[JSR-PROFILE] service name=system.process
+[JSR-PROFILE] service name=system.profile
+[JSR-PROFILE] service name=system.sandbox
+[JSR-PROFILE] service name=system.sync
+[JSR-PROFILE] service name=system.task
+[JSR-PROFILE] service name=system.terminal
+[JSR-PROFILE] service name=system.time
+[JSR-PROFILE] service name=system.update
+[JSR-PROFILE] service name=system.workload
+[JSR-PROFILE] gate profile=headless op=system.async.ring.create allowed=true
+[JSR-PROFILE] gate profile=headless-min op=system.async.ring.create allowed=false
+[JSR-PROFILE] gate profile=headless-min op=system.time.now allowed=true
+[JSR-PROFILE] quota-diff standard_tasks=64 compact_tasks=32 standard_objects=1024 compact_objects=512
+[JSR-PROFILE] tickless power=tickless idle_divisor=4
+[JSR-PROFILE] group-share standard=250 compact=500 current=250
+[JSR-PROFILE] hot_load enabled=false
+[JSR-PROFILE] reject case=missing-capability code=missing_capability subject=memory.virtual total=2
+[JSR-PROFILE] reason case=missing-capability code=invalid_name subject=missing-capability
+[JSR-PROFILE] reason case=missing-capability code=missing_capability subject=memory.virtual
+[JSR-PROFILE] reject case=capability-conflict code=capability_conflict subject=kernel.core total=2
+[JSR-PROFILE] reason case=capability-conflict code=invalid_name subject=capability-conflict
+[JSR-PROFILE] reason case=capability-conflict code=capability_conflict subject=kernel.core
+[JSR-PROFILE] reject case=params-too-small code=unsatisfiable_tasks subject=params-too-small total=2
+[JSR-PROFILE] reason case=params-too-small code=invalid_name subject=params-too-small
+[JSR-PROFILE] reason case=params-too-small code=unsatisfiable_tasks subject=params-too-small
+[JSR-PROFILE] reject case=hot-load-not-allowed code=hot_load_not_allowed subject=core total=2
+[JSR-PROFILE] reason case=hot-load-not-allowed code=invalid_name subject=hot-load-not-allowed
+[JSR-PROFILE] reason case=hot-load-not-allowed code=hot_load_not_allowed subject=core
+[JSR-PROFILE] render idx=0 bytes=1881 head=profile=headless
+[JSR-PROFILE] layers idx=0 modules=9 module_lines=9 four_layers=true
+[JSR-PROFILE] layers_sample idx=0 module=core feature=compiled config=declared runtime=available health=healthy authorization=granted
+[JSR-PROFILE] render idx=1 bytes=1226 head=profile=headless-min
+[JSR-PROFILE] layers idx=1 modules=5 module_lines=5 four_layers=true
+[JSR-PROFILE] layers_sample idx=1 module=core feature=compiled config=declared runtime=not_selected health=unknown authorization=granted
+[JSR-PROFILE] summary profiles=2 rejects=4 gates=3 renders=2 checks=30 failed=0
+[JSR-SCHED] mode=multi
+[JSR-CAPABILITY] domain=system.memory.boot-map state=verified inventory=complete discovered=11 supported=11 admitted=11 rejected=0 unsupported=0 enabled=11 exposed=11 verified=11 fault=none
+[JSR-CAPABILITY] domain=system.cpu.xstate state=exposed inventory=complete discovered=6 supported=6 admitted=3 rejected=0 unsupported=3 enabled=3 exposed=3 verified=0 fault=none
+[JSR-CAPABILITY] domain=system.device.pci-capabilities state=exposed inventory=complete discovered=15 supported=15 admitted=15 rejected=0 unsupported=0 enabled=15 exposed=15 verified=0 fault=none
+[JSR-CAPABILITY] domain=system.network state=kernel-supported inventory=complete discovered=1 supported=1 admitted=0 rejected=0 unsupported=1 enabled=0 exposed=0 verified=0 fault=none
+[JSR-CAPABILITY] domain=system.device.gpu state=discovered inventory=complete discovered=1 supported=0 admitted=0 rejected=0 unsupported=1 enabled=0 exposed=0 verified=0 fault=none
+[JSR-BOOT-STAGE] done stage=sched_mode done_mask=0x7ff
+[JSR-PLAN] case name=hardware-virt
+[JSR-HWV0] vendor=Intel matrix=10 caps=0x105 selected=vmx reject=iommu failed=0
+[JSR-BOOT-STAGE] done stage=space done_mask=0xfff
+[JSR-PLAN] case name=mm-space
+[JSR-AS] created a=SpaceRoot(12279808) b=SpaceRoot(12292096) va=0x100010000000 window=0x100000000000..0x200000000000 outside_window=system.memory.error.invalid_address
+[JSR-AS] switch read a=0xaaaa00000000000a b=0xbbbb00000000000b a_again=0xaaaa00000000000a isolated=true kernel_shared=true
+[JSR-AS] kernel space sees va=unmapped
+[JSR-AS] destroyed free_before=61144 free_after=61144 reclaimed=true
+[JSR-AS] checks=43 failed=0
+[JSR-IOAPIC] controllers=1 pins=24 exposed=2 unsupported=22 invalid=0 dropped=0
+[JSR-IOAPIC] line=0 name=serial vector=80 gsi_pin=4 controlled=true
+[JSR-IOAPIC] line=1 name=rtc vector=81 gsi_pin=8 controlled=true
+[JSR-SMP] start present=1 online=1 failed=0 source=acpi.madt dropped=0 disabled=0
+[JSR-IRQ] topology source=smp_ready discovered=2 admitted=2 rejected=0 capacity=2 budget=64032 dynamic=true complete=true
+[JSR-BOOT-STAGE] done stage=smp done_mask=0x1fff
+[JSR-PLAN] case name=smp-checks
+[JSR-SMP] start present=1 online=1 failed=0 source=acpi.madt dropped=0 disabled=0
+[JSR-SMP] cpu index=0 hw=0 state=online
+[JSR-SMP] refuse no_such_cpu=system.cpu.error.no_such_cpu self=system.cpu.error.self_target call_no_such=system.cpu.error.no_such_cpu call_self=system.cpu.error.self_target bad_range=system.cpu.error.bad_range,system.cpu.error.bad_range,system.cpu.error.bad_range
+[JSR-SMP] single cpus=1 secondary=none
+[JSR-SMPC] registry locks=27 valid=true
+[JSR-SMPC] rank  0 system.compat.android.binder
+[JSR-SMPC] rank  1 system.sandbox.registry
+[JSR-SMPC] rank  2 system.process.registry
+[JSR-SMPC] rank  3 system.module.assembly
+[JSR-SMPC] rank  4 system.object.table
+[JSR-SMPC] rank  5 system.device.interrupt
+[JSR-SMPC] rank  6 system.memory.pins
+[JSR-SMPC] rank  7 system.device.hwv5_policy
+[JSR-SMPC] rank  8 system.sched
+[JSR-SMPC] rank  9 system.compat.linux
+[JSR-SMPC] rank 10 system.fault.last
+[JSR-SMPC] rank 11 system.syscall.last_exit
+[JSR-SMPC] rank 12 system.compat.linux.socket
+[JSR-SMPC] rank 13 system.compat.sysv_ipc
+[JSR-SMPC] rank 14 system.memory.pressure
+[JSR-SMPC] rank 15 system.install
+[JSR-SMPC] rank 17 system.memory.heap
+[JSR-SMPC] rank 18 system.sandbox.storage
+[JSR-SMPC] rank 19 system.memory.frame
+[JSR-SMPC] rank 20 system.irq.routing
+[JSR-SMPC] rank 21 system.irq.quota
+[JSR-SMPC] rank 22 system.trace
+[JSR-SMPC] rank 23 system.sandbox.launch
+[JSR-SMPC] rank 25 system.service.shard
+[JSR-SMPC] rank 26 system.display.session
+[JSR-SMPC] rank 27 system.terminal.session
+[JSR-SMPC] rank 28 system.console
+[JSR-SMPC] order ascending=ok reverse=system.lock.error.out_of_order recursive=system.lock.error.out_of_order unchanged=true held_back=true
+[JSR-SMPC] single cpus=1 cross_cpu=skipped
+[JSR-SMP] summary cpus=1 online=1 checks=13 failed=0
+[JSR-PLAN] case name=drv3-dma
+[JSR-PROC] event=system.process.created id=0x2 name=drv3-dma memory_cap_capacity=571 memory_cap_metadata_budget=2049024 memory_budget=65568768 process_slots=64 dynamic=true
+[JSR-LIFE] cleanup destroy type=Memory id=0x3
+[JSR-LIFE] cleanup destroy type=Device id=0x4
+[JSR-LIFE] cleanup destroy type=DmaMapping id=0x5
+[JSR-PROC] event=system.process.reaped id=0x2 frames=0 quarantined=0 threads=0 code=0
+[JSR-LIFE] cleanup destroy type=Process id=0x2
+[JSR-LIFE] cleanup destroy type=ExitState id=0x1
+[JSR-DRV3] device=0x300 iova=0x1000000 pages=1 writable=true iova_opaque=true pinned=true owner_close=true reclaim=true failed=0
+[JSR-PLAN] case name=blk1
+[JSR-PROC] event=system.process.created id=0x100000002 name=blk1 memory_cap_capacity=571 memory_cap_metadata_budget=2049024 memory_budget=65568768 process_slots=64 dynamic=true
+[JSR-BLK1] checkpoint=true sector=8 pages=2 fua=true flush=true
+[JSR-BLK1] device=0x500 capacity_sectors=2048 logical_block=512 physical_block=512 atomic_write=512 discard=true fua=true checkpoint=true restored=false
+[JSR-LIFE] cleanup destroy type=DmaMapping id=0x100000005
+[JSR-PROC] event=system.process.reaped id=0x100000002 frames=0 quarantined=0 threads=0 code=0
+[JSR-LIFE] cleanup destroy type=Memory id=0x100000003
+[JSR-LIFE] cleanup destroy type=Device id=0x100000004
+[JSR-LIFE] cleanup destroy type=Process id=0x100000002
+[JSR-LIFE] cleanup destroy type=ExitState id=0x100000001
+[JSR-BLK1] summary failed=0 restored=false resources=true
+[JSR-PLAN] finish plan=compat-syscall stages=0x1fff cases=15
+[JSR-PROC] event=system.process.created id=0x200000002 name=linux-abi-probe memory_cap_capacity=571 memory_cap_metadata_budget=2049024 memory_budget=65568768 process_slots=64 dynamic=true
+[JSR-SCHED] switch from=boot to=linux-abi-probe n=32 cause=preempt
+linux-abi: fd1 raw x86_64 ET_EXEC entered
+linux-abi: fd2 raw bytes accepted
+[JSR-PROC] event=system.process.created id=0x6 name=linux-fork memory_cap_capacity=571 memory_cap_metadata_budget=2049024 memory_budget=65568768 process_slots=64 dynamic=true
+[JSR-PROC] event=system.task.spawned process=0x6 task=1002 task_obj=0x8 name=linux-fork
+[JSR-SCHED] switch from=linux-abi-probe to=linux-fork n=33 cause=tick
+[JSR-SCHED] switch from=linux-fork to=linux-abi-probe n=34 cause=sleep
+[JSR-SCHED] switch from=linux-abi-probe to=linux-fork n=35 cause=sleep
+[JSR-PROC] event=system.process.exiting id=0x6 code=0 handles_closed=0
+[JSR-PROC] event=system.process.exited id=0x6 name=linux-fork code=0 threads=1 handles_closed=0
+[JSR-PROC] event=system.task.exit_switch task=1002 cause=linux process exit
+[JSR-SCHED] switch from=linux-fork to=linux-abi-probe n=36 cause=linux process exit
+[JSR-PROC] event=system.process.reaped id=0x6 frames=5 quarantined=0 threads=1 code=0
+[JSR-LIFE] cleanup destroy type=Task id=0x8
+[JSR-LIFE] cleanup destroy type=Process id=0x6
+[JSR-LIFE] cleanup destroy type=ExitState id=0x7
+[JSR-LIFE] cleanup destroy type=ExitState id=0x200000005
+linux-native: epoll=true many_epolls=true many_eventfds=true futex=true mmap=true io_uring=true
+[JSR-PROC] event=system.process.exiting id=0x200000002 code=0 handles_closed=0
+[JSR-PROC] event=system.process.exited id=0x200000002 name=linux-abi-probe code=0 threads=1 handles_closed=0
+[JSR-PROC] event=system.task.exit_switch task=1001 cause=linux process exit
+[JSR-SCHED] switch from=linux-abi-probe to=boot n=37 cause=linux process exit
+[JSR-PROC] event=system.task.spawned process=0x200000002 task=1001 task_obj=0x200000004 name=linux-abi-probe
+[JSR-PROC] event=system.process.reaped id=0x200000002 frames=5 quarantined=0 threads=1 code=0
+[JSR-LIFE] cleanup destroy type=Task id=0x200000004
+[JSR-LIFE] cleanup destroy type=Process id=0x200000002
+[JSR-LIFE] cleanup destroy type=ExitState id=0x200000003
+[JSR-LIFE] cleanup destroy type=ExitState id=0x200000001
+[JSR-LINUX-ABI] exec=true flavor=true write=true getpid=true gettid=true denied=true exit=true cpl3=true native=true epoll=true futex=true mmap=true io_uring=true syscalls=157 frames_before=60666 resources=true failed=0

@@ -31,6 +31,7 @@ pub fn run() {
     let frames_before = crate::mm::frame::free_frames();
     let calls_before = crate::syscall::call_count();
     let calls = LinuxSyscallSet::of(&[
+        LinuxSyscall::Read,
         LinuxSyscall::Write,
         LinuxSyscall::Close,
         LinuxSyscall::Pipe2,
@@ -44,6 +45,7 @@ pub fn run() {
         LinuxSyscall::EpollCreate1,
         LinuxSyscall::EpollCtl,
         LinuxSyscall::EpollWait,
+        LinuxSyscall::EventFd2,
         LinuxSyscall::IoUringSetup,
         LinuxSyscall::IoUringEnter,
         LinuxSyscall::IoUringRegister,

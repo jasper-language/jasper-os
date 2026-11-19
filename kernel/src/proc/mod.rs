@@ -2701,9 +2701,6 @@ pub(crate) fn linux_eventfd_create(
 ) -> Option<u32> {
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
-        if linux.eventfds.len() >= 32 {
-            return Err(ProcError::NoTaskSlot);
-        }
         linux
             .eventfds
             .try_reserve(1)
