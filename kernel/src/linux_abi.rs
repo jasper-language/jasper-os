@@ -12622,32 +12622,35 @@ fn linux_signalfd_read(
     len: usize,
 ) -> Result<u64, CompatErrno> {
     const RECORD_BYTES: usize = 128;
-    const MAX_RECORDS: usize = 16;
     if len < RECORD_BYTES {
         return Err(CompatErrno::Invalid);
     }
-    let limit = (len / RECORD_BYTES).min(MAX_RECORDS);
+    let limit = len / RECORD_BYTES;
     let mask_state = proc::linux_signalfd_state(pid, handle).ok_or(CompatErrno::BadFd)?;
     let nonblocking = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
     loop {
         let requested = *mask_state.lock();
-        let mut records = [SignalFdRecord {
-            signal: 0,
-            sender_pid: 0,
-            sender_uid: 0,
-            code: 0,
-            value: 0,
-        }; MAX_RECORDS];
+        let mut records = alloc::vec::Vec::new();
+        records
+            .try_reserve_exact(limit)
+            .map_err(|_| CompatErrno::NoMemory)?;
         let mut count = 0usize;
         while count < limit {
             let Some(record) = take_signalfd_record(pid, requested) else {
                 break;
             };
-            records[count] = record;
+            records.push(record);
             count += 1;
         }
         if count != 0 {
-            let mut output = [0u8; RECORD_BYTES * MAX_RECORDS];
+            let output_bytes = count
+                .checked_mul(RECORD_BYTES)
+                .ok_or(CompatErrno::NoMemory)?;
+            let mut output = alloc::vec::Vec::new();
+            output
+                .try_reserve_exact(output_bytes)
+                .map_err(|_| CompatErrno::NoMemory)?;
+            output.resize(output_bytes, 0);
             for (index, record) in records[..count].iter().enumerate() {
                 let base = index * RECORD_BYTES;
                 output[base..base + 4].copy_from_slice(&record.signal.to_le_bytes());
@@ -12660,9 +12663,9 @@ fn linux_signalfd_read(
                     .copy_from_slice(&(record.value as u32).to_le_bytes());
                 output[base + 48..base + 56].copy_from_slice(&record.value.to_le_bytes());
             }
-            copy_to_user(address, &output[..count * RECORD_BYTES], count * RECORD_BYTES)
+            copy_to_user(address, &output, output_bytes)
                 .map_err(|_| CompatErrno::Fault)?;
-            return Ok((count * RECORD_BYTES) as u64);
+            return Ok(output_bytes as u64);
         }
         if nonblocking {
             return Err(CompatErrno::TryAgain);
