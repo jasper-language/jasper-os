@@ -88,13 +88,156 @@ impl CpuInbox {
 }
 static CPU_INBOXES: [kernel_core::ticket::TicketLock<CpuInbox>; kernel_core::smp::MAX_CPUS] =
     [const { kernel_core::ticket::TicketLock::new(CpuInbox::new()) }; kernel_core::smp::MAX_CPUS];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerCpuStorageError {
+    Allocation,
+    AlreadyPreparedTooSmall,
+}
+
+impl SchedulerCpuStorageError {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Allocation => "system.scheduler.error.cpu_storage_allocation",
+            Self::AlreadyPreparedTooSmall => "system.scheduler.error.cpu_storage_capacity",
+        }
+    }
+}
+
+struct CpuTail<T> {
+    extra: Once<Result<Vec<T>, SchedulerCpuStorageError>>,
+}
+
+impl<T> CpuTail<T> {
+    const fn new() -> Self {
+        Self { extra: Once::new() }
+    }
+
+    fn prepare(
+        &self,
+        cpus: usize,
+        mut make: impl FnMut(usize) -> T,
+    ) -> Result<(), SchedulerCpuStorageError> {
+        let needed = cpus.saturating_sub(kernel_core::smp::MAX_CPUS);
+        let slots = self.extra.call_once(|| {
+            let mut slots = Vec::new();
+            slots
+                .try_reserve_exact(needed)
+                .map_err(|_| SchedulerCpuStorageError::Allocation)?;
+            for cpu in kernel_core::smp::MAX_CPUS..cpus {
+                slots.push(make(cpu));
+            }
+            Ok(slots)
+        });
+        match slots {
+            Ok(slots) if slots.len() >= needed => Ok(()),
+            Ok(_) => Err(SchedulerCpuStorageError::AlreadyPreparedTooSmall),
+            Err(error) => Err(*error),
+        }
+    }
+
+    fn get(&self, cpu: usize) -> Option<&T> {
+        let extra = cpu.checked_sub(kernel_core::smp::MAX_CPUS)?;
+        self.extra.get()?.as_ref().ok()?.get(extra)
+    }
+
+    fn extras(&self) -> &[T] {
+        self.extra
+            .get()
+            .and_then(|slots| slots.as_ref().ok())
+            .map_or(&[], Vec::as_slice)
+    }
+}
+
+static EXTRA_YIELD_GATES: CpuTail<kernel_core::yield_gate::YieldGate> = CpuTail::new();
+static EXTRA_TICK_LEASES: CpuTail<
+    kernel_core::ticket::TicketLock<kernel_core::tick_lease::TickLease>,
+> = CpuTail::new();
+static EXTRA_CPU_INBOXES: CpuTail<kernel_core::ticket::TicketLock<CpuInbox>> = CpuTail::new();
+#[cfg(feature = "krn2-observe")]
+static EXTRA_SYNC_WORK: CpuTail<[core::sync::atomic::AtomicU32; 4]> = CpuTail::new();
+
+fn yield_gate(cpu: usize) -> Option<&'static kernel_core::yield_gate::YieldGate> {
+    YIELD_GATES
+        .get(cpu)
+        .or_else(|| EXTRA_YIELD_GATES.get(cpu))
+}
+
+fn tick_lease(
+    cpu: usize,
+) -> Option<&'static kernel_core::ticket::TicketLock<kernel_core::tick_lease::TickLease>> {
+    TICK_LEASES
+        .get(cpu)
+        .or_else(|| EXTRA_TICK_LEASES.get(cpu))
+}
+
+fn cpu_inbox(cpu: usize) -> Option<&'static kernel_core::ticket::TicketLock<CpuInbox>> {
+    CPU_INBOXES
+        .get(cpu)
+        .or_else(|| EXTRA_CPU_INBOXES.get(cpu))
+}
+
+#[cfg(feature = "krn2-observe")]
+fn sync_work(
+    cpu: usize,
+) -> Option<&'static [core::sync::atomic::AtomicU32; 4]> {
+    SYNC_WORK
+        .get(cpu)
+        .or_else(|| EXTRA_SYNC_WORK.get(cpu))
+}
+
+pub fn prepare_cpu_slots(cpus: usize) -> Result<(), SchedulerCpuStorageError> {
+    EXTRA_YIELD_GATES.prepare(cpus, |_| kernel_core::yield_gate::YieldGate::new())?;
+    EXTRA_TICK_LEASES.prepare(cpus, |_| {
+        kernel_core::ticket::TicketLock::new(kernel_core::tick_lease::TickLease::new())
+    })?;
+    EXTRA_CPU_INBOXES.prepare(cpus, |_| {
+        kernel_core::ticket::TicketLock::new(CpuInbox::new())
+    })?;
+    #[cfg(feature = "krn2-observe")]
+    EXTRA_SYNC_WORK.prepare(cpus, |_| {
+        [
+            core::sync::atomic::AtomicU32::new(0),
+            core::sync::atomic::AtomicU32::new(0),
+            core::sync::atomic::AtomicU32::new(0),
+            core::sync::atomic::AtomicU32::new(0),
+        ]
+    })?;
+    Ok(())
+}
+
+fn publish_yield_gates(allow: &CpuSet) {
+    for (cpu, gate) in YIELD_GATES.iter().enumerate() {
+        gate.publish(allow.contains(cpu));
+    }
+    for (extra, gate) in EXTRA_YIELD_GATES.extras().iter().enumerate() {
+        gate.publish(allow.contains(kernel_core::smp::MAX_CPUS + extra));
+    }
+}
+
+fn take_yielded(mut visit: impl FnMut(usize)) {
+    for (cpu, gate) in YIELD_GATES.iter().enumerate() {
+        if gate.take_yielded() {
+            visit(cpu);
+        }
+    }
+    for (extra, gate) in EXTRA_YIELD_GATES.extras().iter().enumerate() {
+        if gate.take_yielded() {
+            visit(kernel_core::smp::MAX_CPUS + extra);
+        }
+    }
+}
 static REMOTE_WAKES: AtomicU32 = AtomicU32::new(0);
 static WAKE_FALLBACKS: AtomicU32 = AtomicU32::new(0);
 static REMOTE_PI: AtomicU32 = AtomicU32::new(0);
 static PI_FALLBACKS: AtomicU32 = AtomicU32::new(0);
 
 pub(super) fn publish_wake_token(cpu: usize, token: kernel_core::task_index::Token) -> kernel_core::wake_mailbox::Enqueue {
-    let mut inbox = CPU_INBOXES[cpu].lock();
+    let Some(inbox) = cpu_inbox(cpu) else {
+        WAKE_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+        return kernel_core::wake_mailbox::Enqueue::Full;
+    };
+    let mut inbox = inbox.lock();
     let result = inbox.wake.push(token);
     if !matches!(result, kernel_core::wake_mailbox::Enqueue::Full) { REMOTE_WAKES.fetch_add(1, Ordering::Relaxed); }
     else { WAKE_FALLBACKS.fetch_add(1, Ordering::Relaxed); }
@@ -103,7 +246,11 @@ pub(super) fn publish_wake_token(cpu: usize, token: kernel_core::task_index::Tok
 
 pub(super) fn publish_pi_message(cpu: usize, message: kernel_core::percpu_migration::PiMessage) {
     use kernel_core::percpu_migration::PiEnqueue;
-    let result = CPU_INBOXES[cpu].lock().pi.push(message);
+    let Some(inbox) = cpu_inbox(cpu) else {
+        PI_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+        return;
+    };
+    let result = inbox.lock().pi.push(message);
     match result {
         PiEnqueue::Queued | PiEnqueue::Replaced => { REMOTE_PI.fetch_add(1, Ordering::Relaxed); }
         PiEnqueue::Stale => {}
@@ -117,7 +264,11 @@ struct LocalInbox {
 }
 fn take_local_inbox(cpu: usize) -> LocalInbox {
     let mut out = LocalInbox { wakes: [None; scheduler::WAKE_MAILBOX_CAPACITY], pi: [None; PI_MAILBOX_CAPACITY] };
-    let mut inbox = CPU_INBOXES[cpu].lock();
+    let Some(inbox) = cpu_inbox(cpu) else {
+        crate::kprintln!("[JSR-SMP] reject=scheduler_inbox_missing cpu={}", cpu);
+        crate::arch::halt_forever()
+    };
+    let mut inbox = inbox.lock();
     for slot in &mut out.wakes { *slot = inbox.wake.pop(); if slot.is_none() { break; } }
     for slot in &mut out.pi { *slot = inbox.pi.pop(); if slot.is_none() { break; } }
     out
@@ -143,7 +294,7 @@ impl Drop for StateGuard {
         if !self.2 { self.0.refresh_ns_events(); }
         self.0.program_ns_local();
         let allow = self.0.fast_yield_cpus();
-        for (c, gate) in YIELD_GATES.iter().enumerate() { gate.publish(allow.contains(c)); }
+        publish_yield_gates(&allow);
         let owners = self.0.tick_lease_owners();
         for (c, leaf) in self.1.iter_mut().enumerate() {
             // A BSP tick deliberately leaves ordinary AP leases untouched.
@@ -167,7 +318,7 @@ static SYNC_WORK: [[core::sync::atomic::AtomicU32; 4]; kernel_core::smp::MAX_CPU
 pub fn sync_work_stats() -> [u32; 4] {
     let _state = lock_state(); // This observation transaction is included.
     let mut total = [0u32; 4];
-    for row in &SYNC_WORK { for (sum, value) in total.iter_mut().zip(row) {
+    for row in SYNC_WORK.iter().chain(EXTRA_SYNC_WORK.extras()) { for (sum, value) in total.iter_mut().zip(row) {
         *sum = sum.wrapping_add(value.load(core::sync::atomic::Ordering::Relaxed));
     }}
     total
@@ -238,8 +389,10 @@ fn lock_state_from_observed(
         }
     }
     #[cfg(feature = "krn2-observe")]
-    for (counter, value) in SYNC_WORK[crate::arch::cpu_index()].iter().zip(work) {
-        counter.fetch_add(value, core::sync::atomic::Ordering::Relaxed);
+    if let Some(counter) = sync_work(crate::arch::cpu_index()) {
+        for (counter, value) in counter.iter().zip(work) {
+            counter.fetch_add(value, core::sync::atomic::Ordering::Relaxed);
+        }
     }
     // A pending voluntary yield forbids a new fast tick. Therefore a deferred
     // tick always precedes any still-pending yield; charge first, then reset the
@@ -247,9 +400,7 @@ fn lock_state_from_observed(
     for (c, leaf) in leaves.iter_mut().enumerate() {
         if let Some((owner, ticks)) = leaf.as_mut().and_then(|leaf| leaf.drain()) { s.drain_local_ticks(c, owner, ticks); }
     }
-    for (c, gate) in YIELD_GATES.iter().enumerate() {
-        if gate.take_yielded() { s.note_fast_yield(c); }
-    }
+    take_yielded(|c| s.note_fast_yield(c));
     for token in inbox.wakes.into_iter().flatten() { s.consume_wake_token(token); }
     for message in inbox.pi.into_iter().flatten() { s.consume_pi_message(local_cpu, message); }
     if crate::hrtime::enabled(){s.settle_highres(crate::hrtime::now().expect("high-res monotonic clock"));}
@@ -394,9 +545,13 @@ pub fn leaf_worker_finish_count() -> u32 { scheduler::leaf_worker_finish_count()
 #[cfg(feature = "krn3-fast-tick-verify")]
 pub fn leaf_local_switch_count() -> u32 { scheduler::leaf_local_switch_count() }
 #[cfg(feature = "krn3-fast-tick-verify")]
-pub fn local_tick_batch_peak(cpu: usize) -> u8 { TICK_LEASES[cpu].lock().peak() }
+pub fn local_tick_batch_peak(cpu: usize) -> u8 {
+    tick_lease(cpu).map_or(0, |lease| lease.lock().peak())
+}
 #[cfg(feature = "krn3-fast-tick-verify")]
-pub fn local_tick_hits(cpu: usize) -> u32 { TICK_LEASES[cpu].lock().hits() }
+pub fn local_tick_hits(cpu: usize) -> u32 {
+    tick_lease(cpu).map_or(0, |lease| lease.lock().hits())
+}
 
 /// Diagnostic snapshot used by the isolated KRN-3 fast-tick contract.  The
 /// global transaction drains any pending lease before reading the exact
@@ -415,7 +570,7 @@ pub fn reset_lock_stats() {
         state.pi_window = kernel_core::pi_work::PiWork::EMPTY;
         state.origin_window.clear();
         KERNEL_SCHED.reset_stats();
-        for row in &SYNC_WORK { for value in row {
+        for row in SYNC_WORK.iter().chain(EXTRA_SYNC_WORK.extras()) { for value in row {
             value.store(0, core::sync::atomic::Ordering::Relaxed);
         }}
     }
@@ -748,14 +903,20 @@ pub fn set_watchdog_threshold(ticks: u32) -> u32 {
 }
 
 pub fn fast_yield_count() -> u64 {
-    YIELD_GATES.iter().map(|g| g.hits() as u64).sum()
+    YIELD_GATES
+        .iter()
+        .chain(EXTRA_YIELD_GATES.extras())
+        .map(|g| g.hits() as u64)
+        .sum()
 }
 
 /// 主动让出 CPU。
 pub fn yield_now() {
     let was_enabled = cpu::irq_save_disable();
     let c = cpu::cpu_index();
-    if !crate::smp::percpu::this().resched_pending() && YIELD_GATES[c].try_yield() {
+    if !crate::smp::percpu::this().resched_pending()
+        && yield_gate(c).is_some_and(kernel_core::yield_gate::YieldGate::try_yield)
+    {
         cpu::irq_restore(was_enabled);
         return;
     }
@@ -883,6 +1044,7 @@ struct TimerProgressCell {
 }
 static TIMER_PROGRESS: [TimerProgressCell; kernel_core::smp::MAX_CPUS] =
     [const { TimerProgressCell { last_exit: kernel_core::sync::Atomic64::new(0), cost: kernel_core::sync::Atomic64::new(0), deferred: AtomicU32::new(0), short: AtomicU32::new(0) } }; kernel_core::smp::MAX_CPUS];
+
 /// 完整定时器事务数、引导处理器推迟的时钟事件数、高精度事件推迟数、记录到的最大开销（时钟计数，未封顶）。
 static TIMER_FULL: kernel_core::sync::Atomic64 = kernel_core::sync::Atomic64::new(0);
 static TIMER_DEFERRED_BSP: kernel_core::sync::Atomic64 = kernel_core::sync::Atomic64::new(0);
@@ -1317,8 +1479,10 @@ pub fn on_local_timer(entry: u64) {
     if !requested && deferred == 0 {
         let fast = {
             let c = cpu::cpu_index();
-            TICK_LEASES[c].try_lock().and_then(|mut lease| {
-                if YIELD_GATES[c].pending_yield() { return None; }
+            tick_lease(c).and_then(|lease| lease.try_lock()).and_then(|mut lease| {
+                if yield_gate(c).is_none_or(kernel_core::yield_gate::YieldGate::pending_yield) {
+                    return None;
+                }
                 let owner = lease.try_tick_owner()?;
                 Some(match scheduler::fast_leaf_competing_tick(
                     c, owner, PREEMPTION.load(Ordering::Relaxed),
@@ -1420,7 +1584,11 @@ pub fn pi_work_stats() -> (kernel_core::pi_work::PiWork, kernel_core::pi_work::P
 #[cfg(feature = "krn2-observe")]
 pub fn global_origin_stats() -> (kernel_core::sync_origin::Counts, kernel_core::sync_origin::Counts, u64) {
     let s = lock_state();
-    let aggregate = SYNC_WORK.iter().map(|row| row[0].load(core::sync::atomic::Ordering::Relaxed) as u64).sum();
+    let aggregate = SYNC_WORK
+        .iter()
+        .chain(EXTRA_SYNC_WORK.extras())
+        .map(|row| row[0].load(core::sync::atomic::Ordering::Relaxed) as u64)
+        .sum();
     (s.origin_total, s.origin_window, aggregate)
 }
 
