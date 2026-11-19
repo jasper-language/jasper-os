@@ -9,9 +9,6 @@ use crate::ifc::{FlowError, FlowLabel, FlowPolicy, PURPOSE_SYSTEM};
 use crate::mac::{MacDenial, MacEffect, MacLabel, MacPolicy, SubjectLabel};
 use crate::security::IdentityClass;
 
-pub const MAX_FILES: usize = 64;
-pub const MAX_AUDIT: usize = 256;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileAccess {
     Read,
@@ -162,7 +159,7 @@ struct FileRecord {
     label: FileSecurityLabel,
 }
 
-pub struct ProductionFileGate<const N: usize = MAX_FILES, const A: usize = MAX_AUDIT> {
+pub struct ProductionFileGate<const N: usize, const A: usize> {
     policy: MacPolicy,
     files: [Option<FileRecord>; N],
     audit: [Option<FileAudit>; A],

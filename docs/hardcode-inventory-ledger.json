@@ -1,5 +1,5 @@
 {
-  "baseline_total": 335,
+  "baseline_total": 333,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,10 +10,10 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 129,
+    "explicit-safety-policy": 128,
     "platform-adapter": 28,
     "protocol-abi": 38,
-    "runtime-resource-capacity": 60,
+    "runtime-resource-capacity": 59,
     "test-demo-fixture": 6
   },
   "entries": [
@@ -966,26 +966,6 @@
       "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
       "rules": "HC-G1",
       "source": "pub const MAX_JOURNAL_NODES: usize = 4096;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "105777b7191c96bdf181809e241fbbd242abc3e19e2513d8129eedce9885dc3d",
-      "line": 13,
-      "path": "kernel-core/src/fs_prod.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_AUDIT: usize = 256;"
-    },
-    {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "2bdc8c1ccf3c1bd3791ef629ff66f64e5c0016748edc399f63246ddddadae349",
-      "line": 12,
-      "path": "kernel-core/src/fs_prod.rs",
-      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
-      "rules": "HC-G1",
-      "source": "pub const MAX_FILES: usize = 64;"
     },
     {
       "category": "explicit-safety-policy",
@@ -2630,10 +2610,10 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 145,
+    "explicit-safety-policy": 144,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 98,
+    "runtime-resource-capacity": 97,
     "test-demo-fixture": 7
   }
 }
