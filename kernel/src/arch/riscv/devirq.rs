@@ -14,8 +14,8 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
+use kernel_core::cpu_bitmap::CpuBitmap;
 use kernel_core::irq::IrqError;
-use kernel_core::smp::MAX_CPUS;
 use spin::Mutex;
 
 use super::{plic, uart};
@@ -56,8 +56,19 @@ static STORM: [AtomicBool; 2] = [const { AtomicBool::new(false) }; 2];
 /// 实时时钟寄存器块的虚拟地址与中断源（0 = 没有）。
 static RTC_BASE: AtomicUsize = AtomicUsize::new(0);
 static RTC_IRQ: AtomicU32 = AtomicU32::new(0);
-/// 已完成本地 PLIC 上下文初始化、可作为目标的处理器（位图）。
-static READY: AtomicU32 = AtomicU32::new(0);
+/// 已完成本地 PLIC 上下文初始化、可作为目标的处理器。
+static READY: Mutex<CpuBitmap> = Mutex::new(CpuBitmap::empty());
+
+/// Reserve interrupt-target membership before any secondary CPU starts.
+pub(super) fn prepare(cpus: usize) -> Result<(), super::user::RuntimeStorageError> {
+    let mut ready = CpuBitmap::with_capacity(cpus)
+        .map_err(|_| super::user::RuntimeStorageError::Allocation)?;
+    ready
+        .insert(0)
+        .map_err(|_| super::user::RuntimeStorageError::Allocation)?;
+    *READY.lock() = ready;
+    Ok(())
+}
 
 /// 登记实时时钟（引导适配层解析设备树后调用）。
 pub fn set_rtc(va: u64, irq: u32) {
@@ -67,8 +78,12 @@ pub fn set_rtc(va: u64, irq: u32) {
 
 /// 登记处理器 `index` 已可作为设备中断的目标。
 pub fn mark_ready(index: usize) {
-    if index < MAX_CPUS {
-        READY.fetch_or(1 << index, Ordering::Release);
+    if let Err(error) = READY.lock().insert(index) {
+        crate::kprintln!(
+            "[JSR-IRQ] reject=ready_target cpu={} reason={}",
+            index,
+            error.name()
+        );
     }
 }
 
@@ -83,13 +98,13 @@ pub fn configure() -> usize {
             break;
         }
         plic::set_priority(src, PRIORITY);
-        for c in 0..MAX_CPUS {
+        for c in 0..plic::cpu_capacity() {
             plic::set_enabled_on(c, src, false);
         }
         lines[i] = Line { source: src, target: 0, masked: true };
         n = i + 1;
     }
-    mark_ready(0);
+    drop(lines);
     COUNT.store(n, Ordering::Release);
     n
 }
@@ -119,7 +134,7 @@ pub fn route(line: usize, cpu: usize) -> Result<(), IrqError> {
     if line >= count() {
         return Err(IrqError::NoLine);
     }
-    if cpu >= MAX_CPUS || READY.load(Ordering::Acquire) & (1 << cpu) == 0 || !plic::has_context(cpu) {
+    if !READY.lock().contains(cpu) || !plic::has_context(cpu) {
         return Err(IrqError::RouteFailed);
     }
     without_irq(|| {

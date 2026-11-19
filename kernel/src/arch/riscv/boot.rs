@@ -139,6 +139,14 @@ pub(super) fn configure_plic_contexts(fdt: &Fdt<'static>, topology: &Topology) {
         );
         return;
     }
+    if let Err(error) = devirq::prepare(topology.count()) {
+        crate::kprintln!(
+            "[JSR-IRQ] reject=target_storage cpus={} reason={}",
+            topology.count(),
+            error.name()
+        );
+        return;
+    }
     let Some(plic_node) = fdt
         .find_compatible("riscv,plic0")
         .ok()

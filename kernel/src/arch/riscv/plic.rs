@@ -66,6 +66,15 @@ pub(super) fn prepare(cpus: usize) -> Result<(), super::user::RuntimeStorageErro
     }
 }
 
+/// Number of logical CPU context slots reserved by this backend.
+pub(super) fn cpu_capacity() -> usize {
+    MAX_CPUS
+        + EXTRA_CONTEXT
+            .get()
+            .and_then(|slots| slots.as_ref().ok())
+            .map_or(0, Vec::len)
+}
+
 /// 设置寄存器块的虚拟地址与启动处理器的上下文编号（引导适配层解析设备树后调用）。
 pub fn set_base(va: u64, context: u32) {
     BASE.store(va as usize, Ordering::Relaxed);
