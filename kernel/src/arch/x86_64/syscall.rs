@@ -20,7 +20,9 @@
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use alloc::vec::Vec;
 use kernel_core::smp::MAX_CPUS;
+use spin::Once;
 
 use x86_64::registers::model_specific::{Efer, EferFlags, Msr};
 
@@ -48,10 +50,9 @@ struct EntryBlock {
     xstate_mask: AtomicU64,
 }
 
-/// 全部处理器的入口块（下标 = 逻辑下标）。
-static BLOCKS: [EntryBlock; MAX_CPUS] =
-    [const {
-        EntryBlock {
+impl EntryBlock {
+    const fn new() -> Self {
+        Self {
             kstack: AtomicU64::new(0),
             user_rsp: AtomicU64::new(0),
             return_rip: AtomicU64::new(0),
@@ -61,7 +62,57 @@ static BLOCKS: [EntryBlock; MAX_CPUS] =
             xstate_size: AtomicU64::new(super::xstate::FXSAVE_BYTES as u64),
             xstate_mask: AtomicU64::new(0),
         }
-    }; MAX_CPUS];
+    }
+}
+
+/// 全部处理器的入口块（下标 = 逻辑下标）。
+static BLOCKS: [EntryBlock; MAX_CPUS] =
+    [const { EntryBlock::new() }; MAX_CPUS];
+
+static EXTRA_BLOCKS: Once<Result<Vec<EntryBlock>, RuntimeStorageError>> = Once::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RuntimeStorageError {
+    Allocation,
+    AlreadyPreparedTooSmall,
+}
+
+impl RuntimeStorageError {
+    pub(super) const fn name(self) -> &'static str {
+        match self {
+            Self::Allocation => "system.cpu.error.syscall_storage_allocation",
+            Self::AlreadyPreparedTooSmall => "system.cpu.error.syscall_storage_capacity",
+        }
+    }
+}
+
+fn block(index: usize) -> Option<&'static EntryBlock> {
+    if let Some(block) = BLOCKS.get(index) {
+        return Some(block);
+    }
+    let extra = index.checked_sub(MAX_CPUS)?;
+    EXTRA_BLOCKS.get()?.as_ref().ok()?.get(extra)
+}
+
+/// Reserve stable syscall entry blocks before any secondary CPU is started.
+pub(super) fn prepare(cpus: usize) -> Result<(), RuntimeStorageError> {
+    let needed = cpus.saturating_sub(MAX_CPUS);
+    let blocks = EXTRA_BLOCKS.call_once(|| {
+        let mut blocks = Vec::new();
+        blocks
+            .try_reserve_exact(needed)
+            .map_err(|_| RuntimeStorageError::Allocation)?;
+        for _ in MAX_CPUS..cpus {
+            blocks.push(EntryBlock::new());
+        }
+        Ok(blocks)
+    });
+    match blocks {
+        Ok(blocks) if blocks.len() >= needed => Ok(()),
+        Ok(_) => Err(RuntimeStorageError::AlreadyPreparedTooSmall),
+        Err(error) => Err(*error),
+    }
+}
 
 /// 入口压栈后的寄存器帧（自低地址向高地址，顺序必须与下方汇编一致）。
 #[repr(C)]
@@ -245,11 +296,15 @@ extern "C" fn jsr_syscall_dispatch(frame: &mut RawFrame) -> u64 {
 /// 返回时 CS = 基址 0x10 + 16 = 用户代码段（0x20|3），SS = 0x10 + 8 = 用户数据段（0x18|3）。
 /// 这正是 gdt.rs 中「用户数据段排在用户代码段之前」的原因。
 pub fn init(index: usize, xsave: bool) -> bool {
-    let Some(block_ref) = BLOCKS.get(index) else {
+    let Some(block_ref) = block(index) else {
         crate::kprintln!(
-            "[JSR-SMP] reject=syscall_entry_uninitialized index={} max={}",
+            "[JSR-SMP] reject=syscall_entry_uninitialized index={} prepared={}",
             index,
             MAX_CPUS
+                + EXTRA_BLOCKS
+                    .get()
+                    .and_then(|blocks| blocks.as_ref().ok())
+                    .map_or(0, |blocks| blocks.len())
         );
         return false;
     };
@@ -278,11 +333,15 @@ pub fn init(index: usize, xsave: bool) -> bool {
 /// 更新本处理器系统调用入口使用的内核栈顶（与本核 TSS.rsp0 同步）。
 pub fn set_kernel_stack(top: u64) {
     let index = super::smp::cpu_index();
-    let Some(block) = BLOCKS.get(index) else {
+    let Some(block) = block(index) else {
         crate::kprintln!(
-            "[JSR-SMP] reject=syscall_entry_uninitialized index={} max={}",
+            "[JSR-SMP] reject=syscall_entry_uninitialized index={} prepared={}",
             index,
             MAX_CPUS
+                + EXTRA_BLOCKS
+                    .get()
+                    .and_then(|blocks| blocks.as_ref().ok())
+                    .map_or(0, |blocks| blocks.len())
         );
         crate::arch::halt_forever();
     };

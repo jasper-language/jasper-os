@@ -13,7 +13,11 @@
 use core::arch::{asm, global_asm};
 use core::cell::UnsafeCell;
 
+use alloc::vec::Vec;
+use spin::Once;
+
 use super::gdt;
+use super::syscall::RuntimeStorageError;
 use crate::arch::UserProbe;
 
 /// 进入用户态（永不返回）。
@@ -116,7 +120,14 @@ pub unsafe fn enter_syscall_return(
         arg_regs,
     };
     let _ = crate::arch::irq_save_disable();
-    let scratch = &SYSCALL_RETURN_FRAMES[crate::arch::cpu_index()];
+    let cpu = crate::arch::cpu_index();
+    let Some(scratch) = return_frame(cpu) else {
+        crate::kprintln!(
+            "[JSR-SMP] reject=syscall_return_frame_missing cpu={}",
+            cpu
+        );
+        crate::arch::halt_forever();
+    };
     // SAFETY: interrupts are disabled, so this CPU cannot re-enter the bounded
     // syscall-return frame before `iretq` transfers to user mode.
     unsafe { *scratch.0.get() = frame; }
@@ -156,8 +167,43 @@ struct SyncFrame(UnsafeCell<SyscallReturnFrame>);
 // across its write and non-returning `iretq` use.
 unsafe impl Sync for SyncFrame {}
 
+impl SyncFrame {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(SyscallReturnFrame::ZERO))
+    }
+}
+
 static SYSCALL_RETURN_FRAMES: [SyncFrame; kernel_core::smp::MAX_CPUS] =
-    [const { SyncFrame(UnsafeCell::new(SyscallReturnFrame::ZERO)) }; kernel_core::smp::MAX_CPUS];
+    [const { SyncFrame::new() }; kernel_core::smp::MAX_CPUS];
+
+static EXTRA_RETURN_FRAMES: Once<Result<Vec<SyncFrame>, RuntimeStorageError>> = Once::new();
+
+fn return_frame(index: usize) -> Option<&'static SyncFrame> {
+    if let Some(frame) = SYSCALL_RETURN_FRAMES.get(index) {
+        return Some(frame);
+    }
+    let extra = index.checked_sub(kernel_core::smp::MAX_CPUS)?;
+    EXTRA_RETURN_FRAMES.get()?.as_ref().ok()?.get(extra)
+}
+
+pub(super) fn prepare_return_frames(cpus: usize) -> Result<(), RuntimeStorageError> {
+    let needed = cpus.saturating_sub(kernel_core::smp::MAX_CPUS);
+    let frames = EXTRA_RETURN_FRAMES.call_once(|| {
+        let mut frames = Vec::new();
+        frames
+            .try_reserve_exact(needed)
+            .map_err(|_| RuntimeStorageError::Allocation)?;
+        for _ in kernel_core::smp::MAX_CPUS..cpus {
+            frames.push(SyncFrame::new());
+        }
+        Ok(frames)
+    });
+    match frames {
+        Ok(frames) if frames.len() >= needed => Ok(()),
+        Ok(_) => Err(RuntimeStorageError::AlreadyPreparedTooSmall),
+        Err(error) => Err(*error),
+    }
+}
 
 extern "C" {
     fn jsr_enter_syscall_return_regs(frame: *const SyscallReturnFrame) -> !;

@@ -343,6 +343,12 @@ pub trait Platform {
     /// 中断初始化：中断控制器与周期定时器（`timer_hz` 为目标频率）。不打开中断。
     fn irq_init(timer_hz: u32);
 
+    /// Reserve architecture-owned per-CPU runtime state before AP startup.
+    /// Platforms without such state keep the default no-op.
+    fn prepare_cpu_runtime(_cpus: usize) -> Result<(), &'static str> {
+        Ok(())
+    }
+
     /// 空闲停表：把**本处理器**的下一次本地定时器中断推迟到 `ticks` 个周期之后（`ticks` ≥ 2）。
     ///
     /// 只在非计时处理器的空闲执行流里、关中断且紧接着休眠时调用；之后无论被什么中断唤醒，
@@ -693,6 +699,10 @@ pub unsafe fn timer_arm_after_ns(delay_ns:u64)->bool {
 /// 见 [`Platform::irq_init`]。
 pub fn irq_init(timer_hz: u32) {
     Current::irq_init(timer_hz)
+}
+/// Reserve architecture-owned per-CPU runtime state before AP startup.
+pub fn prepare_cpu_runtime(cpus: usize) -> Result<(), &'static str> {
+    Current::prepare_cpu_runtime(cpus)
 }
 /// 见 [`Platform::console_write_byte`]。
 pub fn console_write_byte(byte: u8) {

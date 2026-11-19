@@ -154,6 +154,11 @@
   逻辑 CPU 截断到 bootstrap 宽度。该快路径不能取 runtime 的 IRQ 安全锁，否则会
   形成 `lock -> per-CPU -> cpu_index -> lock` 自依赖；x86/LoongArch 的硬件 ID
   映射表仍需后续单独迁移。
+- `kernel/src/arch/x86_64/{syscall,user}.rs`：每核 syscall 入口块与 clone/exec
+  返回帧保留静态 bootstrap 区，并在任何 secondary CPU 启动前按完整准入数量一次性
+  分配堆后备连续表。入口块地址在分配后保持稳定，AP 初始化、内核栈更新和用户态
+  返回路径只索引已发布存储；缺失或分配失败会在启动前失败关闭，IRQ 路径不再依赖
+  固定 `MAX_CPUS` 表。
 - `kernel/src/sched/scheduler.rs`：`cpu_stats`、`cpu_residency`、类别仲裁窗口和
   idle context 改用调度器内联 bootstrap + 堆后备扩展表，在 AP 启动前与 CPU
   容量一起原子预留。运行期这些每核统计与上下文不再由固定 128 槽决定容量。
