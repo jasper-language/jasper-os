@@ -502,6 +502,37 @@ pub mod device {
     static QUOTAS: [IrqSpinLock<CoreQuota>; MAX_CPUS] =
         [const { IrqSpinLock::ranked(lockorder::IRQ_QUOTA, CoreQuota::new(QuotaParams::DEFAULT)) };
             MAX_CPUS];
+    static EXTRA_QUOTAS: Once<Result<Vec<IrqSpinLock<CoreQuota>>, DeviceCpuStorageError>> =
+        Once::new();
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum DeviceCpuStorageError {
+        Allocation,
+        AlreadyPreparedTooSmall,
+        QuotaConfiguration,
+    }
+
+    impl DeviceCpuStorageError {
+        pub const fn name(self) -> &'static str {
+            match self {
+                Self::Allocation => "system.interrupt.error.device_cpu_storage_allocation",
+                Self::AlreadyPreparedTooSmall => {
+                    "system.interrupt.error.device_cpu_storage_capacity"
+                }
+                Self::QuotaConfiguration => {
+                    "system.interrupt.error.device_cpu_quota_configuration"
+                }
+            }
+        }
+    }
+
+    fn quota_slot(cpu: usize) -> Option<&'static IrqSpinLock<CoreQuota>> {
+        if let Some(quota) = QUOTAS.get(cpu) {
+            return Some(quota);
+        }
+        let extra = cpu.checked_sub(MAX_CPUS)?;
+        EXTRA_QUOTAS.get()?.as_ref().ok()?.get(extra)
+    }
 
     struct LineStorage {
         /// 函数指针按地址存放；0 = 只做设备侧确认与计数。
@@ -513,6 +544,8 @@ pub mod device {
     }
 
     static LINES: Once<Option<LineStorage>> = Once::new();
+    static EXTRA_LINE_COUNTS: Once<Result<Vec<Vec<AtomicU32>>, DeviceCpuStorageError>> =
+        Once::new();
     /// 未知线号的中断数（平台报告了超出范围的线）。
     static STRAY: AtomicU32 = AtomicU32::new(0);
     /// Topology admission is immutable after the first successful reservation.
@@ -535,6 +568,76 @@ pub mod device {
             + core::mem::size_of::<IrqU64>()
             + core::mem::size_of::<Vec<AtomicU32>>()
             + MAX_CPUS * core::mem::size_of::<AtomicU32>()
+    }
+
+    /// Reserve device-IRQ per-CPU counts and quotas before AP startup.
+    pub fn prepare_cpu_storage(cpus: usize) -> Result<(), DeviceCpuStorageError> {
+        let needed = cpus.saturating_sub(MAX_CPUS);
+        let lines = line_count();
+        let counts = EXTRA_LINE_COUNTS.call_once(|| {
+            let mut rows = Vec::new();
+            rows.try_reserve_exact(needed)
+                .map_err(|_| DeviceCpuStorageError::Allocation)?;
+            for _ in MAX_CPUS..cpus {
+                let mut row = Vec::new();
+                row.try_reserve_exact(lines)
+                    .map_err(|_| DeviceCpuStorageError::Allocation)?;
+                row.resize_with(lines, || AtomicU32::new(0));
+                rows.push(row);
+            }
+            Ok(rows)
+        });
+        match counts {
+            Ok(rows) if rows.len() >= needed => {}
+            Ok(_) => return Err(DeviceCpuStorageError::AlreadyPreparedTooSmall),
+            Err(error) => return Err(*error),
+        }
+
+        let quotas = EXTRA_QUOTAS.call_once(|| {
+            let mut quotas = Vec::new();
+            quotas
+                .try_reserve_exact(needed)
+                .map_err(|_| DeviceCpuStorageError::Allocation)?;
+            for _ in MAX_CPUS..cpus {
+                quotas.push(IrqSpinLock::ranked(
+                    lockorder::IRQ_QUOTA,
+                    CoreQuota::new(QuotaParams::DEFAULT),
+                ));
+            }
+            Ok(quotas)
+        });
+        match quotas {
+            Ok(quotas) if quotas.len() >= needed => {
+                for quota in quotas {
+                    quota
+                        .lock()
+                        .configure_lines(lines)
+                        .map_err(|_| DeviceCpuStorageError::QuotaConfiguration)?;
+                }
+                Ok(())
+            }
+            Ok(_) => Err(DeviceCpuStorageError::AlreadyPreparedTooSmall),
+            Err(error) => Err(*error),
+        }
+    }
+
+    fn line_count_slot<'a>(
+        storage: &'a LineStorage,
+        line: usize,
+        cpu: usize,
+    ) -> Option<&'a AtomicU32> {
+        if let Some(row) = storage.counts.get(line) {
+            if let Some(count) = row.get(cpu) {
+                return Some(count);
+            }
+        }
+        let extra_cpu = cpu.checked_sub(MAX_CPUS)?;
+        EXTRA_LINE_COUNTS
+            .get()?
+            .as_ref()
+            .ok()?
+            .get(extra_cpu)?
+            .get(line)
     }
 
     fn reserve_lines(lines: usize) -> bool {
@@ -826,13 +929,18 @@ pub mod device {
         for b in QUOTAS.iter() {
             b.lock().set_params(params)?;
         }
+        if let Some(quotas) = EXTRA_QUOTAS.get().and_then(|quotas| quotas.as_ref().ok()) {
+            for quota in quotas {
+                quota.lock().set_params(params)?;
+            }
+        }
         Ok(())
     }
 
     /// 处理器 `cpu` 的预算参数（越界为 `None`）。
     /// Quota parameters of processor `cpu`.
     pub fn quota_on(cpu: usize) -> Option<QuotaParams> {
-        QUOTAS.get(cpu).map(|b| b.lock().params())
+        quota_slot(cpu).map(|b| b.lock().params())
     }
 
     /// 当前预算参数（取引导处理器的那份；各处理器始终一致）。
@@ -872,7 +980,7 @@ pub mod device {
     /// 处理器 `cpu` 的统计。
     /// Statistics of processor `cpu`.
     pub fn cpu_stats(cpu: usize) -> CpuIrqStats {
-        match QUOTAS.get(cpu) {
+        match quota_slot(cpu) {
             Some(b) => {
                 let b = b.lock();
                 let (handled, cycles, throttles) = b.stats();
@@ -891,12 +999,11 @@ pub mod device {
     /// 线 `line` 在处理器 `cpu` 上被处理的次数。
     /// Times `line` was handled on `cpu`.
     pub fn count_on(line: usize, cpu: usize) -> u32 {
-        match (LINES.get().and_then(Option::as_ref), cpu < MAX_CPUS) {
-            (Some(storage), true) if line < storage.counts.len() => {
-                storage.counts[line][cpu].load(Ordering::Relaxed)
-            }
-            _ => 0,
-        }
+        LINES
+            .get()
+            .and_then(Option::as_ref)
+            .and_then(|storage| line_count_slot(storage, line, cpu))
+            .map_or(0, |count| count.load(Ordering::Relaxed))
     }
 
     /// 线号超出范围的中断数。
@@ -911,6 +1018,11 @@ pub mod device {
         for b in QUOTAS.iter() {
             b.lock().reset_stats();
         }
+        if let Some(quotas) = EXTRA_QUOTAS.get().and_then(|quotas| quotas.as_ref().ok()) {
+            for quota in quotas {
+                quota.lock().reset_stats();
+            }
+        }
         if let Some(storage) = LINES.get().and_then(Option::as_ref) {
             for row in storage.counts.iter() {
                 for count in row.iter() {
@@ -919,6 +1031,16 @@ pub mod device {
             }
             for window in storage.window.iter() {
                 window.store(0, Ordering::Relaxed);
+            }
+            if let Some(rows) = EXTRA_LINE_COUNTS
+                .get()
+                .and_then(|rows| rows.as_ref().ok())
+            {
+                for row in rows {
+                    for count in row {
+                        count.store(0, Ordering::Relaxed);
+                    }
+                }
             }
         }
         ROUTING.lock().moves = 0;
@@ -937,16 +1059,20 @@ pub mod device {
         let t0 = arch::cycles();
         arch::device_irq_ack(line);
         let cpu = arch::cpu_index();
-        if cpu >= MAX_CPUS {
+        let Some(count) = line_count_slot(storage, line, cpu) else {
             crate::kprintln!(
-                "[JSR-IRQ] reject=cpu_index_out_of_range line={} index={} max={}",
+                "[JSR-IRQ] reject=cpu_index_storage_missing line={} index={} prepared={}",
                 line,
                 cpu,
                 MAX_CPUS
+                    + EXTRA_LINE_COUNTS
+                        .get()
+                        .and_then(|rows| rows.as_ref().ok())
+                        .map_or(0, Vec::len)
             );
             arch::halt_forever();
-        }
-        storage.counts[line][cpu].fetch_add(1, Ordering::Relaxed);
+        };
+        count.fetch_add(1, Ordering::Relaxed);
         storage.window[line].fetch_add(1, Ordering::Relaxed);
         let h = storage.handlers[line].load(Ordering::Acquire);
         if h != 0 {
@@ -955,7 +1081,10 @@ pub mod device {
             f(line);
         }
         let cost = arch::cycles().wrapping_sub(t0);
-        let verdict = QUOTAS[cpu].lock().charge(line, cost);
+        let Some(quota) = quota_slot(cpu) else {
+            arch::halt_forever();
+        };
+        let verdict = quota.lock().charge(line, cost);
         if verdict == Charge::Exhausted {
             arch::device_irq_set_masked(line, true);
         }
@@ -964,7 +1093,10 @@ pub mod device {
     /// MSI 记账（中断上下文，处理函数之后）：超出预算 ⇒ 调用该槽位登记的屏蔽动作（未登记则只记账）。
     /// 预算锁在调用屏蔽动作之前释放：动作可以取级别更低的锁。
     pub(super) fn charge_msi(cpu: usize, vector: u8, cycles: u64) {
-        let verdict = QUOTAS[cpu].lock().charge_msi(vector as usize, cycles);
+        let Some(quota) = quota_slot(cpu) else {
+            arch::halt_forever();
+        };
+        let verdict = quota.lock().charge_msi(vector as usize, cycles);
         if verdict == Ok(Charge::Exhausted) {
             if let Some((ops, ctx)) = msi_mask_ops(cpu, vector as usize) {
                 (ops.mask)(cpu, vector, ctx);
@@ -976,8 +1108,11 @@ pub mod device {
     /// 并对被节流的 MSI 槽位调用其解除屏蔽动作（槽位已解除登记的跳过）。
     pub(super) fn on_cpu_tick() {
         let cpu = arch::cpu_index();
+        let Some(quota) = quota_slot(cpu) else {
+            arch::halt_forever();
+        };
         let (released, released_count) = {
-            let mut quota = QUOTAS[cpu].lock();
+            let mut quota = quota.lock();
             let released = quota.on_tick(arch::cycles());
             (released, quota.released_lines().len())
         };
@@ -995,7 +1130,7 @@ pub mod device {
             }
         }
         for index in 0..released_count {
-            let Some(line) = QUOTAS[cpu]
+            let Some(line) = quota
                 .lock()
                 .released_lines()
                 .get(index)
@@ -1009,7 +1144,7 @@ pub mod device {
                 arch::device_irq_set_masked(line, false);
             }
         }
-        QUOTAS[cpu].lock().clear_released_lines();
+        quota.lock().clear_released_lines();
     }
 
     /// 本处理器是否还需要周期 tick 来补充设备中断预算（本 tick 处理过设备中断或有被节流的线）。
@@ -1017,7 +1152,8 @@ pub mod device {
     /// Whether this CPU's device quota still needs the periodic tick.
     pub fn cpu_needs_tick() -> bool {
         let cpu = arch::cpu_index();
-        QUOTAS[cpu].lock().needs_tick()
+        quota_slot(cpu)
+            .is_some_and(|quota| quota.lock().needs_tick())
     }
 
     /// 引导处理器的 tick：每 [`BALANCE_PERIOD`] 个 tick 按窗口负载运行一次均衡策略。

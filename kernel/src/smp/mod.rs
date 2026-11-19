@@ -237,6 +237,14 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
         );
         arch::halt_forever();
     }
+    if let Err(error) = crate::irq::device::prepare_cpu_storage(topo.count()) {
+        crate::kprintln!(
+            "[JSR-SMP] reject=irq_device_cpu_storage cpus={} reason={}",
+            topo.count(),
+            error.name()
+        );
+        arch::halt_forever();
+    }
     if let Err(error) = percpu::reserve(topo.count()) {
         crate::kprintln!(
             "[JSR-SMP] reject=percpu_storage cpus={} reason={}",
