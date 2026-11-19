@@ -303,9 +303,10 @@ pub fn active_window_bytes() -> u64 {
     STATE.lock().active_len
 }
 
-/// Pre-establish page tables for a runtime-budgeted portion of the reserved
-/// MMIO span. The active window scales with currently free frames instead of a
-/// fixed device or slot capacity.
+/// Admit a runtime-budgeted portion of the reserved MMIO span. Intermediate
+/// page tables are established on demand by [`Mapping::map`]; the admission
+/// path itself does not create temporary device mappings.
+/// 按运行时内存预算准入 MMIO 窗口；中间页表由实际映射按需建立。
 pub fn prepare_window() -> Result<(), MmioError> {
     *PREPARED.call_once(prepare_window_inner)
 }
@@ -320,24 +321,6 @@ fn prepare_window_inner() -> Result<(), MmioError> {
     let blocks = max_blocks.min(budget_blocks);
     if blocks == 0 {
         return Err(MmioError::OutOfWindow);
-    }
-
-    let flags = MapFlags::WRITE | MapFlags::GLOBAL | MapFlags::NO_CACHE;
-    for block in 0..blocks {
-        let va = window_base
-            .checked_add(block * PAGE_TABLE_BLOCK_BYTES)
-            .ok_or(MmioError::OutOfWindow)?;
-        let page = VirtPage::from_start(va).ok_or(MmioError::OutOfWindow)?;
-        let frame = mm::frame::allocate().map_err(|_| MmioError::MapFailed)?;
-        if mm::map::map(page, frame, flags).is_err() {
-            let _ = mm::frame::deallocate(frame);
-            return Err(MmioError::MapFailed);
-        }
-        let unmapped = mm::map::unmap(page);
-        let freed = mm::frame::deallocate(frame);
-        if !matches!((unmapped, freed), (Ok(mapped), Ok(())) if mapped == frame) {
-            return Err(MmioError::MapFailed);
-        }
     }
 
     let active_len = blocks
