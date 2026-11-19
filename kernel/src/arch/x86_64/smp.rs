@@ -14,9 +14,11 @@
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
+use alloc::vec::Vec;
 use kernel_core::acpi::{self, PhysRead};
 use kernel_core::frame::PhysFrame;
 use kernel_core::smp::{IpiKind, SmpError, Topology, MAX_CPUS};
+use spin::Once;
 use x86_64::registers::control::{Cr0, Cr4};
 use x86_64::registers::model_specific::Msr;
 
@@ -31,6 +33,7 @@ pub const START_FRAME_LIMIT: u64 = 0x10_0000;
 static INDEX_OF: [AtomicU8; 256] = [const { AtomicU8::new(0) }; 256];
 /// 逻辑下标 → APIC 标识。
 static HW_ID: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(u32::MAX) }; MAX_CPUS];
+static EXTRA_HW_ID: Once<Result<Vec<AtomicU32>, syscall::RuntimeStorageError>> = Once::new();
 /// 已启用本地 APIC、但拓扑尚未登记的引导处理器标识。
 static BOOTSTRAP_ID: AtomicU32 = AtomicU32::new(u32::MAX);
 /// 拓扑映射已经完整发布。
@@ -41,6 +44,42 @@ static AP_TIMER_HZ: AtomicU32 = AtomicU32::new(0);
 const MSR_EFER: u32 = 0xC000_0080;
 /// CR4.PCIDE：只能在长模式下置位，启动代码在进入长模式之前写 CR4，必须去掉。
 const CR4_PCIDE: u64 = 1 << 17;
+
+fn hw_id_slot(index: usize) -> Option<&'static AtomicU32> {
+    if let Some(slot) = HW_ID.get(index) {
+        return Some(slot);
+    }
+    let extra = index.checked_sub(MAX_CPUS)?;
+    EXTRA_HW_ID.get()?.as_ref().ok()?.get(extra)
+}
+
+fn prepared_cpu_count() -> usize {
+    MAX_CPUS
+        + EXTRA_HW_ID
+            .get()
+            .and_then(|slots| slots.as_ref().ok())
+            .map_or(0, Vec::len)
+}
+
+/// Reserve the published logical-index to APIC-ID mapping before any AP starts.
+pub(super) fn prepare(cpus: usize) -> Result<(), syscall::RuntimeStorageError> {
+    let needed = cpus.saturating_sub(MAX_CPUS);
+    let slots = EXTRA_HW_ID.call_once(|| {
+        let mut slots = Vec::new();
+        slots
+            .try_reserve_exact(needed)
+            .map_err(|_| syscall::RuntimeStorageError::Allocation)?;
+        for _ in MAX_CPUS..cpus {
+            slots.push(AtomicU32::new(u32::MAX));
+        }
+        Ok(slots)
+    });
+    match slots {
+        Ok(slots) if slots.len() >= needed => Ok(()),
+        Ok(_) => Err(syscall::RuntimeStorageError::AlreadyPreparedTooSmall),
+        Err(error) => Err(*error),
+    }
+}
 
 // 启动代码（AT&T 语法）。数据区布局必须与 [`StartData`] 一致。
 global_asm!(
@@ -199,15 +238,32 @@ pub fn init_boot(boot: &BootSpec) -> CpuDiscovery {
         },
         None => (Topology::boot_only(boot_id), "boot_only", false),
     };
-    if topology.count() <= MAX_CPUS {
-        for (i, id) in topology.iter().enumerate() {
-            HW_ID[i].store(id, Ordering::Relaxed);
-            if id < 256 {
-                INDEX_OF[id as usize].store(i as u8 + 1, Ordering::Release);
-            }
-        }
-        TOPOLOGY_READY.store(true, Ordering::Release);
+    if let Err(error) = prepare(topology.count()) {
+        return CpuDiscovery {
+            topology,
+            source: error.name(),
+            inventory_complete: false,
+        };
     }
+    let mut storage_ready = true;
+    for (i, id) in topology.iter().enumerate() {
+        let Some(slot) = hw_id_slot(i) else {
+            storage_ready = false;
+            break;
+        };
+        slot.store(id, Ordering::Relaxed);
+        if id < 256 {
+            INDEX_OF[id as usize].store(i as u8 + 1, Ordering::Release);
+        }
+    }
+    if !storage_ready {
+        return CpuDiscovery {
+            topology,
+            source: "system.cpu.error.apic_id_storage",
+            inventory_complete: false,
+        };
+    }
+    TOPOLOGY_READY.store(true, Ordering::Release);
     CpuDiscovery {
         topology,
         source,
@@ -221,7 +277,7 @@ pub fn init_boot(boot: &BootSpec) -> CpuDiscovery {
 /// 同 `Platform::cpu_start`。
 pub unsafe fn start(req: &CpuStart<space::SpaceRoot>, frame: Option<PhysFrame>) -> Result<(), SmpError> {
     let frame = frame.ok_or(SmpError::StartFailed)?;
-    if req.index == 0 || req.index >= MAX_CPUS || req.hw_id >= 256 {
+    if req.index == 0 || hw_id_of(req.index) != Some(req.hw_id) || req.hw_id >= 256 {
         return Err(SmpError::NoSuchCpu);
     }
     if frame.start() >= START_FRAME_LIMIT || req.space.0 >= 1 << 32 || !apic::ready() {
@@ -277,7 +333,9 @@ extern "C" fn ap_entry(index: u64) -> ! {
 
 /// 逻辑下标 `cpu` 的 APIC 标识（未登记时为 `None`）。
 pub fn hw_id_of(cpu: usize) -> Option<u32> {
-    HW_ID.get(cpu).map(|h| h.load(Ordering::Relaxed)).filter(|&h| h != u32::MAX)
+    hw_id_slot(cpu)
+        .map(|h| h.load(Ordering::Relaxed))
+        .filter(|&h| h != u32::MAX)
 }
 
 /// 当前处理器的逻辑下标；APIC 已就绪但标识未登记时失败关闭。
@@ -297,7 +355,7 @@ pub fn cpu_index() -> usize {
         registered,
         TOPOLOGY_READY.load(Ordering::Acquire),
         (bootstrap != u32::MAX).then_some(bootstrap),
-        MAX_CPUS,
+        prepared_cpu_count(),
     ) {
         Ok(index) => index,
         Err(error) => {
@@ -323,7 +381,9 @@ pub fn cpu_index() -> usize {
 
 /// 向逻辑下标 `cpu` 发送核间中断。
 pub fn send_ipi(cpu: usize, kind: IpiKind) -> Result<(), SmpError> {
-    let hw = HW_ID.get(cpu).map(|h| h.load(Ordering::Relaxed)).ok_or(SmpError::NoSuchCpu)?;
+    let hw = hw_id_slot(cpu)
+        .map(|h| h.load(Ordering::Relaxed))
+        .ok_or(SmpError::NoSuchCpu)?;
     if hw >= 256 || !apic::ready() {
         return Err(SmpError::NoSuchCpu);
     }
