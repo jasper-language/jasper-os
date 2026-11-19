@@ -56,12 +56,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "08255fd32068389c225d277fa9460c52cc040c3b9ec042145fb319e64ead981c",
-      "path": "kernel-core/src/net.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "098552ae8d8627202da62cb15acae542ec4158eef01d6c4a4908550224fb96ea",
       "path": "jaso/src/lib.rs",
       "rules": "HC-G1"
@@ -1358,12 +1352,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "dd1073426df327642d87acf23a402bf61783aca7ae587f3bf294f9520b696a56",
-      "path": "lifecycle-model/src/diagnostic_usi.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "dd14fc6e0198f847338398e30b930a64989050e15919264a0a6ee54395a38f94",
       "path": "jaso/src/wire.rs",
       "rules": "HC-G1"
@@ -1599,5 +1587,5 @@
     "user",
     "xtask"
   ],
-  "total": 337
+  "total": 335
 }

@@ -21,7 +21,7 @@ pub const RESPONSE_HEADER_BYTES: usize = 80;
 /// One event record reuses the existing durable diagnostic schema.
 pub const EVENT_BYTES: usize = PERSISTED_EVENT_BYTES;
 /// Maximum events in one response.
-pub const MAX_PAGE_EVENTS: usize = 8;
+pub const MAX_PAGE_EVENTS: usize = 8; // JASPER-HARDCODE-REVIEW: issue=21 source=diagnostic-usi-v1-contract reason=fixed-record-capacity-in-versioned-diagnostic-response
 /// Event-kind wire value meaning no filter.
 pub const ANY_EVENT_KIND: u8 = 0xff;
 

@@ -15,6 +15,7 @@ diagnostic-source-panic-ring	35	policy	panic-and-boot-failure-no-allocation-emer
 smp-shootdown-batch-policy	35	policy	larger-page-ranges-promote-to-one-whole-table-flush
 jaso-wire-v1	33	spec	JASO-isolated-wire-v1-fixed-handle-array
 channel-abi-v1	33	spec	Jasper-Channel-v1-fixed-message-handle-array
+network-object-v1	33	spec	NET-v1-fixed-endpoint-name-field
 irq-policy	33	policy	explicit-IRQ-safety-policy
 linux-poll-scan-policy	35	policy	Issue-35-bounded-Linux-poll-scan
 linux-batch-partial-policy	35	policy	Issue-35-bounded-Linux-batches-return-partial-progress

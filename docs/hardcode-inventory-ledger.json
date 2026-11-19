@@ -1,5 +1,5 @@
 {
-  "baseline_total": 337,
+  "baseline_total": 335,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -13,7 +13,7 @@
     "explicit-safety-policy": 129,
     "platform-adapter": 28,
     "protocol-abi": 38,
-    "runtime-resource-capacity": 62,
+    "runtime-resource-capacity": 60,
     "test-demo-fixture": 6
   },
   "entries": [
@@ -1116,16 +1116,6 @@
       "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
       "rules": "HC-G1",
       "source": "pub const MAX_MODULE_DEPENDENCIES: usize = 16;"
-    },
-    {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "08255fd32068389c225d277fa9460c52cc040c3b9ec042145fb319e64ead981c",
-      "line": 17,
-      "path": "kernel-core/src/net.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
-      "rules": "HC-G1",
-      "source": "pub const MAX_ENDPOINT_NAME_BYTES: usize = 32;"
     },
     {
       "category": "explicit-safety-policy",
@@ -2458,16 +2448,6 @@
       "source": ".unwrap_or(true)"
     },
     {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "dd1073426df327642d87acf23a402bf61783aca7ae587f3bf294f9520b696a56",
-      "line": 24,
-      "path": "lifecycle-model/src/diagnostic_usi.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
-      "rules": "HC-G1",
-      "source": "pub const MAX_PAGE_EVENTS: usize = 8;"
-    },
-    {
       "category": "protocol-abi",
       "count": 1,
       "fingerprint": "03d2b08f13a943bac8cb4adc939bfbc2b637c81d43915cd3dd497fb8a05c48f7",
@@ -2653,7 +2633,7 @@
     "explicit-safety-policy": 145,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 100,
+    "runtime-resource-capacity": 98,
     "test-demo-fixture": 7
   }
 }

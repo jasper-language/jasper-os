@@ -14,7 +14,7 @@ pub const NET_MAJOR: u16 = 1;
 pub const NET_MINOR: u16 = 0;
 pub const NET_PATCH: u16 = 0;
 pub const NET_WIRE_HEADER_BYTES: usize = 16;
-pub const MAX_ENDPOINT_NAME_BYTES: usize = 32;
+pub const MAX_ENDPOINT_NAME_BYTES: usize = 32; // JASPER-HARDCODE-REVIEW: issue=33 source=network-object-v1 reason=fixed-name-field-in-versioned-net-wire-object
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NetVersion {
