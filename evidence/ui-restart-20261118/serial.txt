@@ -1,0 +1,285 @@
+INFO : Framebuffer info: FrameBufferInfo { byte_len: 2764800, width: 1280, height: 720, pixel_format: Bgr, bytes_per_pixel: 3, stride: 1280 }
+INFO : 4th Stage
+INFO : BiosInfo { stage_4: Region { start: 130000, len: 25068 }, kernel: Region { start: 1000000, len: 3d8bf8 }, ramdisk: Region { start: 13d9000, len: 0 }, config_file: Region { start: 13d9000, len: 0 }, last_used_addr: 13d8fff, framebuffer: BiosFramebufferInfo { region: Region { start: fd000000, len: 2a3000 }, width: 500, height: 2d0, bytes_per_pixel: 3, stride: 500, pixel_format: Bgr }, memory_map_addr: 1207c, memory_map_len: 7 }
+INFO : BIOS boot
+INFO : Elf file loaded at Pointer {
+    addr: 0x0000000001000000,
+    metadata: 4033528,
+}
+INFO : virtual_address_offset: 0x10000000000
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(4), offset: 0, virtual_addr: 0, physical_addr: 0, file_size: 177b3c, mem_size: 177b3c, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(5), offset: 177b40, virtual_addr: 178b40, physical_addr: 178b40, file_size: d82cf, mem_size: d82cf, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 24fe10, virtual_addr: 251e10, physical_addr: 251e10, file_size: c190, mem_size: c1f0, align: 1000 })
+INFO : Mapping bss section
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 25bfc0, virtual_addr: 25efc0, physical_addr: 25efc0, file_size: 1275d0, mem_size: 23b6dc, align: 1000 })
+INFO : Mapping bss section
+INFO : Entry point at: 0x10000178dc0
+INFO : Creating GDT at PhysAddr(0x153b000)
+INFO : Map framebuffer
+INFO : Map physical memory
+INFO : Allocate bootinfo
+INFO : Create Memory Map
+INFO : Create bootinfo
+INFO : Jumping to kernel entry point at VirtAddr(0x10000178dc0)
+[JSR-BOOT] jasper-os rust kernel 0.0.1 x86_64
+[JSR-CONFIG] profile=standard valid=ok params=29
+[JSR-CONFIG] timer_hz=100
+[JSR-CONFIG] boot_ticks=25
+[JSR-CONFIG] quantum.0=2
+[JSR-CONFIG] quantum.1=2
+[JSR-CONFIG] quantum.2=4
+[JSR-CONFIG] quantum.3=4
+[JSR-CONFIG] decay_period=8
+[JSR-CONFIG] max_tasks=64
+[JSR-CONFIG] max_rt=8
+[JSR-CONFIG] kernel_stack_bytes=131072
+[JSR-CONFIG] watchdog_ticks=50
+[JSR-CONFIG] watchdog_log=16
+[JSR-CONFIG] cpu_burst_ticks=4
+[JSR-CONFIG] heap_grow_step=65536
+[JSR-CONFIG] heap_budget_permille=250
+[JSR-CONFIG] pressure_low_permille=125
+[JSR-CONFIG] pressure_critical_permille=50
+[JSR-CONFIG] pressure_reserve_frames=256
+[JSR-CONFIG] max_process_frames=0
+[JSR-CONFIG] max_vm_guest_frames=32768
+[JSR-CONFIG] max_map_pages=1024
+[JSR-CONFIG] max_objects=1024
+[JSR-CONFIG] handles_per_process=64
+[JSR-CONFIG] max_endpoints_per_process=64
+[JSR-CONFIG] ipc_max_queue_bytes=1048576
+[JSR-CONFIG] ipc_max_process_bytes=4194304
+[JSR-CONFIG] ipc_max_total_bytes=16777216
+[JSR-CONFIG] trace_capacity=32
+[JSR-CONFIG] irq_queue_len=64
+[JSR-CAP] cpus=128 tasks=64 objects=1024 handles=64 frames=0 rings=0 endpoints=64
+[JSR-BOOT-STAGE] done stage=console done_mask=0x1
+[JSR-GDT] ok
+[JSR-IDT] ok
+[JSR-EXC] breakpoint handler verified
+[JSR-BOOT-STAGE] done stage=platform done_mask=0x3
+[JSR-TICK] n=1
+[JSR-TICK] n=2
+[JSR-TICK] n=3
+[JSR-TICK] n=4
+[JSR-TICK] n=5
+[JSR-TICK] n=6
+[JSR-TICK] n=7
+[JSR-TICK] n=8
+[JSR-TICK] n=9
+[JSR-TICK] n=10
+[JSR-TICK] n=11
+[JSR-TICK] n=12
+[JSR-TICK] n=13
+[JSR-TICK] n=14
+[JSR-TICK] n=15
+[JSR-TICK] n=16
+[JSR-TICK] n=17
+[JSR-TICK] n=18
+[JSR-TICK] n=19
+[JSR-TICK] n=20
+[JSR-TICK] n=21
+[JSR-TICK] n=22
+[JSR-TICK] n=23
+[JSR-TICK] n=24
+[JSR-TICK] n=25
+[JSR-BOOT-STAGE] done stage=timer done_mask=0x7
+[JSR-BOOT-STAGE] done stage=frames done_mask=0xf
+[JSR-BOOT-STAGE] done stage=kernel_map done_mask=0x1f
+[JSR-TERM] capacity input=32768 output=32768 uart_pump=512 available=131641344
+[JSR-DISPLAY-COMPOSITOR] layers=2 visible=2 primary=terminal overlays=bounded alpha=true full_frame=false damage=true overlay_damage=true text_full=true input_capacity=675
+[JSR-BOOT-STAGE] done stage=heap done_mask=0x3f
+[JSR-SPAWN] child_limit=8 tasks=64 source=boot_capacity
+[JSR-WORKLOAD] capacity workloads=64 members=256 tasks=64 budget=131641344 dynamic=true
+[JSR-SCHED] qos quantum=[1, 1, 1, 1] decay=8 owed_cap=2000 timer_hz=100 tasks=64 dynamic=true
+[JSR-RING] capacity rings=64 in_flight=1024 tasks=64 objects=1024 dynamic=true
+[JSR-IPC] capacity endpoints=8 queue_bytes=128556 process_bytes=514224 total_bytes=8227584 tasks=64 objects=1024 budget=131641344 dynamic=true
+[JSR-SANDBOX] capacity sandboxes=64 workloads=64 budget=131641344 dynamic=true
+[JSR-SANDBOX-STORAGE] capacity images=128 layers=1606 volumes=502 sandboxes=64 budget=131641344 dynamic=true
+[JSR-BOOT-STAGE] done stage=capacity done_mask=0x7f
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=720 stride=1280 bpp=3 frames=1 keys=0 input_capacity=675 dropped=0 compositor_layers=2 pressed=0 released=0
+[JSR-BOOT-STAGE] done stage=devices done_mask=0xff
+[JSR-PROFILE] table idx=0 name=headless valid=true modules=9 services=25 capabilities=10 min_tasks=32 min_objects=256 hot_load=0
+[JSR-PROFILE] table idx=1 name=headless-min valid=true modules=5 services=20 capabilities=5 min_tasks=32 min_objects=128 hot_load=0
+[JSR-PROFILE] active name=headless valid=true params=standard modules=9 services=25 capabilities=10 guarantees=2 dynamic=true
+[JSR-BOOT-STAGE] done stage=profile done_mask=0x1ff
+[JSR-ASSEMBLY] capacity modules=9 capabilities=10 services=25 metadata=1870 budget=128556 dynamic=true
+[JSR-LIFE] release_dispatch closing_locks=true outside_lock=5 none=11 none_empty=true destroyed_when_none=0 hooks_match_registry=true
+[JSR-ASSEMBLY] activate module=core objects=1024
+[JSR-ASSEMBLY] activate module=sched tasks=64 stacks=64
+[JSR-ASSEMBLY] activate module=realtime rt=8
+[JSR-ASSEMBLY] activate module=job queue=empty
+[JSR-PCI] dev bdf=00:00.0 vendor=0x8086 device=0x1237 class=0x060000 bars=0 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:01.0 vendor=0x8086 device=0x7000 class=0x060100 bars=0 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:01.1 vendor=0x8086 device=0x7010 class=0x010180 bars=1 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:01.3 vendor=0x8086 device=0x7113 class=0x068000 bars=0 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:02.0 vendor=0x1234 device=0x1111 class=0x030000 bars=2 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:03.0 vendor=0x8086 device=0x100e class=0x020000 bars=2 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-ASSEMBLY] activate module=devices pci=port functions=6
+[JSR-ASSEMBLY] module=core order=0 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=memory order=1 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=time order=2 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=sched order=3 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=channel order=4 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=realtime order=5 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=job order=6 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=async order=7 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=devices order=8 state=ready reason= version=1.0.0
+[JSR-CAP] boot source=derived objects=1024 tasks=64 rt=8 task_stacks=64 mem_limit=98731008
+[JSR-K06] profile=headless ops=109 kernel_base=72 module_service=37 active_unavailable=0 unclaimed=0 gate_mismatch=0 ring=available time=available sync=available
+[JSR-ASSEMBLY] summary profile=headless modules=9 ready=9 failed=0 blocked=0 declared=10 published=10 pre_publish=0 audit=ok restart=system.module.error.already_started stop_core=system.module.error.in_use stop_devices=system.module.error.permanent generation=0 readers=0
+[JSR-BOOT-STAGE] done stage=assembly done_mask=0x3ff
+[JSR-SCHED] mode=multi
+[JSR-CAPABILITY] domain=system.memory.boot-map state=verified inventory=complete discovered=11 supported=11 admitted=11 rejected=0 unsupported=0 enabled=11 exposed=11 verified=11 fault=none
+[JSR-CAPABILITY] domain=system.cpu.xstate state=unsupported inventory=complete discovered=0 supported=0 admitted=0 rejected=0 unsupported=0 enabled=0 exposed=0 verified=0 fault=none
+[JSR-CAPABILITY] domain=system.device.pci-capabilities state=unsupported inventory=complete discovered=0 supported=0 admitted=0 rejected=0 unsupported=0 enabled=0 exposed=0 verified=0 fault=none
+[JSR-CAPABILITY] domain=system.network state=discovered inventory=complete discovered=1 supported=0 admitted=0 rejected=0 unsupported=1 enabled=0 exposed=0 verified=0 fault=none
+[JSR-CAPABILITY] domain=system.device.gpu state=discovered inventory=complete discovered=1 supported=0 admitted=0 rejected=0 unsupported=1 enabled=0 exposed=0 verified=0 fault=none
+[JSR-BOOT-STAGE] done stage=sched_mode done_mask=0x7ff
+[JSR-BOOT-STAGE] done stage=space done_mask=0xfff
+[JSR-IOAPIC] controllers=1 pins=24 exposed=2 unsupported=22 invalid=0 dropped=0
+[JSR-IOAPIC] line=0 name=serial vector=80 gsi_pin=4 controlled=true
+[JSR-IOAPIC] line=1 name=rtc vector=81 gsi_pin=8 controlled=true
+[JSR-SMP] start present=2 online=2 failed=0 source=acpi.madt dropped=0 disabled=0
+[JSR-IRQ] topology source=smp_ready discovered=2 admitted=2 rejected=0 capacity=2 budget=128556 dynamic=true complete=true
+[JSR-BOOT-STAGE] done stage=smp done_mask=0x1fff
+[JSR-STAGE] user_runtime embedded_programs=true
+[JSR-BOOT-STAGE] done stage=user_runtime done_mask=0x9fff
+[JSR-PLAN] finish plan=ui-process stages=0x9fff cases=0
+[JSR-PROC] event=system.process.created id=0x2 name=ui-process-host memory_cap_capacity=1147 memory_cap_metadata_budget=4113792 memory_budget=131641344 process_slots=64 dynamic=true
+[JSR-PROC] event=system.process.created id=0x4 name=ui-service memory_cap_capacity=1147 memory_cap_metadata_budget=4113792 memory_budget=131641344 process_slots=64 dynamic=true
+[JSR-IPC] event=system.channel.created a=0x5 b=0x6
+[JSR-UI-PROCESS] waiting_real_key=true native_enter=0x0103
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=720 stride=1280 bpp=3 frames=2 keys=1 input_capacity=675 dropped=0 compositor_layers=2 pressed=1 released=0
+[JSR-UI-PROCESS] native_keyboard=true native_code=0x0103 jsui_code=28
+[JSR-PROC] event=system.task.spawned process=0x4 task=1001 task_obj=0x8 name=ui-service
+[JSR-SEC3] policy=installed epoch=2 audit_capacity=256
+[JSR-SYSCALL] enter name=system.memory.map id=19 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.memory.map id=19 ret=0 status=OK
+[JSR-SYSCALL] enter name=system.console.write id=4 task=ui-service effects=write
+[JSR-USERTEXT] task=ui-service bytes=45 text=ui-service: ready protocol=1 engine=cpu-ready
+[JSR-SYSCALL] exit name=system.console.write id=4 ret=45 status=OK
+[JSR-SYSCALL] enter name=system.memory.map id=19 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.memory.map id=19 ret=0 status=OK
+[JSR-SYSCALL] enter name=system.channel.recv id=15 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.channel.recv id=15 ret=574 status=OK
+[JSR-SYSCALL] enter name=system.memory.map id=19 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.memory.map id=19 ret=0 status=OK
+[JSR-SYSCALL] enter name=system.channel.send id=14 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.channel.send id=14 ret=16424 status=OK
+[JSR-SYSCALL] enter name=system.console.write id=4 task=ui-service effects=write
+[JSR-USERTEXT] task=ui-service bytes=50 text=ui-service: presented 64x64 bytes=16384 sequence=1
+[JSR-SYSCALL] exit name=system.console.write id=4 ret=50 status=OK
+[JSR-SYSCALL] enter name=system.memory.map id=19 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.memory.map id=19 ret=0 status=OK
+[JSR-SYSCALL] enter name=system.channel.recv id=15 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.channel.recv id=15 ret=375 status=OK
+[JSR-SYSCALL] enter name=system.memory.map id=19 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.memory.map id=19 ret=0 status=OK
+[JSR-SYSCALL] enter name=system.channel.send id=14 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.channel.send id=14 ret=16424 status=OK
+[JSR-SYSCALL] enter name=system.console.write id=4 task=ui-service effects=write
+[JSR-USERTEXT] task=ui-service bytes=48 text=ui-service: patch accepted revision=2 presents=2
+[JSR-SYSCALL] exit name=system.console.write id=4 ret=48 status=OK
+[JSR-SYSCALL] enter name=system.channel.recv id=15 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.channel.recv id=15 ret=48 status=OK
+[JSR-SYSCALL] enter name=system.channel.send id=14 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.channel.send id=14 ret=16424 status=OK
+[JSR-SYSCALL] enter name=system.console.write id=4 task=ui-service effects=write
+[JSR-USERTEXT] task=ui-service bytes=45 text=ui-service: input accepted code=28 presents=3
+[JSR-SYSCALL] exit name=system.console.write id=4 ret=45 status=OK
+[JSR-SYSCALL] enter name=system.channel.recv id=15 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.channel.recv id=15 ret=40 status=OK
+[JSR-SYSCALL] enter name=system.console.write id=4 task=ui-service effects=write
+[JSR-USERTEXT] task=ui-service bytes=29 text=ui-service: closed presents=3
+[JSR-SYSCALL] exit name=system.console.write id=4 ret=29 status=OK
+[JSR-SYSCALL] enter name=system.handle.close id=6 task=ui-service effects=write
+[JSR-IPC] event=system.channel.closing endpoint=0x6 dropped_messages=0
+[JSR-SYSCALL] exit name=system.handle.close id=6 ret=0 status=OK
+[JSR-LIFE] cleanup destroy type=Endpoint id=0x6
+[JSR-SYSCALL] enter name=system.process.exit id=16 task=ui-service effects=irreversible
+[JSR-PROC] event=system.process.exiting id=0x4 code=0 handles_closed=0
+[JSR-PROC] event=system.process.exited id=0x4 name=ui-service code=0 threads=1 handles_closed=0
+[JSR-PROC] event=system.task.exit_switch task=1001 cause=process.exit
+[JSR-IPC] event=system.channel.closing endpoint=0x5 dropped_messages=3
+[JSR-PROC] event=system.process.reaped id=0x4 frames=390 quarantined=0 threads=1 code=0
+[JSR-PROC] event=system.process.reaped id=0x2 frames=0 quarantined=0 threads=0 code=0
+[JSR-LIFE] cleanup destroy type=Task id=0x8
+[JSR-LIFE] cleanup destroy type=Endpoint id=0x5
+[JSR-LIFE] cleanup destroy type=Process id=0x4
+[JSR-LIFE] cleanup destroy type=Process id=0x2
+[JSR-LIFE] cleanup destroy type=ExitState id=0x7
+[JSR-LIFE] cleanup destroy type=ExitState id=0x3
+[JSR-LIFE] cleanup destroy type=ExitState id=0x1
+[JSR-UI-PROCESS-BASELINE] before=Baseline { free_frames: 125720, objects: 0, pending: 0, pins: (0, 0) } after=Baseline { free_frames: 125720, objects: 0, pending: 0, pins: (0, 0) } queued=0/0
+[JSR-DISPLAY-UI] presented=true width=64 height=64 x=608 y=328 layers=3
+[JSR-UI-SESSION] round=0 started=true channel=true request_queued=true engine=cpu rendered=true present=true patch=true input=true native_keyboard=true frames=3 display=true exit=0 response=true terminal_alive=true resources=true checks=15 failed=0
+[JSR-PROC] event=system.process.created id=0x100000002 name=ui-process-host memory_cap_capacity=1147 memory_cap_metadata_budget=4113792 memory_budget=131641344 process_slots=64 dynamic=true
+[JSR-PROC] event=system.process.created id=0x100000004 name=ui-service memory_cap_capacity=1147 memory_cap_metadata_budget=4113792 memory_budget=131641344 process_slots=64 dynamic=true
+[JSR-IPC] event=system.channel.created a=0x100000005 b=0x100000006
+[JSR-UI-PROCESS] waiting_real_key=true native_enter=0x0103
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=720 stride=1280 bpp=3 frames=4 keys=1 input_capacity=675 dropped=0 compositor_layers=3 pressed=1 released=1
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=720 stride=1280 bpp=3 frames=6 keys=2 input_capacity=675 dropped=0 compositor_layers=3 pressed=2 released=2
+[JSR-UI-PROCESS] native_keyboard=true native_code=0x0103 jsui_code=28
+[JSR-PROC] event=system.task.spawned process=0x100000004 task=1002 task_obj=0x100000008 name=ui-service
+[JSR-SYSCALL] enter name=system.memory.map id=19 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.memory.map id=19 ret=0 status=OK
+[JSR-SYSCALL] enter name=system.console.write id=4 task=ui-service effects=write
+[JSR-USERTEXT] task=ui-service bytes=45 text=ui-service: ready protocol=1 engine=cpu-ready
+[JSR-SYSCALL] exit name=system.console.write id=4 ret=45 status=OK
+[JSR-SYSCALL] enter name=system.memory.map id=19 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.memory.map id=19 ret=0 status=OK
+[JSR-SYSCALL] enter name=system.channel.recv id=15 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.channel.recv id=15 ret=574 status=OK
+[JSR-SYSCALL] enter name=system.memory.map id=19 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.memory.map id=19 ret=0 status=OK
+[JSR-SYSCALL] enter name=system.channel.send id=14 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.channel.send id=14 ret=16424 status=OK
+[JSR-SYSCALL] enter name=system.console.write id=4 task=ui-service effects=write
+[JSR-USERTEXT] task=ui-service bytes=50 text=ui-service: presented 64x64 bytes=16384 sequence=1
+[JSR-SYSCALL] exit name=system.console.write id=4 ret=50 status=OK
+[JSR-SYSCALL] enter name=system.memory.map id=19 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.memory.map id=19 ret=0 status=OK
+[JSR-SYSCALL] enter name=system.channel.recv id=15 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.channel.recv id=15 ret=375 status=OK
+[JSR-SYSCALL] enter name=system.memory.map id=19 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.memory.map id=19 ret=0 status=OK
+[JSR-SYSCALL] enter name=system.channel.send id=14 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.channel.send id=14 ret=16424 status=OK
+[JSR-SYSCALL] enter name=system.console.write id=4 task=ui-service effects=write
+[JSR-USERTEXT] task=ui-service bytes=48 text=ui-service: patch accepted revision=2 presents=2
+[JSR-SYSCALL] exit name=system.console.write id=4 ret=48 status=OK
+[JSR-SYSCALL] enter name=system.channel.recv id=15 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.channel.recv id=15 ret=48 status=OK
+[JSR-SYSCALL] enter name=system.channel.send id=14 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.channel.send id=14 ret=16424 status=OK
+[JSR-SYSCALL] enter name=system.console.write id=4 task=ui-service effects=write
+[JSR-USERTEXT] task=ui-service bytes=45 text=ui-service: input accepted code=28 presents=3
+[JSR-SYSCALL] exit name=system.console.write id=4 ret=45 status=OK
+[JSR-SYSCALL] enter name=system.channel.recv id=15 task=ui-service effects=write
+[JSR-SYSCALL] exit name=system.channel.recv id=15 ret=40 status=OK
+[JSR-SYSCALL] enter name=system.console.write id=4 task=ui-service effects=write
+[JSR-USERTEXT] task=ui-service bytes=29 text=ui-service: closed presents=3
+[JSR-SYSCALL] exit name=system.console.write id=4 ret=29 status=OK
+[JSR-SYSCALL] enter name=system.handle.close id=6 task=ui-service effects=write
+[JSR-IPC] event=system.channel.closing endpoint=0x100000006 dropped_messages=0
+[JSR-SYSCALL] exit name=system.handle.close id=6 ret=0 status=OK
+[JSR-LIFE] cleanup destroy type=Endpoint id=0x100000006
+[JSR-SYSCALL] enter name=system.process.exit id=16 task=ui-service effects=irreversible
+[JSR-PROC] event=system.process.exiting id=0x100000004 code=0 handles_closed=0
+[JSR-PROC] event=system.process.exited id=0x100000004 name=ui-service code=0 threads=1 handles_closed=0
+[JSR-PROC] event=system.task.exit_switch task=1002 cause=process.exit
+[JSR-IPC] event=system.channel.closing endpoint=0x100000005 dropped_messages=3
+[JSR-PROC] event=system.process.reaped id=0x100000004 frames=390 quarantined=0 threads=1 code=0
+[JSR-PROC] event=system.process.reaped id=0x100000002 frames=0 quarantined=0 threads=0 code=0
+[JSR-LIFE] cleanup destroy type=Task id=0x100000008
+[JSR-LIFE] cleanup destroy type=Endpoint id=0x100000005
+[JSR-LIFE] cleanup destroy type=Process id=0x100000004
+[JSR-LIFE] cleanup destroy type=Process id=0x100000002
+[JSR-LIFE] cleanup destroy type=ExitState id=0x100000007
+[JSR-LIFE] cleanup destroy type=ExitState id=0x100000003
+[JSR-LIFE] cleanup destroy type=ExitState id=0x100000001
+[JSR-UI-PROCESS-BASELINE] before=Baseline { free_frames: 125540, objects: 0, pending: 0, pins: (0, 0) } after=Baseline { free_frames: 125540, objects: 0, pending: 0, pins: (0, 0) } queued=0/0
+[JSR-DISPLAY-UI] presented=true width=64 height=64 x=608 y=328 layers=3
+[JSR-UI-SESSION] round=1 started=true channel=true request_queued=true engine=cpu rendered=true present=true patch=true input=true native_keyboard=true frames=3 display=true exit=0 response=true terminal_alive=true resources=true checks=30 failed=0
+[JSR-UI-PROCESS] rounds=2 started=true channel=true request_queued=true engine=cpu rendered=true present=true patch=true input=true native_keyboard=true frames=6 display=true exit=0 response=true terminal_alive=true restart=true resources=true checks=31 failed=0

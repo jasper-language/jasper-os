@@ -5,7 +5,8 @@
 状态：**精确版本与边界已锁定；`no_std-core` 已在 Jasper-OS CPL3 UI Service
 中完成 Typed UI IR → CPU RGBA8 → JSUI Scene/Patch/Input/Present 持续会话 →
 原生 Compositor/framebuffer 集成，并接通 QEMU i8042/PS-2 → 原生输入队列 →
-JSUI Input 的键盘路径。物理硬件输入、重启和物理显示资格仍未完成。**
+JSUI Input 的键盘路径；同一镜像内两个 Service 会话已顺序重建并逐轮回收。
+物理硬件输入、崩溃恢复和物理显示资格仍未完成。**
 
 ## 精确版本
 
@@ -38,11 +39,12 @@ cargo test -p user-ui-service --features native-engine-core --lib
 ```text
 ui-process: PASS cpl3=true channel=true jsui=true engine=cpu \
   rendered=true present=true patch=true input=true native_keyboard=true \
-  frames=3 display=true exit=0 terminal=true resources=true
+  frames=6 display=true exit=0 terminal=true restart=true resources=true
 qemu_rc=33
 ```
 
-证据为 `evidence/ui-native-keyboard-20261118/`，来源审计见
+键盘证据为 `evidence/ui-native-keyboard-20261118/`，双会话证据为
+`evidence/ui-restart-20261118/`，来源审计见
 `evidence/ui-engine-cpu-b21dec1/README.md`。这只关闭首帧集成，不关闭 UI-OS-1。
 
 ## 宿主映射
@@ -70,8 +72,8 @@ qemu_rc=33
    Compositor 图层写入 framebuffer；Patch 推进 revision 并改变像素，Input 帧可驱动焦点节点 Activate 并产生后续帧。
    QEMU PS/2 Enter 经原生 i8042/输入队列进入 JSUI Input，驱动焦点节点
    Activate 并产生后续帧。物理硬件输入、显示资格和 Surface 重建仍未完成。
-4. 在同一镜像完成首帧、输入、present、服务死亡、重启、资源回收、越权负例和
-   Console 救援；之后才进入 LC-2 签名升级、回滚和跨版本验收。
+4. 顺序正常退出和重建已完成；继续在同一镜像完成崩溃死亡、Surface retire、
+   越权负例和 Console 救援，之后才进入 LC-2 签名升级、回滚和跨版本验收。
 
 ## 当前禁止宣称
 

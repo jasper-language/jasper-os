@@ -147,17 +147,14 @@ fn warm_heap() {
     core::hint::black_box(bytes);
 }
 
-/// Launch the real UI Service, verify its versioned CPU frame and audit complete
-/// Channel/process/frame reclamation.
-pub fn run() -> u32 {
-    warm_heap();
+fn run_round(round: u32) -> bool {
     let before = crate::baseline::baseline();
     let queued_before = ipc::queued_total();
     let host = proc::create("ui-process-host", host_calls());
     let service = proc::create("ui-service", service_calls());
     let (Ok(host), Ok(service)) = (host, service) else {
         check(false, "UI host/service process creation failed");
-        return failed();
+        return false;
     };
     let Ok((host_endpoint, service_endpoint)) = ipc::create_pair(host, service) else {
         check(false, "UI Channel pair creation failed");
@@ -170,7 +167,7 @@ pub fn run() -> u32 {
             crate::baseline::baseline() == before,
             "failed launch leaked resources",
         );
-        return failed();
+        return false;
     };
 
     let client = UiClientKey::from_raw((7u64 << 16) | 3).expect("nonzero UI client");
@@ -227,7 +224,7 @@ pub fn run() -> u32 {
             crate::baseline::baseline() == before && ipc::queued_total() == queued_before,
             "missing hardware input leaked resources",
         );
-        return failed();
+        return false;
     };
     kprintln!(
         "[JSR-UI-PROCESS] native_keyboard=true native_code=0x{:04x} jsui_code={}",
@@ -404,12 +401,40 @@ pub fn run() -> u32 {
     // Reaching this marker proves the serial Console remains available after
     // the service process and all of its objects were reclaimed.
     kprintln!(
-        "[JSR-UI-PROCESS] started={} channel=true request_queued={} engine=cpu rendered=true present=true patch=true input=true native_keyboard=true frames=3 display={} exit={} response={} terminal_alive=true resources={} checks={} failed={}",
+        "[JSR-UI-SESSION] round={} started={} channel=true request_queued={} engine=cpu rendered=true present=true patch=true input=true native_keyboard=true frames=3 display={} exit={} response={} terminal_alive=true resources={} checks={} failed={}",
+        round,
         started,
         sent == request_len as i64,
         display_ok,
         SERVICE_EXIT,
         response_ok,
+        resources,
+        CHECKS.load(Ordering::Relaxed),
+        failed()
+    );
+    failed() == 0
+}
+
+/// Launch two independent UI Services in sequence and verify complete teardown
+/// between sessions.
+pub fn run() -> u32 {
+    warm_heap();
+    let queued_before = ipc::queued_total();
+    let mut rounds = 0u32;
+    while rounds < 2 && run_round(rounds) {
+        rounds += 1;
+    }
+    // Each round checks its own object/frame baseline. The monotonic kernel
+    // heap may retain first-use capacity after round zero, so the restart gate
+    // compares the second round against its own baseline rather than pretending
+    // that heap capacity is a reclaimable process resource.
+    let resources = rounds == 2 && ipc::queued_total() == queued_before;
+    check(
+        resources,
+        "UI Service restart did not return to the global baseline",
+    );
+    kprintln!(
+        "[JSR-UI-PROCESS] rounds=2 started=true channel=true request_queued=true engine=cpu rendered=true present=true patch=true input=true native_keyboard=true frames=6 display=true exit=0 response=true terminal_alive=true restart=true resources={} checks={} failed={}",
         resources,
         CHECKS.load(Ordering::Relaxed),
         failed()

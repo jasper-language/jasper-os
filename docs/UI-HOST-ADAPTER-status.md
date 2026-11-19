@@ -35,6 +35,9 @@ QEMU i8042/PS-2 键盘到 JSUI Input 的原生路径已通过；物理键盘、�
   Service Channel，在 CPL3 调度 Service，并检查 64×64 RGBA8 像素、退出码 0、
   Service/Channel 资源基线、Console 存活；随后把 Present Surface 注册为原生
   Compositor 第 3 层，中心写入真实 framebuffer 并回读像素；
+- 同一镜像连续创建两轮独立的 host/service 进程、Channel 和 Surface generation；
+  每轮完成 Scene/Patch/PS-2 Enter/Present 三帧后正常退出，逐轮检查对象、队列、
+  pins 和页帧回到该轮基线，总计六帧；
 - `kernel-core::display_input::PixelLayout` 增加 RGBA，Compositor 与 framebuffer
   写入路径按 R/G/B/A 顺序处理，匹配 CPU Engine 的 RGBA8 输出。
 
@@ -68,12 +71,13 @@ cargo test -p kernel-core 'display_'
 bash scripts/ui-process-check.sh
 ui-process: PASS cpl3=true channel=true jsui=true \
   engine=cpu rendered=true present=true patch=true input=true native_keyboard=true \
-  frames=3 display=true exit=0 terminal=true resources=true
+  frames=6 display=true exit=0 terminal=true restart=true resources=true
 qemu_rc=33
 ```
 
-证据见 `evidence/ui-native-keyboard-20261118/`。这证明 QEMU 的真实 emulated PS/2
-设备到原生驱动的完整路径，不冒充物理键盘或 Pixel 硬件验收。
+键盘路径证据见 `evidence/ui-native-keyboard-20261118/`，双会话重启证据见
+`evidence/ui-restart-20261118/`。这些结果不冒充物理键盘、Pixel 硬件或崩溃恢复
+验收。
 
 ## 尚未完成
 

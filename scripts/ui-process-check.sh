@@ -56,11 +56,11 @@ else
   remaining=$((LIMIT * 10))
   sent=0
   while [ "$remaining" -gt 0 ] && kill -0 "$qemu_pid" 2>/dev/null; do
-    if [ "$sent" = 0 ] && grep -aFq 'waiting_real_key=true' "$OUT/serial.log" 2>/dev/null; then
-      if printf 'sendkey ret\n' | timeout 5 socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1; then
-        sent=1
-      fi
-    fi
+    waits=$(grep -acF 'waiting_real_key=true' "$OUT/serial.log" 2>/dev/null || true)
+    while [ "$sent" -lt "${waits:-0}" ]; do
+      printf 'sendkey ret\n' | timeout 5 socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || break
+      sent=$((sent + 1))
+    done
     sleep 0.1
     remaining=$((remaining - 1))
   done
@@ -78,12 +78,15 @@ grep -aFq 'ui-service: presented 64x64 bytes=16384 sequence=1' "$OUT/serial.log"
 grep -aFq 'ui-service: patch accepted revision=2 presents=2' "$OUT/serial.log"
 grep -aFq 'ui-service: input accepted code=28 presents=3' "$OUT/serial.log"
 grep -aFq 'ui-service: closed presents=3' "$OUT/serial.log"
-grep -aFq '[JSR-UI-PROCESS] started=true channel=true request_queued=true engine=cpu rendered=true present=true patch=true input=true native_keyboard=true frames=3 display=true exit=0 response=true terminal_alive=true resources=true' "$OUT/serial.log"
+grep -aFq '[JSR-UI-SESSION] round=0 started=true channel=true request_queued=true engine=cpu rendered=true present=true patch=true input=true native_keyboard=true frames=3 display=true exit=0 response=true terminal_alive=true resources=true' "$OUT/serial.log"
+grep -aFq '[JSR-UI-SESSION] round=1 started=true channel=true request_queued=true engine=cpu rendered=true present=true patch=true input=true native_keyboard=true frames=3 display=true exit=0 response=true terminal_alive=true resources=true' "$OUT/serial.log"
+grep -aFq '[JSR-UI-PROCESS] rounds=2 started=true channel=true request_queued=true engine=cpu rendered=true present=true patch=true input=true native_keyboard=true frames=6 display=true exit=0 response=true terminal_alive=true restart=true resources=true' "$OUT/serial.log"
 grep -aFq '[JSR-DISPLAY-UI] presented=true' "$OUT/serial.log"
 ! grep -aEq 'panicked|JSR-PANIC|JSR-UI-PROCESS-FAIL' "$OUT/serial.log"
+printf 'PASS\n' >"$OUT/PASS"
 
 printf '%s\n' \
-  "ui-process: PASS cpl3=true channel=true jsui=true engine=cpu rendered=true present=true patch=true input=true native_keyboard=true frames=3 display=true exit=0 terminal=true resources=true" \
+  "ui-process: PASS cpl3=true channel=true jsui=true engine=cpu rendered=true present=true patch=true input=true native_keyboard=true frames=6 display=true exit=0 terminal=true restart=true resources=true" \
   "engine_commit=b21dec1ae504a06923defcc715722c7b9e9c1dc8" \
   "qemu_rc=$rc" \
   "evidence=$OUT"
