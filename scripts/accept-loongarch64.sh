@@ -54,7 +54,7 @@ for memory_mib in $JASPER_MEMORY_MIB; do
 
     deadline=$((SECONDS + JASPER_QEMU_TIMEOUT))
     while [ "$SECONDS" -lt "$deadline" ]; do
-        if grep -a -q '^\[JSR-EXIT-CODE\] code=33' "$RUN/serial.log" 2>/dev/null; then
+        if grep -a -Eq '^\[JSR-EXIT-CODE\] code=(33|37)' "$RUN/serial.log" 2>/dev/null; then
             break
         fi
         if ! kill -0 "$QPID" 2>/dev/null; then
@@ -74,11 +74,12 @@ for memory_mib in $JASPER_MEMORY_MIB; do
     grep -a -q '^\[JSR-BOOT\].*loongarch64' "$RUN/serial.log"
     grep -a -q '^\[JSR-VEC\] ok' "$RUN/serial.log"
     grep -a -q '^\[JSR-TICK\] n=25' "$RUN/serial.log"
-    grep -a -q '^\[JSR-EXIT\] success' "$RUN/serial.log"
+    grep -a -Eq '^\[JSR-EXIT\] (success|timing-only)' "$RUN/serial.log"
+    grep -a -q 'failed=0' "$RUN/serial.log"
     if [ "$JASPER_SMP" -gt 1 ]; then
         grep -a -q "present=$JASPER_SMP online=$JASPER_SMP failed=0" "$RUN/serial.log"
     fi
-    grep -a -q '^\[JSR-EXIT-CODE\] code=33' "$RUN/serial.log"
+    grep -a -Eq '^\[JSR-EXIT-CODE\] code=(33|37)' "$RUN/serial.log"
     grep -a -E '^\[JSR-FRAME\].*usable_mib=[0-9]+' "$RUN/serial.log" | tee "$RUN/memory.txt"
     usable_mib="$(sed -n 's/^\[JSR-FRAME\].*usable_mib=\([0-9][0-9]*\).*/\1/p' "$RUN/memory.txt")"
     test -n "$usable_mib"

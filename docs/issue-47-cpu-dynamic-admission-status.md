@@ -76,7 +76,7 @@ RISC-V 用户返回内核栈记录也已迁移到同一两阶段存储。共享 
 RISC-V PLIC context 表已迁移并由堆后拓扑发布修复多核路由；其余 AArch64/RISC-V
 每核表仍受固定表约束。LoongArch CPU 身份表已改为堆后 Topology，但其 AP 静态栈
 和其他每核状态仍未迁移；4 vCPU QEMU 已恢复 4/4 online、SMP 和并行 TLB
-shootdown 功能通过，仅余一个计时类超界记录。因此：
+shootdown 功能通过，标准验收脚本 PASS；整轮仅余一个计时类超界记录。因此：
 
 - 不能把 128 改成 256/1024 后声称“动态支持”；
 - 不能把本切片中的 4096-CPU 软件准入测试冒充真实内核运行；

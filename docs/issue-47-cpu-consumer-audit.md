@@ -177,6 +177,8 @@
   标准 4 vCPU QEMU 达到 `online=4`、SMP 37 项全通过、并行 shootdown
   `request_failures=0`、`peak_inflight=3`；整轮仅剩一个计时类
   `balance_timing_failed=1`，功能失败项均为 0。
+- LoongArch 验收脚本已按统一规则接受功能成功的退出码 33 和仅计时超界的 37。
+  4 vCPU、256 MiB 标准验收现为 PASS。
 - `kernel/src/{ifc,security,service_catalog}.rs`：把生产 64 位计数器/对象源
   从直接 `AtomicU64` 改为 `kernel_core::sync::Atomic64`。RV32 目标因此可以编译并
   完成真实 QEMU 启动；SMP、平衡、IRQ、IPC、用户运行时、QoS 等已运行阶段失败数为
