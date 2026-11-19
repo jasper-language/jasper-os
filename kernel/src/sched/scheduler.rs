@@ -41,7 +41,8 @@
 
 use alloc::boxed::Box;
 use crate::arch::TaskContext;
-use crate::task::{Task, TaskId, TaskState};
+use crate::task::{Task, TaskAffinity, TaskId, TaskState};
+use kernel_core::cpu_bitmap::CpuBitmap;
 use kernel_core::deadline::{Deadline, ABSENT as NO_DEADLINE};
 use kernel_core::deadline_forest::DeadlineForest;
 use kernel_core::task_index::{TaskIndex, Node as IndexNode};
@@ -826,6 +827,96 @@ pub struct BudgetWindowReport {
     pub total: u64,
 }
 
+/// Contiguous heap-backed affinity words for every task slot.
+struct CpuAffinityTable {
+    words: Box<[u64]>,
+    words_per_slot: usize,
+    slots: usize,
+}
+
+impl CpuAffinityTable {
+    fn new(slots: usize, cpus: usize) -> Result<Self, kernel_core::cpu_bitmap::CpuBitmapError> {
+        let words_per_slot = cpus
+            .checked_add(63)
+            .map(|bits| bits / 64)
+            .ok_or(kernel_core::cpu_bitmap::CpuBitmapError::InvalidCpu)?;
+        let words = slots
+            .checked_mul(words_per_slot)
+            .ok_or(kernel_core::cpu_bitmap::CpuBitmapError::InvalidCpu)?;
+        let mut storage = alloc::vec::Vec::new();
+        storage
+            .try_reserve_exact(words)
+            .map_err(|_| kernel_core::cpu_bitmap::CpuBitmapError::Allocation)?;
+        storage.resize(words, 0);
+        Ok(Self {
+            words: storage.into_boxed_slice(),
+            words_per_slot,
+            slots,
+        })
+    }
+
+    fn view(&self, slot: usize) -> Option<CpuMembershipRef<'_>> {
+        if slot >= self.slots {
+            return None;
+        }
+        let start = slot.checked_mul(self.words_per_slot)?;
+        let end = start.checked_add(self.words_per_slot)?;
+        self.words.get(start..end).map(CpuMembershipRef::Words)
+    }
+
+    fn copy_cpu_set(&mut self, slot: usize, set: CpuSet) -> bool {
+        if slot >= self.slots {
+            return false;
+        }
+        let start = slot * self.words_per_slot;
+        let end = start + self.words_per_slot;
+        self.words[start..end].fill(0);
+        for cpu in set.iter() {
+            let word = cpu / 64;
+            if word >= self.words_per_slot {
+                return false;
+            }
+            self.words[start + word] |= 1u64 << (cpu % 64);
+        }
+        true
+    }
+
+    fn copy_slot(&mut self, target: usize, source: usize) -> bool {
+        if target >= self.slots || source >= self.slots {
+            return false;
+        }
+        let dst = target * self.words_per_slot;
+        let src = source * self.words_per_slot;
+        self.words.copy_within(src..src + self.words_per_slot, dst);
+        true
+    }
+
+    fn copy_view(&mut self, target: usize, source: CpuMembershipRef<'_>) -> bool {
+        if target >= self.slots {
+            return false;
+        }
+        let mut fits = true;
+        source.for_each(|cpu| {
+            if cpu / 64 >= self.words_per_slot {
+                fits = false;
+            }
+        });
+        if !fits {
+            return false;
+        }
+        let start = target * self.words_per_slot;
+        self.words[start..start + self.words_per_slot].fill(0);
+        source.for_each(|cpu| {
+            self.words[start + cpu / 64] |= 1u64 << (cpu % 64);
+        });
+        true
+    }
+
+    fn to_cpu_set(&self, slot: usize) -> Option<CpuSet> {
+        self.view(slot)?.to_cpu_set()
+    }
+}
+
 /// 调度机制本体。槽位总数（含引导线程）在启动期决定，见 [`Scheduler::grow`]。
 pub struct Scheduler {
     #[cfg(feature = "krn2-observe")]
@@ -865,6 +956,8 @@ pub struct Scheduler {
     // Author: chatgpt. One canonical generation state per slot; lock serialized.
     epochs: BootSlots<SlotLifecycle, INLINE_SLOTS>,
     id_index: Option<TaskIndex<BootSlots<IndexNode, { 2 * INLINE_SLOTS - 1 }>>>,
+    /// Heap-backed task affinities after scheduler growth.
+    dynamic_affinities: Option<CpuAffinityTable>,
     stacks: StackPool,
     /// Successfully published, not-yet-exited workers (boot slot excluded).
     workers: usize,
@@ -1060,6 +1153,7 @@ impl Scheduler {
             tasks: TrackedSlots::new(tasks),
             epochs: BootSlots::Inline(epochs),
             id_index: None,
+            dynamic_affinities: None,
             stacks: StackPool::new(),
             list_errors: 0,
             workers: 0,
@@ -1231,6 +1325,25 @@ impl Scheduler {
         self.tasks.get_mut(slot).and_then(|t| t.as_mut())
     }
 
+    fn affinity_view(&self, slot: usize) -> Option<CpuMembershipRef<'_>> {
+        match self.task(slot)?.affinity {
+            TaskAffinity::Bootstrap(set) => Some(CpuMembershipRef::Bootstrap(set)),
+            TaskAffinity::Dynamic => self.dynamic_affinities.as_ref()?.view(slot),
+        }
+    }
+
+    fn inherit_affinity(&mut self, slot: usize, source: usize) -> bool {
+        self.dynamic_affinities
+            .as_mut()
+            .is_some_and(|table| table.copy_slot(slot, source))
+    }
+
+    fn copy_affinity_set(&mut self, slot: usize, source: CpuSet) -> bool {
+        self.dynamic_affinities
+            .as_mut()
+            .is_some_and(|table| table.copy_cpu_set(slot, source))
+    }
+
     fn publish_hot(&self, home: usize, token: kernel_core::task_index::Token, task: &Task) {
         let value = LeafTaskHot {
             state: task.state,
@@ -1345,6 +1458,28 @@ impl Scheduler {
             return Err(GrowError::NotQuiescent);
         }
         let oom = |s: &Self| GrowError::OutOfMemory { available: s.stacks.available() };
+        let mut affinities = CpuAffinityTable::new(slots, MAX_CPUS)
+            .map_err(|_| oom(self))?;
+        for slot in 0..slots {
+            if let Some(task) = self.tasks.get(slot).and_then(|task| task.as_ref()) {
+                match task.affinity {
+                    TaskAffinity::Bootstrap(set) => {
+                        if !affinities.copy_cpu_set(slot, set) {
+                            return Err(oom(self));
+                        }
+                    }
+                    TaskAffinity::Dynamic => {
+                        let source = self.dynamic_affinities
+                            .as_ref()
+                            .and_then(|table| table.view(slot))
+                            .ok_or_else(|| oom(self))?;
+                        if !affinities.copy_view(slot, source) {
+                            return Err(oom(self));
+                        }
+                    }
+                }
+            }
+        }
         let tasks = self.tasks.prepare(slots, || None).ok_or_else(|| oom(self))?;
         let groups = self.groups.prepare(slots, || None).ok_or_else(|| oom(self))?;
         let group_links = self.group_links.prepare(slots, || Link::EMPTY).ok_or_else(|| oom(self))?;
@@ -1415,6 +1550,12 @@ impl Scheduler {
         self.ns_entries.commit(ns_entries);self.ns_positions.commit(ns_positions);self.ns_owners.commit(ns_owners);
         self.epochs.commit(epochs);
         self.id_index = Some(index);
+        for slot in 0..self.tasks.len() {
+            if let Some(task) = self.task_mut(slot) {
+                task.affinity = TaskAffinity::Dynamic;
+            }
+        }
+        self.dynamic_affinities = Some(affinities);
         self.tasks.commit(tasks);
         self.groups.commit(groups);
         self.group_links.commit(group_links);
@@ -1499,11 +1640,19 @@ impl Scheduler {
             None => None,
         };
         let current = self.cur();
-        let creator = if is_worker(current) { self.task(current) } else { None };
-        let affinity = affinity.unwrap_or(creator.map(|c| c.affinity).unwrap_or(CpuSet::first(1)));
-        let base = creator.map(|c| c.base_qos).unwrap_or(Qos::UserInitiated);
+        let creator_slot = is_worker(current).then_some(current);
+        let placement = match affinity {
+            Some(set) => CpuMembershipRef::Bootstrap(set),
+            None => creator_slot
+                .and_then(|slot| self.affinity_view(slot))
+                .unwrap_or(CpuMembershipRef::Bootstrap(CpuSet::first(1))),
+        };
+        let base = creator_slot
+            .and_then(|slot| self.task(slot))
+            .map(|task| task.base_qos)
+            .unwrap_or(Qos::UserInitiated);
         let loads = self.loads();
-        let home = self.balancer.place(CpuMembershipRef::Bootstrap(affinity), None, base, None, self.now, &loads).map_err(|_| SpawnError::BadAffinity)?;
+        let home = self.balancer.place(placement, None, base, None, self.now, &loads).map_err(|_| SpawnError::BadAffinity)?;
         // 空槽位或「已退出且已被完全换下」的槽位都可复用：
         // 已退出任务一旦被切走（`on_cpu` 清除），就再也不会在它的栈上执行，栈与 TCB 可以安全覆盖。
         self.ensure_id_index();
@@ -1562,7 +1711,23 @@ impl Scheduler {
             task.qos_ceiling = creator.qos_ceiling;
             task.cpu_group = creator.cpu_group;
         }
-        task.affinity = affinity;
+        task.affinity = if self.dynamic_affinities.is_some() {
+            if let Some(set) = affinity {
+                assert!(self.copy_affinity_set(slot, set), "preallocated affinity set storage");
+            } else if let Some(source) = creator_slot {
+                assert!(self.inherit_affinity(slot, source), "preallocated inherited affinity storage");
+            } else {
+                assert!(self.copy_affinity_set(slot, CpuSet::first(1)), "preallocated bootstrap affinity storage");
+            }
+            TaskAffinity::Dynamic
+        } else {
+            TaskAffinity::Bootstrap(affinity.unwrap_or_else(|| {
+                creator_slot
+                    .and_then(|slot| self.task(slot))
+                    .and_then(|task| task.affinity.bootstrap_set())
+                    .unwrap_or(CpuSet::first(1))
+            }))
+        };
         task.home = home;
         if explicit.is_some() {
             task.cpu_group = explicit;
@@ -2191,10 +2356,11 @@ impl Scheduler {
             return;
         }
         let loads = self.loads();
+        let Some(affinity) = self.affinity_view(i) else { return };
         let home = {
             let task = self.task(i).expect("live rebalance task");
             self.balancer.place(
-                CpuMembershipRef::Bootstrap(task.affinity),
+                affinity,
                 Some(task.home),
                 task.sched.qos,
                 task.last_ran,
@@ -2512,7 +2678,13 @@ impl Scheduler {
     pub fn deadline_stats(&self) -> ([u32; MAX_CPUS], [u32; MAX_CPUS]) { (self.deadline_wakes, self.deadline_refills) }
     pub fn ns_sleeping(&self,id:TaskId)->bool {self.live_slot(id).and_then(|i|self.task(i)).is_some_and(|t|t.state==TaskState::Blocked && t.wake_ns.is_some())}
     pub fn rt_ns_state(&self,id:TaskId)->Option<kernel_core::ns_budget::Budget>{self.task(self.live_slot(id)?)?.ns_budget}
-    pub fn task_affinity(&self,id:TaskId)->Option<CpuSet> {Some(self.task(self.live_slot(id)?)?.affinity)}
+    pub fn task_affinity(&self,id:TaskId)->Option<CpuSet> {
+        let slot = self.live_slot(id)?;
+        match self.task(slot)?.affinity {
+            TaskAffinity::Bootstrap(set) => Some(set),
+            TaskAffinity::Dynamic => self.dynamic_affinities.as_ref()?.to_cpu_set(slot),
+        }
+    }
     pub fn rt_utilisation(&self)->u32 {
         self.tasks.iter().flatten().filter(|t|t.state!=TaskState::Exited && t.rt_period!=0)
             .map(|t|t.ns_budget.filter(|b|b.enabled).map_or_else(||kernel_core::rt_partition::utilisation(t.rt_quota,t.rt_period).expect("valid RT declaration"),|b|kernel_core::ns_budget::utilisation(b.quota,b.period).expect("ns RT declaration"))).sum()
@@ -2723,7 +2895,9 @@ impl Scheduler {
     fn candidates(&self) -> impl Iterator<Item = Candidate<'_>> + Clone + '_ {
         (0..MAX_CPUS).flat_map(move |q| self.listed(q)).filter_map(move |(i, t)| {
             (t.rt_period == 0 && t.state == TaskState::Runnable && t.on_cpu.is_none() && self.eligible(t))
-                .then_some(Candidate { slot: i, home: t.home, affinity: CpuMembershipRef::Bootstrap(t.affinity), qos: t.sched.qos, last_ran: t.last_ran })
+                .then_some(())
+                .and_then(|_| self.affinity_view(i))
+                .map(|affinity| Candidate { slot: i, home: t.home, affinity, qos: t.sched.qos, last_ran: t.last_ran })
         })
     }
 
@@ -2780,17 +2954,30 @@ impl Scheduler {
         let t=self.task(i).ok_or(AffinityError::NoTask)?;
         if t.rt_period!=0 && !set.contains(t.home) { return Err(AffinityError::RtPartition); }
         let me = this_cpu();
-        let (home, on_cpu) = {
-            let t = self.task_mut(i).ok_or(AffinityError::NoTask)?;
-            t.affinity = set;
-            (t.home, t.on_cpu)
-        };
+        let (home, on_cpu) = (t.home, t.on_cpu);
+        let dynamic = self.dynamic_affinities.is_some();
         if set.contains(home) && self.online.contains(home) {
+            if dynamic {
+                assert!(self.copy_affinity_set(i, set), "preallocated affinity storage");
+            }
+            self.task_mut(i).ok_or(AffinityError::NoTask)?.affinity = if dynamic {
+                TaskAffinity::Dynamic
+            } else {
+                TaskAffinity::Bootstrap(set)
+            };
             return Ok(home == me || on_cpu != Some(me));
         }
         let loads = self.loads();
         let (qos, last_ran) = self.task(i).map(|t| (t.sched.qos, t.last_ran)).unwrap_or((Qos::Background, None));
         let new_home = self.balancer.place(CpuMembershipRef::Bootstrap(set), None, qos, last_ran, self.now, &loads).map_err(|_| AffinityError::NoOnlineCpu)?;
+        if dynamic {
+            assert!(self.copy_affinity_set(i, set), "preallocated affinity storage");
+        }
+        self.task_mut(i).ok_or(AffinityError::NoTask)?.affinity = if dynamic {
+            TaskAffinity::Dynamic
+        } else {
+            TaskAffinity::Bootstrap(set)
+        };
         self.rehome(i, new_home);
         if let Some(c) = on_cpu.filter(|&c| c != me) {
             self.kicks.insert(c);
@@ -3305,8 +3492,17 @@ impl Scheduler {
             let usage=t.ns_budget.filter(|b|b.enabled).map_or_else(||kernel_core::rt_partition::utilisation(t.rt_quota,t.rt_period).unwrap(),|b|kernel_core::ns_budget::utilisation(b.quota,b.period).unwrap());
             loads[t.home]=loads[t.home].checked_add(usage).expect("RT utilisation bounded");
         }
-        let mut allowed=old.affinity.intersect(self.online);if old.on_cpu.is_some(){let mut only=CpuSet::EMPTY;only.insert(old.home);allowed=allowed.intersect(only);}
-        let Some(home)=allowed.iter().filter(|&c|loads[c].checked_add(added).is_some_and(|sum|sum<=900)).min_by_key(|&c|(loads[c],c)) else{return false;};
+        let Some(affinity)=self.affinity_view(slot) else{return false;};
+        let mut best=None;
+        affinity.for_each(|cpu| {
+            if cpu>=loads.len() || !self.online.contains(cpu) {return;}
+            if old.on_cpu.is_some() && cpu!=old.home {return;}
+            if !loads[cpu].checked_add(added).is_some_and(|sum|sum<=900) {return;}
+            if best.is_none_or(|current|(loads[cpu],cpu)<(loads[current],current)) {
+                best=Some(cpu);
+            }
+        });
+        let Some(home)=best else{return false;};
         let tick=crate::hrtime::tick_ns();let view_period=period.div_ceil(tick).min(u64::from(u32::MAX)) as u32;
         let Some(view_next)=self.now.checked_add(u64::from(view_period)) else{return false;};
         if let Some(cpu)=running_home{self.checkpoint_running_budget(cpu,self.ns_now);}
@@ -3348,7 +3544,8 @@ impl Scheduler {
                 let Ok(usage)=kernel_core::rt_partition::utilisation(t.rt_quota,t.rt_period) else {return false;};
                 let Some(sum)=loads[t.home].checked_add(usage) else {return false;};loads[t.home]=sum;
             }
-            let Some(mut allowed)=task.affinity.intersect(self.online).bits_u64() else {return false;};
+            let Some(affinity)=self.affinity_view(slot) else {return false;};
+            let Some(mut allowed)=affinity.online_bits_u64(self.online) else {return false;};
             // A currently running context cannot migrate before its old CPU stops.
             if task.on_cpu.is_some() {allowed &= 1u64<<home;}
             let Ok(chosen)=kernel_core::rt_partition::place(&loads,allowed,quota,period,900) else {return false;};
@@ -3472,8 +3669,38 @@ impl Scheduler {
         }
         let scratch = kernel_core::cpu_bitmap::CpuBitmap::with_capacity(cpus)
             .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
-        self.nohz.reserve_capacity(cpus)?;
+        let mut next_nohz = self.nohz.clone();
+        next_nohz.reserve_capacity(cpus)?;
+        let mut next_affinities = CpuAffinityTable::new(self.tasks.len(), cpus)
+            .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
+        for slot in 0..self.tasks.len() {
+            if let Some(task) = self.task(slot) {
+                match task.affinity {
+                    TaskAffinity::Bootstrap(set) => {
+                        if !next_affinities.copy_cpu_set(slot, set) {
+                            return Err(kernel_core::tickless::StopStorageError::InvalidCpu);
+                        }
+                    }
+                    TaskAffinity::Dynamic => {
+                        let source = self.dynamic_affinities
+                            .as_ref()
+                            .and_then(|table| table.view(slot))
+                            .unwrap_or_else(|| panic!("dynamic affinity slot {slot} missing"));
+                        if !next_affinities.copy_view(slot, source) {
+                            return Err(kernel_core::tickless::StopStorageError::InvalidCpu);
+                        }
+                    }
+                }
+            }
+        }
+        self.nohz = next_nohz;
         self.nohz_wake_scratch = scratch;
+        self.dynamic_affinities = Some(next_affinities);
+        for slot in 0..self.tasks.len() {
+            if let Some(task) = self.task_mut(slot) {
+                task.affinity = TaskAffinity::Dynamic;
+            }
+        }
         Ok(())
     }
 

@@ -140,7 +140,10 @@
   负载投影和自动均衡全部使用动态 CPU membership；`set_affinity_dynamic` 可直接
   接收高位稀疏集合。129/4096 号 CPU 的 spread/keep 决策已有宿主测试，真实
   QEMU IOAPIC 路由在 4 vCPU 上通过。
-- `kernel-core/src/sched/balance.rs`：均衡决策已支持 bootstrap 与动态 membership
-  的统一 view，129/4096 号 CPU 的 placement/steal 已有测试。任务自身仍暂存
-  `CpuSet`，因此这一层只是决策接口迁移，不能据此宣称调度亲和已支持高位 CPU。
-- 其余调度任务亲和、per-CPU、架构入口和亲和 ABI 尚未迁移。
+- `kernel/src/task.rs`、`kernel/src/sched/scheduler.rs`：任务亲和采用两阶段表示。
+  堆前任务只保存 bootstrap 标记；`Scheduler::grow` 将全部任务事务化迁移到调度器
+  持有的连续堆后备槽位表。CPU 准入后按实际数量重建该表，spawn、继承、
+  `set_affinity`、实时预算放置和均衡候选均通过预分配槽位完成，不再在调度锁内
+  临时分配。129/4096 号 CPU 的 placement/steal 已有宿主测试，4 vCPU QEMU
+  IOAPIC/调度路由通过。
+- 其余调度器 per-CPU 数组、per-CPU 注册表、架构入口和亲和 ABI 尚未迁移。

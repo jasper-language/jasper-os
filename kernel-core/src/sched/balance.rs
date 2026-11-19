@@ -25,6 +25,7 @@ use crate::smp::CpuSet;
 pub enum CpuMembershipRef<'a> {
     Bootstrap(CpuSet),
     Dynamic(&'a CpuBitmap),
+    Words(&'a [u64]),
 }
 
 #[cfg(not(any(test, feature = "cpu-dynamic")))]
@@ -51,6 +52,10 @@ impl CpuMembershipRef<'_> {
             Self::Bootstrap(set) => set.contains(cpu),
             #[cfg(any(test, feature = "cpu-dynamic"))]
             Self::Dynamic(set) => set.contains(cpu),
+            #[cfg(any(test, feature = "cpu-dynamic"))]
+            Self::Words(words) => words
+                .get(cpu / 64)
+                .is_some_and(|word| word & (1u64 << (cpu % 64)) != 0),
             #[cfg(not(any(test, feature = "cpu-dynamic")))]
             Self { set, .. } => set.contains(cpu),
         }
@@ -61,12 +66,76 @@ impl CpuMembershipRef<'_> {
         match self {
             Self::Bootstrap(set) => set.iter().find(|&cpu| predicate(cpu)),
             Self::Dynamic(set) => set.iter().find(|&cpu| predicate(cpu)),
+            Self::Words(words) => words
+                .iter()
+                .enumerate()
+                .flat_map(|(index, word)| {
+                    let mut bits = *word;
+                    core::iter::from_fn(move || {
+                        if bits == 0 {
+                            return None;
+                        }
+                        let offset = bits.trailing_zeros() as usize;
+                        bits &= bits - 1;
+                        Some(index * 64 + offset)
+                    })
+                })
+                .find(|&cpu| predicate(cpu)),
         }
     }
 
     #[cfg(not(any(test, feature = "cpu-dynamic")))]
     pub fn find(self, mut predicate: impl FnMut(usize) -> bool) -> Option<usize> {
         self.set.iter().find(|&cpu| predicate(cpu))
+    }
+
+    #[cfg(any(test, feature = "cpu-dynamic"))]
+    pub fn for_each(self, mut visit: impl FnMut(usize)) {
+        match self {
+            Self::Bootstrap(set) => set.iter().for_each(&mut visit),
+            Self::Dynamic(set) => set.iter().for_each(&mut visit),
+            Self::Words(words) => {
+                for (index, word) in words.iter().enumerate() {
+                    let mut bits = *word;
+                    while bits != 0 {
+                        let offset = bits.trailing_zeros() as usize;
+                        bits &= bits - 1;
+                        visit(index * 64 + offset);
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(any(test, feature = "cpu-dynamic")))]
+    pub fn for_each(self, mut visit: impl FnMut(usize)) {
+        self.set.iter().for_each(&mut visit);
+    }
+
+    pub fn online_bits_u64(self, online: CpuSet) -> Option<u64> {
+        let mut bits = 0u64;
+        let mut representable = true;
+        self.for_each(|cpu| {
+            if online.contains(cpu) {
+                if cpu >= 64 {
+                    representable = false;
+                } else {
+                    bits |= 1u64 << cpu;
+                }
+            }
+        });
+        representable.then_some(bits)
+    }
+
+    pub fn to_cpu_set(self) -> Option<CpuSet> {
+        let mut legacy = CpuSet::EMPTY;
+        let mut representable = true;
+        self.for_each(|cpu| {
+            if !legacy.insert(cpu) {
+                representable = false;
+            }
+        });
+        representable.then_some(legacy)
     }
 }
 
@@ -222,6 +291,7 @@ impl Balancer {
                     victim = Some((c, r));
                 }
             }
+
         }
         if let Some((c, _)) = victim {
             return Ok(c);
@@ -439,5 +509,21 @@ mod tests {
             last_ran: None,
         };
         assert_eq!(B.steal(4096, 10, &loads, [candidate].into_iter()), Ok(7));
+    }
+
+    #[test]
+    fn contiguous_word_view_preserves_sparse_high_membership() {
+        let mut words = vec![0u64; 65];
+        words[2] |= 1u64 << 1; // CPU 129
+        words[64] |= 1; // CPU 4096
+        let loads = [IDLE; 4097];
+        let view = CpuMembershipRef::Words(&words);
+        assert!(view.contains(129));
+        assert!(view.contains(4096));
+        assert_eq!(
+            B.place(view, Some(129), Qos::Utility, None, 10, &loads),
+            Ok(129)
+        );
+        assert_eq!(view.to_cpu_set(), None);
     }
 }

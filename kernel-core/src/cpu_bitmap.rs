@@ -188,6 +188,30 @@ impl CpuBitmap {
         Ok(())
     }
 
+    /// Replace membership from the legacy mask without growing this bitmap.
+    pub fn copy_from_cpu_set(&mut self, other: crate::smp::CpuSet) -> Result<(), CpuBitmapError> {
+        let required_bits = other.iter().max().map_or(0, |cpu| cpu.saturating_add(1));
+        if required_bits > self.capacity_bits()? {
+            return Err(CpuBitmapError::Allocation);
+        }
+        self.words.fill(0);
+        for cpu in other.iter() {
+            self.insert(cpu)?;
+        }
+        Ok(())
+    }
+
+    /// Borrow the set as the legacy mask when every member is representable.
+    pub fn to_cpu_set(&self) -> Option<crate::smp::CpuSet> {
+        let mut legacy = crate::smp::CpuSet::EMPTY;
+        for cpu in self.iter() {
+            if !legacy.insert(cpu) {
+                return None;
+            }
+        }
+        Some(legacy)
+    }
+
     fn with_words(words: usize) -> Result<Self, CpuBitmapError> {
         let mut storage = Vec::new();
         storage
@@ -282,5 +306,28 @@ mod tests {
             Err(CpuBitmapError::Allocation)
         );
         assert_eq!(too_small, CpuBitmap::first(64).unwrap());
+    }
+
+    #[test]
+    fn legacy_mask_copy_never_grows_destination() {
+        let mut destination = CpuBitmap::with_capacity(130).unwrap();
+        destination
+            .copy_from_cpu_set(crate::smp::CpuSet::first(128))
+            .unwrap();
+        assert_eq!(destination.len(), 128);
+
+        let mut too_small = CpuBitmap::first(64).unwrap();
+        assert_eq!(
+            too_small.copy_from_cpu_set(crate::smp::CpuSet::first(65)),
+            Err(CpuBitmapError::Allocation)
+        );
+        assert_eq!(
+            too_small,
+            CpuBitmap::from_cpu_set(crate::smp::CpuSet::first(64)).unwrap()
+        );
+        assert_eq!(
+            destination.to_cpu_set(),
+            Some(crate::smp::CpuSet::first(128))
+        );
     }
 }

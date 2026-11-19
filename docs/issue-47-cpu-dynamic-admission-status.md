@@ -59,13 +59,14 @@ NUMA 节点 CPU 本地域也已改用动态集合，重复 CPU、离线节点和
 registry 在一个事务中发布 discovered、supported、admitted、online/rejected 事实，
 AP 上线时更新 CPU 代际，启动路径也通过 registry 解析硬件 ID。IRQ 路由和均衡器
 已改用动态集合，宿主覆盖 129/4096 号 CPU；QEMU 4 vCPU IOAPIC 路由与 4 vCPU/q35
-NOHZ 均通过。调度均衡决策已有动态 view，但 `Task.affinity` 仍是 `CpuSet`，
-所以没有把这一阶段冒充为调度亲和 ABI 完成。
+NOHZ 均通过。任务亲和也已迁移：`Task` 只保留 bootstrap/dynamic 标记，动态位图
+由调度器按任务槽和准入 CPU 数量连续预分配；启动扩容和 CPU 容量调整均先完成全部
+分配，再整体发布。spawn、继承、修改亲和及实时预算路径不依赖临时扩容。
 
 ## 尚未完成
 
-当前生产 `CpuSet` 仍是 128 位静态位图；调度、每核状态、IRQ/MSI、TLB/IPI、
-定时器、实时调度、NUMA 和诊断中仍有由该宽度派生的静态数组。因此：
+当前生产 `CpuSet` 仍是 128 位静态位图；调度器的每核队列、per-CPU 状态、
+IRQ handler 数组、TLB/IPI、定时器和诊断中仍有由该宽度派生的静态数组。因此：
 
 - 不能把 128 改成 256/1024 后声称“动态支持”；
 - 不能把本切片中的 4096-CPU 软件准入测试冒充真实内核运行；
@@ -77,7 +78,7 @@ NOHZ 均通过。调度均衡决策已有动态 view，但 `Task.affinity` 仍�
 1. `CPU-DYNAMIC-ADMISSION-1`：消费链、bootstrap 生命周期、锁序和负例审计；
 2. `CPU-DYNAMIC-CORE-1`：动态 CPU 身份、拓扑和 `CpuSet` 核心（进行中）；
 3. `CPU-DYNAMIC-CONSUMERS-1`：调度、per-CPU、IRQ/MSI、TLB/IPI、NUMA 和诊断
-   （MSI 向量池已开始迁移）；
+   （调度任务亲和、IRQ 路由、NUMA、MSI 与 tickless 已迁移，per-CPU/调度数组未完）；
 4. `CPU-DYNAMIC-ABI-1`：可变长/分页 CPU 枚举与亲和 ABI；
 5. `CPU-DYNAMIC-MATRIX-1`：多规模、多 ISA、热插拔和真实可用平台矩阵。
 

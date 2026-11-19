@@ -12,6 +12,31 @@ use crate::sched::policy::{new_entity, Qos, RunStreak, SchedEntity};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TaskId(pub u64);
 
+/// Where a task's affinity lives.
+///
+/// Before scheduler growth, the copyable bootstrap mask remains inside the
+/// task. After growth, the affinity is stored by the scheduler in a heap-backed
+/// slot table; keeping the bitmap there avoids a destructor in the const-built
+/// task control block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskAffinity {
+    Bootstrap(CpuSet),
+    Dynamic,
+}
+
+impl TaskAffinity {
+    pub const fn bootstrap(set: CpuSet) -> Self {
+        Self::Bootstrap(set)
+    }
+
+    pub const fn bootstrap_set(self) -> Option<CpuSet> {
+        match self {
+            Self::Bootstrap(set) => Some(set),
+            Self::Dynamic => None,
+        }
+    }
+}
+
 /// 任务状态。
 /// Task states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +113,7 @@ pub struct Task {
     /// 所在运行队列的处理器下标（只会被该处理器选中；负载均衡改写它即完成迁移）。
     pub home: usize,
     /// 亲和集合：允许运行的处理器（硬约束；`home` 总在其中）。
-    pub affinity: CpuSet,
+    pub affinity: TaskAffinity,
     /// 上次被换下的时刻（tick；迁移代价据此判断缓存是否仍热）。
     pub last_ran: Option<u64>,
     /// 正占用它的处理器：被选中时置位，换下它的那次切换**完成保存之后**才清除；
@@ -142,7 +167,7 @@ impl Task {
             streak: RunStreak::new(),
             timer: None,
             home: 0,
-            affinity: CpuSet::first(1),
+            affinity: TaskAffinity::bootstrap(CpuSet::first(1)),
             last_ran: None,
             on_cpu: None,
             ran_on: CpuSet::EMPTY,
