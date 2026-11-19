@@ -37,6 +37,9 @@ SMP 门面在启动 secondary CPUs 前读取真实空闲页帧预算，并按每
 无 `cpu-dynamic` 的轻量构建保留 `CpuSet` 兼容路径，避免给不需要堆的用户程序
 强加 allocator。调度、per-CPU、IRQ 全局路由和四架构入口仍未迁移。
 
+`ShardRouter` 已移除 `MAX_SHARDS = MAX_CPUS * 4`。分片数量不再间接跟随 128 位
+CPU 集合，只有 32 位分片编号这一明确协议表示范围；实际分片数由服务资源准入决定。
+
 ## 尚未完成
 
 当前生产 `CpuSet` 仍是 128 位静态位图；调度、每核状态、IRQ/MSI、TLB/IPI、

@@ -110,4 +110,7 @@
   稀疏分配已有宿主测试。无该 feature 的用户运行时轻量构建继续使用固定兼容路径。
 - `kernel/src/interrupt.rs` 将当前 legacy `CpuSet` 在线集合适配为动态 MSI 集合；
   分配失败时 MSI 池构造失败关闭。
+- `kernel-core/src/shard.rs`：删除 `MAX_SHARDS = MAX_CPUS * 4`。路由分片数只受
+  32 位分片编号格式范围约束，不再从 CPU 位图宽度派生非规范容量上限；任意更大
+  运行期分片预算由服务自身资源准入决定。
 - 其余 IRQ 全局路由、调度器、per-CPU、架构入口和亲和 ABI 尚未迁移。

@@ -13,12 +13,6 @@
 //! 不含锁与线程：每个分片由内核侧各自一把锁保护，分片之间互不等待——这是服务多核化的关键，
 //! 没有全局串行点。路由是纯函数，因此在宿主上可做确定性测试。
 
-use crate::smp::MAX_CPUS;
-
-/// 分片数上限。
-/// Maximum number of shards.
-pub const MAX_SHARDS: usize = MAX_CPUS * 4;
-
 /// 分片键。
 /// Shard key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +29,7 @@ pub enum ShardKey {
 /// Sharding errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShardError {
-    /// 分片数为 0 或超过 [`MAX_SHARDS`]。
+    /// 分片数为 0 或超过路由器 32 位分片编号的可表示范围。
     BadCount,
     /// 按处理器路由时该处理器没有分片。
     NoCpuShard,
@@ -89,7 +83,7 @@ impl ShardRouter {
     /// 建立 `shards` 个分片的路由；数量非法返回 [`ShardError::BadCount`]。
     /// Create a router over `shards` shards.
     pub const fn new(shards: usize) -> Result<ShardRouter, ShardError> {
-        if shards == 0 || shards > MAX_SHARDS {
+        if shards == 0 || shards > u32::MAX as usize {
             Err(ShardError::BadCount)
         } else {
             Ok(ShardRouter { shards: shards as u32 })
@@ -200,8 +194,16 @@ mod tests {
     #[test]
     fn router_rejects_bad_counts() {
         assert_eq!(ShardRouter::new(0), Err(ShardError::BadCount));
-        assert_eq!(ShardRouter::new(MAX_SHARDS + 1), Err(ShardError::BadCount));
-        assert_eq!(ShardRouter::new(MAX_SHARDS).map(|r| r.shards()), Ok(MAX_SHARDS));
+        if usize::BITS > u32::BITS {
+            assert_eq!(
+                ShardRouter::new(u32::MAX as usize + 1),
+                Err(ShardError::BadCount)
+            );
+        }
+        assert_eq!(
+            ShardRouter::new(u32::MAX as usize).map(|r| r.shards()),
+            Ok(u32::MAX as usize)
+        );
         assert_eq!(ShardError::Full.name(), "system.service.shard.error.full");
     }
 
