@@ -1,5 +1,5 @@
 {
-  "baseline_total": 339,
+  "baseline_total": 337,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -13,7 +13,7 @@
     "explicit-safety-policy": 129,
     "platform-adapter": 28,
     "protocol-abi": 38,
-    "runtime-resource-capacity": 63,
+    "runtime-resource-capacity": 62,
     "test-demo-fixture": 6
   },
   "entries": [
@@ -111,7 +111,7 @@
       "category": "protocol-abi",
       "count": 2,
       "fingerprint": "4d383868a3b455aec1907e5595db29555a6d558d323cfa31d715f0c82a784909",
-      "line": 29,
+      "line": 28,
       "path": "compat-graphics/src/service.rs",
       "reason": "path owns a wire, loader, package, graphics, or lifecycle ABI; consumer review remains required",
       "rules": "HC-G1",
@@ -1006,16 +1006,6 @@
       "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "pub const MIN_ALIGN: usize = 16;"
-    },
-    {
-      "category": "runtime-resource-capacity",
-      "count": 2,
-      "fingerprint": "e1e54dc91192b80e95cab94d14139ab6d890862198dffbcfc29da311d82552f0",
-      "line": 11,
-      "path": "kernel-core/src/hwv7.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
-      "rules": "HC-G8",
-      "source": "pub const QUEUE_CAPACITY: usize = 32;"
     },
     {
       "category": "protocol-abi",
@@ -2663,7 +2653,7 @@
     "explicit-safety-policy": 145,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 102,
+    "runtime-resource-capacity": 100,
     "test-demo-fixture": 7
   }
 }

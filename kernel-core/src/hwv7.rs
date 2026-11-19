@@ -8,8 +8,6 @@ use crate::dma_quiesce::{quiesce_verdict, QuiesceVerdict, ResetOutcome};
 use crate::iommu::DeviceId;
 use crate::security_domain::DomainKey;
 
-pub const QUEUE_CAPACITY: usize = 32;
-pub const COMPLETION_CAPACITY: usize = 32;
 pub const SUBMIT: u32 = 1 << 0;
 pub const CANCEL: u32 = 1 << 1;
 pub const CONTROL: u32 = 1 << 2;
@@ -125,13 +123,13 @@ pub struct GpuStats {
     pub doorbells: u64,
 }
 
-pub struct GpuQueue {
+pub struct GpuQueue<const Q: usize, const C: usize> {
     identity: GpuIdentity,
     backend: GpuBackend,
     iommu: Option<DomainKey>,
     active: bool,
-    requests: [Option<GpuRequest>; QUEUE_CAPACITY],
-    completions: [Option<Completion>; COMPLETION_CAPACITY],
+    requests: [Option<GpuRequest>; Q],
+    completions: [Option<Completion>; C],
     completion_head: usize,
     completion_len: usize,
     next_request: u64,
@@ -139,13 +137,13 @@ pub struct GpuQueue {
     stats: GpuStats,
 }
 
-impl GpuQueue {
+impl<const Q: usize, const C: usize> GpuQueue<Q, C> {
     pub fn bind(
         identity: GpuIdentity,
         backend: GpuBackend,
         iommu: Option<DomainKey>,
     ) -> Result<Self, GpuError> {
-        if identity.object == 0 || identity.generation == 0 {
+        if Q == 0 || C == 0 || identity.object == 0 || identity.generation == 0 {
             return Err(GpuError::InvalidIdentity);
         }
         if backend.requires_iommu() && !iommu.is_some_and(|key| key.is_valid()) {
@@ -156,8 +154,8 @@ impl GpuQueue {
             backend,
             iommu,
             active: true,
-            requests: [None; QUEUE_CAPACITY],
-            completions: [None; COMPLETION_CAPACITY],
+            requests: [None; Q],
+            completions: [None; C],
             completion_head: 0,
             completion_len: 0,
             next_request: 1,
@@ -312,7 +310,7 @@ impl GpuQueue {
             return None;
         }
         let completion = self.completions[self.completion_head].take();
-        self.completion_head = (self.completion_head + 1) % COMPLETION_CAPACITY;
+        self.completion_head = (self.completion_head + 1) % C;
         self.completion_len -= 1;
         if let Some(request) = completion {
             if let Some(slot) = self
@@ -349,10 +347,10 @@ impl GpuQueue {
     }
 
     fn push_completion(&mut self, completion: Completion) -> Result<(), GpuError> {
-        if self.completion_len == COMPLETION_CAPACITY {
+        if self.completion_len == C {
             return Err(GpuError::CompletionFull);
         }
-        let index = (self.completion_head + self.completion_len) % COMPLETION_CAPACITY;
+        let index = (self.completion_head + self.completion_len) % C;
         self.completions[index] = Some(completion);
         self.completion_len += 1;
         Ok(())
@@ -490,12 +488,12 @@ impl Default for MemoryTierState {
 mod tests {
     use super::*;
 
-    fn queue(backend: GpuBackend, iommu: bool) -> GpuQueue {
+    fn queue(backend: GpuBackend, iommu: bool) -> GpuQueue<32, 32> {
         let domain = DomainKey {
             id: 1,
             generation: 1,
         };
-        GpuQueue::bind(
+        GpuQueue::<32, 32>::bind(
             GpuIdentity {
                 object: 1,
                 generation: 1,
@@ -541,7 +539,7 @@ mod tests {
     #[test]
     fn exclusive_backends_require_iommu_and_cancel_rights() {
         assert_eq!(
-            GpuQueue::bind(
+            GpuQueue::<32, 32>::bind(
                 GpuIdentity {
                     object: 1,
                     generation: 1

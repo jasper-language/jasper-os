@@ -7,8 +7,7 @@
 
 use kernel_core::dma_quiesce::ResetOutcome;
 use kernel_core::hwv7::{
-    GpuBackend, GpuError, GpuIdentity, GpuQueue, CANCEL, CONTROL, MAP_DEVICE, QUEUE_CAPACITY,
-    SUBMIT,
+    GpuBackend, GpuError, GpuIdentity, GpuQueue, CANCEL, CONTROL, MAP_DEVICE, SUBMIT,
 };
 use kernel_core::memory_capability::{
     BackingIdentity, MemoryCapabilityTable, MemoryCapabilityUse, MemoryRights,
@@ -210,25 +209,33 @@ struct Work {
 ///
 /// 绑定一个 Jasper GPU 队列世代的 Linux 图形兼容服务。所有 import 在使用前
 /// 重新校验 Memory capability，撤销后的 token 不会被缓存绕过。
-pub struct GraphicsService<const W: usize, const S: usize, const Q: usize> {
+pub struct GraphicsService<
+    const W: usize,
+    const S: usize,
+    const I: usize,
+    const G: usize,
+    const K: usize,
+> {
     caps: DeviceCapabilities,
-    queue: GpuQueue,
+    queue: GpuQueue<G, K>,
     available_rights: u32,
     limits: GraphicsLimit,
     buffers: [Option<ImportedBuffer>; MAX_IMPORTS],
     images: [Option<ImportedImage>; MAX_IMPORTS],
-    work: [Option<Work>; QUEUE_CAPACITY],
+    work: [Option<Work>; G],
     fences: [Option<Fence>; MAX_SYNC_OBJECTS],
     semaphores: [Option<Semaphore>; MAX_SYNC_OBJECTS],
     timelines: [Option<TimelineSemaphore>; MAX_SYNC_OBJECTS],
     next_sync: u64,
-    wsi: Wsi<W, S, Q>,
+    wsi: Wsi<W, S, I>,
     buffer_bytes: u64,
     image_bytes: u64,
     active: bool,
 }
 
-impl<const W: usize, const S: usize, const Q: usize> GraphicsService<W, S, Q> {
+impl<const W: usize, const S: usize, const I: usize, const G: usize, const K: usize>
+    GraphicsService<W, S, I, G, K>
+{
     pub fn new(
         caps: DeviceCapabilities,
         identity: GpuIdentity,
@@ -241,7 +248,8 @@ impl<const W: usize, const S: usize, const Q: usize> GraphicsService<W, S, Q> {
             return Err(GraphicsError::RightsDenied);
         }
         let limits = limits.validate()?;
-        let queue = GpuQueue::bind(identity, caps.backend(), iommu).map_err(GraphicsError::Queue)?;
+        let queue =
+            GpuQueue::<G, K>::bind(identity, caps.backend(), iommu).map_err(GraphicsError::Queue)?;
         Ok(Self {
             caps,
             queue,
@@ -249,7 +257,7 @@ impl<const W: usize, const S: usize, const Q: usize> GraphicsService<W, S, Q> {
             limits,
             buffers: [None; MAX_IMPORTS],
             images: [None; MAX_IMPORTS],
-            work: [None; QUEUE_CAPACITY],
+            work: [None; G],
             fences: [None; MAX_SYNC_OBJECTS],
             semaphores: [None; MAX_SYNC_OBJECTS],
             timelines: [None; MAX_SYNC_OBJECTS],
@@ -1021,7 +1029,6 @@ fn map_capability_error(
 mod tests {
     use super::*;
     use alloc::vec;
-    use kernel_core::hwv7::COMPLETION_CAPACITY;
     use kernel_core::memory_capability::{
         BackingIdentity, MemoryCapabilityTable, MemoryKind, MemoryRights,
     };
@@ -1043,7 +1050,7 @@ mod tests {
         .unwrap()
     }
 
-    fn test_service() -> GraphicsService<2, 2, 32> {
+    fn test_service() -> GraphicsService<2, 2, 32, 32, 32> {
         GraphicsService::new(
             capabilities(),
             GpuIdentity {
@@ -1475,8 +1482,18 @@ mod tests {
     }
 
     #[test]
-    fn queue_and_completion_capacities_are_finite() {
-        assert_eq!(QUEUE_CAPACITY, COMPLETION_CAPACITY);
+    fn queue_and_completion_capacities_are_explicit() {
+        let mut queue = GpuQueue::<1, 1>::bind(
+            GpuIdentity {
+                object: 1,
+                generation: 1,
+            },
+            GpuBackend::VirtioGpu,
+            None,
+        )
+        .unwrap();
+        queue.submit(1, SUBMIT, 1).unwrap();
+        assert_eq!(queue.submit(1, SUBMIT, 1), Err(GpuError::QueueFull));
         assert_eq!(MAX_IMPORTS, MAX_SYNC_OBJECTS);
     }
 
