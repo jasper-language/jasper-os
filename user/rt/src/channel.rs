@@ -16,7 +16,7 @@ use crate::ring::{Completion, Ring};
 use crate::{ids, sys};
 
 /// 单条消息的句柄数上限（与内核一致）。
-pub const MAX_HANDLES: usize = 8;
+pub const MAX_HANDLES: usize = 8; // JASPER-HARDCODE-REVIEW: issue=33 source=channel-abi-v1 reason=fixed-per-message-handle-array-in-v1-ring-descriptor
 /// 单条消息的字节数上限（与内核一致）。
 pub const MAX_BYTES: usize = 64 * 1024;
 

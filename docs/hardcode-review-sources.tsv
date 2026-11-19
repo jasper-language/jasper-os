@@ -13,6 +13,8 @@ build-only-physical-runtime-plan	33	build	verification-feature-platform-plan
 diagnostic-usi-v1-contract	21	spec	diagnostic-USI-v1-wire-contract
 diagnostic-source-panic-ring	35	policy	panic-and-boot-failure-no-allocation-emergency-ring
 smp-shootdown-batch-policy	35	policy	larger-page-ranges-promote-to-one-whole-table-flush
+jaso-wire-v1	33	spec	JASO-isolated-wire-v1-fixed-handle-array
+channel-abi-v1	33	spec	Jasper-Channel-v1-fixed-message-handle-array
 irq-policy	33	policy	explicit-IRQ-safety-policy
 linux-poll-scan-policy	35	policy	Issue-35-bounded-Linux-poll-scan
 linux-batch-partial-policy	35	policy	Issue-35-bounded-Linux-batches-return-partial-progress

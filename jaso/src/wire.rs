@@ -25,7 +25,7 @@ pub const MAX_STR: usize = 255;
 /// 授予的能力名个数上限。
 pub const MAX_CAPS: usize = 16;
 /// 随 Load 附带的句柄个数上限（与内核通道单条消息的句柄上限一致）。
-pub const MAX_HANDLES: usize = 8;
+pub const MAX_HANDLES: usize = 8; // JASPER-HARDCODE-REVIEW: issue=33 source=jaso-wire-v1 reason=fixed-per-message-handle-array-in-v1-wire-layout
 
 const TAG_CHUNK: u8 = 1;
 const TAG_LOAD: u8 = 2;

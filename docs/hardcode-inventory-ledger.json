@@ -1,5 +1,5 @@
 {
-  "baseline_total": 341,
+  "baseline_total": 339,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -13,7 +13,7 @@
     "explicit-safety-policy": 129,
     "platform-adapter": 28,
     "protocol-abi": 38,
-    "runtime-resource-capacity": 65,
+    "runtime-resource-capacity": 63,
     "test-demo-fixture": 6
   },
   "entries": [
@@ -556,16 +556,6 @@
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
       "source": "pub const MAX_LOGICAL_BYTES: usize = 4 * 1024 * 1024;"
-    },
-    {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "1efafabf0892200d4799a54f9c3c3646975d67ae156db31c31a945ee3e36776f",
-      "line": 28,
-      "path": "jaso/src/wire.rs",
-      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
-      "rules": "HC-G1",
-      "source": "pub const MAX_HANDLES: usize = 8;"
     },
     {
       "category": "protocol-abi",
@@ -2618,16 +2608,6 @@
       "source": "pub const MAX_BYTES: usize = 64 * 1024;"
     },
     {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "adac915235a17d479445459d015d7abd00957014df0bd20a7370604020ed6b49",
-      "line": 19,
-      "path": "user/rt/src/channel.rs",
-      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
-      "rules": "HC-G1",
-      "source": "pub const MAX_HANDLES: usize = 8;"
-    },
-    {
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "5db71a927ab52d1e51eb30cf0de0400a17648468c3c7462d4c81f006e4a2a917",
@@ -2683,7 +2663,7 @@
     "explicit-safety-policy": 145,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 104,
+    "runtime-resource-capacity": 102,
     "test-demo-fixture": 7
   }
 }

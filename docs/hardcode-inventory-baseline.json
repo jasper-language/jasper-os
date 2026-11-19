@@ -218,12 +218,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "1efafabf0892200d4799a54f9c3c3646975d67ae156db31c31a945ee3e36776f",
-      "path": "jaso/src/wire.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "1fab4168ad16d1ae91704a94d0c1e3aec9f96bfb6b84dc88a7e1a669ec540335",
       "path": "kernel/src/subscription.rs",
       "rules": "HC-G1"
@@ -1124,12 +1118,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "adac915235a17d479445459d015d7abd00957014df0bd20a7370604020ed6b49",
-      "path": "user/rt/src/channel.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "b075d9bd440f026d96268f6d16367f505af6e3b88c1e4fc5beb3020db602ea0e",
       "path": "kernel/src/sched/scheduler.rs",
       "rules": "HC-G8"
@@ -1617,5 +1605,5 @@
     "user",
     "xtask"
   ],
-  "total": 341
+  "total": 339
 }
