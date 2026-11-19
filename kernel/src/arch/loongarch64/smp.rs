@@ -266,8 +266,11 @@ pub fn send_ipi(cpu: usize, kind: IpiKind) -> Result<(), SmpError> {
     let Some(topology) = topology() else {
         return Err(SmpError::NotOnline);
     };
-    if cpu == 0 || cpu >= topology.count() {
+    if cpu >= topology.count() {
         return Err(SmpError::NoSuchCpu);
+    }
+    if cpu == cpu_index() {
+        return Err(SmpError::SelfTarget);
     }
     let vector = match kind {
         IpiKind::Reschedule => 1,

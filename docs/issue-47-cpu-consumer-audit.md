@@ -173,6 +173,10 @@
   `failed=0`。该轮仍保留既有 PCI/KRN0 失败，不等于 RISC-V 全量验收完成。
 - RISC-V 每核 IPI mailbox 也改为 bootstrap 加 AP 前堆扩展；4 vCPU 重放继续通过
   SMP、IPI、精确 IRQ 路由和资源回收，mailbox 缺失会 fail closed。
+- LoongArch IPI 目标判定修复：CPU0 是合法 BSP 目标，只拒绝越界和自目标。
+  标准 4 vCPU QEMU 达到 `online=4`、SMP 37 项全通过、并行 shootdown
+  `request_failures=0`、`peak_inflight=3`；整轮仅剩一个计时类
+  `balance_timing_failed=1`，功能失败项均为 0。
 - `kernel/src/{ifc,security,service_catalog}.rs`：把生产 64 位计数器/对象源
   从直接 `AtomicU64` 改为 `kernel_core::sync::Atomic64`。RV32 目标因此可以编译并
   完成真实 QEMU 启动；SMP、平衡、IRQ、IPC、用户运行时、QoS 等已运行阶段失败数为
