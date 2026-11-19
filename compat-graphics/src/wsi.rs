@@ -7,7 +7,6 @@
 use alloc::vec::Vec;
 
 pub const MAX_SWAPCHAIN_IMAGES: usize = 4;
-pub const INPUT_QUEUE_CAPACITY: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WindowId(u64);
@@ -204,10 +203,10 @@ impl Surface {
 /// Bounded WSI compatibility state.
 ///
 /// 有界 WSI 兼容状态；surface 和 input 都由窗口世代约束。
-pub struct Wsi<const W: usize, const S: usize> {
+pub struct Wsi<const W: usize, const S: usize, const Q: usize> {
     windows: [Window; W],
     surfaces: [Surface; S],
-    input: [Option<InputEvent>; INPUT_QUEUE_CAPACITY],
+    input: [Option<InputEvent>; Q],
     input_head: usize,
     input_len: usize,
     next_serial: u64,
@@ -215,13 +214,13 @@ pub struct Wsi<const W: usize, const S: usize> {
     next_surface_generation: u32,
 }
 
-impl<const W: usize, const S: usize> Wsi<W, S> {
+impl<const W: usize, const S: usize, const Q: usize> Wsi<W, S, Q> {
     pub const fn new() -> Self {
-        assert!(W > 0 && S > 0, "WSI capacities must be non-zero");
+        assert!(W > 0 && S > 0 && Q > 0, "WSI capacities must be non-zero");
         Self {
             windows: [Window::empty(); W],
             surfaces: [const { Surface::empty() }; S],
-            input: [None; INPUT_QUEUE_CAPACITY],
+            input: [None; Q],
             input_head: 0,
             input_len: 0,
             next_serial: 1,
@@ -265,7 +264,7 @@ impl<const W: usize, const S: usize> Wsi<W, S> {
         self.windows[slot] = Window::empty();
         let mut removed = 0;
         while removed < self.input_len {
-            let index = (self.input_head + removed) % INPUT_QUEUE_CAPACITY;
+            let index = (self.input_head + removed) % Q;
             if self.input[index].is_some_and(|event| event.window == id) {
                 self.input[index] = None;
             } else {
@@ -273,7 +272,7 @@ impl<const W: usize, const S: usize> Wsi<W, S> {
                 continue;
             }
             if removed + 1 < self.input_len {
-                let last = (self.input_head + self.input_len - 1) % INPUT_QUEUE_CAPACITY;
+                let last = (self.input_head + self.input_len - 1) % Q;
                 self.input[index] = self.input[last];
                 self.input[last] = None;
             }
@@ -410,12 +409,12 @@ impl<const W: usize, const S: usize> Wsi<W, S> {
         if self.windows[slot].generation != generation {
             return Err(WsiError::StaleGeneration);
         }
-        if self.input_len == INPUT_QUEUE_CAPACITY {
+        if self.input_len == Q {
             return Err(WsiError::Capacity);
         }
         let serial = self.next_serial;
         self.next_serial = serial.checked_add(1).ok_or(WsiError::Capacity)?;
-        let index = (self.input_head + self.input_len) % INPUT_QUEUE_CAPACITY;
+        let index = (self.input_head + self.input_len) % Q;
         self.input[index] = Some(InputEvent {
             window,
             serial,
@@ -430,7 +429,7 @@ impl<const W: usize, const S: usize> Wsi<W, S> {
             return None;
         }
         let event = self.input[self.input_head].take();
-        self.input_head = (self.input_head + 1) % INPUT_QUEUE_CAPACITY;
+        self.input_head = (self.input_head + 1) % Q;
         self.input_len -= 1;
         event
     }
@@ -466,7 +465,7 @@ impl<const W: usize, const S: usize> Wsi<W, S> {
     }
 }
 
-impl<const W: usize, const S: usize> Default for Wsi<W, S> {
+impl<const W: usize, const S: usize, const Q: usize> Default for Wsi<W, S, Q> {
     fn default() -> Self {
         Self::new()
     }
@@ -490,7 +489,7 @@ mod tests {
     fn surface_image_rotation_present_and_resize_revoke() {
         let window = WindowId::new(1).unwrap();
         let surface = SurfaceId::new(2).unwrap();
-        let mut wsi = Wsi::<2, 2>::new();
+        let mut wsi = Wsi::<2, 2, 32>::new();
         assert_eq!(
             wsi.register_window(
                 window,
@@ -537,7 +536,7 @@ mod tests {
     #[test]
     fn input_queue_is_bounded_and_window_destroy_removes_events() {
         let window = WindowId::new(1).unwrap();
-        let mut wsi = Wsi::<1, 1>::new();
+        let mut wsi = Wsi::<1, 1, 3>::new();
         wsi.register_window(
             window,
             WindowGeometry {
@@ -547,7 +546,7 @@ mod tests {
             },
         )
         .unwrap();
-        for _ in 0..INPUT_QUEUE_CAPACITY {
+        for _ in 0..3 {
             wsi.push_input(
                 window,
                 1,
@@ -588,7 +587,7 @@ mod tests {
     #[test]
     fn invalid_surface_and_single_window_surface_are_rejected() {
         let window = WindowId::new(1).unwrap();
-        let mut wsi = Wsi::<1, 2>::new();
+        let mut wsi = Wsi::<1, 2, 32>::new();
         wsi.register_window(
             window,
             WindowGeometry {

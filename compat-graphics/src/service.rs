@@ -210,7 +210,7 @@ struct Work {
 ///
 /// 绑定一个 Jasper GPU 队列世代的 Linux 图形兼容服务。所有 import 在使用前
 /// 重新校验 Memory capability，撤销后的 token 不会被缓存绕过。
-pub struct GraphicsService<const W: usize, const S: usize> {
+pub struct GraphicsService<const W: usize, const S: usize, const Q: usize> {
     caps: DeviceCapabilities,
     queue: GpuQueue,
     available_rights: u32,
@@ -222,13 +222,13 @@ pub struct GraphicsService<const W: usize, const S: usize> {
     semaphores: [Option<Semaphore>; MAX_SYNC_OBJECTS],
     timelines: [Option<TimelineSemaphore>; MAX_SYNC_OBJECTS],
     next_sync: u64,
-    wsi: Wsi<W, S>,
+    wsi: Wsi<W, S, Q>,
     buffer_bytes: u64,
     image_bytes: u64,
     active: bool,
 }
 
-impl<const W: usize, const S: usize> GraphicsService<W, S> {
+impl<const W: usize, const S: usize, const Q: usize> GraphicsService<W, S, Q> {
     pub fn new(
         caps: DeviceCapabilities,
         identity: GpuIdentity,
@@ -1043,7 +1043,7 @@ mod tests {
         .unwrap()
     }
 
-    fn test_service() -> GraphicsService<2, 2> {
+    fn test_service() -> GraphicsService<2, 2, 32> {
         GraphicsService::new(
             capabilities(),
             GpuIdentity {

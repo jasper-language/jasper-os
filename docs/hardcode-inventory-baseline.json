@@ -230,12 +230,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "21093907514c0c757353b572850dd771db094df7c90ead7bbf7495a90ac3f67c",
-      "path": "compat-graphics/src/wsi.rs",
-      "rules": "HC-G8"
-    },
-    {
-      "count": 1,
       "fingerprint": "21159198226b515b8bdfc84c5c98f2a533a455e106e2c6524db8391226011a19",
       "path": "kernel/src/lifecycle_health.rs",
       "rules": "HC-G1"
@@ -1641,5 +1635,5 @@
     "user",
     "xtask"
   ],
-  "total": 345
+  "total": 344
 }

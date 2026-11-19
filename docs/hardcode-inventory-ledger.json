@@ -1,5 +1,5 @@
 {
-  "baseline_total": 345,
+  "baseline_total": 344,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -13,7 +13,7 @@
     "explicit-safety-policy": 129,
     "platform-adapter": 28,
     "protocol-abi": 38,
-    "runtime-resource-capacity": 69,
+    "runtime-resource-capacity": 68,
     "test-demo-fixture": 6
   },
   "entries": [
@@ -126,16 +126,6 @@
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
       "source": "pub const MAX_SWAPCHAIN_IMAGES: usize = 4;"
-    },
-    {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "21093907514c0c757353b572850dd771db094df7c90ead7bbf7495a90ac3f67c",
-      "line": 10,
-      "path": "compat-graphics/src/wsi.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
-      "rules": "HC-G8",
-      "source": "pub const INPUT_QUEUE_CAPACITY: usize = 32;"
     },
     {
       "category": "protocol-abi",
@@ -2723,7 +2713,7 @@
     "explicit-safety-policy": 145,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 108,
+    "runtime-resource-capacity": 107,
     "test-demo-fixture": 7
   }
 }
