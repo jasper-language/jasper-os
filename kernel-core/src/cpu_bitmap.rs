@@ -87,6 +87,11 @@ impl CpuBitmap {
         self.words.iter().all(|word| *word == 0)
     }
 
+    /// Remove every member while retaining allocated storage for hot paths.
+    pub fn clear(&mut self) {
+        self.words.clear();
+    }
+
     pub fn len(&self) -> usize {
         self.words
             .iter()
@@ -237,5 +242,15 @@ mod tests {
         );
         assert_eq!(CpuBitmap::first(64).unwrap().capacity_bits(), Ok(64));
         assert_eq!(CpuBitmap::first(65).unwrap().capacity_bits(), Ok(128));
+    }
+
+    #[test]
+    fn clear_reuses_hot_path_storage() {
+        let mut set = CpuBitmap::first(130).unwrap();
+        set.clear();
+        assert!(set.is_empty());
+        set.insert(129).unwrap();
+        assert!(set.contains(129));
+        assert_eq!(set.len(), 1);
     }
 }

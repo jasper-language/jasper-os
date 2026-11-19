@@ -648,6 +648,13 @@ pub fn configure_idle_tick() -> u32 {
     divisor
 }
 
+/// Reserve tickless-idle CPU bookkeeping before secondary CPUs are started.
+pub fn prepare_nohz_cpus(
+    cpus: usize,
+) -> Result<(), kernel_core::tickless::StopStorageError> {
+    with_mut(|scheduler| scheduler.prepare_nohz_cpus(cpus))
+}
+
 /// 设置空闲停表的最大间隔（< 2 关闭），返回之前的设置（演练对照测量用，结束时以返回值恢复）。
 /// Set the tickless-idle divisor; returns the previous one.
 pub fn set_idle_tick(divisor: u32) -> u32 {

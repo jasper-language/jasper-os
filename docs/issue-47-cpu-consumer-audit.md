@@ -120,4 +120,9 @@
   `cpu-dynamic` 构建中使用 `CpuBitmap`，删除 `MAX_CPUS` 平台检查。资源准入只依赖
   所选 CPU 是否在亲和集合中；实际硬件/在线资格由 CPU runtime registry 和调度器
   统一校验。轻量无 feature 构建保留 legacy `CpuSet` 适配。
+- `kernel-core/src/tickless.rs`：`StopBoard` 的生产 `cpu-dynamic` 路径使用
+  `CpuBitmap` 与按已准入 CPU 数预分配的起止时刻表，删除 `[u64; MAX_CPUS]`。
+  调度器在 AP 启动前的静止事务中完成停表表和唤醒扫描暂存区预分配；`stop`/
+  `restart` 与计时器 `kick_stopped` 路径不再临时扩容。宿主测试覆盖 129 和 4096
+  号 CPU；无堆轻量构建保留 `CpuSet` 兼容路径。
 - 其余 IRQ 全局路由、调度器、per-CPU、架构入口和亲和 ABI 尚未迁移。

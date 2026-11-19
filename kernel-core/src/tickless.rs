@@ -20,7 +20,47 @@
 //!   Pure decision logic for how far to push an idle CPU's next tick, plus the board that
 //!   records which CPUs stopped their tick so the scheduler can wake them and keep honest stats.
 
+#[cfg(any(test, feature = "cpu-dynamic"))]
+use alloc::vec::Vec;
+
+#[cfg(any(test, feature = "cpu-dynamic"))]
+use crate::cpu_bitmap::{CpuBitmap, CpuBitmapError};
+#[cfg(not(any(test, feature = "cpu-dynamic")))]
 use crate::smp::{CpuSet, MAX_CPUS};
+
+#[cfg(any(test, feature = "cpu-dynamic"))]
+type StopSet = CpuBitmap;
+#[cfg(not(any(test, feature = "cpu-dynamic")))]
+type StopSet = CpuSet;
+
+#[cfg(any(test, feature = "cpu-dynamic"))]
+type StopTimes = Vec<u64>;
+#[cfg(not(any(test, feature = "cpu-dynamic")))]
+type StopTimes = [u64; MAX_CPUS];
+
+/// Failure to reserve tickless CPU storage before the hot path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopStorageError {
+    InvalidCpu,
+    Allocation,
+}
+
+#[cfg(any(test, feature = "cpu-dynamic"))]
+fn stop_storage_error(error: CpuBitmapError) -> StopStorageError {
+    match error {
+        CpuBitmapError::InvalidCpu => StopStorageError::InvalidCpu,
+        CpuBitmapError::Allocation => StopStorageError::Allocation,
+    }
+}
+
+impl StopStorageError {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::InvalidCpu => "system.cpu.error.invalid_cpu",
+            Self::Allocation => "system.cpu.error.stop_board_allocation",
+        }
+    }
+}
 
 /// 下一次定时器中断的安排。
 /// How to arm the next timer interrupt.
@@ -97,14 +137,15 @@ impl StopError {
 
 /// 停表处理器的登记（由调度器在自己的锁内持有）。
 /// Board of processors whose periodic tick is stopped.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct StopBoard {
     timekeeper: usize,
-    stopped: CpuSet,
+    capacity: usize,
+    stopped: StopSet,
     /// 停表时的全局 tick。
-    since: [u64; MAX_CPUS],
+    since: StopTimes,
     /// 停表时该处理器已记账的本地 tick 数。
-    local_at: [u64; MAX_CPUS],
+    local_at: StopTimes,
     stops: u64,
     restarts: u64,
 }
@@ -113,14 +154,81 @@ impl StopBoard {
     /// 新登记：`timekeeper` 为计时处理器的下标。
     /// New board; `timekeeper` never stops its tick.
     pub const fn new(timekeeper: usize) -> StopBoard {
-        StopBoard { timekeeper, stopped: CpuSet::EMPTY, since: [0; MAX_CPUS], local_at: [0; MAX_CPUS], stops: 0, restarts: 0 }
+        StopBoard {
+            timekeeper,
+            capacity: 0,
+            #[cfg(any(test, feature = "cpu-dynamic"))]
+            stopped: CpuBitmap::empty(),
+            #[cfg(not(any(test, feature = "cpu-dynamic")))]
+            stopped: CpuSet::EMPTY,
+            #[cfg(any(test, feature = "cpu-dynamic"))]
+            since: Vec::new(),
+            #[cfg(not(any(test, feature = "cpu-dynamic")))]
+            since: [0; MAX_CPUS],
+            #[cfg(any(test, feature = "cpu-dynamic"))]
+            local_at: Vec::new(),
+            #[cfg(not(any(test, feature = "cpu-dynamic")))]
+            local_at: [0; MAX_CPUS],
+            stops: 0,
+            restarts: 0,
+        }
+    }
+
+    /// 为已准入的 CPU 数量预分配登记存储。成功前不修改现有登记；调用者必须在
+    /// 中断或热路径之前完成该事务。
+    ///
+    /// Preallocate storage for the admitted CPU count. The board is exchanged
+    /// only after every allocation succeeds, so failure leaves it unchanged.
+    pub fn reserve_capacity(&mut self, cpus: usize) -> Result<(), StopStorageError> {
+        let highest_stopped = self.stopped.iter().max();
+        if highest_stopped.is_some_and(|cpu| cpu >= cpus) {
+            return Err(StopStorageError::InvalidCpu);
+        }
+
+        #[cfg(not(any(test, feature = "cpu-dynamic")))]
+        {
+            if cpus > MAX_CPUS {
+                return Err(StopStorageError::InvalidCpu);
+            }
+            self.capacity = cpus;
+            return Ok(());
+        }
+
+        #[cfg(any(test, feature = "cpu-dynamic"))]
+        {
+            let mut since = Vec::new();
+            since
+                .try_reserve_exact(cpus)
+                .map_err(|_| StopStorageError::Allocation)?;
+            since.extend_from_slice(&self.since);
+            since.resize(cpus, 0);
+
+            let mut local_at = Vec::new();
+            local_at
+                .try_reserve_exact(cpus)
+                .map_err(|_| StopStorageError::Allocation)?;
+            local_at.extend_from_slice(&self.local_at);
+            local_at.resize(cpus, 0);
+
+            let mut stopped =
+                CpuBitmap::with_capacity(cpus).map_err(stop_storage_error)?;
+            for cpu in self.stopped.iter() {
+                stopped.insert(cpu).map_err(stop_storage_error)?;
+            }
+
+            self.since = since;
+            self.local_at = local_at;
+            self.stopped = stopped;
+            self.capacity = cpus;
+            Ok(())
+        }
     }
 
     /// 登记处理器 `cpu` 停表：`now` 为全局 tick，`local` 为它已记账的本地 tick 数。
     /// 计时处理器、越界下标、重复停表被拒绝，登记不变。
     /// Record that `cpu` stopped its tick.
     pub fn stop(&mut self, cpu: usize, now: u64, local: u64) -> Result<(), StopError> {
-        if cpu >= MAX_CPUS {
+        if cpu >= self.capacity {
             return Err(StopError::NoSuchCpu);
         }
         if cpu == self.timekeeper {
@@ -129,7 +237,15 @@ impl StopBoard {
         if self.stopped.contains(cpu) {
             return Err(StopError::AlreadyStopped);
         }
-        self.stopped.insert(cpu);
+        // `reserve_capacity` allocated every word needed for the admitted CPU
+        // interval. This call therefore cannot reach the allocator while the
+        // scheduler lock and IRQ masking are held.
+        #[cfg(any(test, feature = "cpu-dynamic"))]
+        self.stopped.insert(cpu).map_err(|_| StopError::NoSuchCpu)?;
+        #[cfg(not(any(test, feature = "cpu-dynamic")))]
+        if !self.stopped.insert(cpu) {
+            return Err(StopError::NoSuchCpu);
+        }
         self.since[cpu] = now;
         self.local_at[cpu] = local;
         self.stops += 1;
@@ -152,8 +268,8 @@ impl StopBoard {
 
     /// 当前停表的处理器集合。
     /// Processors whose tick is stopped.
-    pub const fn stopped(&self) -> CpuSet {
-        self.stopped
+    pub fn stopped(&self) -> &StopSet {
+        &self.stopped
     }
 
     /// 计时处理器下标。
@@ -224,6 +340,7 @@ mod tests {
     #[test]
     fn stop_and_restart_report_unaccounted_idle() {
         let mut b = StopBoard::new(0);
+        b.reserve_capacity(4).unwrap();
         assert_eq!(b.stop(2, 100, 40), Ok(()));
         assert!(b.stopped().contains(2));
         // 全局走了 12 tick，本地只记了 3 个（停表期间的保底 tick）⇒ 补记 9 个空闲 tick
@@ -235,6 +352,7 @@ mod tests {
     #[test]
     fn restart_never_goes_negative() {
         let mut b = StopBoard::new(0);
+        b.reserve_capacity(2).unwrap();
         b.stop(1, 50, 10).unwrap();
         // 本地时钟比全局时钟快（两个时钟源相互独立）：补记 0，而不是回绕成巨大值
         assert_eq!(b.restart(1, 52, 15), Some(0));
@@ -246,17 +364,18 @@ mod tests {
     #[test]
     fn refusals_leave_the_board_unchanged() {
         let mut b = StopBoard::new(0);
+        b.reserve_capacity(5).unwrap();
         assert_eq!(b.stop(0, 1, 1), Err(StopError::Timekeeper));
-        assert_eq!(b.stop(MAX_CPUS, 1, 1), Err(StopError::NoSuchCpu));
+        assert_eq!(b.stop(5, 1, 1), Err(StopError::NoSuchCpu));
         assert!(b.stopped().is_empty());
         assert_eq!(b.counts(), (0, 0));
         b.stop(3, 5, 5).unwrap();
-        let before = (b.stopped(), b.counts());
+        let before = (b.stopped().clone(), b.counts());
         assert_eq!(b.stop(3, 9, 9), Err(StopError::AlreadyStopped));
-        assert_eq!((b.stopped(), b.counts()), before);
+        assert_eq!((b.stopped().clone(), b.counts()), before);
         // 没停表的处理器重新开表：None，登记不变
         assert_eq!(b.restart(4, 9, 9), None);
-        assert_eq!((b.stopped(), b.counts()), before);
+        assert_eq!((b.stopped().clone(), b.counts()), before);
         // 被拒绝的重复停表没有改写起点
         assert_eq!(b.restart(3, 9, 5), Some(4));
     }
@@ -264,14 +383,32 @@ mod tests {
     #[test]
     fn many_cpus_tracked_independently() {
         let mut b = StopBoard::new(0);
-        for c in 1..MAX_CPUS {
+        let cpus = 130;
+        b.reserve_capacity(cpus).unwrap();
+        for c in 1..cpus {
             b.stop(c, c as u64, 0).unwrap();
         }
-        assert_eq!(b.stopped().len(), MAX_CPUS - 1);
-        let restart = MAX_CPUS as u64 + 100;
-        for c in 1..MAX_CPUS {
+        assert_eq!(b.stopped().len(), cpus - 1);
+        let restart = cpus as u64 + 100;
+        for c in 1..cpus {
             assert_eq!(b.restart(c, restart, 0), Some(restart - c as u64));
         }
         assert!(b.stopped().is_empty());
+    }
+
+    #[test]
+    fn sparse_high_cpu_is_tracked_after_preallocation() {
+        let mut b = StopBoard::new(0);
+        b.reserve_capacity(4097).unwrap();
+        assert_eq!(b.stop(4096, 10, 3), Ok(()));
+        assert!(b.stopped().contains(4096));
+        assert_eq!(b.restart(4096, 20, 4), Some(9));
+    }
+
+    #[test]
+    fn capacity_is_required_before_the_hot_path() {
+        let mut b = StopBoard::new(0);
+        assert_eq!(b.stop(1, 0, 0), Err(StopError::NoSuchCpu));
+        assert_eq!(b.counts(), (0, 0));
     }
 }

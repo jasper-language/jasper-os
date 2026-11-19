@@ -969,6 +969,8 @@ pub struct Scheduler {
     arbiter_on: bool,
     /// 空闲停表的登记（计时处理器 = 引导处理器，永不停表）。
     nohz: StopBoard,
+    /// 预分配的停表扫描结果，避免计时器路径临时分配。
+    nohz_wake_scratch: kernel_core::cpu_bitmap::CpuBitmap,
     /// 空闲停表时本地 tick 的最大间隔（tick；< 2 = 关闭停表，空闲处理器保持周期 tick）。
     nohz_divisor: u32,
     /// 计时处理器为停表处理器发出的重新调度请求次数（停表期间出现可接的工作）。
@@ -995,12 +997,12 @@ pub enum IdleStep {
 
 /// 空闲停表的统计快照。
 /// Snapshot of tickless-idle state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NohzStats {
     /// 停表时的最大间隔（< 2 = 关闭）。
     pub divisor: u32,
     /// 当前停表的处理器。
-    pub stopped: CpuSet,
+    pub stopped: kernel_core::cpu_bitmap::CpuBitmap,
     /// 累计停表次数。
     pub stops: u64,
     /// 累计重新开表次数。
@@ -1127,6 +1129,7 @@ impl Scheduler {
             arbiter: kernel_core::arbiter::Arbiter::new(kernel_core::arbiter::ArbiterParams::DEFAULT),
             arb_windows: [kernel_core::arbiter::Window { ticks: 0, realtime: 0, interactive: 0, batch: 0 }; MAX_CPUS],
             nohz: StopBoard::new(0),
+            nohz_wake_scratch: kernel_core::cpu_bitmap::CpuBitmap::empty(),
             nohz_divisor: 0,
             nohz_kicks: 0,
             #[cfg(feature="s3-nohz-verify")]
@@ -3438,18 +3441,42 @@ impl Scheduler {
         // idle loop calls idle_exit() and restores the periodic timer; merely
         // changing the policy leaves the old one-shot in force indefinitely.
         if divisor < 2 {
-            for cpu in self.nohz.stopped().intersect(self.online).iter() {
-                self.kicks.insert(cpu);
+            for cpu in self.nohz.stopped().iter() {
+                if self.online.contains(cpu) {
+                    self.kicks.insert(cpu);
+                }
             }
         }
         old
+    }
+
+    /// Preallocate the tickless stop board after CPU admission and before any
+    /// secondary starts. Failure leaves the board and all CPU state unchanged.
+    pub fn prepare_nohz_cpus(
+        &mut self,
+        cpus: usize,
+    ) -> Result<(), kernel_core::tickless::StopStorageError> {
+        if self.online.len() != 1 || !self.nohz.stopped().is_empty() {
+            return Err(kernel_core::tickless::StopStorageError::InvalidCpu);
+        }
+        let scratch = kernel_core::cpu_bitmap::CpuBitmap::with_capacity(cpus)
+            .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
+        self.nohz.reserve_capacity(cpus)?;
+        self.nohz_wake_scratch = scratch;
+        Ok(())
     }
 
     /// 空闲停表的统计快照。
     /// Snapshot of tickless-idle statistics.
     pub fn nohz_stats(&self) -> NohzStats {
         let (stops, restarts) = self.nohz.counts();
-        NohzStats { divisor: self.nohz_divisor, stopped: self.nohz.stopped(), stops, restarts, kicks: self.nohz_kicks }
+        NohzStats {
+            divisor: self.nohz_divisor,
+            stopped: self.nohz.stopped().clone(),
+            stops,
+            restarts,
+            kicks: self.nohz_kicks,
+        }
     }
 
     /// 处理器 `c` 的空闲执行流（关中断）问下一步：有事可做 ⇒ 切换；否则在允许时登记停表。
@@ -3497,19 +3524,28 @@ impl Scheduler {
     /// 不会为一个任务叫醒一群处理器。被叫醒之前停表处理器看不到 tick，「空闲而有工作在等」由这里代为记账，
     /// 因此 [`CpuStats::max_idle_waiting`] 在停表时仍然如实。
     fn kick_stopped(&mut self) {
-        let mut left = self.nohz.stopped().intersect(self.online);
-        if left.is_empty() {
+        if self.nohz.stopped().is_empty() {
             return;
         }
-        let mut wake = CpuSet::EMPTY;
+        let mut wake = core::mem::take(&mut self.nohz_wake_scratch);
+        wake.clear();
         for k in self.candidates() {
-            if left.is_empty() {
-                break;
-            }
-            let pick = if left.contains(k.home) { Some(k.home) } else { k.affinity.intersect(left).iter().next() };
+            let pick = if self.nohz.stopped().contains(k.home)
+                && self.online.contains(k.home)
+                && !wake.contains(k.home)
+            {
+                Some(k.home)
+            } else {
+                k.affinity.iter().find(|&cpu| {
+                    self.nohz.stopped().contains(cpu)
+                        && self.online.contains(cpu)
+                        && !wake.contains(cpu)
+                })
+            };
             if let Some(c) = pick {
-                left.remove(c);
-                wake.insert(c);
+                // The scratch was allocated before AP startup, so this insert
+                // cannot enter the allocator from the timer path.
+                wake.insert(c).expect("preallocated tickless wake scratch");
             }
         }
         for c in wake.iter() {
@@ -3519,6 +3555,7 @@ impl Scheduler {
             st.idle_waiting += 1;
             st.max_idle_waiting = st.max_idle_waiting.max(st.idle_waiting);
         }
+        self.nohz_wake_scratch = wake;
     }
 
     /// 本处理器现在是否应切换（收到重新调度请求时调用；不记账）。

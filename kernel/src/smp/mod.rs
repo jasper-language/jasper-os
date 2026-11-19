@@ -221,6 +221,14 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
         );
         arch::halt_forever();
     }
+    if let Err(error) = crate::sched::prepare_nohz_cpus(topo.count()) {
+        crate::kprintln!(
+            "[JSR-SMP] reject=tickless_cpu_storage cpus={} reason={}",
+            topo.count(),
+            error.name()
+        );
+        arch::halt_forever();
+    }
     let boards = initialize_shootdown_boards(topo.count());
     if boards.len() != topo.count() {
         crate::kprintln!(

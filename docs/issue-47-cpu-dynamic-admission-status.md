@@ -46,6 +46,11 @@ IOMMU 中断重映射不再用 `MAX_CPUS` 裁决目标 CPU。它保留 `u8` 路�
 ENV-0 CPU 资源 Demand 在生产构建中已改用动态 CPU 亲和集合，不再用 `MAX_CPUS`
 判定资源平台合法性；CPU 真实存在/在线仍由统一 CPU runtime registry 校验。
 
+空闲停表的 `StopBoard` 也已迁到动态 CPU 集合：停表成员使用 `CpuBitmap`，起止
+时刻表按已准入 CPU 数预分配。调度器在启动 AP 前完成表和扫描暂存区的全有或全无
+分配，因此 `stop`、`restart` 和计时器唤醒路径不依赖临时扩容。CPU 129 与 4096
+的宿主测试通过；轻量无堆构建仍使用固定兼容路径。
+
 ## 尚未完成
 
 当前生产 `CpuSet` 仍是 128 位静态位图；调度、每核状态、IRQ/MSI、TLB/IPI、
