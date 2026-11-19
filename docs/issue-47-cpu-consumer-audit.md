@@ -171,6 +171,8 @@
   全缺失、设备中断只能落到 CPU0 的真实缺陷。context 存储改为 bootstrap 加堆扩展；
   4 vCPU QEMU 中每个 CPU 的两条中断均精确送达，`delivered_exact=4/4`，IRQ 汇总
   `failed=0`。该轮仍保留既有 PCI/KRN0 失败，不等于 RISC-V 全量验收完成。
+- RISC-V 每核 IPI mailbox 也改为 bootstrap 加 AP 前堆扩展；4 vCPU 重放继续通过
+  SMP、IPI、精确 IRQ 路由和资源回收，mailbox 缺失会 fail closed。
 - `kernel/src/{ifc,security,service_catalog}.rs`：把生产 64 位计数器/对象源
   从直接 `AtomicU64` 改为 `kernel_core::sync::Atomic64`。RV32 目标因此可以编译并
   完成真实 QEMU 启动；SMP、平衡、IRQ、IPC、用户运行时、QoS 等已运行阶段失败数为

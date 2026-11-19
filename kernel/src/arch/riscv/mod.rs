@@ -134,6 +134,7 @@ impl Platform for Riscv {
     }
 
     fn prepare_cpu_runtime(cpus: usize) -> Result<(), &'static str> {
+        smp::prepare(cpus).map_err(user::RuntimeStorageError::name)?;
         user::prepare(cpus).map_err(user::RuntimeStorageError::name)
     }
 

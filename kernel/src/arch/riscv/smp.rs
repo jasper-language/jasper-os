@@ -21,6 +21,7 @@
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
+use alloc::vec::Vec;
 use kernel_core::fdt::Fdt;
 use kernel_core::sbi::{self, HartState, SbiError};
 use kernel_core::smp::{IpiKind, IpiMailbox, SmpError, Topology, MAX_CPUS};
@@ -37,7 +38,8 @@ static FIRMWARE: Once<(Topology, &'static str, bool)> = Once::new();
 /// 其他处理器本地定时器的频率（启动前写入）。
 static AP_TIMER_HZ: AtomicU32 = AtomicU32::new(0);
 /// 每个处理器一格的核间中断信箱（下标 = 逻辑下标）。
-static MAILBOX: [IpiMailbox; MAX_CPUS] = [const { IpiMailbox::new() }; MAX_CPUS];
+static BOOTSTRAP_MAILBOX: [IpiMailbox; MAX_CPUS] = [const { IpiMailbox::new() }; MAX_CPUS];
+static EXTRA_MAILBOX: Once<Result<Vec<IpiMailbox>, super::user::RuntimeStorageError>> = Once::new();
 
 /// 启动块：被启动的处理器在地址转换关闭时按物理地址读取（布局与下方汇编的偏移一致）。
 /// 同一时刻只启动一个处理器，所以只需一份。
@@ -48,6 +50,33 @@ struct StartBlock {
 }
 
 static START_BLOCK: StartBlock = StartBlock { words: [const { AtomicUsize::new(0) }; 3] };
+
+fn mailbox(index: usize) -> Option<&'static IpiMailbox> {
+    if let Some(mailbox) = BOOTSTRAP_MAILBOX.get(index) {
+        return Some(mailbox);
+    }
+    let extra = index.checked_sub(MAX_CPUS)?;
+    EXTRA_MAILBOX.get()?.as_ref().ok()?.get(extra)
+}
+
+pub(super) fn prepare(cpus: usize) -> Result<(), super::user::RuntimeStorageError> {
+    let needed = cpus.saturating_sub(MAX_CPUS);
+    let mailboxes = EXTRA_MAILBOX.call_once(|| {
+        let mut mailboxes = Vec::new();
+        mailboxes
+            .try_reserve_exact(needed)
+            .map_err(|_| super::user::RuntimeStorageError::Allocation)?;
+        for _ in MAX_CPUS..cpus {
+            mailboxes.push(IpiMailbox::new());
+        }
+        Ok(mailboxes)
+    });
+    match mailboxes {
+        Ok(mailboxes) if mailboxes.len() >= needed => Ok(()),
+        Ok(_) => Err(super::user::RuntimeStorageError::AlreadyPreparedTooSmall),
+        Err(error) => Err(*error),
+    }
+}
 
 // 其他处理器的入口（HSM hart_start 的入口地址；a0 = hart 号，a1 = 启动块物理地址）。地址转换打开前只读启动块、不写内存。
 global_asm!(
@@ -222,7 +251,10 @@ pub fn send_ipi(target: usize, kind: IpiKind) -> Result<(), SmpError> {
     if target == cpu_index() {
         return Err(SmpError::SelfTarget);
     }
-    if MAILBOX[target].post(kind) {
+    let Some(mailbox) = mailbox(target) else {
+        return Err(SmpError::NoSuchCpu);
+    };
+    if mailbox.post(kind) {
         // 已待处理：先前的发送方已经（或即将）触发中断，接收方会一并取走
         return Ok(());
     }
@@ -232,5 +264,10 @@ pub fn send_ipi(target: usize, kind: IpiKind) -> Result<(), SmpError> {
 /// 监管态软件中断的处理（中断上下文）：先撤下挂起位，再取走本处理器信箱中的全部种类逐一交给 Core。
 pub fn on_soft_interrupt(from_user: bool) {
     cpu::clear_soft_pending();
-    MAILBOX[cpu_index()].take(|kind| irq::on_hardware_irq(IrqLine::Ipi(kind), from_user));
+    let index = cpu_index();
+    let Some(mailbox) = mailbox(index) else {
+        crate::kprintln!("[JSR-SMP] reject=ipi_mailbox_missing cpu={}", index);
+        crate::arch::halt_forever()
+    };
+    mailbox.take(|kind| irq::on_hardware_irq(IrqLine::Ipi(kind), from_user));
 }
