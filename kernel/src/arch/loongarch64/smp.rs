@@ -5,10 +5,11 @@
 //! the LoongArch IOCSR IPI device.
 
 use core::arch::global_asm;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel_core::fdt::Fdt;
 use kernel_core::smp::{CpuSet, IpiKind, SmpError, Topology, MAX_CPUS};
+use spin::Once;
 
 use super::qemu_virt::{
     EFI_CONFIG_TABLE_BUDGET, EFI_CONFIG_TABLE_ENTRY_BYTES, EFI_DEVICE_TREE_GUID,
@@ -25,16 +26,9 @@ const IPI_CALL: u32 = 1 << 4;
 const ECFG_IPI: u64 = 1 << 12;
 const ESTAT_IPI: u64 = 1 << 12;
 
-static CPU_COUNT: AtomicU32 = AtomicU32::new(1);
-static CPU_DROPPED: AtomicU32 = AtomicU32::new(0);
-static CPU_DISCOVERED: AtomicU32 = AtomicU32::new(1);
-static CPU_CONVERSION_FAILURES: AtomicU32 = AtomicU32::new(0);
-static CPU_DISABLED: AtomicU32 = AtomicU32::new(0);
-static CPU_INVENTORY_COMPLETE: AtomicBool = AtomicBool::new(false);
 static TIMER_HZ: AtomicU32 = AtomicU32::new(100);
-static HW_IDS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
-static DISABLED_IDS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
-static DISABLED_STORED: AtomicU32 = AtomicU32::new(0);
+static FIRMWARE_FDT: Once<(Fdt<'static>, u32)> = Once::new();
+static FIRMWARE_TOPOLOGY: Once<Topology> = Once::new();
 
 const AP_STACK_BYTES: usize = 16 * 1024;
 #[repr(C, align(16))]
@@ -137,63 +131,6 @@ pub fn discover_fdt(efi_boot: bool, system_table: u64) -> Result<FirmwareFdt, &'
     if !root_matches {
         return Err("qemu-platform-unverified");
     }
-    let Ok(cpus) = fdt.cpu_topology(0, |hw| (hw <= u32::MAX as u64).then_some(hw as u32)) else {
-        return Err("qemu-fdt-cpu-invalid");
-    };
-    if !cpus.boot_listed {
-        return Err("qemu-fdt-boot-cpu-missing");
-    }
-    let topology = cpus.topology;
-    let discovered = topology.count();
-    if discovered > MAX_CPUS {
-        return Err("fdt-cpu-capacity-exceeded");
-    }
-    let admitted = discovered;
-    let conversion_failures = topology.dropped;
-    let discovered_u32 =
-        u32::try_from(discovered).map_err(|_| "fdt-cpu-inventory-overflow")?;
-    let conversion_u32 =
-        u32::try_from(conversion_failures).map_err(|_| "fdt-cpu-conversion-overflow")?;
-    let disabled_u32 =
-        u32::try_from(topology.disabled).map_err(|_| "fdt-cpu-disabled-overflow")?;
-    let dropped = kernel_core::smp::unadmitted_inventory(
-        discovered,
-        admitted,
-        conversion_failures,
-    );
-    let disabled_ids = topology.disabled_ids();
-    if disabled_ids.len() > MAX_CPUS {
-        return Err("fdt-disabled-cpu-capacity-exceeded");
-    }
-    let disabled_stored = disabled_ids.len();
-    let dropped_u32 = u32::try_from(dropped).map_err(|_| "fdt-cpu-dropped-overflow")?;
-    // Preserve the firmware inventory overflow for the unified SMP gate.
-    // Rebuilding from the fixed hardware-ID table must not make an unsupported
-    // larger machine look like a complete smaller machine.
-    // 保留固件原始库存溢出；从固定硬件 ID 表重建时，不能把超限机器伪装成
-    // 完整但更小的机器。
-    CPU_DISCOVERED.store(discovered_u32, Ordering::Release);
-    CPU_CONVERSION_FAILURES.store(conversion_u32, Ordering::Release);
-    CPU_DISABLED.store(disabled_u32, Ordering::Release);
-    CPU_DROPPED.store(dropped_u32, Ordering::Release);
-    CPU_COUNT.store(
-        u32::try_from(admitted).map_err(|_| "fdt-cpu-admitted-overflow")?,
-        Ordering::Release,
-    );
-    for index in 0..admitted {
-        let hw_id = topology
-            .hw_id(index)
-            .ok_or("fdt-cpu-identity-missing")?;
-        HW_IDS[index].store(hw_id, Ordering::Release);
-    }
-    for (index, &hw_id) in disabled_ids[..disabled_stored].iter().enumerate() {
-        DISABLED_IDS[index].store(hw_id, Ordering::Release);
-    }
-    DISABLED_STORED.store(
-        u32::try_from(disabled_stored).map_err(|_| "fdt-disabled-stored-overflow")?,
-        Ordering::Release,
-    );
-    CPU_INVENTORY_COMPLETE.store(true, Ordering::Release);
     Ok(FirmwareFdt {
         physical: fdt_physical,
         length: total,
@@ -257,29 +194,40 @@ fn firmware_fdt_physical(system_table: u64) -> Result<u64, &'static str> {
     Err("boot-fdt-not-provided")
 }
 
+/// Save the post-MMU device tree for heap-backed CPU topology publication.
+pub fn configure(fdt: Fdt<'static>, boot_hart: u32) {
+    FIRMWARE_FDT.call_once(|| (fdt, boot_hart));
+}
+
 pub fn init_boot() -> super::CpuDiscovery {
+    let Some((fdt, boot_hart)) = FIRMWARE_FDT.get() else {
+        return super::CpuDiscovery {
+            topology: Topology::boot_only(super::cpu::cpuid() as u32),
+            source: "boot_only",
+            inventory_complete: false,
+        };
+    };
+    let (topology, source, inventory_complete) =
+        match fdt.cpu_topology(*boot_hart, |hw| (hw <= u32::MAX as u64).then_some(hw as u32)) {
+            Err(error) => (Topology::boot_only(*boot_hart), error.name(), false),
+            Ok(cpus) if !cpus.boot_listed => (
+                Topology::boot_only(*boot_hart),
+                "system.firmware.error.boot_cpu_unlisted",
+                false,
+            ),
+            Ok(cpus) if cpus.topology.count() > 1 => (cpus.topology, "fdt.cpus", true),
+            Ok(cpus) => (cpus.topology, "boot_only", true),
+        };
+    let topology = FIRMWARE_TOPOLOGY.call_once(|| topology).clone();
     super::CpuDiscovery {
-        topology: topology(),
-        source: "qemu-fdt-cpu-map",
-        inventory_complete: CPU_INVENTORY_COMPLETE.load(Ordering::Acquire),
+        topology,
+        source,
+        inventory_complete,
     }
 }
 
-fn topology() -> Topology {
-    let mut topology = Topology::boot_only(HW_IDS[0].load(Ordering::Acquire));
-    for index in 1..CPU_COUNT.load(Ordering::Acquire) as usize {
-        topology.push(HW_IDS[index].load(Ordering::Acquire));
-    }
-    for index in 0..DISABLED_STORED.load(Ordering::Acquire) as usize {
-        topology.push_disabled(DISABLED_IDS[index].load(Ordering::Acquire));
-    }
-    topology.dropped = topology
-        .dropped
-        .saturating_add(CPU_DROPPED.load(Ordering::Acquire) as usize);
-    let disabled_not_stored = (CPU_DISABLED.load(Ordering::Acquire) as usize)
-        .saturating_sub(DISABLED_STORED.load(Ordering::Acquire) as usize);
-    topology.dropped = topology.dropped.saturating_add(disabled_not_stored);
-    topology
+fn topology() -> Option<&'static Topology> {
+    FIRMWARE_TOPOLOGY.get()
 }
 
 fn cpu_hw_id() -> u32 {
@@ -288,21 +236,25 @@ fn cpu_hw_id() -> u32 {
 
 pub fn cpu_index() -> usize {
     let hw = cpu_hw_id();
+    let Some(topology) = topology() else {
+        crate::kprintln!("[JSR-SMP] reject=cpu_topology_unpublished hw={}", hw);
+        crate::arch::halt_forever()
+    };
     let mut registered = None;
-    for index in 0..CPU_COUNT.load(Ordering::Acquire) as usize {
-        if HW_IDS[index].load(Ordering::Acquire) == hw {
+    for index in 0..topology.count() {
+        if topology.hw_id(index) == Some(hw) {
             registered = Some(index);
             break;
         }
     }
-    match kernel_core::cpu_identity::resolve_index(hw, registered, true, None, MAX_CPUS) {
+    match kernel_core::cpu_identity::resolve_index(hw, registered, true, None, topology.count()) {
         Ok(index) => index,
         Err(error) => {
             crate::kprintln!(
                 "[JSR-SMP] reject=cpu_id_unregistered domain={} hw={} online={}",
                 error.name(),
                 hw,
-                CPU_COUNT.load(Ordering::Acquire)
+                topology.count()
             );
             crate::arch::halt_forever()
         }
@@ -310,7 +262,10 @@ pub fn cpu_index() -> usize {
 }
 
 pub fn send_ipi(cpu: usize, kind: IpiKind) -> Result<(), SmpError> {
-    if cpu == 0 || cpu >= CPU_COUNT.load(Ordering::Acquire) as usize {
+    let Some(topology) = topology() else {
+        return Err(SmpError::NotOnline);
+    };
+    if cpu == 0 || cpu >= topology.count() {
         return Err(SmpError::NoSuchCpu);
     }
     let vector = match kind {
@@ -318,7 +273,7 @@ pub fn send_ipi(cpu: usize, kind: IpiKind) -> Result<(), SmpError> {
         IpiKind::TlbShootdown => 2,
         IpiKind::Call => 4,
     };
-    let hw = HW_IDS[cpu].load(Ordering::Acquire);
+    let hw = topology.hw_id(cpu).ok_or(SmpError::NoSuchCpu)?;
     let value = (1u32 << 31) | (hw << 16) | vector;
     // SAFETY: IPI_SEND is a 32-bit IOCSR doorbell register.
     unsafe { iocsr_write32(value, IOCSR_IPI_SEND) };
@@ -341,7 +296,10 @@ fn mail_send(value: u64, hw: u32) {
 pub unsafe fn start_cpu(
     start: &crate::arch::CpuStart<super::space::SpaceRoot>,
 ) -> Result<(), SmpError> {
-    if start.index == 0 || start.index >= CPU_COUNT.load(Ordering::Acquire) as usize {
+    let Some(topology) = topology() else {
+        return Err(SmpError::NotOnline);
+    };
+    if start.index == 0 || start.index >= topology.count() {
         return Err(SmpError::NoSuchCpu);
     }
     TIMER_HZ.store(start.timer_hz, Ordering::Release);

@@ -130,6 +130,7 @@ extern "C" fn jsr_loongarch64_boot() -> ! {
         crate::console::_print(format_args!("[JSR-DTB] reject={}\n", error.name()));
         super::testdev::stop(35);
     }
+    super::smp::configure(fdt, cpu::cpuid() as u32);
 
     let (image_start, image_end) = mmu::image_range();
     let mut spec = BootSpec::new();

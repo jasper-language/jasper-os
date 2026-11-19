@@ -1,5 +1,5 @@
 {
-  "baseline_total": 364,
+  "baseline_total": 361,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -11,7 +11,7 @@
   ],
   "counts": {
     "explicit-safety-policy": 139,
-    "platform-adapter": 31,
+    "platform-adapter": 28,
     "protocol-abi": 38,
     "runtime-resource-capacity": 71,
     "test-demo-fixture": 6
@@ -1841,7 +1841,7 @@
       "category": "platform-adapter",
       "count": 1,
       "fingerprint": "04ec57a2fc944f41fc3ad27795c72b2c1c949d56600b108ffc553e35a0e2b512",
-      "line": 138,
+      "line": 132,
       "path": "kernel/src/arch/loongarch64/smp.rs",
       "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
       "rules": "HC-G3",
@@ -1850,18 +1850,8 @@
     {
       "category": "platform-adapter",
       "count": 1,
-      "fingerprint": "3df9866394ee7023f08ca80cc41d9c16b1092952bb2275c68618311bf2c7c274",
-      "line": 141,
-      "path": "kernel/src/arch/loongarch64/smp.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "return Err(\"qemu-fdt-cpu-invalid\");"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
       "fingerprint": "50439cff51e58600c84598fd317009b536a6e1d4161521cc99b9eb939ba9e631",
-      "line": 130,
+      "line": 124,
       "path": "kernel/src/arch/loongarch64/smp.rs",
       "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
       "rules": "HC-G3",
@@ -1870,18 +1860,8 @@
     {
       "category": "platform-adapter",
       "count": 1,
-      "fingerprint": "5dd9e61aae20cc48f44a5f965e1d26c833903f8b59ef23b811d3358a445392ac",
-      "line": 263,
-      "path": "kernel/src/arch/loongarch64/smp.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "source: \"qemu-fdt-cpu-map\","
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
       "fingerprint": "633d4b3e1dd9609927e0abcb039cc71c886f6f599c87f8dde63c8cf7787feb65",
-      "line": 124,
+      "line": 118,
       "path": "kernel/src/arch/loongarch64/smp.rs",
       "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
       "rules": "HC-G3",
@@ -1890,18 +1870,8 @@
     {
       "category": "platform-adapter",
       "count": 1,
-      "fingerprint": "a04a872c2d74511c5b57acb16f5ce8bf65dec2777aa60cb2964369f66fda1027",
-      "line": 144,
-      "path": "kernel/src/arch/loongarch64/smp.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "return Err(\"qemu-fdt-boot-cpu-missing\");"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
       "fingerprint": "b43e20246a77b5db2c53925bb18b236ed6f6e4ddbba01f26d08349a1aa1a8851",
-      "line": 121,
+      "line": 115,
       "path": "kernel/src/arch/loongarch64/smp.rs",
       "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
       "rules": "HC-G3",
@@ -1931,7 +1901,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "851d07bef48da61dd28029fb24cdf5f4e6913e256a9fa3cd4e18ed1f9c9ea3e2",
-      "line": 160,
+      "line": 163,
       "path": "kernel/src/arch/riscv/smp.rs",
       "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
       "rules": "HC-G7",
@@ -2871,7 +2841,7 @@
   "schema": 1,
   "weighted_counts": {
     "explicit-safety-policy": 156,
-    "platform-adapter": 47,
+    "platform-adapter": 44,
     "protocol-abi": 41,
     "runtime-resource-capacity": 113,
     "test-demo-fixture": 7

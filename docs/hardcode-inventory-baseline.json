@@ -434,12 +434,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "3df9866394ee7023f08ca80cc41d9c16b1092952bb2275c68618311bf2c7c274",
-      "path": "kernel/src/arch/loongarch64/smp.rs",
-      "rules": "HC-G3"
-    },
-    {
-      "count": 1,
       "fingerprint": "3e45b23274e30aecc738102d75e3d7f983f2246387779e452c237db4e23ef130",
       "path": "jaso/src/wire.rs",
       "rules": "HC-G1"
@@ -647,12 +641,6 @@
       "fingerprint": "5db71a927ab52d1e51eb30cf0de0400a17648468c3c7462d4c81f006e4a2a917",
       "path": "user/rt/src/io.rs",
       "rules": "HC-G2"
-    },
-    {
-      "count": 1,
-      "fingerprint": "5dd9e61aae20cc48f44a5f965e1d26c833903f8b59ef23b811d3358a445392ac",
-      "path": "kernel/src/arch/loongarch64/smp.rs",
-      "rules": "HC-G3"
     },
     {
       "count": 1,
@@ -1096,12 +1084,6 @@
       "count": 2,
       "fingerprint": "9f1736c3ef19f749a7beebc1dec869212027735899dc8933babb7517042885b8",
       "path": "kernel/src/arch/aarch64/boot.rs",
-      "rules": "HC-G3"
-    },
-    {
-      "count": 1,
-      "fingerprint": "a04a872c2d74511c5b57acb16f5ce8bf65dec2777aa60cb2964369f66fda1027",
-      "path": "kernel/src/arch/loongarch64/smp.rs",
       "rules": "HC-G3"
     },
     {
@@ -1731,5 +1713,5 @@
     "user",
     "xtask"
   ],
-  "total": 364
+  "total": 361
 }

@@ -175,6 +175,10 @@
   从直接 `AtomicU64` 改为 `kernel_core::sync::Atomic64`。RV32 目标因此可以编译并
   完成真实 QEMU 启动；SMP、平衡、IRQ、IPC、用户运行时、QoS 等已运行阶段失败数为
   0，整体仍因既有 PCI/KRN0 缺口退出失败。
+- `kernel/src/arch/loongarch64/{boot,smp}.rs`：LoongArch 堆前阶段只保存并校验
+  FDT，不再提前分配动态 CPU Topology；硬件身份和 disabled 集合在堆后
+  `init_boot` 发布，固定 `HW_IDS`/`DISABLED_IDS` 已删除。目标构建通过，但标准
+  `accept-loongarch64.sh` 仍没有串口输出，因此不记录为运行验收通过。
 - `kernel/src/arch/aarch64/user.rs`：每核用户返回内核栈记录改为 bootstrap 加
   AP 启动前堆扩展。Pixel 6a 无损 runtime 在 `4.49s` 到达 PSCI reset，恢复到同一
   Android build，`sys.boot_completed=1` 且 slot 仍为 `a`。
