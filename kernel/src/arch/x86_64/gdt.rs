@@ -8,8 +8,8 @@
 //! 引导处理器的表放在静态存储里（堆就绪之前就要用）；其他处理器的表在启动它之前从内核堆分配并永久保留。
 //! `rsp0`（从用户态进入内核时使用的栈）只由本处理器在关中断临界区里写，经 [`set_kernel_stack`] 封装。
 
-use alloc::alloc::{alloc_zeroed, Layout};
-use alloc::boxed::Box;
+use alloc::alloc::{alloc, alloc_zeroed, Layout};
+use alloc::vec::Vec;
 use core::mem::size_of;
 use core::ptr::{addr_of, addr_of_mut};
 use core::sync::atomic::{AtomicPtr, Ordering};
@@ -37,10 +37,34 @@ static mut BOOT_RSP0_STACK: Stack<[u8; STACK_SIZE]> = Stack([0; STACK_SIZE]);
 static mut TSS: TaskStateSegment = TaskStateSegment::new();
 static GDT: Once<(GlobalDescriptorTable, Selectors)> = Once::new();
 
-/// 每个处理器的 TSS（下标 = 逻辑下标；空 = 尚未准备）。
-static CPU_TSS: [AtomicPtr<TaskStateSegment>; MAX_CPUS] = [const { AtomicPtr::new(core::ptr::null_mut()) }; MAX_CPUS];
-/// 其他处理器的 GDT（下标 = 逻辑下标）。
-static CPU_GDT: [AtomicPtr<GlobalDescriptorTable>; MAX_CPUS] = [const { AtomicPtr::new(core::ptr::null_mut()) }; MAX_CPUS];
+struct CpuTablePointers {
+    tss: AtomicPtr<TaskStateSegment>,
+    gdt: AtomicPtr<GlobalDescriptorTable>,
+}
+
+impl CpuTablePointers {
+    const fn empty() -> Self {
+        Self {
+            tss: AtomicPtr::new(core::ptr::null_mut()),
+            gdt: AtomicPtr::new(core::ptr::null_mut()),
+        }
+    }
+}
+
+/// Bootstrap GDT/TSS pointers. Heap-backed entries extend this table before AP startup.
+static CPU_TABLE_BOOTSTRAP: [CpuTablePointers; MAX_CPUS] =
+    [const { CpuTablePointers::empty() }; MAX_CPUS];
+
+static EXTRA_CPU_TABLES: Once<Result<Vec<CpuTablePointers>, super::syscall::RuntimeStorageError>> =
+    Once::new();
+
+fn table_slot(index: usize) -> Option<&'static CpuTablePointers> {
+    if index < MAX_CPUS {
+        return Some(CPU_TABLE_BOOTSTRAP.get(index)?);
+    }
+    let extra = index.checked_sub(MAX_CPUS)?;
+    EXTRA_CPU_TABLES.get()?.as_ref().ok()?.get(extra)
+}
 
 /// 全部段选择子。
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -92,7 +116,9 @@ pub fn init() {
         t.iomap_base = size_of::<TaskStateSegment>() as u16;
         &*addr_of!(TSS)
     };
-    CPU_TSS[0].store(addr_of_mut!(TSS), Ordering::Release);
+    if let Some(table) = table_slot(0) {
+        table.tss.store(addr_of_mut!(TSS), Ordering::Release);
+    }
     let (gdt, sel) = GDT.call_once(|| build(tss));
     load(gdt, *sel);
 }
@@ -104,13 +130,25 @@ struct CpuStacks {
     rsp0: [u8; STACK_SIZE],
 }
 
-/// 为逻辑下标 `index`（≥ 1）的处理器准备 GDT 与 TSS（在启动它之前、于引导处理器上调用）。
-/// 重复调用复用已准备好的表；下标越界返回 `false`。
-pub fn prepare_cpu(index: usize) -> bool {
-    if index == 0 || index >= MAX_CPUS {
+fn tss_ptr(index: usize) -> Option<*mut TaskStateSegment> {
+    table_slot(index)
+        .map(|table| table.tss.load(Ordering::Acquire))
+        .filter(|pointer| !pointer.is_null())
+}
+
+fn gdt_ptr(index: usize) -> Option<*mut GlobalDescriptorTable> {
+    table_slot(index)
+        .map(|table| table.gdt.load(Ordering::Acquire))
+        .filter(|pointer| !pointer.is_null())
+}
+
+fn allocate_cpu(index: usize) -> bool {
+    let Some(table) = table_slot(index) else {
         return false;
-    }
-    if !CPU_GDT[index].load(Ordering::Acquire).is_null() {
+    };
+    if !table.gdt.load(Ordering::Acquire).is_null()
+        && !table.tss.load(Ordering::Acquire).is_null()
+    {
         return true;
     }
     // 栈与表永久保留（处理器不会下线），因此直接泄漏为 'static。
@@ -128,25 +166,68 @@ pub fn prepare_cpu(index: usize) -> bool {
     tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] =
         VirtAddr::from_ptr(stacks.double_fault.as_ptr()) + STACK_SIZE as u64;
     tss.iomap_base = size_of::<TaskStateSegment>() as u16;
-    let tss: &'static mut TaskStateSegment = Box::leak(Box::new(tss));
-    let tss_ptr: *mut TaskStateSegment = tss;
-    // SAFETY：tss 已泄漏为 'static；之后只经 CPU_TSS 指针由该处理器自己写 rsp0。
+    let tss_layout = Layout::new::<TaskStateSegment>();
+    // SAFETY：以正确布局分配未初始化存储；成功后立即写入完整 TSS。
+    let tss_ptr = unsafe { alloc(tss_layout) } as *mut TaskStateSegment;
+    if tss_ptr.is_null() {
+        return false;
+    }
+    // SAFETY：tss_ptr 对齐且有效；写后永不释放，成为该处理器的稳定 TSS。
+    unsafe { tss_ptr.write(tss) };
+    // SAFETY：tss_ptr 指向已初始化且不会移动的 TSS。
     let (gdt, sel) = build(unsafe { &*tss_ptr });
     if sel != selectors() {
         return false;
     }
-    let gdt: &'static mut GlobalDescriptorTable = Box::leak(Box::new(gdt));
-    CPU_TSS[index].store(tss_ptr, Ordering::Release);
-    CPU_GDT[index].store(gdt, Ordering::Release);
+    let gdt_layout = Layout::new::<GlobalDescriptorTable>();
+    // SAFETY：以正确布局分配未初始化存储；成功后立即写入完整 GDT。
+    let gdt_ptr = unsafe { alloc(gdt_layout) } as *mut GlobalDescriptorTable;
+    if gdt_ptr.is_null() {
+        return false;
+    }
+    // SAFETY：指针对齐且有效；写后永不释放，成为该处理器的稳定 GDT。
+    unsafe { gdt_ptr.write(gdt) };
+    table.tss.store(tss_ptr, Ordering::Release);
+    table.gdt.store(gdt_ptr, Ordering::Release);
     true
+}
+
+/// Reserve every AP's GDT/TSS pointer slot and concrete table before any AP starts.
+pub(super) fn prepare_all(
+    cpus: usize,
+) -> Result<(), super::syscall::RuntimeStorageError> {
+    let needed = cpus.saturating_sub(MAX_CPUS);
+    let tables = EXTRA_CPU_TABLES.call_once(|| {
+        let mut tables = Vec::new();
+        tables
+            .try_reserve_exact(needed)
+            .map_err(|_| super::syscall::RuntimeStorageError::Allocation)?;
+        for _ in MAX_CPUS..cpus {
+            tables.push(CpuTablePointers::empty());
+        }
+        Ok(tables)
+    });
+    match tables {
+        Ok(tables) if tables.len() >= needed => {}
+        Ok(_) => return Err(super::syscall::RuntimeStorageError::AlreadyPreparedTooSmall),
+        Err(error) => return Err(*error),
+    }
+    for index in 1..cpus {
+        if !allocate_cpu(index) {
+            return Err(super::syscall::RuntimeStorageError::Allocation);
+        }
+    }
+    Ok(())
+}
+
+/// Verify that an AP's GDT and TSS were reserved by [`prepare_all`].
+pub fn prepare_cpu(index: usize) -> bool {
+    index == 0 || (gdt_ptr(index).is_some() && tss_ptr(index).is_some())
 }
 
 /// 在逻辑下标 `index` 的处理器上加载为它准备的 GDT 与 TSS（该处理器启动后最先调用）。
 pub fn init_cpu(index: usize) -> bool {
-    let Some(p) = CPU_GDT.get(index).map(|g| g.load(Ordering::Acquire)) else { return false };
-    if p.is_null() {
-        return false;
-    }
+    let Some(p) = gdt_ptr(index) else { return false };
     // SAFETY：p 指向 prepare_cpu 泄漏的 'static GDT，此后只读。
     load(unsafe { &*p }, selectors());
     true
@@ -161,11 +242,7 @@ pub fn selectors() -> Selectors {
 ///
 /// 调用者（调度器）在关中断临界区内调用；CPU 只在特权级切换时读取它。
 pub fn set_kernel_stack(top: u64) {
-    let Some(p) = CPU_TSS
-        .get(super::smp::cpu_index())
-        .map(|t| t.load(Ordering::Acquire))
-        .filter(|p| !p.is_null())
-    else {
+    let Some(p) = tss_ptr(super::smp::cpu_index()) else {
         crate::kprintln!(
             "[JSR-SMP] reject=tss_uninitialized index={}",
             super::smp::cpu_index()

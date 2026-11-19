@@ -167,7 +167,8 @@ impl Platform for X86_64 {
 
     fn prepare_cpu_runtime(cpus: usize) -> Result<(), &'static str> {
         syscall::prepare(cpus).map_err(syscall::RuntimeStorageError::name)?;
-        user::prepare_return_frames(cpus).map_err(syscall::RuntimeStorageError::name)
+        user::prepare_return_frames(cpus).map_err(syscall::RuntimeStorageError::name)?;
+        gdt::prepare_all(cpus).map_err(syscall::RuntimeStorageError::name)
     }
 
     fn console_write_byte(byte: u8) {

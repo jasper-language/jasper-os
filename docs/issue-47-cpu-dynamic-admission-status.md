@@ -71,8 +71,9 @@ IRQ handler 数组、TLB/IPI、定时器和诊断中仍有由该宽度派生的�
 CPU 维度和三个 deadline forest 也已预分配扩展；scheduler per-CPU run leaves
 已采用 bootstrap 加堆后备 leaf，且每个 leaf 的外部 CPU 队列身份与其单项本地
 RunLists 解耦；x86 syscall 入口块与用户态返回帧也已采用 AP 启动前的堆后备扩展。
-共享 CpuSet 门面、x86 GDT/TSS 表、AArch64/RISC-V 每核表和 LoongArch 硬件 ID
-表仍受固定表约束。因此：
+x86 GDT/TSS 指针表、双重错误栈和启动 rsp0 栈也已完成 AP 启动前全量预留。
+共享 CpuSet 门面、AArch64/RISC-V 每核表和 LoongArch 硬件 ID 表仍受固定表约束。
+因此：
 
 - 不能把 128 改成 256/1024 后声称“动态支持”；
 - 不能把本切片中的 4096-CPU 软件准入测试冒充真实内核运行；

@@ -159,6 +159,10 @@
   分配堆后备连续表。入口块地址在分配后保持稳定，AP 初始化、内核栈更新和用户态
   返回路径只索引已发布存储；缺失或分配失败会在启动前失败关闭，IRQ 路径不再依赖
   固定 `MAX_CPUS` 表。
+- `kernel/src/arch/x86_64/gdt.rs`：每核 GDT、TSS、双重错误栈和初始 rsp0 栈同样在
+  任意 AP 启动前全部预留。CPU 指针表采用 bootstrap 加堆后备扩展，具体 GDT/TSS
+  使用稳定独立分配；任一表或栈分配失败都不会启动 secondary。`set_kernel_stack`
+  和 AP 入口只查询已发布表，不在中断路径扩容。
 - `kernel/src/sched/scheduler.rs`：`cpu_stats`、`cpu_residency`、类别仲裁窗口和
   idle context 改用调度器内联 bootstrap + 堆后备扩展表，在 AP 启动前与 CPU
   容量一起原子预留。运行期这些每核统计与上下文不再由固定 128 槽决定容量。
