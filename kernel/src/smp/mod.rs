@@ -245,6 +245,14 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
         );
         arch::halt_forever();
     }
+    if let Err(error) = crate::wcet::prepare_cpu_storage(topo.count()) {
+        crate::kprintln!(
+            "[JSR-SMP] reject=wcet_cpu_storage cpus={} reason={}",
+            topo.count(),
+            error.name()
+        );
+        arch::halt_forever();
+    }
     if let Err(error) = crate::sched::prepare_cpu_slots(topo.count()) {
         crate::kprintln!(
             "[JSR-SMP] reject=scheduler_cpu_slots cpus={} reason={}",

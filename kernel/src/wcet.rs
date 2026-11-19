@@ -9,7 +9,10 @@
 //! 只做测量与报告，不影响调度决策。周期计数在 QEMU 上是虚拟 TSC，
 //! **不能**据此推断真实硬件的绝对耗时；这里只用于横向比较与回归。
 
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
+
+use spin::Once;
 
 use kernel_core::sync::Atomic64;
 use kernel_core::smp::MAX_CPUS;
@@ -22,10 +25,68 @@ static IRQ_OFF_SAMPLES: AtomicU32 = AtomicU32::new(0);
 static LOCK_MAX_CYCLES: Atomic64 = Atomic64::new(0);
 static LOCK_SAMPLES: AtomicU32 = AtomicU32::new(0);
 
+struct IrqOffState {
+    start: AtomicU32,
+    depth: AtomicU32,
+}
+
+impl IrqOffState {
+    const fn new() -> Self {
+        Self {
+            start: AtomicU32::new(0),
+            depth: AtomicU32::new(0),
+        }
+    }
+}
+
 /// 每处理器「关中断起点」与嵌套深度。周期戳只取低 32 位：只比较差值，
 /// 环绕减法仍然正确；超过一秒量级的临界区本就不该存在。
-static IRQ_OFF_START: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
-static IRQ_OFF_DEPTH: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+static BOOTSTRAP_IRQ_OFF: [IrqOffState; MAX_CPUS] =
+    [const { IrqOffState::new() }; MAX_CPUS];
+static EXTRA_IRQ_OFF: Once<Result<Vec<IrqOffState>, ReserveError>> = Once::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReserveError {
+    Allocation,
+    AlreadyReservedTooSmall,
+}
+
+impl ReserveError {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Allocation => "system.wcet.error.cpu_storage_allocation",
+            Self::AlreadyReservedTooSmall => "system.wcet.error.cpu_storage_capacity",
+        }
+    }
+}
+
+/// Reserve the complete per-CPU WCET IRQ-off state before any AP starts.
+pub fn prepare_cpu_storage(cpus: usize) -> Result<(), ReserveError> {
+    let needed = cpus.saturating_sub(MAX_CPUS);
+    let states = EXTRA_IRQ_OFF.call_once(|| {
+        let mut states = Vec::new();
+        states
+            .try_reserve_exact(needed)
+            .map_err(|_| ReserveError::Allocation)?;
+        for _ in 0..needed {
+            states.push(IrqOffState::new());
+        }
+        Ok(states)
+    });
+    match states {
+        Ok(states) if states.len() >= needed => Ok(()),
+        Ok(_) => Err(ReserveError::AlreadyReservedTooSmall),
+        Err(error) => Err(*error),
+    }
+}
+
+fn irq_off_state(cpu: usize) -> Option<&'static IrqOffState> {
+    if let Some(state) = BOOTSTRAP_IRQ_OFF.get(cpu) {
+        return Some(state);
+    }
+    let extra = cpu.checked_sub(MAX_CPUS)?;
+    EXTRA_IRQ_OFF.get()?.as_ref().ok()?.get(extra)
+}
 
 /// 记录一次系统调用的耗时（周期）。
 pub fn record_syscall(cycles: u64) {
@@ -40,18 +101,26 @@ pub fn record_syscall(cycles: u64) {
 /// 进入关中断区：最外层记起点，嵌套只加深计数。
 pub fn irq_off_enter() {
     let cpu = crate::arch::cpu_index();
-    if IRQ_OFF_DEPTH[cpu].fetch_add(1, Ordering::Relaxed) == 0 {
-        IRQ_OFF_START[cpu].store(crate::arch::cycles() as u32, Ordering::Relaxed);
+    let Some(state) = irq_off_state(cpu) else {
+        crate::arch::halt_forever()
+    };
+    if state.depth.fetch_add(1, Ordering::Relaxed) == 0 {
+        state
+            .start
+            .store(crate::arch::cycles() as u32, Ordering::Relaxed);
     }
 }
 
 /// 离开关中断区：最外层退出时结算本次窗口。
 pub fn irq_off_exit() {
     let cpu = crate::arch::cpu_index();
-    if IRQ_OFF_DEPTH[cpu].fetch_sub(1, Ordering::Relaxed) != 1 {
+    let Some(state) = irq_off_state(cpu) else {
+        crate::arch::halt_forever()
+    };
+    if state.depth.fetch_sub(1, Ordering::Relaxed) != 1 {
         return;
     }
-    let start = IRQ_OFF_START[cpu].load(Ordering::Relaxed);
+    let start = state.start.load(Ordering::Relaxed);
     let elapsed = (crate::arch::cycles() as u32).wrapping_sub(start) as u64;
     IRQ_OFF_SAMPLES.fetch_add(1, Ordering::Relaxed);
     if elapsed > IRQ_OFF_MAX_CYCLES.load(Ordering::Relaxed) {

@@ -218,4 +218,7 @@
 - `kernel/src/linux_abi.rs` 的 Linux affinity 适配改为按当前 CPU 数生成动态
   字节位图；查询和设置不再依赖 `u64` 或 `MAX_CPUS`，高位 CPU 的可见性仍由统一
   online/runtime registry 裁决。
+- `kernel/src/wcet.rs` 的每核 IRQ-off 起点和嵌套深度改为 bootstrap 加堆后备
+  记录，由 SMP 在任何 secondary 启动前统一预留；WCET 热路径不再直接索引固定
+  CPU 数组。
 - 其余调度器固定表、共享 CpuSet 门面、部分诊断和亲和 ABI 尚未迁移。

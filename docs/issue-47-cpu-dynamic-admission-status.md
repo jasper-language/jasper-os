@@ -89,6 +89,10 @@ Linux `sched_getaffinity`/`sched_setaffinity` 兼容适配已改为按调用者�
 `kernel_core::smp::MAX_CPUS` 拒绝高位 CPU。位图分配失败返回 `ENOMEM`，短缓冲、
 离线位或超出当前 CPU 数的置位返回 `EINVAL`。
 
+WCET 的每核 IRQ-off 起点/嵌套深度已迁移为 bootstrap 加堆后备记录，并在任何
+secondary CPU 启动前按完整拓扑预留。进入/退出关中断区的热路径只查询已发布表，
+不再直接索引固定 `MAX_CPUS`；存储不足会在 AP 启动前失败关闭。
+
 - 不能把 128 改成 256/1024 后声称“动态支持”；
 - 不能把本切片中的 4096-CPU 软件准入测试冒充真实内核运行；
 - 不能把 `Topology` 的高位库存保留冒充 `CpuSet`/调度器已支持高位 CPU；
