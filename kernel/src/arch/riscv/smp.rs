@@ -184,7 +184,7 @@ pub fn init_boot(boot_hart: u32) -> CpuDiscovery {
 /// # Safety
 /// 同 `Platform::cpu_start`。
 pub unsafe fn start(req: &CpuStart<space::SpaceRoot>) -> Result<(), SmpError> {
-    if req.index == 0 || req.index >= MAX_CPUS {
+    if req.index == 0 || hart_of(req.index) != Some(req.hw_id) {
         return Err(SmpError::NoSuchCpu);
     }
     let hart = req.hw_id as usize;
@@ -245,7 +245,7 @@ pub fn cpu_index() -> usize {
 /// 向逻辑下标 `target` 发送核间中断：先在其信箱置位，该种类原本未待处理时再经 SBI 触发软件中断。
 pub fn send_ipi(target: usize, kind: IpiKind) -> Result<(), SmpError> {
     let topology = FIRMWARE.get().map(|f| f.0.clone());
-    let Some(hart) = topology.and_then(|t| t.hw_id(target)).filter(|_| target < MAX_CPUS) else {
+    let Some(hart) = topology.and_then(|t| t.hw_id(target)) else {
         return Err(SmpError::NoSuchCpu);
     };
     if target == cpu_index() {
