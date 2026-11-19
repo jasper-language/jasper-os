@@ -500,12 +500,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "50f0ccd694f16510fce468d79f03ed2da40a95948879b25c2441521e32f1c0d0",
-      "path": "kernel-core/src/net2.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "51888dfad14f49c4959ab348a6537610aaface187172a58cab64651bd43420b5",
       "path": "jaso/src/manifest.rs",
       "rules": "HC-G1"
@@ -766,12 +760,6 @@
       "count": 1,
       "fingerprint": "72096cf9d914a4f4e139171f36b660fe7f2089f99403e8acf8cb204a448c0aeb",
       "path": "compat-core/src/executable.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "72511494b0f8f433e7bb66418df994043ea4bfc6a2cb1d2ffe228ba4dbeefff8",
-      "path": "kernel-core/src/net2.rs",
       "rules": "HC-G1"
     },
     {
@@ -1072,12 +1060,6 @@
       "count": 2,
       "fingerprint": "aac4e14f880b706e7de0fe71e069499bb0fa18668fc986756c1022b2bf8518d6",
       "path": "kernel/src/linux_abi.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "ab4c66694ddab131104ba682d036aa1c4c22926a0b08a876c21d7308f3b33508",
-      "path": "kernel-core/src/net2.rs",
       "rules": "HC-G1"
     },
     {
@@ -1569,5 +1551,5 @@
     "user",
     "xtask"
   ],
-  "total": 332
+  "total": 329
 }

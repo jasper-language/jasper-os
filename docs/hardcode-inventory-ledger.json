@@ -1,5 +1,5 @@
 {
-  "baseline_total": 332,
+  "baseline_total": 329,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,10 +10,10 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 127,
+    "explicit-safety-policy": 125,
     "platform-adapter": 28,
     "protocol-abi": 38,
-    "runtime-resource-capacity": 59,
+    "runtime-resource-capacity": 58,
     "test-demo-fixture": 6
   },
   "entries": [
@@ -1086,36 +1086,6 @@
       "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
       "rules": "HC-G1",
       "source": "pub const MAX_MODULE_DEPENDENCIES: usize = 16;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "50f0ccd694f16510fce468d79f03ed2da40a95948879b25c2441521e32f1c0d0",
-      "line": 8,
-      "path": "kernel-core/src/net2.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_EVENTS: usize = 64;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "72511494b0f8f433e7bb66418df994043ea4bfc6a2cb1d2ffe228ba4dbeefff8",
-      "line": 7,
-      "path": "kernel-core/src/net2.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_RX_BYTES: usize = 4096;"
-    },
-    {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "ab4c66694ddab131104ba682d036aa1c4c22926a0b08a876c21d7308f3b33508",
-      "line": 6,
-      "path": "kernel-core/src/net2.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
-      "rules": "HC-G1",
-      "source": "pub const MAX_SOCKETS: usize = 32;"
     },
     {
       "category": "runtime-resource-capacity",
@@ -2600,10 +2570,10 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 143,
+    "explicit-safety-policy": 141,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 97,
+    "runtime-resource-capacity": 96,
     "test-demo-fixture": 7
   }
 }

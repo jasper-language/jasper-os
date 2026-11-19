@@ -3,10 +3,6 @@
 //! Parsing lives in NET-1c. This module owns connection state, sequence
 //! bookkeeping, receive buffers, cancellation, timeout and resource quotas.
 
-pub const MAX_SOCKETS: usize = 32;
-pub const MAX_RX_BYTES: usize = 4096;
-pub const MAX_EVENTS: usize = 64;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TcpAddress {
     pub ip: [u8; 4],
@@ -118,7 +114,7 @@ pub struct SocketView {
 }
 
 #[derive(Clone, Copy)]
-struct Socket {
+struct Socket<const R: usize> {
     id: u32,
     generation: u32,
     state: TcpState,
@@ -129,13 +125,13 @@ struct Socket {
     snd_nxt: u32,
     rcv_nxt: u32,
     peer_window: u16,
-    receive: [u8; MAX_RX_BYTES],
+    receive: [u8; R],
     receive_len: usize,
     retries: u8,
     deadline: u64,
 }
 
-impl Socket {
+impl<const R: usize> Socket<R> {
     const EMPTY: Self = Self {
         id: 0,
         generation: 0,
@@ -147,7 +143,7 @@ impl Socket {
         snd_nxt: 0,
         rcv_nxt: 0,
         peer_window: 0,
-        receive: [0; MAX_RX_BYTES],
+        receive: [0; R],
         receive_len: 0,
         retries: 0,
         deadline: 0,
@@ -173,8 +169,8 @@ impl TcpQuota {
     }
 }
 
-pub struct TcpService<const N: usize = MAX_SOCKETS, const E: usize = MAX_EVENTS> {
-    sockets: [Socket; N],
+pub struct TcpService<const N: usize, const E: usize, const R: usize> {
+    sockets: [Socket<R>; N],
     events: [Option<TcpEvent>; E],
     event_head: usize,
     event_len: usize,
@@ -184,10 +180,11 @@ pub struct TcpService<const N: usize = MAX_SOCKETS, const E: usize = MAX_EVENTS>
     timeout_ticks: u64,
 }
 
-impl<const N: usize, const E: usize> TcpService<N, E> {
+impl<const N: usize, const E: usize, const R: usize> TcpService<N, E, R> {
     pub fn new(quota: TcpQuota, retry_limit: u8, timeout_ticks: u64) -> Self {
+        assert!(N > 0 && E > 0 && R > 0, "TCP capacities must be non-zero");
         Self {
-            sockets: [Socket::EMPTY; N],
+            sockets: [Socket::<R>::EMPTY; N],
             events: [None; E],
             event_head: 0,
             event_len: 0,
@@ -211,7 +208,7 @@ impl<const N: usize, const E: usize> TcpService<N, E> {
             snd_nxt: iss,
             rcv_nxt: 0,
             deadline: now.saturating_add(self.timeout_ticks),
-            ..Socket::EMPTY
+            ..Socket::<R>::EMPTY
         })
     }
 
@@ -233,7 +230,7 @@ impl<const N: usize, const E: usize> TcpService<N, E> {
             snd_nxt: iss.wrapping_add(1),
             rcv_nxt: 0,
             deadline: now.saturating_add(self.timeout_ticks),
-            ..Socket::EMPTY
+            ..Socket::<R>::EMPTY
         })?;
         self.push_event(TcpEvent::Syn { socket: id, sequence: iss })?;
         Ok(id)
@@ -243,7 +240,7 @@ impl<const N: usize, const E: usize> TcpService<N, E> {
         let slot = self.slot(id, generation)?;
         self.push_event(TcpEvent::Closed { socket: id })?;
         self.quota.bytes = self.quota.bytes.saturating_sub(self.sockets[slot].receive_len as u64);
-        self.sockets[slot] = Socket::EMPTY;
+        self.sockets[slot] = Socket::<R>::EMPTY;
         self.quota.sockets = self.quota.sockets.saturating_sub(1);
         Ok(())
     }
@@ -327,7 +324,7 @@ impl<const N: usize, const E: usize> TcpService<N, E> {
                         .receive_len
                         .checked_add(segment.payload.len())
                         .ok_or(Net2Error::Window)?;
-                    if end > MAX_RX_BYTES
+                    if end > R
                         || self.quota.bytes.checked_add(segment.payload.len() as u64)
                             .is_none_or(|bytes| bytes > self.quota.max_bytes)
                     {
@@ -445,7 +442,7 @@ impl<const N: usize, const E: usize> TcpService<N, E> {
         self.quota
     }
 
-    fn insert(&mut self, socket: Socket) -> Result<u32, Net2Error> {
+    fn insert(&mut self, socket: Socket<R>) -> Result<u32, Net2Error> {
         if self.quota.sockets >= self.quota.max_sockets {
             return Err(Net2Error::Quota);
         }
@@ -503,7 +500,7 @@ mod tests {
         TcpAddress { ip: [10, 0, 2, 15], port: 40000 }
     }
 
-    fn service() -> TcpService<8, 16> {
+    fn service() -> TcpService<8, 16, 4096> {
         TcpService::new(TcpQuota::new(4, 64), 2, 10)
     }
 

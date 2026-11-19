@@ -116,7 +116,7 @@ pub fn run() {
         "network IFC allow/taint denial",
     );
 
-    let mut tcp = TcpService::<8, 16>::new(TcpQuota::new(2, 64), 2, 10);
+    let mut tcp = TcpService::<8, 16, 4096>::new(TcpQuota::new(2, 64), 2, 10);
     let client = match tcp.connect(local(), remote(), 100, 0) {
         Ok(id) => id,
         Err(_) => {
