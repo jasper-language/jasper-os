@@ -234,7 +234,7 @@ impl Channel {
         let desc = MsgDesc {
             data_ptr: buf.as_mut_ptr() as u64,
             handles_ptr: hs.as_mut_ptr() as u64,
-            data_len: buf.len().min(MAX_BYTES) as u32,
+            data_len: buf.len() as u32,
             handles_cap: MAX_HANDLES as u32,
             out_data_len: 0,
             out_handles: 0,
@@ -254,7 +254,11 @@ impl Channel {
         let out = MsgDesc::decode(&b);
         match check(ret) {
             Ok(_) => {
-                let n = (out.out_handles as usize).min(MAX_HANDLES);
+                let n = out.out_handles as usize;
+                if n > MAX_HANDLES {
+                    close_handles(&hs, MAX_HANDLES as u32);
+                    return Err((Error::INVALID_ARGUMENT, out.out_data_len as usize));
+                }
                 // SAFETY：这些句柄由内核随消息放入本进程句柄表，尚无人拥有。
                 let handles = hs[..n]
                     .iter()

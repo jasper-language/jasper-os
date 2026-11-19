@@ -1,5 +1,5 @@
 {
-  "baseline_total": 353,
+  "baseline_total": 351,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,7 +10,7 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 134,
+    "explicit-safety-policy": 132,
     "platform-adapter": 28,
     "protocol-abi": 38,
     "runtime-resource-capacity": 71,
@@ -2720,26 +2720,6 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "78b395e5f80d4d2bfdc338b5b0747d5886e97d39cf90702cec2bab58ab3b3a7c",
-      "line": 257,
-      "path": "user/rt/src/channel.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G2,HC-G6",
-      "source": "let n = (out.out_handles as usize).min(MAX_HANDLES);"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "d8356cfef1740d78b1177bde6b3563a4adb0d394ecdd24d101178479b8d0b714",
-      "line": 237,
-      "path": "user/rt/src/channel.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G2,HC-G6",
-      "source": "data_len: buf.len().min(MAX_BYTES) as u32,"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
       "fingerprint": "5db71a927ab52d1e51eb30cf0de0400a17648468c3c7462d4c81f006e4a2a917",
       "line": 19,
       "path": "user/rt/src/io.rs",
@@ -2790,7 +2770,7 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 151,
+    "explicit-safety-policy": 149,
     "platform-adapter": 44,
     "protocol-abi": 41,
     "runtime-resource-capacity": 110,

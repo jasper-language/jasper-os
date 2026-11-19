@@ -854,12 +854,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "78b395e5f80d4d2bfdc338b5b0747d5886e97d39cf90702cec2bab58ab3b3a7c",
-      "path": "user/rt/src/channel.rs",
-      "rules": "HC-G2,HC-G6"
-    },
-    {
-      "count": 1,
       "fingerprint": "7a24191b986fa6beaa0d0d8a88e484eb69a31522283039ce202eefb22eccc2a7",
       "path": "kernel-core/src/capacity/tests.rs",
       "rules": "HC-G1"
@@ -1364,12 +1358,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "d8356cfef1740d78b1177bde6b3563a4adb0d394ecdd24d101178479b8d0b714",
-      "path": "user/rt/src/channel.rs",
-      "rules": "HC-G2,HC-G6"
-    },
-    {
-      "count": 1,
       "fingerprint": "da5ce7c398c47043ba405f574aad6713e5873666860d41c7aec9793c3ce38f07",
       "path": "kernel/src/pci.rs",
       "rules": "HC-G7"
@@ -1683,5 +1671,5 @@
     "user",
     "xtask"
   ],
-  "total": 353
+  "total": 351
 }
