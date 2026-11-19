@@ -31,6 +31,87 @@ pub const MAX_CPUS: usize = BOOTSTRAP_CPUS; // JASPER-HARDCODE-REVIEW: issue=35 
 /// 内核堆就绪前必须可用的处理器库存上限。
 pub const BOOTSTRAP_CPUS: usize = 128; // JASPER-HARDCODE-REVIEW: issue=35 source=bootstrap-cpu-inventory reason=firmware-inventory-required-before-heap
 
+/// CPU capacity derived from firmware facts and an actual resource budget.
+///
+/// This is intentionally independent of the current `CpuSet` representation.
+/// A caller must either satisfy the complete enabled CPU inventory or reject
+/// the topology; it must never silently boot an arbitrary subset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuAdmission {
+    /// Firmware-reported CPU records, including disabled CPUs.
+    pub present: usize,
+    /// Firmware-reported disabled CPUs.
+    pub disabled: usize,
+    /// Enabled CPUs whose resources must be admitted.
+    pub enabled: usize,
+    /// Bytes required for the complete enabled inventory.
+    pub required_bytes: u64,
+    /// Bytes currently available to CPU metadata and per-CPU runtime state.
+    pub available_bytes: u64,
+}
+
+/// Why the complete discovered CPU inventory cannot be admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuAdmissionError {
+    /// The firmware inventory does not contain an enabled bootable CPU.
+    NoEnabledCpu,
+    /// Disabled count exceeds the discovered inventory.
+    InvalidInventory,
+    /// The complete inventory does not fit the current resource budget.
+    InsufficientResources {
+        required_bytes: u64,
+        available_bytes: u64,
+    },
+    /// Per-CPU or total byte accounting overflowed.
+    Overflow,
+}
+
+impl CpuAdmissionError {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::NoEnabledCpu => "system.cpu.error.no_enabled_cpu",
+            Self::InvalidInventory => "system.cpu.error.invalid_inventory",
+            Self::InsufficientResources { .. } => "system.cpu.error.insufficient_resources",
+            Self::Overflow => "system.cpu.error.capacity_overflow",
+        }
+    }
+}
+
+/// Admit the complete non-disabled CPU inventory against an explicit budget.
+///
+/// The function has no fixed CPU-count ceiling. The caller supplies the
+/// currently available bytes and the per-CPU cost of its actual runtime state.
+pub fn admit_cpu_inventory(
+    present: usize,
+    disabled: usize,
+    per_cpu_bytes: u64,
+    available_bytes: u64,
+) -> Result<CpuAdmission, CpuAdmissionError> {
+    if disabled > present {
+        return Err(CpuAdmissionError::InvalidInventory);
+    }
+    let enabled = present - disabled;
+    if enabled == 0 {
+        return Err(CpuAdmissionError::NoEnabledCpu);
+    }
+    let required_bytes = (enabled as u64)
+        .checked_mul(per_cpu_bytes)
+        .ok_or(CpuAdmissionError::Overflow)?;
+    if required_bytes > available_bytes {
+        return Err(CpuAdmissionError::InsufficientResources {
+            required_bytes,
+            available_bytes,
+        });
+    }
+    Ok(CpuAdmission {
+        present,
+        disabled,
+        enabled,
+        required_bytes,
+        available_bytes,
+    })
+}
+
 /// Count inventory records that were discovered but not admitted.
 ///
 /// Platform adapters may copy a larger firmware inventory into a bounded
@@ -873,6 +954,43 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicU32};
     use std::sync::Arc;
+
+    #[test]
+    fn cpu_admission_has_no_fixed_count_ceiling() {
+        for count in [1usize, 32, 64, 128, 129, 256, 1024, 4096] {
+            let admission = admit_cpu_inventory(count, 0, 1024, (count as u64) * 1024).unwrap();
+            assert_eq!(admission.present, count);
+            assert_eq!(admission.enabled, count);
+            assert_eq!(admission.required_bytes, (count as u64) * 1024);
+        }
+    }
+
+    #[test]
+    fn cpu_admission_requires_the_complete_inventory_budget() {
+        // 129 present - 1 disabled leaves exactly 128 enabled CPUs.
+        assert_eq!(
+            admit_cpu_inventory(129, 1, 4096, 128 * 4096),
+            Ok(CpuAdmission {
+                present: 129,
+                disabled: 1,
+                enabled: 128,
+                required_bytes: 128 * 4096,
+                available_bytes: 128 * 4096,
+            })
+        );
+        assert!(matches!(
+            admit_cpu_inventory(129, 0, 4096, 128 * 4096),
+            Err(CpuAdmissionError::InsufficientResources { .. })
+        ));
+        assert_eq!(
+            admit_cpu_inventory(1, 1, 4096, 4096),
+            Err(CpuAdmissionError::NoEnabledCpu)
+        );
+        assert_eq!(
+            admit_cpu_inventory(1, 2, 4096, 4096),
+            Err(CpuAdmissionError::InvalidInventory)
+        );
+    }
 
     #[test]
     fn cpuset_basic_and_out_of_range_rejected() {

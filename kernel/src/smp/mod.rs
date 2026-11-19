@@ -173,6 +173,36 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
         arch::halt_forever();
     }
     let topo = TOPOLOGY.call_once(|| discovery.topology);
+    let per_cpu_bytes = IDLE_STACK_SIZE as u64;
+    let available_bytes =
+        mm::frame::free_frames() as u64 * kernel_core::frame::FRAME_SIZE as u64;
+    match kernel_core::smp::admit_cpu_inventory(
+        topo.count().saturating_add(topo.disabled),
+        topo.disabled,
+        per_cpu_bytes,
+        available_bytes,
+    ) {
+        Ok(admission) => crate::kprintln!(
+            "[JSR-SMP] admit present={} enabled={} disabled={} per_cpu_bytes={} required_bytes={} available_bytes={} source=resource-budget",
+            admission.present,
+            admission.enabled,
+            admission.disabled,
+            per_cpu_bytes,
+            admission.required_bytes,
+            admission.available_bytes
+        ),
+        Err(error) => {
+            crate::kprintln!(
+                "[JSR-SMP] reject=cpu_resource_admission present={} disabled={} per_cpu_bytes={} available_bytes={} reason={}",
+                topo.count().saturating_add(topo.disabled),
+                topo.disabled,
+                per_cpu_bytes,
+                available_bytes,
+                error.name()
+            );
+            arch::halt_forever();
+        }
+    }
     if topo.dropped > 0 {
         crate::kprintln!(
             "[JSR-SMP] reject=cpu_set_capacity discovered={} admitted={} capacity={} dropped={}",
