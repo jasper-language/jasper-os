@@ -116,4 +116,8 @@
 - `kernel-core/src/iommu.rs`：中断重映射不再用 `MAX_CPUS` 拒绝目标 CPU；IOMMU
   只保留 `u8` 路由字段的协议表示范围，具体 CPU 是否存在/在线由 IRQ/调度权威校验。
   `target_cpu=255` 的保存与原样读回已有测试。
+- `kernel-core/src/environment.rs`：CPU 资源 Demand 亲和集合在生产
+  `cpu-dynamic` 构建中使用 `CpuBitmap`，删除 `MAX_CPUS` 平台检查。资源准入只依赖
+  所选 CPU 是否在亲和集合中；实际硬件/在线资格由 CPU runtime registry 和调度器
+  统一校验。轻量无 feature 构建保留 legacy `CpuSet` 适配。
 - 其余 IRQ 全局路由、调度器、per-CPU、架构入口和亲和 ABI 尚未迁移。

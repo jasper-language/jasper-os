@@ -43,6 +43,9 @@ CPU 集合，只有 32 位分片编号这一明确协议表示范围；实际分
 IOMMU 中断重映射不再用 `MAX_CPUS` 裁决目标 CPU。它保留 `u8` 路由字段的协议
 表示范围，并把 CPU 是否真实存在/在线的权威校验留给 IRQ 与调度层。
 
+ENV-0 CPU 资源 Demand 在生产构建中已改用动态 CPU 亲和集合，不再用 `MAX_CPUS`
+判定资源平台合法性；CPU 真实存在/在线仍由统一 CPU runtime registry 校验。
+
 ## 尚未完成
 
 当前生产 `CpuSet` 仍是 128 位静态位图；调度、每核状态、IRQ/MSI、TLB/IPI、
