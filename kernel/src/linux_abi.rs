@@ -13216,7 +13216,6 @@ fn linux_fanotify_read(
     len: usize,
 ) -> Result<u64, CompatErrno> {
     const EVENT_BYTES: usize = 24;
-    const MAX_EVENTS: usize = 8;
     if len < EVENT_BYTES {
         return Err(CompatErrno::Invalid);
     }
@@ -13233,7 +13232,7 @@ fn linux_fanotify_read(
             if !state.fanotify {
                 return Err(CompatErrno::BadFd);
             }
-            let count = (len / EVENT_BYTES).min(MAX_EVENTS).min(state.fanotify_events.len());
+            let count = (len / EVENT_BYTES).min(state.fanotify_events.len());
             let batch = state.fanotify_events.drain(..count).collect::<alloc::vec::Vec<_>>();
             (batch, state.fanotify_event_cloexec)
         };
@@ -13303,7 +13302,6 @@ fn linux_inotify_read(
     len: usize,
 ) -> Result<u64, CompatErrno> {
     const EVENT_HEADER: usize = 16;
-    const MAX_EVENTS: usize = 64;
     const MAX_NAME: usize = 256;
     if len < EVENT_HEADER {
         return Err(CompatErrno::Invalid);
@@ -13315,14 +13313,18 @@ fn linux_inotify_read(
     let state = proc::linux_inotify_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
     let nonblocking = proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
     loop {
-        let capacity = len.min(MAX_EVENTS * (EVENT_HEADER + MAX_NAME));
-        let mut output = alloc::vec![0u8; capacity];
+        let capacity = len;
+        let mut output = alloc::vec::Vec::new();
+        output
+            .try_reserve_exact(capacity)
+            .map_err(|_| CompatErrno::NoMemory)?;
+        output.resize(capacity, 0);
         let mut written = 0usize;
         let mut consumed = 0usize;
         let mut taken = alloc::vec::Vec::new();
         {
             let mut state = state.lock();
-            for event in state.events.iter().take(MAX_EVENTS) {
+            for event in state.events.iter() {
                 let name_len = usize::from(event.name_len);
                 let event_len = EVENT_HEADER
                     .checked_add(name_len)

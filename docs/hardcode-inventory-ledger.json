@@ -1,5 +1,5 @@
 {
-  "baseline_total": 357,
+  "baseline_total": 353,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,7 +10,7 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 137,
+    "explicit-safety-policy": 134,
     "platform-adapter": 28,
     "protocol-abi": 38,
     "runtime-resource-capacity": 71,
@@ -2191,7 +2191,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "000d188c021a044a0b0eba0dd80ebbeb2509c1ada97c6c2f1623b343047f86ec",
-      "line": 14146,
+      "line": 14148,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
@@ -2220,18 +2220,8 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "3a8dbb67509a21358932b44cf5e03efd2bffa8c4106b3db8006303ebeaa9466a",
-      "line": 13219,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_EVENTS: usize = 8;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
       "fingerprint": "3af1e6502dcd353efec6f5267b895350363f008196d29af1566bbad84a3e071d",
-      "line": 17917,
+      "line": 17919,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
       "rules": "HC-G1",
@@ -2279,7 +2269,7 @@
     },
     {
       "category": "runtime-resource-capacity",
-      "count": 9,
+      "count": 8,
       "fingerprint": "89e5f4b00dcf46110fa49d6418af23ad0e2f1d685b844041e195ed2ec50d3ab7",
       "line": 52,
       "path": "kernel/src/linux_abi.rs",
@@ -2301,7 +2291,7 @@
       "category": "explicit-safety-policy",
       "count": 2,
       "fingerprint": "aac4e14f880b706e7de0fe71e069499bb0fa18668fc986756c1022b2bf8518d6",
-      "line": 14484,
+      "line": 14486,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
       "rules": "HC-G1",
@@ -2311,7 +2301,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "b727cb2514e39b364a1e6bf5e12336e4dd89cbaca542c1adc710c7c5decc9dfa",
-      "line": 13671,
+      "line": 13673,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
@@ -2351,7 +2341,7 @@
       "category": "explicit-safety-policy",
       "count": 2,
       "fingerprint": "e97a270ced01ef94d308799b5756449ba29e6a718ff48941c1c41ea0a9c5485b",
-      "line": 19434,
+      "line": 19436,
       "path": "kernel/src/linux_abi.rs",
       "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
@@ -2371,7 +2361,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "c3bdd178d15b9cff2b4f096b7a09e64ad1f794ae3b8fc8ce729caa17606dba1e",
-      "line": 19455,
+      "line": 19457,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G2,HC-G6",
@@ -2380,18 +2370,8 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "d8c3103588f39e35a618b2c824d864934163f8e5b4cadfb7afc32b45fc787f28",
-      "line": 13236,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G2,HC-G6",
-      "source": "let count = (len / EVENT_BYTES).min(MAX_EVENTS).min(state.fanotify_events.len());"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
       "fingerprint": "dc7025deaeb7e1c5533875d42b1f12573a6df19dd51a3303af2715fb68febf55",
-      "line": 19562,
+      "line": 19564,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G2,HC-G6",
@@ -2406,16 +2386,6 @@
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G6",
       "source": "let chunk = (pages - done).min(proc::MAX_MAP_PAGES);"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "ea3a521b8d37120236fe6ab33a99370a8d320b29e1284c2f3c49d3e8111c6fb0",
-      "line": 13318,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G6",
-      "source": "let capacity = len.min(MAX_EVENTS * (EVENT_HEADER + MAX_NAME));"
     },
     {
       "category": "runtime-resource-capacity",
@@ -2820,10 +2790,10 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 154,
+    "explicit-safety-policy": 151,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 111,
+    "runtime-resource-capacity": 110,
     "test-demo-fixture": 7
   }
 }
