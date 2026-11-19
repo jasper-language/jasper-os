@@ -5,7 +5,8 @@
 //! publication changes. The source is a normal EventSource object; USI does not
 //! introduce a second notification mechanism.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
+use kernel_core::sync::Atomic64;
 
 use kernel_core::objtable::ObjId;
 use kernel_core::subscription::Snapshot;
@@ -13,7 +14,7 @@ use kernel_core::subscription::Snapshot;
 use crate::kobj::{self, Table};
 use crate::{assembly, subscription};
 
-static SOURCE: AtomicU64 = AtomicU64::new(0);
+static SOURCE: Atomic64 = Atomic64::new(0);
 
 pub(crate) fn source_in(t: &mut Table) -> Result<ObjId, subscription::Error> {
     let stored = SOURCE.load(Ordering::Acquire);

@@ -171,6 +171,10 @@
   全缺失、设备中断只能落到 CPU0 的真实缺陷。context 存储改为 bootstrap 加堆扩展；
   4 vCPU QEMU 中每个 CPU 的两条中断均精确送达，`delivered_exact=4/4`，IRQ 汇总
   `failed=0`。该轮仍保留既有 PCI/KRN0 失败，不等于 RISC-V 全量验收完成。
+- `kernel/src/{ifc,security,service_catalog}.rs`：把生产 64 位计数器/对象源
+  从直接 `AtomicU64` 改为 `kernel_core::sync::Atomic64`。RV32 目标因此可以编译并
+  完成真实 QEMU 启动；SMP、平衡、IRQ、IPC、用户运行时、QoS 等已运行阶段失败数为
+  0，整体仍因既有 PCI/KRN0 缺口退出失败。
 - `kernel/src/arch/aarch64/user.rs`：每核用户返回内核栈记录改为 bootstrap 加
   AP 启动前堆扩展。Pixel 6a 无损 runtime 在 `4.49s` 到达 PSCI reset，恢复到同一
   Android build，`sys.boot_completed=1` 且 slot 仍为 `a`。

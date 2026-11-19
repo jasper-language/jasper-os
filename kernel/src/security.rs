@@ -14,7 +14,8 @@ use kernel_core::security::{
     SecurityError, SecurityDomain,
 };
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
+use kernel_core::sync::Atomic64;
 
 use ed25519_dalek::{Signature, VerifyingKey};
 
@@ -44,10 +45,10 @@ static MAC: IrqSpinLock<MacEngine> = IrqSpinLock::new(MacEngine::new(PolicySlot:
         version: 1,
     },
 )));
-static MAC_AUDIT_DRAINED: AtomicU64 = AtomicU64::new(0);
-static MAC_AUDIT_DENIED: AtomicU64 = AtomicU64::new(0);
-static MAC_AUDIT_DIGEST: AtomicU64 = AtomicU64::new(0);
-static MAC_AUDIT_OVERFLOW: AtomicU64 = AtomicU64::new(0);
+static MAC_AUDIT_DRAINED: Atomic64 = Atomic64::new(0);
+static MAC_AUDIT_DENIED: Atomic64 = Atomic64::new(0);
+static MAC_AUDIT_DIGEST: Atomic64 = Atomic64::new(0);
+static MAC_AUDIT_OVERFLOW: Atomic64 = Atomic64::new(0);
 
 fn mix64(mut value: u64) -> u64 {
     value ^= value >> 30;

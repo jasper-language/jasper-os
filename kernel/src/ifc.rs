@@ -1,6 +1,7 @@
 //! Kernel bridge for SEC-5 information-flow control.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
+use kernel_core::sync::Atomic64;
 
 use kernel_core::ifc::{
     DeclassGrant, DeclassRoot, FlowChannel, FlowDecision, FlowEngine, FlowError, FlowIdentity,
@@ -11,10 +12,10 @@ use kernel_core::security::SecurityContext;
 use crate::sync::IrqSpinLock;
 
 static FLOWS: IrqSpinLock<FlowEngine<256, 256>> = IrqSpinLock::new(FlowEngine::new());
-static ALLOWED: AtomicU64 = AtomicU64::new(0);
-static DENIED: AtomicU64 = AtomicU64::new(0);
-static OVERFLOW: AtomicU64 = AtomicU64::new(0);
-static LAST_DIGEST: AtomicU64 = AtomicU64::new(0);
+static ALLOWED: Atomic64 = Atomic64::new(0);
+static DENIED: Atomic64 = Atomic64::new(0);
+static OVERFLOW: Atomic64 = Atomic64::new(0);
+static LAST_DIGEST: Atomic64 = Atomic64::new(0);
 
 pub fn identity(context: SecurityContext) -> FlowIdentity {
     FlowIdentity {
