@@ -7,7 +7,9 @@
 //! generation are independent from scheduler task slots.
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
+use spin::Once;
 
 use crate::sync::{IrqSpinLock, IrqU64};
 use kernel_core::deadline::{Deadline, DeadlineHeap, ABSENT};
@@ -25,8 +27,6 @@ use crate::syscall::table::{
     SYSTEM_TIME_ERROR_BUSY,
 };
 
-/// General timer objects are independent from the scheduler task-timer table.
-pub const MAX_TIMER_OBJECTS: u32 = 256;
 /// One-shot or fixed-period user timer.
 pub struct TimerObj {
     owner: ObjId,
@@ -60,22 +60,37 @@ struct Registration {
 }
 
 struct Coalescer {
-    allocated: [bool; MAX_TIMER_OBJECTS as usize],
-    registrations: [Option<Registration>; MAX_TIMER_OBJECTS as usize],
+    allocated: Vec<bool>,
+    registrations: Vec<Option<Registration>>,
     heap: DeadlineHeap,
-    entries: [Deadline; MAX_TIMER_OBJECTS as usize],
-    positions: [usize; MAX_TIMER_OBJECTS as usize],
+    entries: Vec<Deadline>,
+    positions: Vec<usize>,
 }
 
 impl Coalescer {
-    const fn new() -> Self {
-        Self {
-            allocated: [false; MAX_TIMER_OBJECTS as usize],
-            registrations: [None; MAX_TIMER_OBJECTS as usize],
-            heap: DeadlineHeap::new(),
-            entries: [Deadline::EMPTY; MAX_TIMER_OBJECTS as usize],
-            positions: [ABSENT; MAX_TIMER_OBJECTS as usize],
+    fn new(capacity: usize) -> Option<Self> {
+        if capacity == 0 {
+            return None;
         }
+        let mut allocated = Vec::new();
+        let mut registrations = Vec::new();
+        let mut entries = Vec::new();
+        let mut positions = Vec::new();
+        allocated.try_reserve_exact(capacity).ok()?;
+        registrations.try_reserve_exact(capacity).ok()?;
+        entries.try_reserve_exact(capacity).ok()?;
+        positions.try_reserve_exact(capacity).ok()?;
+        allocated.resize(capacity, false);
+        registrations.resize(capacity, None);
+        entries.resize(capacity, Deadline::EMPTY);
+        positions.resize(capacity, ABSENT);
+        Some(Self {
+            allocated,
+            registrations,
+            heap: DeadlineHeap::new(),
+            entries,
+            positions,
+        })
     }
 
     fn allocate(&mut self) -> Option<usize> {
@@ -125,7 +140,18 @@ impl Coalescer {
     }
 }
 
-static COALESCER: IrqSpinLock<Coalescer> = IrqSpinLock::new(Coalescer::new());
+static COALESCER: Once<Option<IrqSpinLock<Coalescer>>> = Once::new();
+
+/// Install timer metadata after the boot object budget is approved.
+pub fn init_runtime(object_capacity: usize) -> bool {
+    COALESCER
+        .call_once(|| Coalescer::new(object_capacity).map(IrqSpinLock::new))
+        .is_some()
+}
+
+fn coalescer() -> Option<&'static IrqSpinLock<Coalescer>> {
+    COALESCER.get().and_then(Option::as_ref)
+}
 
 fn timer_mut(t: &mut Table, id: ObjId) -> Option<&mut TimerObj> {
     match t.get_mut(id) {
@@ -161,16 +187,18 @@ fn arm_request(timer: &TimerObj, at: u64) -> Request {
 pub fn sys_create(period_ns: u64, slack_ns: u64, flags: u64) -> i64 {
     if flags != 0 { return err(SYSTEM_ERROR_INVALID_ARGUMENT); }
     let Some(pid) = proc::current_process() else { return err(SYSTEM_ERROR_INVALID_ARGUMENT) };
-    let live = LIVE_TIMERS.try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-        (n < u64::from(MAX_TIMER_OBJECTS)).then_some(n + 1)
-    });
+    let live = LIVE_TIMERS.try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1));
     if live.is_err() { return err(SYSTEM_ERROR_QUOTA_EXCEEDED); }
     let Ok(serial) = NEXT_ID.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1)) else {
         LIVE_TIMERS.fetch_sub(1, Ordering::AcqRel);
         return err(SYSTEM_ERROR_QUOTA_EXCEEDED);
     };
     let coalesce_slot = {
-        let mut coalescer = COALESCER.lock();
+        let Some(global) = coalescer() else {
+            LIVE_TIMERS.fetch_sub(1, Ordering::AcqRel);
+            return err(SYSTEM_ERROR_QUOTA_EXCEEDED);
+        };
+        let mut coalescer = global.lock();
         let Some(slot) = coalescer.allocate() else {
             LIVE_TIMERS.fetch_sub(1, Ordering::AcqRel);
             return err(SYSTEM_ERROR_QUOTA_EXCEEDED);
@@ -191,7 +219,9 @@ pub fn sys_create(period_ns: u64, slack_ns: u64, flags: u64) -> i64 {
     match proc::grant_new(pid, KObject::Timer(Box::new(object)), ObjectType::Timer, TIMER_RIGHTS) {
         Ok(handle) => handle.raw() as i64,
         Err(error) => {
-            COALESCER.lock().free(coalesce_slot);
+            if let Some(global) = coalescer() {
+                global.lock().free(coalesce_slot);
+            }
             LIVE_TIMERS.fetch_sub(1, Ordering::AcqRel);
             crate::syscall::proc_err(error)
         }
@@ -219,7 +249,9 @@ pub fn sys_arm(raw: u64, when_ns: u64, flags: u64) -> i64 {
     });
     match wake {
         Ok((timer, slot, waiter)) => {
-            COALESCER.lock().unregister(slot, timer);
+            if let Some(global) = coalescer() {
+                global.lock().unregister(slot, timer);
+            }
             if let Some(key) = waiter { sched::wake_event_wait(key); }
             0
         }
@@ -239,7 +271,9 @@ pub fn sys_cancel(raw: u64) -> i64 {
     });
     match cancelled {
         Ok((timer, slot, waiter, result)) => {
-            COALESCER.lock().unregister(slot, timer);
+            if let Some(global) = coalescer() {
+                global.lock().unregister(slot, timer);
+            }
             if let Some(key) = waiter { sched::wake_event_wait(key); }
             result
         }
@@ -330,7 +364,11 @@ pub fn sys_wait(raw: u64) -> i64 {
             Step::Busy => return err(SYSTEM_TIME_ERROR_BUSY),
             Step::Error(e) => return e,
             Step::Park(id, timer, slot, key, at, latest) => {
-                COALESCER.lock().register(slot, timer, at, latest, key);
+                let Some(global) = coalescer() else {
+                    let _ = kobj::with(|t| t.release_internal(id));
+                    return err(SYSTEM_ERROR_QUOTA_EXCEEDED);
+                };
+                global.lock().register(slot, timer, at, latest, key);
                 COALESCE_EARLIEST.fetch_min(at, Ordering::Release);
                 sched::yield_now();
                 let closed = kobj::with(|t| {
@@ -356,7 +394,8 @@ pub fn close_in(t: &mut Table, id: ObjId) {
     timer.closed = true;
     timer.request = None;
     {
-        let mut coalescer = COALESCER.lock();
+        let Some(global) = coalescer() else { return; };
+        let mut coalescer = global.lock();
         coalescer.unregister(timer.coalesce_slot, timer.id);
         coalescer.free(timer.coalesce_slot);
     }
@@ -373,7 +412,8 @@ pub fn wake_due(now: u64) {
     }
     loop {
         let next = {
-            let mut coalescer = COALESCER.lock();
+            let Some(global) = coalescer() else { return; };
+            let mut coalescer = global.lock();
             let Coalescer { heap, entries, positions, .. } = &mut *coalescer;
             let Some(deadline) = heap.pop_due(entries, positions, now) else {
                 COALESCE_EARLIEST.store(u64::MAX, Ordering::Release);

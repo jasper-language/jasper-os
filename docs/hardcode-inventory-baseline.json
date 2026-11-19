@@ -1130,12 +1130,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "ab70b30b81e2746ceca9c65548ae1318167889fda0414657fbe0ab9045da3e14",
-      "path": "kernel/src/user_timer.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "abedd5d371dace76f16069ac470fe4e49778577fa42897ea360a802342dec018",
       "path": "compat-core/src/executable.rs",
       "rules": "HC-G1"
@@ -1647,5 +1641,5 @@
     "user",
     "xtask"
   ],
-  "total": 346
+  "total": 345
 }

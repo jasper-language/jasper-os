@@ -264,6 +264,10 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
             if !proc::init_runtime(cap.tasks) {
                 return None;
             }
+            if !crate::user_timer::init_runtime(cap.objects) {
+                kprintln!("[JSR-TIMER] reject=metadata_capacity objects={}", cap.objects);
+                return None;
+            }
             if !mm::pin::init_runtime(cap.tasks) {
                 return None;
             }
