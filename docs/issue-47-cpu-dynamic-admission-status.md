@@ -31,6 +31,12 @@ SMP 门面在启动 secondary CPUs 前读取真实空闲页帧预算，并按每
 分配结构行为。该类型尚未替换生产 `CpuSet`，所以只是阶段 2 进行中的核心，
 不是最终动态调度支持。
 
+阶段 3 的第一个生产消费者已迁移：`kernel_core::msi::VectorPool` 在
+`cpu-dynamic` 生产构建中使用动态 `CpuBitmap` 和按 CPU index 分配的向量位图
+`Vec`，不再包含 `[_; MAX_CPUS]`。测试验证 CPU 129 的稀疏 MSI 向量分配；
+无 `cpu-dynamic` 的轻量构建保留 `CpuSet` 兼容路径，避免给不需要堆的用户程序
+强加 allocator。调度、per-CPU、IRQ 全局路由和四架构入口仍未迁移。
+
 ## 尚未完成
 
 当前生产 `CpuSet` 仍是 128 位静态位图；调度、每核状态、IRQ/MSI、TLB/IPI、
@@ -45,7 +51,8 @@ SMP 门面在启动 secondary CPUs 前读取真实空闲页帧预算，并按每
 
 1. `CPU-DYNAMIC-ADMISSION-1`：消费链、bootstrap 生命周期、锁序和负例审计；
 2. `CPU-DYNAMIC-CORE-1`：动态 CPU 身份、拓扑和 `CpuSet` 核心（进行中）；
-3. `CPU-DYNAMIC-CONSUMERS-1`：调度、per-CPU、IRQ/MSI、TLB/IPI、NUMA 和诊断；
+3. `CPU-DYNAMIC-CONSUMERS-1`：调度、per-CPU、IRQ/MSI、TLB/IPI、NUMA 和诊断
+   （MSI 向量池已开始迁移）；
 4. `CPU-DYNAMIC-ABI-1`：可变长/分页 CPU 枚举与亲和 ABI；
 5. `CPU-DYNAMIC-MATRIX-1`：多规模、多 ISA、热插拔和真实可用平台矩阵。
 

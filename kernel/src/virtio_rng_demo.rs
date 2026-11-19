@@ -176,28 +176,31 @@ pub fn run() {
     let mut masked_pending = false;
 
     if let Some(range) = arch::msi_vector_range() {
-        match VectorPool::new(range.first, range.count, online) {
-            Ok(pool) => {
-                if prepare_vectors(&pool, online, &mut vectors, &mut extra_vector) {
-                    mmio::prepare_window().map_or_else(
-                        |e| check(false, e.name()),
-                        |_| {
-                            let baseline = mm::frame::free_frames();
-                            match exercise(device, online, &vectors, extra_vector) {
-                                Ok(result) => {
-                                    outcome = result;
-                                    masked_pending = result.masked_pending;
+        match kernel_core::cpu_bitmap::CpuBitmap::from_cpu_set(online) {
+            Ok(bitmap_online) => match VectorPool::new(range.first, range.count, bitmap_online) {
+                Ok(pool) => {
+                    if prepare_vectors(&pool, online, &mut vectors, &mut extra_vector) {
+                        mmio::prepare_window().map_or_else(
+                            |e| check(false, e.name()),
+                            |_| {
+                                let baseline = mm::frame::free_frames();
+                                match exercise(device, online, &vectors, extra_vector) {
+                                    Ok(result) => {
+                                        outcome = result;
+                                        masked_pending = result.masked_pending;
+                                    }
+                                    Err(reason) => check(false, reason),
                                 }
-                                Err(reason) => check(false, reason),
-                            }
-                            frames_back = mm::frame::free_frames() == baseline;
-                            check(frames_back, "页帧没有回到演练前的基线");
-                        },
-                    );
+                                frames_back = mm::frame::free_frames() == baseline;
+                                check(frames_back, "页帧没有回到演练前的基线");
+                            },
+                        );
+                    }
+                    release_vectors(&pool, online, &vectors, extra_vector);
                 }
-                release_vectors(&pool, online, &vectors, extra_vector);
-            }
-            Err(e) => check(false, e.name()),
+                Err(e) => check(false, e.name()),
+            },
+            Err(_) => check(false, "MSI 在线 CPU 位图分配失败"),
         }
     } else {
         check(false, "平台未提供 MSI 向量范围");

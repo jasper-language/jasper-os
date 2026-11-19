@@ -187,7 +187,9 @@ pub fn redelivered() -> u64 {
 fn pool() -> Option<&'static VectorPool> {
     POOL.call_once(|| {
         let range = arch::msi_vector_range()?;
-        VectorPool::new(range.first, range.count, sched::online_cpus()).ok()
+        let online =
+            kernel_core::cpu_bitmap::CpuBitmap::from_cpu_set(sched::online_cpus()).ok()?;
+        VectorPool::new(range.first, range.count, online).ok()
     })
     .as_ref()
 }

@@ -13,8 +13,24 @@
 //! * 处理器是否存在 / 是否在线由调用者在构造时以集合给出；不在线处理器的分配与释放一律被拒。
 //! * 只依赖 `core`，因此成功与失败路径都能在宿主上确定性测试。
 
+#[cfg(any(test, feature = "cpu-dynamic"))]
+use alloc::vec::Vec;
+
+#[cfg(any(test, feature = "cpu-dynamic"))]
+use crate::cpu_bitmap::CpuBitmap;
+#[cfg(not(any(test, feature = "cpu-dynamic")))]
 use crate::smp::{CpuSet, MAX_CPUS};
 use crate::sync::SpinLock;
+
+#[cfg(any(test, feature = "cpu-dynamic"))]
+type CpuMembership = CpuBitmap;
+#[cfg(not(any(test, feature = "cpu-dynamic")))]
+type CpuMembership = CpuSet;
+
+#[cfg(any(test, feature = "cpu-dynamic"))]
+type VectorBits = Vec<SpinLock<[u64; WORDS]>>;
+#[cfg(not(any(test, feature = "cpu-dynamic")))]
+type VectorBits = [SpinLock<[u64; WORDS]>; MAX_CPUS];
 
 /// 向量编号的取值上限（`u8` 的全部取值）。
 /// Number of representable vector numbers.
@@ -49,6 +65,8 @@ pub enum MsiError {
     /// 平台没有提供 MSI 向量范围。
     /// The platform provides no MSI vector range.
     Unsupported,
+    /// 每核向量状态无法分配时返回。
+    Allocation,
     /// 平台投递 MSI 超时（消息未送达）。
     /// The platform timed out while delivering an MSI message.
     Timeout,
@@ -66,6 +84,7 @@ impl MsiError {
             MsiError::NotAllocated => "system.irq.error.msi_not_allocated",
             MsiError::BadRange => "system.irq.error.msi_bad_range",
             MsiError::Unsupported => "system.irq.error.msi_unsupported",
+            MsiError::Allocation => "system.irq.error.msi_allocation",
             MsiError::Timeout => "system.irq.error.msi_timeout",
         }
     }
@@ -95,8 +114,8 @@ impl Vector {
 pub struct VectorPool {
     first: u8,
     count: u8,
-    online: CpuSet,
-    bits: [SpinLock<[u64; WORDS]>; MAX_CPUS],
+    online: CpuMembership,
+    bits: VectorBits,
 }
 
 impl VectorPool {
@@ -104,15 +123,16 @@ impl VectorPool {
     ///
     /// `count == 0` 或范围越过 256 个向量时返回 [`MsiError::BadRange`]，不产生对象。
     /// Builds a pool over `[first, first + count)` for the processors in `online`.
-    pub fn new(first: u8, count: u8, online: CpuSet) -> Result<VectorPool, MsiError> {
+    pub fn new(first: u8, count: u8, online: CpuMembership) -> Result<VectorPool, MsiError> {
         if count == 0 || first as u16 + count as u16 > MAX_SLOTS as u16 {
             return Err(MsiError::BadRange);
         }
+        let bits = new_vector_bits(&online)?;
         Ok(VectorPool {
             first,
             count,
             online,
-            bits: [const { SpinLock::new([0u64; WORDS]) }; MAX_CPUS],
+            bits,
         })
     }
 
@@ -130,14 +150,14 @@ impl VectorPool {
 
     /// 参与分配的处理器集合（构造后不变）。
     /// Processor set taking part in allocation.
-    pub const fn online(&self) -> CpuSet {
-        self.online
+    pub const fn online(&self) -> &CpuMembership {
+        &self.online
     }
 
     /// 处理器 `cpu` 是否可参与分配。
     /// Whether `cpu` may allocate from this pool.
     pub fn available(&self, cpu: usize) -> bool {
-        cpu < MAX_CPUS && self.online.contains(cpu)
+        self.online.contains(cpu) && self.bits.get(cpu).is_some()
     }
 
     /// 处理器 `cpu` 已分配的向量个数；处理器无效时返回 0（诊断用）。
@@ -146,7 +166,11 @@ impl VectorPool {
         if !self.available(cpu) {
             return 0;
         }
-        self.bits[cpu].lock().iter().map(|w| w.count_ones() as usize).sum()
+        self.bits[cpu]
+            .lock()
+            .iter()
+            .map(|w| w.count_ones() as usize)
+            .sum()
     }
 
     /// 向量 `vector` 是否在处理器 `cpu` 上已分配。
@@ -202,12 +226,24 @@ impl VectorPool {
     }
 
     fn check_cpu(&self, cpu: usize) -> Result<(), MsiError> {
-        if cpu >= MAX_CPUS {
-            Err(MsiError::NoSuchCpu)
-        } else if !self.online.contains(cpu) {
+        if cpu >= self.capacity() {
+            return Err(MsiError::NoSuchCpu);
+        }
+        if !self.online.contains(cpu) {
             Err(MsiError::NotOnline)
         } else {
             Ok(())
+        }
+    }
+
+    fn capacity(&self) -> usize {
+        #[cfg(any(test, feature = "cpu-dynamic"))]
+        {
+            self.online.capacity_bits().unwrap_or(0)
+        }
+        #[cfg(not(any(test, feature = "cpu-dynamic")))]
+        {
+            MAX_CPUS
         }
     }
 
@@ -220,14 +256,29 @@ impl VectorPool {
     }
 }
 
+#[cfg(any(test, feature = "cpu-dynamic"))]
+fn new_vector_bits(online: &CpuMembership) -> Result<VectorBits, MsiError> {
+    let cpus = online.capacity_bits().map_err(|_| MsiError::Allocation)?;
+    let mut bits = Vec::new();
+    bits.try_reserve_exact(cpus)
+        .map_err(|_| MsiError::Allocation)?;
+    bits.resize_with(cpus, || SpinLock::new([0u64; WORDS]));
+    Ok(bits)
+}
+
+#[cfg(not(any(test, feature = "cpu-dynamic")))]
+fn new_vector_bits(_online: &CpuMembership) -> Result<VectorBits, MsiError> {
+    Ok([const { SpinLock::new([0u64; WORDS]) }; MAX_CPUS])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn cpus(list: &[usize]) -> CpuSet {
-        let mut set = CpuSet::EMPTY;
+    fn cpus(list: &[usize]) -> CpuBitmap {
+        let mut set = CpuBitmap::empty();
         for &cpu in list {
-            set.insert(cpu);
+            set.insert(cpu).unwrap();
         }
         set
     }
@@ -241,7 +292,11 @@ mod tests {
         let p = pool(0x60, 4, &[0, 1]);
         assert_eq!(p.alloc(0), Ok(Vector::new(0x60)));
         assert_eq!(p.alloc(0), Ok(Vector::new(0x61)));
-        assert_eq!(p.alloc(1), Ok(Vector::new(0x60)), "同一向量号在另一核上独立");
+        assert_eq!(
+            p.alloc(1),
+            Ok(Vector::new(0x60)),
+            "同一向量号在另一核上独立"
+        );
         assert_eq!(p.allocated(0), 2);
         assert_eq!(p.allocated(1), 1);
         assert_eq!(p.free(0, Vector::new(0x60)), Ok(()));
@@ -249,7 +304,7 @@ mod tests {
         assert!(p.is_allocated(1, Vector::new(0x60)).unwrap());
         assert_eq!(p.count(), 4);
         assert_eq!(p.first(), 0x60);
-        assert_eq!(p.online(), cpus(&[0, 1]));
+        assert_eq!(p.online(), &cpus(&[0, 1]));
     }
 
     #[test]
@@ -265,13 +320,22 @@ mod tests {
     }
 
     #[test]
+    fn msi_vector_pool_supports_sparse_cpu_above_legacy_bitmap_width() {
+        let p = pool(0x60, 2, &[0, 129]);
+        assert_eq!(p.alloc(129), Ok(Vector::new(0x60)));
+        assert_eq!(p.allocated(129), 1);
+        assert_eq!(p.alloc(0), Ok(Vector::new(0x60)));
+        assert!(p.is_allocated(129, Vector::new(0x60)).unwrap());
+    }
+
+    #[test]
     fn unknown_and_offline_cpus_are_rejected_without_change() {
         let p = pool(0x60, 2, &[0]);
-        assert_eq!(p.alloc(MAX_CPUS), Err(MsiError::NoSuchCpu));
-        assert_eq!(p.free(MAX_CPUS, Vector::new(0x60)), Err(MsiError::NoSuchCpu));
+        assert_eq!(p.alloc(64), Err(MsiError::NoSuchCpu));
+        assert_eq!(p.free(64, Vector::new(0x60)), Err(MsiError::NoSuchCpu));
         assert_eq!(p.alloc(1), Err(MsiError::NotOnline));
         assert_eq!(p.free(1, Vector::new(0x60)), Err(MsiError::NotOnline));
-        assert_eq!(p.allocated(MAX_CPUS), 0);
+        assert_eq!(p.allocated(64), 0);
         assert_eq!(p.allocated(1), 0);
         assert_eq!(p.allocated(0), 0);
         assert_eq!(MsiError::NoSuchCpu.name(), "system.cpu.error.no_such_cpu");
@@ -283,7 +347,11 @@ mod tests {
         let p = pool(0x60, 4, &[0, 1]);
         let owned = p.alloc(0).unwrap();
         let extra = p.alloc(0).unwrap();
-        assert_eq!(p.free(1, extra), Err(MsiError::NotAllocated), "释放别核的向量");
+        assert_eq!(
+            p.free(1, extra),
+            Err(MsiError::NotAllocated),
+            "释放别核的向量"
+        );
         assert_eq!(p.allocated(0), 2, "被拒后本核位图不变");
         assert_eq!(p.allocated(1), 0, "另一核位图不变");
         assert_eq!(p.free(0, Vector::new(0x5F)), Err(MsiError::OutOfRange));
@@ -291,23 +359,39 @@ mod tests {
         assert_eq!(p.free(0, owned), Ok(()));
         assert_eq!(p.free(0, owned), Err(MsiError::NotAllocated), "重复释放");
         assert_eq!(p.allocated(0), 1);
-        assert_eq!(MsiError::NotAllocated.name(), "system.irq.error.msi_not_allocated");
-        assert_eq!(MsiError::OutOfRange.name(), "system.irq.error.msi_vector_out_of_range");
+        assert_eq!(
+            MsiError::NotAllocated.name(),
+            "system.irq.error.msi_not_allocated"
+        );
+        assert_eq!(
+            MsiError::OutOfRange.name(),
+            "system.irq.error.msi_vector_out_of_range"
+        );
     }
 
     #[test]
     fn each_cpu_has_its_own_lock() {
         let p = pool(0x60, 2, &[0, 1]);
         let held = p.bits[0].lock();
-        assert_eq!(p.alloc(1), Ok(Vector::new(0x60)), "锁住 0 号核不阻塞 1 号核");
+        assert_eq!(
+            p.alloc(1),
+            Ok(Vector::new(0x60)),
+            "锁住 0 号核不阻塞 1 号核"
+        );
         drop(held);
         assert_eq!(p.alloc(0), Ok(Vector::new(0x60)));
     }
 
     #[test]
     fn constructors_reject_bad_ranges() {
-        assert_eq!(VectorPool::new(0x60, 0, cpus(&[0])).err(), Some(MsiError::BadRange));
-        assert_eq!(VectorPool::new(0xF0, 0x11, cpus(&[0])).err(), Some(MsiError::BadRange));
+        assert_eq!(
+            VectorPool::new(0x60, 0, cpus(&[0])).err(),
+            Some(MsiError::BadRange)
+        );
+        assert_eq!(
+            VectorPool::new(0xF0, 0x11, cpus(&[0])).err(),
+            Some(MsiError::BadRange)
+        );
         assert_eq!(VectorPool::new(0xFF, 1, cpus(&[0])).is_ok(), true);
         assert_eq!(MsiError::BadRange.name(), "system.irq.error.msi_bad_range");
     }
@@ -326,6 +410,9 @@ mod tests {
         assert_eq!(p.allocated(1), 0);
         assert_eq!(p.alloc(0), Ok(Vector::new(0x60)), "清空后重新可用");
         assert_eq!(p.alloc(1), Ok(Vector::new(0x60)));
-        assert_eq!(MsiError::Unsupported.name(), "system.irq.error.msi_unsupported");
+        assert_eq!(
+            MsiError::Unsupported.name(),
+            "system.irq.error.msi_unsupported"
+        );
     }
 }

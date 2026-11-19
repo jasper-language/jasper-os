@@ -102,3 +102,12 @@
 本审计没有删除固定 `CpuSet`，也没有迁移生产每核数组。Issue #47 阶段 1 的清单已完成
 第一版，但仍需在阶段 2 开工前逐文件确认生成代码、宏和构建期条件没有遗漏；阶段 2/3
 完成前 `CPU-DYNAMIC-ADMISSION-1` 不能标记 done。
+
+## 消费链迁移进度
+
+- `kernel-core/src/msi.rs`：已完成首个生产迁移。`VectorPool` 在生产
+  `cpu-dynamic` 构建中使用 `CpuBitmap` 在线集合和堆后备每核向量位图；CPU 129 的
+  稀疏分配已有宿主测试。无该 feature 的用户运行时轻量构建继续使用固定兼容路径。
+- `kernel/src/interrupt.rs` 将当前 legacy `CpuSet` 在线集合适配为动态 MSI 集合；
+  分配失败时 MSI 池构造失败关闭。
+- 其余 IRQ 全局路由、调度器、per-CPU、架构入口和亲和 ABI 尚未迁移。

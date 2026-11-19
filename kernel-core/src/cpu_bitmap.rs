@@ -50,6 +50,18 @@ impl CpuBitmap {
         Self { words: Vec::new() }
     }
 
+    /// Convert the legacy fixed CPU set into scalable storage.
+    ///
+    /// This adapter is temporary for consumers whose inputs still arrive
+    /// through the copyable bootstrap ABI.
+    pub fn from_cpu_set(set: crate::smp::CpuSet) -> Result<Self, CpuBitmapError> {
+        let mut bitmap = Self::empty();
+        for cpu in set.iter() {
+            bitmap.insert(cpu)?;
+        }
+        Ok(bitmap)
+    }
+
     /// Create a set containing processors `0..count`.
     pub fn first(count: usize) -> Result<Self, CpuBitmapError> {
         let mut set = Self::with_capacity(count)?;
@@ -86,9 +98,7 @@ impl CpuBitmap {
         let Some((index, mask)) = word_mask(cpu) else {
             return false;
         };
-        self.words
-            .get(index)
-            .is_some_and(|word| word & mask != 0)
+        self.words.get(index).is_some_and(|word| word & mask != 0)
     }
 
     /// Insert one CPU, growing the backing set when required.
@@ -117,20 +127,17 @@ impl CpuBitmap {
 
     /// Number of members in ascending CPU-index order.
     pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
-        self.words
-            .iter()
-            .enumerate()
-            .flat_map(|(index, word)| {
-                let mut bits = *word;
-                core::iter::from_fn(move || {
-                    if bits == 0 {
-                        return None;
-                    }
-                    let offset = bits.trailing_zeros() as usize;
-                    bits &= bits - 1;
-                    Some(index * 64 + offset)
-                })
+        self.words.iter().enumerate().flat_map(|(index, word)| {
+            let mut bits = *word;
+            core::iter::from_fn(move || {
+                if bits == 0 {
+                    return None;
+                }
+                let offset = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                Some(index * 64 + offset)
             })
+        })
     }
 
     pub fn union(&self, other: &Self) -> Result<Self, CpuBitmapError> {
@@ -224,14 +231,11 @@ mod tests {
     fn empty_and_capacity_boundaries_are_explicit() {
         assert!(CpuBitmap::empty().is_empty());
         assert!(CpuBitmap::first(0).unwrap().is_empty());
-        assert_eq!(CpuBitmap::first(1).unwrap().iter().collect::<Vec<_>>(), vec![0]);
         assert_eq!(
-            CpuBitmap::first(64).unwrap().capacity_bits(),
-            Ok(64)
+            CpuBitmap::first(1).unwrap().iter().collect::<Vec<_>>(),
+            vec![0]
         );
-        assert_eq!(
-            CpuBitmap::first(65).unwrap().capacity_bits(),
-            Ok(128)
-        );
+        assert_eq!(CpuBitmap::first(64).unwrap().capacity_bits(), Ok(64));
+        assert_eq!(CpuBitmap::first(65).unwrap().capacity_bits(), Ok(128));
     }
 }

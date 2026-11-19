@@ -712,7 +712,10 @@ fn run_rtl(boot: &BootSpec) -> bool {
         range.first,
         range.count
     );
-    let pool = VectorPool::new(range.first, range.count, online).expect("MSI vector pool");
+    let bitmap_online =
+        kernel_core::cpu_bitmap::CpuBitmap::from_cpu_set(online).expect("MSI online bitmap");
+    let pool =
+        VectorPool::new(range.first, range.count, bitmap_online).expect("MSI vector pool");
     let vector = pool.alloc(cpu).expect("MSI vector");
     let _ = irq::msi_bind(cpu, vector.get(), Some(msi_handler));
     check(
@@ -899,7 +902,10 @@ pub fn run(boot: &BootSpec) {
         range.first,
         range.count
     );
-    let pool = VectorPool::new(range.first, range.count, online).expect("MSI vector pool");
+    let bitmap_online =
+        kernel_core::cpu_bitmap::CpuBitmap::from_cpu_set(online).expect("MSI online bitmap");
+    let pool =
+        VectorPool::new(range.first, range.count, bitmap_online).expect("MSI vector pool");
     let vector = pool.alloc(cpu).expect("MSI vector");
     let _ = irq::msi_bind(cpu, vector.get(), Some(msi_handler));
     if ENABLE_IR {

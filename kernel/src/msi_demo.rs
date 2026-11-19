@@ -105,7 +105,9 @@ pub fn run() {
     match arch::msi_vector_range() {
         Some(range) => {
             vectors_per_cpu = range.count as usize;
-            match VectorPool::new(range.first, range.count, online) {
+            let bitmap_online = kernel_core::cpu_bitmap::CpuBitmap::from_cpu_set(online)
+                .expect("MSI online bitmap");
+            match VectorPool::new(range.first, range.count, bitmap_online) {
                 Ok(pool) => delivered = exercise(&pool, online),
                 Err(e) => check(false, &format!("MSI 向量池构造被拒：{}", e.name())),
             }
