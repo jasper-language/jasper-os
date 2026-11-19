@@ -16,7 +16,7 @@ use crate::security::{IdentityClass, ObjectIdentity, SecurityDomain};
 
 pub const MAC_LABEL_VERSION: u16 = 1;
 pub const MAX_POLICY_RULES: usize = 32;
-pub const MAX_AUDIT_EVENTS: usize = 256;
+pub const MAX_AUDIT_EVENTS: usize = 256; // JASPER-HARDCODE-REVIEW: issue=39 source=mac-audit-backpressure-policy reason=audit-full-denies-effect-and-counts-overflow
 pub const POLICY_AUTHORITY_JASPER: u64 = 0x4a53_524d_4143_0001;
 pub const OBJECT_CLASS_ALL: u16 = (1u16 << 10) - 1;
 

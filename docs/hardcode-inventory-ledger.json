@@ -1,5 +1,5 @@
 {
-  "baseline_total": 333,
+  "baseline_total": 332,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,7 +10,7 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 128,
+    "explicit-safety-policy": 127,
     "platform-adapter": 28,
     "protocol-abi": 38,
     "runtime-resource-capacity": 59,
@@ -1056,16 +1056,6 @@
       "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "pub const MAX_RANK: u8 = 31;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "5947d01ca70f3b925b4b393dc4ff416f08eb757bf4dd1c8250fbddb293fb8904",
-      "line": 19,
-      "path": "kernel-core/src/mac.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_AUDIT_EVENTS: usize = 256;"
     },
     {
       "category": "explicit-safety-policy",
@@ -2610,7 +2600,7 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 144,
+    "explicit-safety-policy": 143,
     "platform-adapter": 44,
     "protocol-abi": 41,
     "runtime-resource-capacity": 97,

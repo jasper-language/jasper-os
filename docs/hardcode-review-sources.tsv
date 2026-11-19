@@ -16,6 +16,7 @@ smp-shootdown-batch-policy	35	policy	larger-page-ranges-promote-to-one-whole-tab
 jaso-wire-v1	33	spec	JASO-isolated-wire-v1-fixed-handle-array
 channel-abi-v1	33	spec	Jasper-Channel-v1-fixed-message-handle-array
 network-object-v1	33	spec	NET-v1-fixed-endpoint-name-field
+mac-audit-backpressure-policy	39	policy	MAC-audit-full-denies-authorization-without-silent-loss
 irq-policy	33	policy	explicit-IRQ-safety-policy
 linux-poll-scan-policy	35	policy	Issue-35-bounded-Linux-poll-scan
 linux-batch-partial-policy	35	policy	Issue-35-bounded-Linux-batches-return-partial-progress

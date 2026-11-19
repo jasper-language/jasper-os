@@ -578,12 +578,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "5947d01ca70f3b925b4b393dc4ff416f08eb757bf4dd1c8250fbddb293fb8904",
-      "path": "kernel-core/src/mac.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "5b38a8010913efe41b3bceb60be29c61fe073c12d76bca8a4f09b63628e1b38f",
       "path": "kernel-core/src/ext4_write.rs",
       "rules": "HC-G1"
@@ -1575,5 +1569,5 @@
     "user",
     "xtask"
   ],
-  "total": 333
+  "total": 332
 }
