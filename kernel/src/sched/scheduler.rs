@@ -986,6 +986,58 @@ impl<T, const N: usize> core::ops::IndexMut<usize> for CpuTable<T, N> {
     }
 }
 
+fn prepare_deadline_layout(
+    forest: &DeadlineForest<MAX_CPUS>,
+    entries: &BootSlots<Deadline, { INLINE_SLOTS * MAX_CPUS }>,
+    slots: usize,
+    cpus: usize,
+) -> Result<
+    (
+        DeadlineForest<MAX_CPUS>,
+        Box<[Deadline]>,
+        Box<[usize]>,
+        Box<[usize]>,
+    ),
+    kernel_core::tickless::StopStorageError,
+> {
+    let target_cpus = cpus.max(MAX_CPUS).max(forest.capacity());
+    let mut next = DeadlineForest::<MAX_CPUS>::new();
+    let extra = next
+        .prepare_capacity(target_cpus)
+        .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
+    next.commit_capacity(extra);
+    let count = slots
+        .checked_mul(target_cpus)
+        .ok_or(kernel_core::tickless::StopStorageError::InvalidCpu)?;
+    let mut next_entries = entries
+        .prepare(count, || Deadline::EMPTY)
+        .ok_or(kernel_core::tickless::StopStorageError::Allocation)?;
+    let mut next_positions = BootSlots::<usize, INLINE_SLOTS>::Inline([NO_DEADLINE; INLINE_SLOTS])
+        .prepare(slots, || NO_DEADLINE)
+        .ok_or(kernel_core::tickless::StopStorageError::Allocation)?;
+    let mut next_owners = BootSlots::<usize, INLINE_SLOTS>::Inline([NO_DEADLINE; INLINE_SLOTS])
+        .prepare(slots, || NO_DEADLINE)
+        .ok_or(kernel_core::tickless::StopStorageError::Allocation)?;
+
+    for cpu in 0..forest.capacity() {
+        let events = forest
+            .len(cpu)
+            .ok_or(kernel_core::tickless::StopStorageError::InvalidCpu)?;
+        for index in 0..events {
+            let event = entries[cpu * slots + index];
+            next.set(
+                &mut next_entries,
+                &mut next_positions,
+                &mut next_owners,
+                cpu,
+                event,
+            )
+            .map_err(|_| kernel_core::tickless::StopStorageError::InvalidCpu)?;
+        }
+    }
+    Ok((next, next_entries, next_positions, next_owners))
+}
+
 /// 调度机制本体。槽位总数（含引导线程）在启动期决定，见 [`Scheduler::grow`]。
 pub struct Scheduler {
     #[cfg(feature = "krn2-observe")]
@@ -3763,6 +3815,24 @@ impl Scheduler {
             .idle_ctx
             .prepare_tail(cpus, || crate::arch::EMPTY_CONTEXT)
             .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
+        let wake_layout = prepare_deadline_layout(
+            &self.wake_heap,
+            &self.wake_entries,
+            self.tasks.len(),
+            cpus,
+        )?;
+        let rt_layout = prepare_deadline_layout(
+            &self.rt_heap,
+            &self.rt_entries,
+            self.tasks.len(),
+            cpus,
+        )?;
+        let ns_layout = prepare_deadline_layout(
+            &self.ns_heap,
+            &self.ns_entries,
+            self.tasks.len(),
+            cpus,
+        )?;
         let mut next_nohz = self.nohz.clone();
         next_nohz.reserve_capacity(cpus)?;
         let mut next_affinities = CpuAffinityTable::new(self.tasks.len(), cpus)
@@ -3794,6 +3864,21 @@ impl Scheduler {
         self.cpu_residency.commit_tail(residency_tail);
         self.arb_windows.commit_tail(arbiter_tail);
         self.idle_ctx.commit_tail(idle_tail);
+        let (wake_heap, wake_entries, wake_positions, wake_owners) = wake_layout;
+        self.wake_heap = wake_heap;
+        self.wake_entries = BootSlots::Heap(wake_entries);
+        self.wake_positions = BootSlots::Heap(wake_positions);
+        self.wake_owners = BootSlots::Heap(wake_owners);
+        let (rt_heap, rt_entries, rt_positions, rt_owners) = rt_layout;
+        self.rt_heap = rt_heap;
+        self.rt_entries = BootSlots::Heap(rt_entries);
+        self.rt_positions = BootSlots::Heap(rt_positions);
+        self.rt_owners = BootSlots::Heap(rt_owners);
+        let (ns_heap, ns_entries, ns_positions, ns_owners) = ns_layout;
+        self.ns_heap = ns_heap;
+        self.ns_entries = BootSlots::Heap(ns_entries);
+        self.ns_positions = BootSlots::Heap(ns_positions);
+        self.ns_owners = BootSlots::Heap(ns_owners);
         for slot in 0..self.tasks.len() {
             if let Some(task) = self.task_mut(slot) {
                 task.affinity = TaskAffinity::Dynamic;

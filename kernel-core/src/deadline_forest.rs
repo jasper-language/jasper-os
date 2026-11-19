@@ -3,7 +3,27 @@
 //! Storage is C*N entries plus N positions and N owners, with no lazy nodes.
 //! Caller initializes positions/owners to ABSENT and preserves coherent slices.
 use crate::deadline::{Deadline, DeadlineHeap, HeapError, ABSENT};
-pub struct DeadlineForest<const C: usize> { heaps: [DeadlineHeap; C] }
+pub struct DeadlineForest<const C: usize> {
+    heaps: [DeadlineHeap; C],
+    #[cfg(any(test, feature = "cpu-dynamic"))]
+    extra: alloc::vec::Vec<DeadlineHeap>,
+}
+
+/// Failure while extending the CPU dimension of a deadline forest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForestCapacityError {
+    InvalidCpu,
+    Allocation,
+}
+
+impl ForestCapacityError {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::InvalidCpu => "system.deadline.error.cpu_capacity",
+            Self::Allocation => "system.deadline.error.allocation",
+        }
+    }
+}
 /// [`DeadlineForest::sync`] 的结果；除 `Unchanged` 外都写了一次堆。
 /// Outcome of a sync; everything except `Unchanged` performed one heap write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,21 +68,92 @@ impl SyncStats {
     pub fn balanced(&self) -> bool { self.unchanged.checked_add(self.writes()) == Some(self.synced) }
 }
 impl<const C: usize> DeadlineForest<C> {
-    pub const fn new() -> Self { Self { heaps: [const { DeadlineHeap::new() }; C] } }
-    pub fn len(&self, cpu: usize) -> Option<usize> { self.heaps.get(cpu).map(DeadlineHeap::len) }
-    fn shape(entries: &[Deadline], positions: &[usize], owners: &[usize]) -> Result<usize, HeapError> {
+    pub const fn new() -> Self {
+        Self {
+            heaps: [const { DeadlineHeap::new() }; C],
+            #[cfg(any(test, feature = "cpu-dynamic"))]
+            extra: alloc::vec::Vec::new(),
+        }
+    }
+    fn heap_count(&self) -> usize {
+        #[cfg(any(test, feature = "cpu-dynamic"))]
+        {
+            C + self.extra.len()
+        }
+        #[cfg(not(any(test, feature = "cpu-dynamic")))]
+        {
+            C
+        }
+    }
+    fn heap(&self, cpu: usize) -> Option<&DeadlineHeap> {
+        if cpu < C {
+            self.heaps.get(cpu)
+        } else {
+            #[cfg(any(test, feature = "cpu-dynamic"))]
+            {
+                self.extra.get(cpu - C)
+            }
+            #[cfg(not(any(test, feature = "cpu-dynamic")))]
+            {
+                None
+            }
+        }
+    }
+    fn heap_mut(&mut self, cpu: usize) -> Option<&mut DeadlineHeap> {
+        if cpu < C {
+            self.heaps.get_mut(cpu)
+        } else {
+            #[cfg(any(test, feature = "cpu-dynamic"))]
+            {
+                self.extra.get_mut(cpu - C)
+            }
+            #[cfg(not(any(test, feature = "cpu-dynamic")))]
+            {
+                None
+            }
+        }
+    }
+    #[cfg(any(test, feature = "cpu-dynamic"))]
+    pub fn prepare_capacity(
+        &self,
+        cpus: usize,
+    ) -> Result<alloc::vec::Vec<DeadlineHeap>, ForestCapacityError> {
+        if cpus <= self.heap_count() {
+            return Ok(alloc::vec::Vec::new());
+        }
+        let needed = cpus - self.heap_count();
+        let mut extra = alloc::vec::Vec::new();
+        extra
+            .try_reserve_exact(needed)
+            .map_err(|_| ForestCapacityError::Allocation)?;
+        for _ in 0..needed {
+            extra.push(DeadlineHeap::new());
+        }
+        Ok(extra)
+    }
+    #[cfg(any(test, feature = "cpu-dynamic"))]
+    pub fn commit_capacity(&mut self, extra: alloc::vec::Vec<DeadlineHeap>) {
+        self.extra.extend(extra);
+    }
+    pub fn capacity(&self) -> usize {
+        self.heap_count()
+    }
+    pub fn len(&self, cpu: usize) -> Option<usize> {
+        self.heap(cpu).map(DeadlineHeap::len)
+    }
+    fn shape(&self, entries: &[Deadline], positions: &[usize], owners: &[usize]) -> Result<usize, HeapError> {
         let n = positions.len();
-        if owners.len() != n || n.checked_mul(C) != Some(entries.len()) { return Err(HeapError::Corrupt); }
+        if owners.len() != n || n.checked_mul(self.heap_count()) != Some(entries.len()) { return Err(HeapError::Corrupt); }
         Ok(n)
     }
     fn locate(&self, entries: &[Deadline], positions: &[usize], owners: &[usize], slot: usize)
         -> Result<Option<(usize, Deadline)>, HeapError> {
-        let n = Self::shape(entries, positions, owners)?;
+        let n = self.shape(entries, positions, owners)?;
         let &cpu = owners.get(slot).ok_or(HeapError::Slot)?;
         if cpu == ABSENT {
             return if positions[slot] == ABSENT { Ok(None) } else { Err(HeapError::Corrupt) };
         }
-        let heap = self.heaps.get(cpu).ok_or(HeapError::Corrupt)?;
+        let heap = self.heap(cpu).ok_or(HeapError::Corrupt)?;
         let p = positions[slot];
         if heap.len() > n || p >= heap.len() { return Err(HeapError::Corrupt); }
         let event = entries[cpu*n+p];
@@ -76,8 +167,8 @@ impl<const C: usize> DeadlineForest<C> {
     }
     pub fn peek(&self, entries: &[Deadline], positions: &[usize], owners: &[usize], cpu: usize)
         -> Result<Option<Deadline>, HeapError> {
-        let n = Self::shape(entries, positions, owners)?;
-        let heap = self.heaps.get(cpu).ok_or(HeapError::Slot)?;
+        let n = self.shape(entries, positions, owners)?;
+        let heap = self.heap(cpu).ok_or(HeapError::Slot)?;
         if heap.len() > n { return Err(HeapError::Corrupt); }
         if heap.is_empty() { return Ok(None); }
         let event = entries[cpu*n];
@@ -87,27 +178,33 @@ impl<const C: usize> DeadlineForest<C> {
     /// All rejecting branches precede mutation, including stale-generation moves.
     pub fn set(&mut self, entries: &mut [Deadline], positions: &mut [usize], owners: &mut [usize], cpu: usize, event: Deadline)
         -> Result<(), HeapError> {
-        let n = Self::shape(entries, positions, owners)?;
-        if cpu >= C { return Err(HeapError::Slot); }
+        let n = self.shape(entries, positions, owners)?;
+        if cpu >= self.heap_count() { return Err(HeapError::Slot); }
         let old = self.locate(entries, positions, owners, event.slot)?;
         if old.is_some_and(|(_, e)| e.generation != event.generation) { return Err(HeapError::Stale); }
-        if self.heaps[cpu].len() > n { return Err(HeapError::Corrupt); }
-        if old.is_none_or(|(c, _)| c != cpu) && self.heaps[cpu].len() == n { return Err(HeapError::Full); }
+        if self.heap(cpu).is_none_or(|heap| heap.len() > n) { return Err(HeapError::Corrupt); }
+        if old.is_none_or(|(c, _)| c != cpu) && self.heap(cpu).is_some_and(|heap| heap.len() == n) { return Err(HeapError::Full); }
         if let Some((old_cpu, _)) = old.filter(|(c, _)| *c != cpu) {
-            self.heaps[old_cpu].remove(&mut entries[old_cpu*n..(old_cpu+1)*n], positions, event.slot, event.generation)
+            self.heap_mut(old_cpu)
+                .expect("validated source heap")
+                .remove(&mut entries[old_cpu*n..(old_cpu+1)*n], positions, event.slot, event.generation)
                 .expect("validated source node");
             owners[event.slot] = ABSENT;
         }
-        self.heaps[cpu].set(&mut entries[cpu*n..(cpu+1)*n], positions, event)?;
+        self.heap_mut(cpu)
+            .expect("validated destination heap")
+            .set(&mut entries[cpu*n..(cpu+1)*n], positions, event)?;
         owners[event.slot] = cpu;
         Ok(())
     }
     pub fn remove(&mut self, entries: &mut [Deadline], positions: &mut [usize], owners: &mut [usize], slot: usize, generation: u64)
         -> Result<Option<Deadline>, HeapError> {
-        let n = Self::shape(entries, positions, owners)?;
+        let n = self.shape(entries, positions, owners)?;
         let Some((cpu, event)) = self.locate(entries, positions, owners, slot)? else { return Ok(None) };
         if event.generation != generation { return Err(HeapError::Stale); }
-        let removed = self.heaps[cpu].remove(&mut entries[cpu*n..(cpu+1)*n], positions, slot, generation);
+        let removed = self.heap_mut(cpu)
+            .expect("validated owner heap")
+            .remove(&mut entries[cpu*n..(cpu+1)*n], positions, slot, generation);
         assert_eq!(removed, Some(event));
         owners[slot] = ABSENT;
         Ok(removed)
@@ -168,6 +265,39 @@ mod tests {
         assert_eq!(h.set(&mut e,&mut p,&mut o,2,a), Err(HeapError::Slot));
         let mut z = DeadlineForest::<0>::new();
         assert_eq!(z.set(&mut [],&mut [],&mut [],0,a), Err(HeapError::Slot));
+    }
+
+    #[test]
+    fn heap_capacity_grows_past_bootstrap_cpus() {
+        let mut h = DeadlineForest::<2>::new();
+        let extra = h.prepare_capacity(130).unwrap();
+        h.commit_capacity(extra);
+        assert_eq!(h.capacity(), 130);
+        let mut entries = [Deadline::EMPTY; 130];
+        let mut positions = [ABSENT; 1];
+        let mut owners = [ABSENT; 1];
+        let event = Deadline {
+            at: 17,
+            slot: 0,
+            generation: 1,
+        };
+        h.set(
+            &mut entries,
+            &mut positions,
+            &mut owners,
+            129,
+            event,
+        )
+        .unwrap();
+        assert_eq!(h.peek(&entries, &positions, &owners, 129), Ok(Some(event)));
+        assert_eq!(
+            h.pop_due(&mut entries, &mut positions, &mut owners, 129, 16),
+            Ok(None)
+        );
+        assert_eq!(
+            h.pop_due(&mut entries, &mut positions, &mut owners, 129, 17),
+            Ok(Some(event))
+        );
     }
     #[derive(Clone, Copy, Debug)]
     enum Op { Set(usize, Deadline), Remove(usize,u64), Pop(usize,u64) }

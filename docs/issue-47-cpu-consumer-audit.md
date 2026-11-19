@@ -157,4 +157,9 @@
 - `kernel/src/sched/scheduler.rs`：`cpu_stats`、`cpu_residency`、类别仲裁窗口和
   idle context 改用调度器内联 bootstrap + 堆后备扩展表，在 AP 启动前与 CPU
   容量一起原子预留。运行期这些每核统计与上下文不再由固定 128 槽决定容量。
-- 其余调度器 timer/RT deadline heap、共享 CpuSet 门面、部分诊断和亲和 ABI 尚未迁移。
+- `kernel-core/src/deadline_forest.rs`：deadline forest 保留内联 bootstrap heaps，
+  并增加按已准入 CPU 数预分配的堆后备 heap 表；CPU 130 的软件测试通过。
+- `kernel/src/sched/scheduler.rs`：AP 启动前同时重建 wake、RT 和纳秒预算三个 forest
+  及其按 CPU 步长排列的 entries，迁移现存期限事件后整体替换。timer/RT 热路径
+  不在持锁时扩容，也不再依赖 `DeadlineForest<128>` 作为最终 CPU 上限。
+- 其余调度器 per-CPU run leaves、共享 CpuSet 门面、部分诊断和亲和 ABI 尚未迁移。
