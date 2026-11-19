@@ -649,7 +649,7 @@
       "rules": "HC-G1"
     },
     {
-      "count": 13,
+      "count": 12,
       "fingerprint": "600c2c1cfaeec8919bfc3b86c43873620bf9f3c620e7928c7809b5269131abbc",
       "path": "kernel/src/linux_abi.rs",
       "rules": "HC-G1"
@@ -875,12 +875,6 @@
       "fingerprint": "7a5ed2da179af0df4e49c1797c8ec01e81e3b12a88639c2540a109a74d7dd767",
       "path": "user/rt/src/channel.rs",
       "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "7ac867494100e7f919fe0c2e6157a0c1cf654a74b751fbc793290694eb36ea68",
-      "path": "kernel/src/linux_abi.rs",
-      "rules": "HC-G2,HC-G6"
     },
     {
       "count": 1,
@@ -1713,5 +1707,5 @@
     "user",
     "xtask"
   ],
-  "total": 361
+  "total": 359
 }
