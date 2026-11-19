@@ -78,6 +78,12 @@ RISC-V PLIC context 表已迁移并由堆后拓扑发布修复多核路由；其
 和其他每核状态仍未迁移；4 vCPU QEMU 已恢复 4/4 online、SMP 和并行 TLB
 shootdown 功能通过，标准验收脚本 PASS；整轮仅余一个计时类超界记录。因此：
 
+SMP 启动门已删除 `topology.count() > MAX_CPUS` 的最终拒绝。堆前 128 槽仍只是
+bootstrap 暂存；`Topology` 溢出项、CPU runtime registry、MSI、设备 IRQ、
+per-CPU 与调度 leaf 的 AP 启动前堆扩容共同决定能否准入。任一完整存储分配失败
+仍失败关闭，不发布被截断的子集。设备 IRQ 行元数据成本也改为按实际
+`smp::cpu_count()` 计算，不再固定按 128 CPU 估算。
+
 - 不能把 128 改成 256/1024 后声称“动态支持”；
 - 不能把本切片中的 4096-CPU 软件准入测试冒充真实内核运行；
 - 不能把 `Topology` 的高位库存保留冒充 `CpuSet`/调度器已支持高位 CPU；

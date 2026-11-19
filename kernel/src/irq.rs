@@ -560,14 +560,14 @@ pub mod device {
         pub capacity: usize,
     }
 
-    fn line_cost() -> usize {
+    fn line_cost(cpus: usize) -> usize {
         core::mem::size_of::<CpuBitmap>()
             + core::mem::size_of::<Option<usize>>()
             + core::mem::size_of::<bool>()
             + core::mem::size_of::<AtomicUsize>()
             + core::mem::size_of::<IrqU64>()
             + core::mem::size_of::<Vec<AtomicU32>>()
-            + MAX_CPUS * core::mem::size_of::<AtomicU32>()
+            + cpus.saturating_mul(core::mem::size_of::<AtomicU32>())
     }
 
     /// Reserve device-IRQ per-CPU counts and quotas before AP startup.
@@ -721,7 +721,7 @@ pub mod device {
     pub fn admit_topology(source: &'static str) -> LineTopology {
         *TOPOLOGY.call_once(|| {
             let discovered = arch::device_irq_count();
-            let cost = line_cost().max(1);
+            let cost = line_cost(crate::smp::cpu_count()).max(1);
             let metadata_budget = match usize::try_from(crate::mm::heap::limit() / 1024) {
                 Ok(budget) => budget,
                 Err(_) => 0,

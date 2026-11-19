@@ -209,4 +209,10 @@
   这移除了队列身份和规范化锁序上的 255/65535 上限。每个 leaf 只拥有一个外部
   CPU 运行队列，其本地 RunLists 表头因此固定为 1 项；外部 CPU 身份保存在
   `CoreQueue`/`SchedEntity` 的 `usize` 编号中，不再按全机拓扑复制表头。
+- `kernel/src/smp/mod.rs` 删除了 `topology.count() > MAX_CPUS` 的最终启动拒绝；
+  128 只保留为堆前 bootstrap 暂存宽度。完整拓扑进入 CPU runtime registry 后，
+  MSI、设备 IRQ、per-CPU、调度 leaf 和架构入口各自完成堆后扩容；分配失败仍整体
+  拒绝，不启动任意 128 子集。
+- `kernel/src/irq.rs` 的每行元数据预算从固定 `MAX_CPUS` 改为实际
+  `smp::cpu_count()`，避免合法 >128 拓扑在设备 IRQ 容量规划阶段被错误拒绝。
 - 其余调度器固定表、共享 CpuSet 门面、部分诊断和亲和 ABI 尚未迁移。

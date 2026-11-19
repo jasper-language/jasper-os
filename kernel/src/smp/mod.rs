@@ -221,14 +221,6 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
         );
         arch::halt_forever();
     }
-    if topo.count() > kernel_core::smp::MAX_CPUS {
-        crate::kprintln!(
-            "[JSR-SMP] reject=cpu_runtime_capacity present={} capacity={}",
-            topo.count(),
-            kernel_core::smp::MAX_CPUS
-        );
-        arch::halt_forever();
-    }
     if let Err(error) = crate::irq::prepare_msi_storage(topo.count()) {
         crate::kprintln!(
             "[JSR-SMP] reject=msi_dispatch_storage cpus={} reason={}",
