@@ -10444,16 +10444,17 @@ pub fn transfer(from: ObjId, h: HandleId, to: ObjId) -> Result<HandleId, ProcErr
         // —— 提交：以下步骤在检查通过后不会失败 ——
         if let Ok(KObject::Process(p)) = t.get_mut(from) {
             let link = p.handles.capability(h).map_err(ProcError::Handle)?;
-            p.handles.remove(h).map_err(ProcError::Handle)?;
+            let moved = p
+                .handles
+                .put_capability_link(r, rights, link)
+                .map_err(ProcError::Handle)?;
+            if p.handles.remove(h).is_err() {
+                let _ = p.handles.remove(moved);
+                return Err(ProcError::Handle(HandleError::Invalid));
+            }
             // 转移后发送方不再持有句柄，它经该句柄建立的设备窗口一并撤销（只改页表，不会失败）。
             revoke_device_mappings_for_handle(p, h);
-            match t.get_mut(to) {
-                Ok(KObject::Process(p)) => p
-                    .handles
-                    .put_capability_link(r, rights, link)
-                    .map_err(ProcError::Handle),
-                _ => Err(ProcError::NoSuchProcess),
-            }
+            Ok(moved)
         } else {
             Err(ProcError::NoSuchProcess)
         }

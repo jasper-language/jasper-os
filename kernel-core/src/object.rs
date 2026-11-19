@@ -637,8 +637,15 @@ impl<V, const N: usize> HandleTable<V, N> {
         let link = self.capability(h)?;
         // Destination insertion can fail; do it before touching the source.
         let moved = to.put_capability_link(*value, rights, link)?;
-        self.remove(h).expect("exclusive validated source handle cannot disappear");
-        Ok(moved)
+        match self.remove(h) {
+            Ok(_) => Ok(moved),
+            Err(error) => {
+                // The caller still owns the source handle when commit fails.
+                // Roll back the destination so no duplicate ownership is left.
+                let _ = to.remove(moved);
+                Err(error)
+            }
+        }
     }
 
     /// 查找句柄对应的槽位；只校验槽位占用与世代，不校验能力撤销状态。
@@ -1127,6 +1134,23 @@ mod tests {
         assert_eq!(a.transfer_to(root, &mut b), Err(HandleError::RightsDenied));
         assert!(a.get(root).is_ok(), "refusal leaves the authority tree intact");
         assert!(b.is_empty());
+    }
+
+    #[test]
+    fn transfer_to_full_destination_keeps_source_and_destination_unchanged() {
+        let mut source: HandleTable<u8, 2> = HandleTable::new();
+        let mut destination: HandleTable<u8, 1> = HandleTable::new();
+        let moving = source
+            .put(7, Rights::READ.union(Rights::TRANSFER))
+            .unwrap();
+        let occupied = destination.put(9, Rights::WAIT).unwrap();
+
+        assert_eq!(
+            source.transfer_to(moving, &mut destination),
+            Err(HandleError::TableFull)
+        );
+        assert_eq!(source.get(moving).unwrap().0, &7);
+        assert_eq!(destination.get(occupied).unwrap(), (&9, Rights::WAIT));
     }
 
     #[test]
