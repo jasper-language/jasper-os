@@ -1,5 +1,5 @@
 {
-  "baseline_total": 351,
+  "baseline_total": 347,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,7 +10,7 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 132,
+    "explicit-safety-policy": 129,
     "platform-adapter": 28,
     "protocol-abi": 38,
     "runtime-resource-capacity": 71,
@@ -2338,16 +2338,6 @@
       "source": "const MAX_CONTEXT: usize = 4096;"
     },
     {
-      "category": "explicit-safety-policy",
-      "count": 2,
-      "fingerprint": "e97a270ced01ef94d308799b5756449ba29e6a718ff48941c1c41ea0a9c5485b",
-      "line": 19436,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
-      "rules": "HC-G1",
-      "source": "const MAX_SENDFILE: u64 = 1024 * 1024;"
-    },
-    {
       "category": "runtime-resource-capacity",
       "count": 8,
       "fingerprint": "f8bf7b2af6078428764b23efcf7b8a6f7a8390c6f27fd0923b26363d2d5126eb",
@@ -2356,26 +2346,6 @@
       "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
       "rules": "HC-G1",
       "source": "const MAX_FUTEX_WORDS: usize = 32;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "c3bdd178d15b9cff2b4f096b7a09e64ad1f794ae3b8fc8ce729caa17606dba1e",
-      "line": 19457,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G2,HC-G6",
-      "source": ".min(MAX_SENDFILE)"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "dc7025deaeb7e1c5533875d42b1f12573a6df19dd51a3303af2715fb68febf55",
-      "line": 19564,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G2,HC-G6",
-      "source": "let requested = args[4].min(MAX_COPY);"
     },
     {
       "category": "explicit-safety-policy",
@@ -2770,7 +2740,7 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 149,
+    "explicit-safety-policy": 145,
     "platform-adapter": 44,
     "protocol-abi": 41,
     "runtime-resource-capacity": 110,

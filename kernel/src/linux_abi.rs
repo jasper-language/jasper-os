@@ -19433,7 +19433,6 @@ fn linux_readlinkat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 
 /// Implements bounded `sendfile(2)` from one virtual file to a writable stream.
 fn linux_sendfile(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const MAX_SENDFILE: u64 = 1024 * 1024;
     let output_fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let input_fd = u32::try_from(args[1]).map_err(|_| CompatErrno::BadFd)?;
     let (input_handle, file_offset) =
@@ -19453,14 +19452,15 @@ fn linux_sendfile(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let start = usize::try_from(start).map_err(|_| CompatErrno::Invalid)?;
     let bytes = file.bytes();
     let available = bytes.len().saturating_sub(start);
-    let take = args[3]
-        .min(MAX_SENDFILE)
-        .min(compat_core::PIPE_CAPACITY as u64)
-        .min(available as u64) as usize;
+    let output = proc::linux_fd(pid, output_fd).ok_or(CompatErrno::BadFd)?;
+    let mut take = args[3].min(available as u64);
+    if output.kind == compat_core::fd::CompatKind::Pipe {
+        take = take.min(compat_core::PIPE_CAPACITY as u64);
+    }
+    let take = take as usize;
     if take == 0 {
         return Ok(0);
     }
-    let output = proc::linux_fd(pid, output_fd).ok_or(CompatErrno::BadFd)?;
     let io = admit_process_io(pid, take as u64, 1)?;
     let written = match output.kind {
         compat_core::fd::CompatKind::Pipe => {
@@ -19531,7 +19531,6 @@ fn linux_sendfile(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 
 /// Implements bounded `copy_file_range(2)` between virtual files and memfds.
 fn linux_copy_file_range(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const MAX_COPY: u64 = 1024 * 1024;
     if args[5] != 0 {
         return Err(CompatErrno::Invalid);
     }
@@ -19561,7 +19560,7 @@ fn linux_copy_file_range(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno>
         }
         value as u64
     };
-    let requested = args[4].min(MAX_COPY);
+    let requested = usize::try_from(args[4]).map_err(|_| CompatErrno::Invalid)?;
     let (bytes, available) = match input.kind {
         compat_core::fd::CompatKind::File => {
             if !input
@@ -19575,10 +19574,12 @@ fn linux_copy_file_range(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno>
             let bytes = file.bytes();
             let start = usize::try_from(input_offset).map_err(|_| CompatErrno::Invalid)?;
             let available = bytes.len().saturating_sub(start);
-            (
-                bytes[start..start + available.min(requested as usize)].to_vec(),
-                available,
-            )
+            let take = available.min(requested);
+            let mut copy = alloc::vec::Vec::new();
+            copy.try_reserve_exact(take)
+                .map_err(|_| CompatErrno::NoMemory)?;
+            copy.extend_from_slice(&bytes[start..start + take]);
+            (copy, available)
         }
         compat_core::fd::CompatKind::Device
             if proc::linux_ashmem_is_regular(pid, input.handle) == Some(true) =>
@@ -19592,7 +19593,13 @@ fn linux_copy_file_range(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno>
             let (size, _, _) =
                 proc::linux_ashmem_state(pid, input.handle).ok_or(CompatErrno::BadFd)?;
             let available = size.saturating_sub(input_offset);
-            let mut bytes = alloc::vec![0u8; available.min(requested) as usize];
+            let take = usize::try_from(available.min(requested as u64))
+                .map_err(|_| CompatErrno::Invalid)?;
+            let mut bytes = alloc::vec::Vec::new();
+            bytes
+                .try_reserve_exact(take)
+                .map_err(|_| CompatErrno::NoMemory)?;
+            bytes.resize(take, 0);
             let copied = proc::linux_ashmem_read_from(
                 pid,
                 input.handle,
