@@ -211,17 +211,72 @@ pub type MsiHandler = fn();
 /// Number of MSI vector slots known to the dispatcher.
 pub const MSI_SLOTS: usize = kernel_core::msi::MAX_SLOTS;
 
-/// 每核每个向量绑定的处理函数（0 = 未绑定）。
-/// Handler bound to `[cpu][vector]`; zero means unbound.
-static MSI_HANDLERS: [[AtomicUsize; MSI_SLOTS]; MAX_CPUS] =
-    [const { [const { AtomicUsize::new(0) }; MSI_SLOTS] }; MAX_CPUS];
-/// 每核每个向量收到的 MSI 次数（无论是否绑定处理函数）。
-/// MSI arrival count per `[cpu][vector]`, bound or not.
-static MSI_COUNTS: [[AtomicU32; MSI_SLOTS]; MAX_CPUS] =
-    [const { [const { AtomicU32::new(0) }; MSI_SLOTS] }; MAX_CPUS];
-/// 每核未绑定处理函数的 MSI 次数（伪 MSI）。
-/// Spurious MSI count per processor.
-static MSI_SPURIOUS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+struct MsiCpuState {
+    handlers: [AtomicUsize; MSI_SLOTS],
+    counts: [AtomicU32; MSI_SLOTS],
+    spurious: AtomicU32,
+    mask_ops: [AtomicUsize; MSI_SLOTS],
+    mask_ctx: [AtomicUsize; MSI_SLOTS],
+}
+
+impl MsiCpuState {
+    const fn new() -> Self {
+        Self {
+            handlers: [const { AtomicUsize::new(0) }; MSI_SLOTS],
+            counts: [const { AtomicU32::new(0) }; MSI_SLOTS],
+            spurious: AtomicU32::new(0),
+            mask_ops: [const { AtomicUsize::new(0) }; MSI_SLOTS],
+            mask_ctx: [const { AtomicUsize::new(0) }; MSI_SLOTS],
+        }
+    }
+}
+
+static BOOTSTRAP_MSI_CPUS: [MsiCpuState; MAX_CPUS] =
+    [const { MsiCpuState::new() }; MAX_CPUS];
+static EXTRA_MSI_CPUS: Once<Result<Vec<MsiCpuState>, MsiStorageError>> = Once::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MsiStorageError {
+    Allocation,
+    AlreadyPreparedTooSmall,
+}
+
+impl MsiStorageError {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Allocation => "system.interrupt.error.msi_storage_allocation",
+            Self::AlreadyPreparedTooSmall => "system.interrupt.error.msi_storage_capacity",
+        }
+    }
+}
+
+fn msi_cpu_state(cpu: usize) -> Option<&'static MsiCpuState> {
+    if let Some(state) = BOOTSTRAP_MSI_CPUS.get(cpu) {
+        return Some(state);
+    }
+    let extra = cpu.checked_sub(MAX_CPUS)?;
+    EXTRA_MSI_CPUS.get()?.as_ref().ok()?.get(extra)
+}
+
+/// Reserve MSI dispatch state before AP startup. Calling twice is idempotent.
+pub fn prepare_msi_storage(cpus: usize) -> Result<(), MsiStorageError> {
+    let needed = cpus.saturating_sub(MAX_CPUS);
+    let states = EXTRA_MSI_CPUS.call_once(|| {
+        let mut states = Vec::new();
+        states
+            .try_reserve_exact(needed)
+            .map_err(|_| MsiStorageError::Allocation)?;
+        for _ in MAX_CPUS..cpus {
+            states.push(MsiCpuState::new());
+        }
+        Ok(states)
+    });
+    match states {
+        Ok(states) if states.len() >= needed => Ok(()),
+        Ok(_) => Err(MsiStorageError::AlreadyPreparedTooSmall),
+        Err(error) => Err(*error),
+    }
+}
 
 /// MSI 槽位的屏蔽 / 解除屏蔽回调（中断上下文调用；参数为处理器、向量与登记时给出的上下文值）。
 /// Mask callback of an MSI slot: `(cpu, vector, ctx)`.
@@ -236,13 +291,6 @@ pub struct MsiMaskOps {
     pub unmask: MsiMaskFn,
 }
 
-/// 每核每个向量登记的屏蔽动作（`&'static MsiMaskOps` 的地址；0 = 未登记）。
-static MSI_MASK_OPS: [[AtomicUsize; MSI_SLOTS]; MAX_CPUS] =
-    [const { [const { AtomicUsize::new(0) }; MSI_SLOTS] }; MAX_CPUS];
-/// 与屏蔽动作一起登记的上下文值。
-static MSI_MASK_CTX: [[AtomicUsize; MSI_SLOTS]; MAX_CPUS] =
-    [const { [const { AtomicUsize::new(0) }; MSI_SLOTS] }; MAX_CPUS];
-
 /// 为处理器 `cpu` 上的 `vector` 登记（或以 `None` 清除）预算屏蔽动作。
 ///
 /// 登记要求该向量已绑定处理函数（否则 [`MsiError::NotAllocated`]）；处理器或向量越界返回错误。失败时登记表不变。
@@ -253,44 +301,43 @@ pub fn msi_set_mask_ops(
     vector: u8,
     ops: Option<(&'static MsiMaskOps, usize)>,
 ) -> Result<(), MsiError> {
-    if cpu >= MAX_CPUS {
-        return Err(MsiError::NoSuchCpu);
-    }
+    let state = msi_cpu_state(cpu).ok_or(MsiError::NoSuchCpu)?;
     if vector as usize >= MSI_SLOTS {
         return Err(MsiError::OutOfRange);
     }
     let v = vector as usize;
     match ops {
         Some((ops, ctx)) => {
-            if MSI_HANDLERS[cpu][v].load(Ordering::Acquire) == 0 {
+            if state.handlers[v].load(Ordering::Acquire) == 0 {
                 return Err(MsiError::NotAllocated);
             }
             // 先写上下文、再发布动作：读者先取动作（Acquire）再读上下文
-            MSI_MASK_CTX[cpu][v].store(ctx, Ordering::Relaxed);
-            MSI_MASK_OPS[cpu][v].store(ops as *const MsiMaskOps as usize, Ordering::Release);
+            state.mask_ctx[v].store(ctx, Ordering::Relaxed);
+            state.mask_ops[v].store(ops as *const MsiMaskOps as usize, Ordering::Release);
         }
-        None => MSI_MASK_OPS[cpu][v].store(0, Ordering::Release),
+        None => state.mask_ops[v].store(0, Ordering::Release),
     }
     Ok(())
 }
 
 /// 槽位登记的屏蔽动作与上下文值。
 fn msi_mask_ops(cpu: usize, vector: usize) -> Option<(&'static MsiMaskOps, usize)> {
-    let p = MSI_MASK_OPS[cpu][vector].load(Ordering::Acquire);
+    let state = msi_cpu_state(cpu)?;
+    let p = state.mask_ops.get(vector)?.load(Ordering::Acquire);
     if p == 0 {
         return None;
     }
     // SAFETY：非零值只来自 `msi_set_mask_ops` 写入的 `&'static MsiMaskOps` 地址。
     let ops = unsafe { &*(p as *const MsiMaskOps) };
-    Some((ops, MSI_MASK_CTX[cpu][vector].load(Ordering::Relaxed)))
+    Some((ops, state.mask_ctx[vector].load(Ordering::Relaxed)))
 }
 
 /// 处理器 `cpu` 上的 `vector` 是否已绑定处理函数。
 /// Whether `vector` on `cpu` has a handler.
 pub fn msi_is_bound(cpu: usize, vector: u8) -> bool {
-    cpu < MAX_CPUS
-        && (vector as usize) < MSI_SLOTS
-        && MSI_HANDLERS[cpu][vector as usize].load(Ordering::Acquire) != 0
+    msi_cpu_state(cpu).is_some_and(|state| {
+        (vector as usize) < MSI_SLOTS && state.handlers[vector as usize].load(Ordering::Acquire) != 0
+    })
 }
 
 /// 在处理器 `cpu` 上为 `vector` 安装（或以 `None` 清除）处理函数。
@@ -298,13 +345,11 @@ pub fn msi_is_bound(cpu: usize, vector: u8) -> bool {
 /// 调用者保证 `cpu` 在线；处理器下标或向量号越界时返回错误且登记表不变。
 /// Install or clear the handler of `vector` on `cpu`.
 pub fn msi_bind(cpu: usize, vector: u8, handler: Option<MsiHandler>) -> Result<(), MsiError> {
-    if cpu >= MAX_CPUS {
-        return Err(MsiError::NoSuchCpu);
-    }
+    let state = msi_cpu_state(cpu).ok_or(MsiError::NoSuchCpu)?;
     if vector as usize >= MSI_SLOTS {
         return Err(MsiError::OutOfRange);
     }
-    MSI_HANDLERS[cpu][vector as usize].store(
+    state.handlers[vector as usize].store(
         handler.map_or(0, |handler| handler as usize),
         Ordering::Release,
     );
@@ -319,22 +364,26 @@ pub fn msi_bind(cpu: usize, vector: u8, handler: Option<MsiHandler>) -> Result<(
 /// MSI entry point: dispatch on the current processor, then charge the per-CPU quota.
 pub fn on_msi(vector: u8) {
     let cpu = arch::cpu_index();
-    if cpu >= MAX_CPUS {
+    let Some(state) = msi_cpu_state(cpu) else {
         crate::kprintln!(
-            "[JSR-SMP] reject=cpu_index_out_of_range index={} max={}",
+            "[JSR-SMP] reject=cpu_index_storage_missing index={} prepared={}",
             cpu,
             MAX_CPUS
+                + EXTRA_MSI_CPUS
+                    .get()
+                    .and_then(|states| states.as_ref().ok())
+                    .map_or(0, Vec::len)
         );
         arch::halt_forever();
-    }
+    };
     if vector as usize >= MSI_SLOTS {
-        MSI_SPURIOUS[cpu].fetch_add(1, Ordering::Relaxed);
+        state.spurious.fetch_add(1, Ordering::Relaxed);
         return;
     }
-    count_arrival(&MSI_COUNTS[cpu][vector as usize]);
-    let h = MSI_HANDLERS[cpu][vector as usize].load(Ordering::Acquire);
+    count_arrival(&state.counts[vector as usize]);
+    let h = state.handlers[vector as usize].load(Ordering::Acquire);
     if h == 0 {
-        MSI_SPURIOUS[cpu].fetch_add(1, Ordering::Relaxed);
+        state.spurious.fetch_add(1, Ordering::Relaxed);
         return;
     }
     let t0 = arch::cycles();
@@ -355,18 +404,15 @@ pub(crate) fn count_arrival(c: &AtomicU32) {
 /// 处理器 `cpu` 在 `vector` 上收到的 MSI 次数。
 /// MSI arrivals of `vector` on `cpu`.
 pub fn msi_count(cpu: usize, vector: u8) -> u32 {
-    if cpu >= MAX_CPUS || vector as usize >= MSI_SLOTS {
-        return 0;
-    }
-    MSI_COUNTS[cpu][vector as usize].load(Ordering::Acquire)
+    msi_cpu_state(cpu)
+        .and_then(|state| state.counts.get(vector as usize))
+        .map_or(0, |count| count.load(Ordering::Acquire))
 }
 
 /// 处理器 `cpu` 上的伪 MSI 次数（未绑定处理函数的向量）。
 /// Spurious MSI count of `cpu`.
 pub fn msi_spurious(cpu: usize) -> u32 {
-    MSI_SPURIOUS
-        .get(cpu)
-        .map_or(0, |count| count.load(Ordering::Relaxed))
+    msi_cpu_state(cpu).map_or(0, |state| state.spurious.load(Ordering::Relaxed))
 }
 
 /// 清零伪 MSI 计数，以及**没有登记处理函数**的槽位的 MSI 计数。
@@ -375,15 +421,21 @@ pub fn msi_spurious(cpu: usize) -> u32 {
 /// 计数一旦被清零，差值就会把不存在的到达算进去（或把真实到达丢掉）。
 /// Reset spurious counts and the counts of unbound slots; bound slots stay monotonic for their readers.
 pub fn reset_msi_stats() {
-    for (handlers, counts) in MSI_HANDLERS.iter().zip(MSI_COUNTS.iter()) {
-        for (h, count) in handlers.iter().zip(counts.iter()) {
+    let reset = |state: &MsiCpuState| {
+        for (h, count) in state.handlers.iter().zip(state.counts.iter()) {
             if h.load(Ordering::Acquire) == 0 {
                 count.store(0, Ordering::Relaxed);
             }
         }
+        state.spurious.store(0, Ordering::Relaxed);
+    };
+    for state in BOOTSTRAP_MSI_CPUS.iter() {
+        reset(state);
     }
-    for count in MSI_SPURIOUS.iter() {
-        count.store(0, Ordering::Relaxed);
+    if let Some(states) = EXTRA_MSI_CPUS.get().and_then(|states| states.as_ref().ok()) {
+        for state in states {
+            reset(state);
+        }
     }
 }
 

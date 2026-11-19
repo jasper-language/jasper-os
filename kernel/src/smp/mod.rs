@@ -229,6 +229,14 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
         );
         arch::halt_forever();
     }
+    if let Err(error) = crate::irq::prepare_msi_storage(topo.count()) {
+        crate::kprintln!(
+            "[JSR-SMP] reject=msi_dispatch_storage cpus={} reason={}",
+            topo.count(),
+            error.name()
+        );
+        arch::halt_forever();
+    }
     if let Err(error) = percpu::reserve(topo.count()) {
         crate::kprintln!(
             "[JSR-SMP] reject=percpu_storage cpus={} reason={}",
