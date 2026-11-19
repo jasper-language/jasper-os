@@ -42,7 +42,6 @@
 use alloc::boxed::Box;
 use crate::arch::TaskContext;
 use crate::task::{Task, TaskAffinity, TaskId, TaskState};
-use kernel_core::cpu_bitmap::CpuBitmap;
 use kernel_core::deadline::{Deadline, ABSENT as NO_DEADLINE};
 use kernel_core::deadline_forest::DeadlineForest;
 use kernel_core::task_index::{TaskIndex, Node as IndexNode};

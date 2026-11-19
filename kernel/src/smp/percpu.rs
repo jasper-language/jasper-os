@@ -12,7 +12,10 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use kernel_core::lockorder::HeldRanks;
-use kernel_core::smp::{CallSlot, CpuStateCell, IpiKind, MAX_CPUS};
+use kernel_core::smp::{
+    CallSlot, CpuStateCell, IpiKind, BOOTSTRAP_CPUS,
+};
+use spin::Once;
 
 use crate::arch;
 use crate::sync::{IrqSpinLock, IrqU64};
@@ -152,24 +155,78 @@ impl PerCpu {
     }
 }
 
-/// 全部处理器的每核数据（下标 = 逻辑下标；引导处理器为 0）。
-static CPUS: [PerCpu; MAX_CPUS] = [const { PerCpu::new() }; MAX_CPUS];
+/// 堆前可用的每核数据（下标 = 逻辑下标；引导处理器为 0）。
+static BOOTSTRAP_CPUS_DATA: [PerCpu; BOOTSTRAP_CPUS] =
+    [const { PerCpu::new() }; BOOTSTRAP_CPUS];
+
+/// Heap-backed records beyond the pre-heap bootstrap area.
+static EXTRA_CPUS: Once<Result<alloc::vec::Vec<PerCpu>, ReserveError>> =
+    Once::new();
+
+/// Why the runtime per-CPU record table could not be reserved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReserveError {
+    Allocation,
+    AlreadyReservedTooSmall,
+}
+
+impl ReserveError {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Allocation => "system.cpu.error.percpu_allocation",
+            Self::AlreadyReservedTooSmall => "system.cpu.error.percpu_capacity",
+        }
+    }
+}
+
+/// Reserve heap-backed per-CPU records for every admitted logical CPU.
+///
+/// The bootstrap area remains valid before the heap exists. `reserve` is a
+/// boot-time transaction called before any secondary CPU starts; after it
+/// succeeds, `get` and `this` can use the same logical indices without a final
+/// 128-CPU ceiling.
+pub fn reserve(cpus: usize) -> Result<(), ReserveError> {
+    let extra = cpus.saturating_sub(BOOTSTRAP_CPUS);
+    let reserved = EXTRA_CPUS.call_once(|| {
+        let mut records = alloc::vec::Vec::new();
+        records
+            .try_reserve_exact(extra)
+            .map_err(|_| ReserveError::Allocation)?;
+        for _ in 0..extra {
+            records.push(PerCpu::new());
+        }
+        Ok(records)
+    });
+    match reserved {
+        Ok(records) if records.len() >= extra => Ok(()),
+        Ok(_) => Err(ReserveError::AlreadyReservedTooSmall),
+        Err(error) => Err(*error),
+    }
+}
 
 /// 逻辑下标为 `cpu` 的每核数据（越界返回 `None`）。
 /// Per-CPU record of logical index `cpu`.
 pub fn get(cpu: usize) -> Option<&'static PerCpu> {
-    CPUS.get(cpu)
+    if let Some(record) = BOOTSTRAP_CPUS_DATA.get(cpu) {
+        return Some(record);
+    }
+    let extra = cpu.checked_sub(BOOTSTRAP_CPUS)?;
+    EXTRA_CPUS.get()?.as_ref().ok()?.get(extra)
 }
 
 /// 本处理器的每核数据。
 /// Per-CPU record of the executing processor.
 pub fn this() -> &'static PerCpu {
     let index = arch::cpu_index();
-    CPUS.get(index).unwrap_or_else(|| {
+    get(index).unwrap_or_else(|| {
         crate::kprintln!(
             "[JSR-SMP] reject=cpu_index_out_of_range index={} max={}",
             index,
-            MAX_CPUS
+            BOOTSTRAP_CPUS
+                + EXTRA_CPUS
+                    .get()
+                    .and_then(|records| records.as_ref().ok())
+                    .map_or(0, |records| records.len())
         );
         arch::halt_forever()
     })

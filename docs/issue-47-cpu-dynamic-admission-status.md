@@ -66,7 +66,8 @@ NOHZ 均通过。任务亲和也已迁移：`Task` 只保留 bootstrap/dynamic �
 ## 尚未完成
 
 当前生产 `CpuSet` 仍是 128 位静态位图；调度器的每核队列、per-CPU 状态、
-IRQ handler 数组、TLB/IPI、定时器和诊断中仍有由该宽度派生的静态数组。因此：
+IRQ handler 数组、TLB/IPI、定时器和诊断中仍有由该宽度派生的静态数组。per-CPU
+数据本体已增加堆后备记录表，但调度器 per-CPU 状态和四架构入口仍受固定表约束。因此：
 
 - 不能把 128 改成 256/1024 后声称“动态支持”；
 - 不能把本切片中的 4096-CPU 软件准入测试冒充真实内核运行；
@@ -78,7 +79,7 @@ IRQ handler 数组、TLB/IPI、定时器和诊断中仍有由该宽度派生的�
 1. `CPU-DYNAMIC-ADMISSION-1`：消费链、bootstrap 生命周期、锁序和负例审计；
 2. `CPU-DYNAMIC-CORE-1`：动态 CPU 身份、拓扑和 `CpuSet` 核心（进行中）；
 3. `CPU-DYNAMIC-CONSUMERS-1`：调度、per-CPU、IRQ/MSI、TLB/IPI、NUMA 和诊断
-   （调度任务亲和、IRQ 路由、NUMA、MSI 与 tickless 已迁移，per-CPU/调度数组未完）；
+   （任务亲和、per-CPU 记录、IRQ 路由、NUMA、MSI 与 tickless 已迁移，调度数组/架构入口未完）；
 4. `CPU-DYNAMIC-ABI-1`：可变长/分页 CPU 枚举与亲和 ABI；
 5. `CPU-DYNAMIC-MATRIX-1`：多规模、多 ISA、热插拔和真实可用平台矩阵。
 

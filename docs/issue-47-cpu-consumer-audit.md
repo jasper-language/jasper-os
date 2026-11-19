@@ -146,4 +146,7 @@
   `set_affinity`、实时预算放置和均衡候选均通过预分配槽位完成，不再在调度锁内
   临时分配。129/4096 号 CPU 的 placement/steal 已有宿主测试，4 vCPU QEMU
   IOAPIC/调度路由通过。
-- 其余调度器 per-CPU 数组、per-CPU 注册表、架构入口和亲和 ABI 尚未迁移。
+- `kernel/src/smp/percpu.rs`：每核数据保留堆前 bootstrap 区，并在 AP 启动前按
+  已准入 CPU 数量一次性预留堆后备记录；`get`/`this` 已能通过同一逻辑索引访问
+  bootstrap 之外的记录。分配失败会阻止任何 secondary 上线，不在中断路径扩容。
+- 其余调度器每核数组、架构入口和亲和 ABI 尚未迁移。
