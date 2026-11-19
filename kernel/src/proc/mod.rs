@@ -1197,12 +1197,17 @@ pub(crate) fn linux_pipe2(
     close_on_exec: bool,
     nonblocking: bool,
 ) -> Option<(u32, u32)> {
+    let byte_budget = usize::try_from(crate::mm::heap::limit()).ok()?;
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
         let reader_handle = linux.next_pipe_handle;
         let writer_handle = reader_handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
         linux.next_pipe_handle = writer_handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
-        let (reader, writer) = compat_core::PipeEndpoint::pair();
+        let (reader, writer) = compat_core::PipeEndpoint::pair_with_budget(
+            compat_core::LINUX_PIPE_DEFAULT_CAPACITY,
+            byte_budget,
+        )
+        .ok_or(ProcError::MemoryQuota)?;
         let reader_fd = linux
             .fds
             .install(
@@ -1254,15 +1259,17 @@ pub(crate) fn linux_socketpair(
     close_on_exec: bool,
     nonblocking: bool,
 ) -> Option<(u32, u32)> {
+    let byte_budget = usize::try_from(crate::mm::heap::limit()).ok()?;
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
-        if linux.sockets.len() >= 32 {
-            return Err(ProcError::NoTaskSlot);
-        }
         let first_handle = linux.next_socket_handle;
         let second_handle = first_handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
         linux.next_socket_handle = second_handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
-        let (first, second) = compat_core::UnixSocketEndpoint::pair();
+        let (first, second) = compat_core::UnixSocketEndpoint::pair_with_budget(
+            compat_core::LINUX_PIPE_DEFAULT_CAPACITY,
+            byte_budget,
+        )
+        .ok_or(ProcError::MemoryQuota)?;
         let credentials = compat_core::UnixCredentials {
             pid: linux.pid,
             uid: compat_core::syscall::LINUX_COMPAT_UID as u32,
@@ -1327,18 +1334,23 @@ pub(crate) fn linux_socket_create(
     close_on_exec: bool,
     nonblocking: bool,
 ) -> Result<u32, LinuxSocketError> {
+    let byte_budget =
+        usize::try_from(crate::mm::heap::limit()).map_err(|_| LinuxSocketError::NoSpace)?;
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
-        if linux.sockets.len() >= 32 {
-            return Err(ProcError::NoTaskSlot);
-        }
         linux
             .sockets
             .try_reserve(1)
             .map_err(|_| ProcError::NoTaskSlot)?;
         let handle = linux.next_socket_handle;
         linux.next_socket_handle = handle.checked_add(1).ok_or(ProcError::NoTaskSlot)?;
-        let endpoint = Arc::new(compat_core::UnixSocketEndpoint::unconnected());
+        let endpoint = Arc::new(
+            compat_core::UnixSocketEndpoint::unconnected_with_budget(
+                compat_core::LINUX_PIPE_DEFAULT_CAPACITY,
+                byte_budget,
+            )
+            .ok_or(ProcError::MemoryQuota)?,
+        );
         let fd = linux
             .fds
             .install(
@@ -1502,7 +1514,13 @@ pub(crate) fn linux_socket_connect(
             pending
                 .try_reserve(1)
                 .map_err(|_| LinuxSocketError::NoSpace)?;
-            let accepted = Arc::new(compat_core::UnixSocketEndpoint::unconnected());
+            let accepted = Arc::new(
+                compat_core::UnixSocketEndpoint::unconnected_with_budget(
+                    socket.endpoint.default_capacity(),
+                    socket.endpoint.max_capacity().unwrap_or(usize::MAX),
+                )
+                .ok_or(LinuxSocketError::NoSpace)?,
+            );
             if !compat_core::UnixSocketEndpoint::connect_pair(&socket.endpoint, &accepted) {
                 return Err(LinuxSocketError::Invalid);
             }
@@ -1548,9 +1566,6 @@ pub(crate) fn linux_socket_accept(
     crate::kobj::with(|t| match t.get_mut(pid) {
         Ok(KObject::Process(p)) => {
             let linux = p.linux.as_mut().ok_or(LinuxSocketError::Invalid)?;
-            if linux.sockets.len() >= 32 {
-                return Err(LinuxSocketError::NoSpace);
-            }
             let listener = linux
                 .sockets
                 .iter()

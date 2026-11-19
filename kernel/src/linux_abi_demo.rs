@@ -35,6 +35,7 @@ pub fn run() {
         LinuxSyscall::Write,
         LinuxSyscall::Close,
         LinuxSyscall::Pipe2,
+        LinuxSyscall::Fcntl,
         LinuxSyscall::Mmap,
         LinuxSyscall::Mprotect,
         LinuxSyscall::Munmap,

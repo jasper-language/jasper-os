@@ -14252,8 +14252,9 @@ fn linux_sendmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     {
         return Err(CompatErrno::NotConnected);
     }
-    let vectors =
-        read_message_iovecs(pid, header.iov, header.iov_len, compat_core::PIPE_CAPACITY)?;
+    let endpoint =
+        proc::linux_socket_endpoint(pid, entry.handle).ok_or(CompatErrno::NotConnected)?;
+    let vectors = read_message_iovecs(pid, header.iov, header.iov_len, endpoint.capacity())?;
     let mut bytes = alloc::vec::Vec::new();
     bytes
         .try_reserve(vectors.iter().map(|(_, len)| *len).sum())
@@ -14428,8 +14429,9 @@ fn linux_recvmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     {
         return Err(CompatErrno::NotConnected);
     }
-    let vectors =
-        read_message_iovecs(pid, header.iov, header.iov_len, compat_core::PIPE_CAPACITY)?;
+    let endpoint =
+        proc::linux_socket_endpoint(pid, entry.handle).ok_or(CompatErrno::NotConnected)?;
+    let vectors = read_message_iovecs(pid, header.iov, header.iov_len, endpoint.capacity())?;
     let total = vectors.iter().map(|(_, len)| *len).sum::<usize>();
     let mut bytes = alloc::vec![0u8; total];
     let count = linux_socket_read_buffer(
@@ -14449,8 +14451,6 @@ fn linux_recvmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             offset += take;
         }
     }
-    let endpoint =
-        proc::linux_socket_endpoint(pid, entry.handle).ok_or(CompatErrno::NotConnected)?;
     let mut name_len = 0usize;
     if header.name != 0 {
         let name = endpoint
@@ -14798,11 +14798,10 @@ fn linux_pipe_write(
     if len == 0 {
         return Ok(0);
     }
-    if len > compat_core::PIPE_CAPACITY {
-        return Err(CompatErrno::Invalid);
-    }
-    let mut input = alloc::vec![0u8; len];
-    copy_from_user(&mut input, address, len).map_err(|_| CompatErrno::Fault)?;
+    let endpoint = proc::linux_pipe_endpoint(pid, handle).ok_or(CompatErrno::BadFd)?;
+    let admitted = len.min(endpoint.capacity());
+    let mut input = alloc::vec![0u8; admitted];
+    copy_from_user(&mut input, address, admitted).map_err(|_| CompatErrno::Fault)?;
     linux_pipe_write_buffer(pid, fd, handle, &input).map(|written| written as u64)
 }
 
@@ -14842,6 +14841,7 @@ fn linux_pipe_write_buffer_mode(
                 raise_sigpipe(pid);
                 return Err(CompatErrno::BrokenPipe);
             }
+            compat_core::PipeWrite::NoMemory => return Err(CompatErrno::NoMemory),
             compat_core::PipeWrite::WouldBlock if nonblocking => {
                 return if written == 0 {
                     Err(CompatErrno::TryAgain)
@@ -14955,9 +14955,6 @@ fn linux_socket_write_buffer(
     if input.is_empty() {
         return Ok(0);
     }
-    if input.len() > compat_core::PIPE_CAPACITY {
-        return Err(CompatErrno::Invalid);
-    }
     let endpoint = proc::linux_socket_endpoint(pid, handle).ok_or(CompatErrno::BadFd)?;
     if !endpoint.is_connected() {
         return Err(CompatErrno::NotConnected);
@@ -14980,6 +14977,7 @@ fn linux_socket_write_buffer(
                 }
                 return Ok(written as u64);
             }
+            compat_core::PipeWrite::NoMemory => return Err(CompatErrno::NoMemory),
             compat_core::PipeWrite::WouldBlock if nonblocking => {
                 if written != 0 && record_data {
                     proc::linux_socket_record_data(pid, handle, written);
@@ -16694,15 +16692,22 @@ fn linux_fcntl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             }
             let page = kernel_core::frame::FRAME_SIZE as u64;
             let requested = args[2];
-            if requested == 0 || requested > compat_core::pipe::PIPE_CAPACITY as u64 {
+            if requested == 0 {
                 return Err(CompatErrno::Perm);
             }
-            let rounded = requested.div_ceil(page) * page;
+            let rounded = requested
+                .checked_add(page - 1)
+                .ok_or(CompatErrno::Perm)?
+                / page
+                * page;
             let pipe = proc::linux_pipe_endpoint(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
-            if !pipe.set_capacity(rounded as usize) {
-                return Err(CompatErrno::Busy);
+            let capacity = usize::try_from(rounded).map_err(|_| CompatErrno::Perm)?;
+            match pipe.set_capacity(capacity) {
+                Ok(capacity) => Ok(capacity as u64),
+                Err(compat_core::PipeCapacityError::AboveBudget) => Err(CompatErrno::Perm),
+                Err(compat_core::PipeCapacityError::Buffered) => Err(CompatErrno::Busy),
+                Err(compat_core::PipeCapacityError::BelowMinimum) => Err(CompatErrno::Perm),
             }
-            Ok(pipe.capacity() as u64)
         }
         F_ADD_SEALS => {
             let seals = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
@@ -19455,7 +19460,9 @@ fn linux_sendfile(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let output = proc::linux_fd(pid, output_fd).ok_or(CompatErrno::BadFd)?;
     let mut take = args[3].min(available as u64);
     if output.kind == compat_core::fd::CompatKind::Pipe {
-        take = take.min(compat_core::PIPE_CAPACITY as u64);
+        let pipe =
+            proc::linux_pipe_endpoint(pid, output.handle).ok_or(CompatErrno::BadFd)?;
+        take = take.min(pipe.capacity() as u64);
     }
     let take = take as usize;
     if take == 0 {
@@ -19699,9 +19706,13 @@ fn linux_splice(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     {
         return Err(CompatErrno::BadFd);
     }
-    let limit = args[4]
-        .min(compat_core::PIPE_CAPACITY as u64)
-        .min(1024 * 1024) as usize;
+    let limit = if output.kind == compat_core::fd::CompatKind::Pipe {
+        let pipe =
+            proc::linux_pipe_endpoint(pid, output.handle).ok_or(CompatErrno::BadFd)?;
+        args[4].min(pipe.capacity() as u64)
+    } else {
+        args[4]
+    } as usize;
     let force_nonblocking = args[5] & SPLICE_F_NONBLOCK != 0;
     let (input_offset, explicit_input_offset, bytes) = match input.kind {
         compat_core::fd::CompatKind::Pipe => {
@@ -19850,7 +19861,8 @@ fn linux_vmsplice(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::BadFd);
     }
     let count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    let vectors = read_message_iovecs(pid, args[1], count, compat_core::PIPE_CAPACITY)?;
+    let endpoint = proc::linux_pipe_endpoint(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let vectors = read_message_iovecs(pid, args[1], count, endpoint.capacity())?;
     let total = vectors.iter().map(|(_, length)| *length).sum::<usize>();
     let mut bytes = alloc::vec![0u8; total];
     let mut offset = 0usize;
@@ -19894,14 +19906,13 @@ fn linux_tee(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     {
         return Err(CompatErrno::BadFd);
     }
-    let limit = args[2]
-        .min(compat_core::PIPE_CAPACITY as u64)
-        .min(1024 * 1024) as usize;
+    let input_endpoint =
+        proc::linux_pipe_endpoint(pid, input.handle).ok_or(CompatErrno::BadFd)?;
+    let limit = args[2].min(input_endpoint.capacity() as u64) as usize;
     let mut bytes = alloc::vec![0u8; limit];
-    let endpoint = proc::linux_pipe_endpoint(pid, input.handle).ok_or(CompatErrno::BadFd)?;
     let force_nonblocking = flags & SPLICE_F_NONBLOCK != 0;
     let count = loop {
-        match endpoint.peek(&mut bytes) {
+        match input_endpoint.peek(&mut bytes) {
             compat_core::PipeRead::Data(count) => break count,
             compat_core::PipeRead::Eof => return Ok(0),
             compat_core::PipeRead::WouldBlock if force_nonblocking => {

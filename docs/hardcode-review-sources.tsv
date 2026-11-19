@@ -14,6 +14,7 @@ diagnostic-usi-v1-contract	21	spec	diagnostic-USI-v1-wire-contract
 irq-policy	33	policy	explicit-IRQ-safety-policy
 linux-poll-scan-policy	35	policy	Issue-35-bounded-Linux-poll-scan
 linux-batch-partial-policy	35	policy	Issue-35-bounded-Linux-batches-return-partial-progress
+linux-pipe-uapi-v1	35	spec	Linux-pipe2-compat-default-capacity-not-runtime-maximum
 native-install-verification-stack	21	policy	LC-2-native-install-QEMU-acceptance-stack-policy
 physical-runtime-plan	33	build	verification-feature-platform-plan
 pixel-el2-observation-window	21	test	boot-carrier-EL2-host-observability-probe

@@ -1,0 +1,13 @@
+time=2026-11-19T22:45:02+01:00
+accelerator=kvm
+cpu_affinity=6-7
+host_load=1.08 1.72 1.79
+QEMU emulator version 10.2.1 (Debian 1:10.2.1+ds-1ubuntu3.3)
+CPU(s):                                  20
+Model name:                              Intel(R) Core(TM) i9-10850K CPU @ 3.60GHz
+Thread(s) per core:                      2
+Core(s) per socket:                      10
+Socket(s):                               1
+CPU(s) scaling MHz:                      89%
+CPU max MHz:                             5300.0000
+CPU min MHz:                             800.0000

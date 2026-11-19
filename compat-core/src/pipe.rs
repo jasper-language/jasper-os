@@ -6,7 +6,11 @@ use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use kernel_core::sync::SpinLock;
 
-pub const PIPE_CAPACITY: usize = 64 * 1024;
+/// Default capacity of a newly created Linux pipe.
+///
+/// This is compatibility-profile behavior, not a kernel-wide maximum. The
+/// per-endpoint maximum is admitted from the caller's runtime resource budget.
+pub const LINUX_PIPE_DEFAULT_CAPACITY: usize = 64 * 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-pipe-uapi-v1 reason=compat-default-not-runtime-maximum
 pub const PIPE_BUF: usize = 4096;
 pub const UNIX_SOCKET_NAME_MAX: usize = 108;
 
@@ -29,6 +33,14 @@ pub enum PipeWrite {
     Data(usize),
     WouldBlock,
     Broken,
+    NoMemory,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipeCapacityError {
+    BelowMinimum,
+    AboveBudget,
+    Buffered,
 }
 
 #[derive(Debug)]
@@ -37,6 +49,7 @@ struct PipeState {
     readers: u32,
     writers: u32,
     capacity: usize,
+    max_capacity: Option<usize>,
 }
 
 pub struct PipeEndpoint {
@@ -82,6 +95,8 @@ pub struct UnixSocketEndpoint {
     link: SpinLock<Option<SocketLink>>,
     identity: SpinLock<Option<Arc<SocketIdentity>>>,
     side: AtomicU8,
+    default_capacity: usize,
+    max_capacity: Option<usize>,
 }
 
 struct SocketLink {
@@ -103,14 +118,29 @@ struct SocketNames {
 
 impl UnixSocketEndpoint {
     pub fn pair() -> (Self, Self) {
-        Self::connected_pair()
+        Self::pair_with_budget(LINUX_PIPE_DEFAULT_CAPACITY, usize::MAX)
+            .expect("default Unix socket pipe allocation")
     }
 
-    fn connected_pair() -> (Self, Self) {
+    /// Creates a socket pair whose pipe buffers are bounded by an admitted
+    /// runtime byte budget. Allocation failure returns `None` without
+    /// publishing a partial pair.
+    pub fn pair_with_budget(default_capacity: usize, byte_budget: usize) -> Option<(Self, Self)> {
+        let per_direction = byte_budget / 2;
+        if per_direction < default_capacity {
+            return None;
+        }
+        Self::connected_pair(default_capacity, Some(per_direction))
+    }
+
+    fn connected_pair(
+        default_capacity: usize,
+        max_capacity: Option<usize>,
+    ) -> Option<(Self, Self)> {
         let identity = Arc::new(SocketIdentity::new());
-        let (a_to_b_rx, a_to_b_tx) = PipeEndpoint::pair();
-        let (b_to_a_rx, b_to_a_tx) = PipeEndpoint::pair();
-        (
+        let (a_to_b_rx, a_to_b_tx) = PipeEndpoint::try_pair(default_capacity, max_capacity)?;
+        let (b_to_a_rx, b_to_a_tx) = PipeEndpoint::try_pair(default_capacity, max_capacity)?;
+        Some((
             Self {
                 link: SpinLock::new(Some(SocketLink {
                     rx: b_to_a_rx,
@@ -118,6 +148,8 @@ impl UnixSocketEndpoint {
                 })),
                 identity: SpinLock::new(Some(Arc::clone(&identity))),
                 side: AtomicU8::new(0),
+                default_capacity,
+                max_capacity,
             },
             Self {
                 link: SpinLock::new(Some(SocketLink {
@@ -126,17 +158,38 @@ impl UnixSocketEndpoint {
                 })),
                 identity: SpinLock::new(Some(identity)),
                 side: AtomicU8::new(1),
+                default_capacity,
+                max_capacity,
             },
-        )
+        ))
     }
 
     /// Creates a socket placeholder that may later be connected without
     /// replacing its fd handle. Fork inheritance shares this transition.
     pub fn unconnected() -> Self {
+        Self::unconnected_with_budget(LINUX_PIPE_DEFAULT_CAPACITY, usize::MAX)
+            .expect("default Unix socket endpoint")
+    }
+
+    /// Creates an unconnected endpoint with an admitted pipe-buffer budget.
+    pub fn unconnected_with_budget(default_capacity: usize, byte_budget: usize) -> Option<Self> {
+        let per_direction = byte_budget / 2;
+        if default_capacity < PIPE_BUF || per_direction < default_capacity {
+            return None;
+        }
+        Some(Self::unconnected_with_capacity(
+            default_capacity,
+            Some(per_direction),
+        ))
+    }
+
+    fn unconnected_with_capacity(default_capacity: usize, max_capacity: Option<usize>) -> Self {
         Self {
             link: SpinLock::new(None),
             identity: SpinLock::new(None),
             side: AtomicU8::new(0),
+            default_capacity,
+            max_capacity,
         }
     }
 
@@ -146,14 +199,26 @@ impl UnixSocketEndpoint {
         if core::ptr::eq(client, server) {
             return false;
         }
+        let max_capacity = match (client.max_capacity, server.max_capacity) {
+            (Some(first), Some(second)) => Some(first.min(second)),
+            (None, Some(limit)) | (Some(limit), None) => Some(limit),
+            (None, None) => None,
+        };
+        let default_capacity = client.default_capacity.max(server.default_capacity);
+        let Some((a_to_b_rx, a_to_b_tx)) = PipeEndpoint::try_pair(default_capacity, max_capacity)
+        else {
+            return false;
+        };
+        let Some((b_to_a_rx, b_to_a_tx)) = PipeEndpoint::try_pair(default_capacity, max_capacity)
+        else {
+            return false;
+        };
         let mut client_link = client.link.lock();
         let mut server_link = server.link.lock();
         if client_link.is_some() || server_link.is_some() {
             return false;
         }
         let identity = Arc::new(SocketIdentity::new());
-        let (a_to_b_rx, a_to_b_tx) = PipeEndpoint::pair();
-        let (b_to_a_rx, b_to_a_tx) = PipeEndpoint::pair();
         client.side.store(0, Ordering::Release);
         server.side.store(1, Ordering::Release);
         *client_link = Some(SocketLink {
@@ -167,6 +232,14 @@ impl UnixSocketEndpoint {
         *client.identity.lock() = Some(Arc::clone(&identity));
         *server.identity.lock() = Some(identity);
         true
+    }
+
+    pub fn default_capacity(&self) -> usize {
+        self.default_capacity
+    }
+
+    pub fn max_capacity(&self) -> Option<usize> {
+        self.max_capacity
     }
 
     pub fn is_connected(&self) -> bool {
@@ -267,6 +340,15 @@ impl UnixSocketEndpoint {
             .lock()
             .as_ref()
             .map(|link| link.rx.buffered_bytes())
+            .unwrap_or(0)
+    }
+
+    /// Current admitted byte capacity of the outbound pipe.
+    pub fn capacity(&self) -> usize {
+        self.link
+            .lock()
+            .as_ref()
+            .map(|link| link.tx.capacity())
             .unwrap_or(0)
     }
 
@@ -372,13 +454,30 @@ impl SocketIdentity {
 
 impl PipeEndpoint {
     pub fn pair() -> (Self, Self) {
+        Self::try_pair(LINUX_PIPE_DEFAULT_CAPACITY, None).expect("default pipe allocation")
+    }
+
+    /// Allocates both endpoints only when the complete initial capacity can be
+    /// reserved. `max_capacity` is an admitted byte budget, not a product
+    /// constant; `None` leaves admission to the allocator.
+    pub fn try_pair(default_capacity: usize, max_capacity: Option<usize>) -> Option<(Self, Self)> {
+        if default_capacity < PIPE_BUF
+            || max_capacity.is_some_and(|maximum| maximum < default_capacity)
+        {
+            return None;
+        }
+        let mut bytes = VecDeque::new();
+        bytes
+            .try_reserve_exact(default_capacity.min(PIPE_BUF))
+            .ok()?;
         let state = Arc::new(SpinLock::new(PipeState {
-            bytes: VecDeque::with_capacity(PIPE_CAPACITY.min(PIPE_BUF)),
+            bytes,
             readers: 1,
             writers: 1,
-            capacity: PIPE_CAPACITY,
+            capacity: default_capacity,
+            max_capacity,
         }));
-        (
+        Some((
             Self {
                 state: Arc::clone(&state),
                 reader: true,
@@ -387,7 +486,13 @@ impl PipeEndpoint {
                 state,
                 reader: false,
             },
-        )
+        ))
+    }
+
+    /// Creates a pipe whose starting and maximum capacities come from the
+    /// caller's runtime byte budget.
+    pub fn pair_with_budget(default_capacity: usize, byte_budget: usize) -> Option<(Self, Self)> {
+        Self::try_pair(default_capacity, Some(byte_budget))
     }
 
     pub const fn is_reader(&self) -> bool {
@@ -442,16 +547,23 @@ impl PipeEndpoint {
     }
 
     /// Resizes the shared pipe without discarding buffered bytes.
-    pub fn set_capacity(&self, capacity: usize) -> bool {
+    ///
+    /// This publishes the logical capacity only. Actual backing storage is
+    /// admitted at write time with `try_reserve`, so a large empty pipe cannot
+    /// force permanent kernel-heap growth merely by being resized.
+    pub fn set_capacity(&self, capacity: usize) -> Result<usize, PipeCapacityError> {
         let mut state = self.state.lock();
-        if capacity < PIPE_BUF
-            || capacity > PIPE_CAPACITY
-            || state.bytes.len() > capacity
-        {
-            return false;
+        if capacity < PIPE_BUF {
+            return Err(PipeCapacityError::BelowMinimum);
+        }
+        if state.max_capacity.is_some_and(|maximum| capacity > maximum) {
+            return Err(PipeCapacityError::AboveBudget);
+        }
+        if state.bytes.len() > capacity {
+            return Err(PipeCapacityError::Buffered);
         }
         state.capacity = capacity;
-        true
+        Ok(capacity)
     }
 
     pub fn is_readable(&self) -> bool {
@@ -491,6 +603,9 @@ impl PipeEndpoint {
             return PipeWrite::WouldBlock;
         }
         let count = input.len().min(available);
+        if state.bytes.try_reserve(count).is_err() {
+            return PipeWrite::NoMemory;
+        }
         state.bytes.extend(input[..count].iter().copied());
         PipeWrite::Data(count)
     }
@@ -545,16 +660,49 @@ mod tests {
 
     #[test]
     fn pipe_capacity_resizes_without_losing_buffered_bytes() {
-        let (reader, writer) = PipeEndpoint::pair();
-        assert_eq!(reader.capacity(), PIPE_CAPACITY);
+        let (reader, writer) = PipeEndpoint::pair_with_budget(
+            LINUX_PIPE_DEFAULT_CAPACITY,
+            LINUX_PIPE_DEFAULT_CAPACITY * 4,
+        )
+        .unwrap();
+        assert_eq!(reader.capacity(), LINUX_PIPE_DEFAULT_CAPACITY);
         assert_eq!(writer.write(b"data"), PipeWrite::Data(4));
-        assert!(reader.set_capacity(PIPE_BUF));
+        assert_eq!(reader.set_capacity(PIPE_BUF), Ok(PIPE_BUF));
         assert_eq!(reader.capacity(), PIPE_BUF);
-        assert!(!reader.set_capacity(1));
-        assert!(!reader.set_capacity(PIPE_CAPACITY + 1));
+        assert_eq!(reader.set_capacity(1), Err(PipeCapacityError::BelowMinimum));
+        assert_eq!(
+            reader.set_capacity(LINUX_PIPE_DEFAULT_CAPACITY * 4 + 1),
+            Err(PipeCapacityError::AboveBudget)
+        );
         let mut bytes = [0; 4];
         assert_eq!(reader.read(&mut bytes), PipeRead::Data(4));
         assert_eq!(&bytes, b"data");
+    }
+
+    #[test]
+    fn pipe_capacity_follows_runtime_budget_above_linux_default() {
+        let target = 2 * 1024 * 1024;
+        let (reader, writer) =
+            PipeEndpoint::pair_with_budget(LINUX_PIPE_DEFAULT_CAPACITY, target).unwrap();
+        assert_eq!(reader.set_capacity(target), Ok(target));
+        assert_eq!(reader.capacity(), target);
+
+        let payload = alloc::vec![0x5a; 512 * 1024];
+        assert_eq!(writer.write(&payload), PipeWrite::Data(payload.len()));
+        assert_eq!(reader.buffered_bytes(), payload.len());
+    }
+
+    #[test]
+    fn rejected_pipe_resize_is_transactional() {
+        let (reader, writer) =
+            PipeEndpoint::pair_with_budget(LINUX_PIPE_DEFAULT_CAPACITY, 2 * 1024 * 1024).unwrap();
+        assert_eq!(writer.write(b"retained"), PipeWrite::Data(8));
+        assert_eq!(
+            reader.set_capacity(PIPE_BUF / 2),
+            Err(PipeCapacityError::BelowMinimum)
+        );
+        assert_eq!(reader.capacity(), LINUX_PIPE_DEFAULT_CAPACITY);
+        assert_eq!(reader.buffered_bytes(), 8);
     }
 
     #[test]
@@ -582,6 +730,18 @@ mod tests {
         assert!(a.peer_read_gone());
         assert!(a.peer_write_gone());
         assert_eq!(a.write(b"x"), PipeWrite::Broken);
+    }
+
+    #[test]
+    fn unix_socket_budget_covers_both_directions() {
+        let budget = 2 * LINUX_PIPE_DEFAULT_CAPACITY;
+        let (a, b) =
+            UnixSocketEndpoint::pair_with_budget(LINUX_PIPE_DEFAULT_CAPACITY, budget).unwrap();
+        assert_eq!(a.max_capacity(), Some(LINUX_PIPE_DEFAULT_CAPACITY));
+        assert_eq!(b.max_capacity(), Some(LINUX_PIPE_DEFAULT_CAPACITY));
+        assert!(
+            UnixSocketEndpoint::pair_with_budget(LINUX_PIPE_DEFAULT_CAPACITY, budget - 1).is_none()
+        );
     }
 
     #[test]

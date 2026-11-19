@@ -1,5 +1,5 @@
 {
-  "baseline_total": 347,
+  "baseline_total": 346,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -13,7 +13,7 @@
     "explicit-safety-policy": 129,
     "platform-adapter": 28,
     "protocol-abi": 38,
-    "runtime-resource-capacity": 71,
+    "runtime-resource-capacity": 70,
     "test-demo-fixture": 6
   },
   "entries": [
@@ -86,16 +86,6 @@
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
       "source": "pub const MAX_EPOLL_EVENTS: usize = 16;"
-    },
-    {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "e3a79390772c4159bc134db8604f3c5c16eb338a6aba8a54629ae94f9e18353f",
-      "line": 9,
-      "path": "compat-core/src/pipe.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
-      "rules": "HC-G8",
-      "source": "pub const PIPE_CAPACITY: usize = 64 * 1024;"
     },
     {
       "category": "explicit-safety-policy",
@@ -2221,7 +2211,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "3af1e6502dcd353efec6f5267b895350363f008196d29af1566bbad84a3e071d",
-      "line": 17919,
+      "line": 17923,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
       "rules": "HC-G1",
@@ -2381,7 +2371,7 @@
       "category": "runtime-resource-capacity",
       "count": 1,
       "fingerprint": "1562f97b588ab42e1ec366faf866a95330c895c26c7b2bbe904b59afe7c77358",
-      "line": 7256,
+      "line": 7271,
       "path": "kernel/src/proc/mod.rs",
       "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
       "rules": "HC-G1",
@@ -2391,7 +2381,7 @@
       "category": "runtime-resource-capacity",
       "count": 1,
       "fingerprint": "17860804d04d51495f65f64dbd30cbe086ddc80d75818ceaf68fd4996241a826",
-      "line": 7247,
+      "line": 7262,
       "path": "kernel/src/proc/mod.rs",
       "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
       "rules": "HC-G1",
@@ -2401,7 +2391,7 @@
       "category": "runtime-resource-capacity",
       "count": 1,
       "fingerprint": "39cd2ed3cd72fa0a31a0fa19987bb5474b6d90c89aa2077cae0c583e317ed5c1",
-      "line": 7258,
+      "line": 7273,
       "path": "kernel/src/proc/mod.rs",
       "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
       "rules": "HC-G1",
@@ -2441,7 +2431,7 @@
       "category": "runtime-resource-capacity",
       "count": 1,
       "fingerprint": "ea5e321b6639cfd420063502ae6b2f65f11c34e133ed95bedf228e3daa00c6ac",
-      "line": 80,
+      "line": 81,
       "path": "kernel/src/sched/mod.rs",
       "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
       "rules": "HC-G8",
@@ -2743,7 +2733,7 @@
     "explicit-safety-policy": 145,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 110,
+    "runtime-resource-capacity": 109,
     "test-demo-fixture": 7
   }
 }

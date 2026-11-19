@@ -1442,12 +1442,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "e3a79390772c4159bc134db8604f3c5c16eb338a6aba8a54629ae94f9e18353f",
-      "path": "compat-core/src/pipe.rs",
-      "rules": "HC-G8"
-    },
-    {
-      "count": 1,
       "fingerprint": "e3d4b22c145fbc57fbd4fc38a92233eb9613452f4404e0b6b2409c1347dbfdf6",
       "path": "kernel/src/arch/aarch64/boot.rs",
       "rules": "HC-G3"
@@ -1653,5 +1647,5 @@
     "user",
     "xtask"
   ],
-  "total": 347
+  "total": 346
 }

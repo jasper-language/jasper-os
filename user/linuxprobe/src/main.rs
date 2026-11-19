@@ -33,6 +33,9 @@ const SYS_IO_URING_SETUP: u64 = 425;
 const SYS_IO_URING_ENTER: u64 = 426;
 const SYS_IO_URING_REGISTER: u64 = 427;
 const SYS_EXIT_GROUP: u64 = 231;
+const SYS_FCNTL: u64 = 72;
+const F_SETPIPE_SZ: u64 = 1031;
+const F_GETPIPE_SZ: u64 = 1032;
 
 const PROT_READ: u64 = 1;
 const PROT_WRITE: u64 = 2;
@@ -142,6 +145,30 @@ unsafe extern "C" fn futex_child() -> ! {
 #[cfg(target_arch = "x86_64")]
 unsafe fn write_bytes(fd: u64, bytes: &[u8]) -> bool {
     syscall3(SYS_WRITE, fd, bytes.as_ptr() as u64, bytes.len() as u64) == bytes.len() as i64
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe fn write_syscall_number(fd: u64, value: i64) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut buffer = [0u8; 19];
+    buffer[..3].copy_from_slice(b"0x=");
+    let negative = value < 0;
+    let mut number = value.unsigned_abs();
+    let mut cursor = buffer.len();
+    loop {
+        cursor -= 1;
+        buffer[cursor] = HEX[(number & 0xf) as usize];
+        number >>= 4;
+        if number == 0 {
+            break;
+        }
+    }
+    if negative {
+        cursor -= 1;
+        buffer[cursor] = b'-';
+    }
+    let _ = write_bytes(fd, &buffer[cursor..]);
+    let _ = write_bytes(fd, b"\n");
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -337,6 +364,7 @@ unsafe fn test_many_signalfds() -> bool {
 #[cfg(target_arch = "x86_64")]
 unsafe fn test_many_pipes() -> bool {
     const COUNT: usize = 40;
+    const F_SETPIPE_BYTES: u64 = 128 * 1024;
     let mut pairs = [[-1i32; 2]; COUNT];
     for index in 0..COUNT {
         if syscall6(SYS_PIPE2, pairs[index].as_mut_ptr() as u64, 0, 0, 0, 0, 0) != 0 {
@@ -363,6 +391,32 @@ unsafe fn test_many_pipes() -> bool {
             }
             return false;
         }
+    }
+    let pipe = pairs[0];
+    let resized = syscall3(SYS_FCNTL, pipe[1] as u64, F_SETPIPE_SZ, F_SETPIPE_BYTES);
+    let observed = syscall3(SYS_FCNTL, pipe[0] as u64, F_GETPIPE_SZ, 0);
+    if resized != F_SETPIPE_BYTES as i64 || observed != F_SETPIPE_BYTES as i64 {
+        let _ = write_bytes(
+            2,
+            if resized != F_SETPIPE_BYTES as i64 {
+                b"linux-native: large-pipe resize failed "
+            } else {
+                b"linux-native: large-pipe readback failed "
+            },
+        );
+        write_syscall_number(
+            2,
+            if resized != F_SETPIPE_BYTES as i64 {
+                resized
+            } else {
+                observed
+            },
+        );
+        for pair in &pairs {
+            let _ = syscall1(SYS_CLOSE, pair[0] as u64);
+            let _ = syscall1(SYS_CLOSE, pair[1] as u64);
+        }
+        return false;
     }
     let mut closed = true;
     for pair in pairs {
