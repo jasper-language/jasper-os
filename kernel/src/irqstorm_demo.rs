@@ -306,9 +306,9 @@ fn drive(bdf: Bdf) -> Option<Storm> {
         HOG_END.store(end, Ordering::Relaxed);
         let mut ok = true;
         for i in 0..2 * n as u64 {
-            ok &= sched::spawn_on(TaskId(TASK_BASE + 10 + i), "irqstorm-load", hog, None, all).is_ok();
+            ok &= sched::spawn_on(TaskId(TASK_BASE + 10 + i), "irqstorm-load", hog, None, all.clone()).is_ok();
         }
-        ok && sched::spawn_on(TaskId(TASK_BASE + 1), "irqstorm-ui", interactive, None, all).is_ok()
+        ok && sched::spawn_on(TaskId(TASK_BASE + 1), "irqstorm-ui", interactive, None, all.clone()).is_ok()
     });
     STORMING.store(true, Ordering::Release);
     OUTSTANDING.store(true, Ordering::Release);
@@ -418,7 +418,7 @@ pub fn run() {
     let bdf = device.bdf;
     let online = sched::online_cpus();
     let cpus = online.len();
-    let target = target_cpu(online);
+    let target = target_cpu(online.clone());
     let mut mask = 0u64;
     for cpu in online.iter() {
         mask |= 1 << cpu;

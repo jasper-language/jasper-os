@@ -3,7 +3,7 @@
 //! 调度属性（[`SchedEntity`]：有效 QoS 档位、所在运行队列与策略私有状态）经每核运行队列由策略读写；睡眠与唤醒延迟记账、
 //! 自身档位与等待关系（优先级继承）由调度机制维护。
 
-use kernel_core::smp::CpuSet;
+use kernel_core::smp::{BootstrapCpuSet, CpuSet};
 
 use crate::sched::policy::{new_entity, Qos, RunStreak, SchedEntity};
 
@@ -20,18 +20,21 @@ pub struct TaskId(pub u64);
 /// task control block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskAffinity {
-    Bootstrap(CpuSet),
+    Bootstrap(BootstrapCpuSet),
     Dynamic,
 }
 
 impl TaskAffinity {
-    pub const fn bootstrap(set: CpuSet) -> Self {
-        Self::Bootstrap(set)
+    pub fn bootstrap(set: CpuSet) -> Self {
+        match BootstrapCpuSet::from_cpu_set(&set) {
+            Some(set) => Self::Bootstrap(set),
+            None => Self::Bootstrap(BootstrapCpuSet::EMPTY),
+        }
     }
 
-    pub const fn bootstrap_set(self) -> Option<CpuSet> {
+    pub fn bootstrap_set(self) -> Option<CpuSet> {
         match self {
-            Self::Bootstrap(set) => Some(set),
+            Self::Bootstrap(set) => Some(set.to_cpu_set()),
             Self::Dynamic => None,
         }
     }
@@ -120,7 +123,7 @@ pub struct Task {
     /// 置位期间其他处理器不得选中它（否则会恢复一份尚未保存完的上下文），槽位也不得复用。
     pub on_cpu: Option<usize>,
     /// 曾经运行过它的处理器集合（诊断：亲和与迁移的验收依据）。
-    pub ran_on: CpuSet,
+    pub ran_on: BootstrapCpuSet,
     /// 实时预算（tick）；`rt_period == 0` 表示不是实时任务。
     /// Compatibility tick declaration; ns_budget is canonical when present.
     pub ns_budget: Option<kernel_core::ns_budget::Budget>,
@@ -167,10 +170,10 @@ impl Task {
             streak: RunStreak::new(),
             timer: None,
             home: 0,
-            affinity: TaskAffinity::bootstrap(CpuSet::first(1)),
+            affinity: TaskAffinity::Bootstrap(BootstrapCpuSet::CPU0),
             last_ran: None,
             on_cpu: None,
-            ran_on: CpuSet::EMPTY,
+            ran_on: BootstrapCpuSet::EMPTY,
             ns_budget: None,
             wake_ns: None,
             rt_quota: 0,

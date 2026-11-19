@@ -396,7 +396,7 @@ impl ExecutionBackend for JasperExecutionBackend {
             frame.stack.stack_pointer(),
             0,
             0,
-            self.affinity,
+            self.affinity.clone(),
         ) {
             Ok((task, _)) => {
                 self.task = Some(task);

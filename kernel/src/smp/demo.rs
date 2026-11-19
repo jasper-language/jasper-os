@@ -140,7 +140,7 @@ fn parallel_shootdown_worker() {
     let me = arch::cpu_index();
     let targets = target.intersect(super::online_set()).without(me);
     let posted = super::admitted_shootdown_boards().is_some_and(|boards| {
-        match boards.begin(me, targets, TLB_VA, 1) {
+        match boards.begin(me, targets.clone(), TLB_VA, 1) {
             Ok(generation) => {
                 for cpu in targets.iter() {
                     if arch::send_ipi(cpu, IpiKind::TlbShootdown).is_err() {

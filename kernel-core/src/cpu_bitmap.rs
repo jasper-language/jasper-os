@@ -145,6 +145,11 @@ impl CpuBitmap {
         })
     }
 
+    /// Borrow the backing words for zero-allocation composite iterators.
+    pub(crate) fn words(&self) -> &[u64] {
+        &self.words
+    }
+
     pub fn union(&self, other: &Self) -> Result<Self, CpuBitmapError> {
         let words = self.words.len().max(other.words.len());
         let mut result = Self::with_words(words)?;

@@ -287,8 +287,8 @@ fn refusals(online: CpuSet) {
     let empty = sched::spawn_on(TaskId(TASK_ID_BASE), "smp2-bad", hog, None, CpuSet::EMPTY);
     let offline = (0..MAX_CPUS).find(|&c| !online.contains(c));
     let off = offline.map(|c| sched::spawn_on(TaskId(TASK_ID_BASE + 1), "smp2-bad", hog, None, only(c)));
-    let no_task = sched::set_affinity(TaskId(TASK_ID_BASE + 99), online);
-    let boot = sched::set_affinity(TaskId(0), online);
+    let no_task = sched::set_affinity(TaskId(TASK_ID_BASE + 99), online.clone());
+    let boot = sched::set_affinity(TaskId(0), online.clone());
     let ok_empty = matches!(empty, Err(SpawnError::BadAffinity));
     let ok_off = off.is_none_or(|r| matches!(r, Err(SpawnError::BadAffinity)));
     let ok_none = no_task == Err(AffinityError::NoTask) && boot == Err(AffinityError::NoTask);
@@ -318,7 +318,7 @@ fn spread(n: usize) {
     let spawned = quiet(|| {
         sched::reset_cpu_stats();
         arm_hogs(WINDOW, n as u32);
-        (0..n).all(|i| sched::spawn_on(TaskId(TASK_ID_BASE + 10 + i as u64), "smp2-hog", hog, None, all).is_ok())
+        (0..n).all(|i| sched::spawn_on(TaskId(TASK_ID_BASE + 10 + i as u64), "smp2-hog", hog, None, all.clone()).is_ok())
     });
     check(spawned, "铺满用例任务创建失败");
     sched::run();
@@ -354,7 +354,7 @@ fn steal(n: usize) {
             ok &= sched::spawn_on(TaskId(TASK_ID_BASE + 20 + i), "smp2-steal", hog, None, only(0)).is_ok();
         }
         for i in 0..count {
-            ok &= sched::set_affinity(TaskId(TASK_ID_BASE + 20 + i), all).is_ok();
+            ok &= sched::set_affinity(TaskId(TASK_ID_BASE + 20 + i), all.clone()).is_ok();
         }
         ok
     });
@@ -390,9 +390,9 @@ fn overload(n: usize) {
         arm_hogs(window, 0);
         let mut ok = true;
         for i in 0..count {
-            ok &= sched::spawn_on(TaskId(TASK_ID_BASE + 40 + i), "smp2-load", hog, None, all).is_ok();
+            ok &= sched::spawn_on(TaskId(TASK_ID_BASE + 40 + i), "smp2-load", hog, None, all.clone()).is_ok();
         }
-        ok && sched::spawn_on(TaskId(TASK_ID_BASE + 39), "smp2-ui", interactive, None, all).is_ok()
+        ok && sched::spawn_on(TaskId(TASK_ID_BASE + 39), "smp2-ui", interactive, None, all.clone()).is_ok()
     });
     check(ok, "过载用例任务创建失败");
     sched::run();
@@ -652,11 +652,11 @@ fn inherit(n: usize) {
     let window = 2 * WINDOW;
     let ok = quiet(|| {
         arm_hogs(window, 0);
-        let mut ok = sched::spawn_on(TaskId(TASK_ID_BASE + 80), "smp2-pi-low", pi_low, None, all).is_ok();
+        let mut ok = sched::spawn_on(TaskId(TASK_ID_BASE + 80), "smp2-pi-low", pi_low, None, all.clone()).is_ok();
         for i in 0..2 * n as u64 {
-            ok &= sched::spawn_on(TaskId(TASK_ID_BASE + 81 + i), "smp2-pi-hog", pi_hog, None, all).is_ok();
+            ok &= sched::spawn_on(TaskId(TASK_ID_BASE + 81 + i), "smp2-pi-hog", pi_hog, None, all.clone()).is_ok();
         }
-        ok && sched::spawn_on(TaskId(TASK_ID_BASE + 79), "smp2-pi-high", pi_high, None, all).is_ok()
+        ok && sched::spawn_on(TaskId(TASK_ID_BASE + 79), "smp2-pi-high", pi_high, None, all.clone()).is_ok()
     });
     check(ok, "继承用例任务创建失败");
     sched::run();
@@ -703,7 +703,7 @@ fn limit(n: usize) {
     let ok = quiet(|| {
         sched::reset_cpu_stats();
         arm_hogs_until(sched::budget_window_arm(g,LIMIT_WINDOW), 0);
-        (0..n as u64).all(|i| sched::spawn_on(TaskId(TASK_ID_BASE + 90 + i), "smp2-capped", hog, Some(g), all).is_ok())
+        (0..n as u64).all(|i| sched::spawn_on(TaskId(TASK_ID_BASE + 90 + i), "smp2-capped", hog, Some(g), all.clone()).is_ok())
     });
     check(ok, "上限用例任务创建失败");
     sched::run();

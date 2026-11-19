@@ -21,7 +21,7 @@ use crate::smp::CpuSet;
 
 /// CPU membership view accepted by balancing decisions.
 #[cfg(any(test, feature = "cpu-dynamic"))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CpuMembershipRef<'a> {
     Bootstrap(CpuSet),
     Dynamic(&'a CpuBitmap),
@@ -46,7 +46,7 @@ impl<'a> CpuMembershipRef<'a> {
 }
 
 impl CpuMembershipRef<'_> {
-    pub fn contains(self, cpu: usize) -> bool {
+    pub fn contains(&self, cpu: usize) -> bool {
         match self {
             #[cfg(any(test, feature = "cpu-dynamic"))]
             Self::Bootstrap(set) => set.contains(cpu),
@@ -62,7 +62,7 @@ impl CpuMembershipRef<'_> {
     }
 
     #[cfg(any(test, feature = "cpu-dynamic"))]
-    pub fn find(self, mut predicate: impl FnMut(usize) -> bool) -> Option<usize> {
+    pub fn find(&self, mut predicate: impl FnMut(usize) -> bool) -> Option<usize> {
         match self {
             Self::Bootstrap(set) => set.iter().find(|&cpu| predicate(cpu)),
             Self::Dynamic(set) => set.iter().find(|&cpu| predicate(cpu)),
@@ -85,12 +85,12 @@ impl CpuMembershipRef<'_> {
     }
 
     #[cfg(not(any(test, feature = "cpu-dynamic")))]
-    pub fn find(self, mut predicate: impl FnMut(usize) -> bool) -> Option<usize> {
+    pub fn find(&self, mut predicate: impl FnMut(usize) -> bool) -> Option<usize> {
         self.set.iter().find(|&cpu| predicate(cpu))
     }
 
     #[cfg(any(test, feature = "cpu-dynamic"))]
-    pub fn for_each(self, mut visit: impl FnMut(usize)) {
+    pub fn for_each(&self, mut visit: impl FnMut(usize)) {
         match self {
             Self::Bootstrap(set) => set.iter().for_each(&mut visit),
             Self::Dynamic(set) => set.iter().for_each(&mut visit),
@@ -108,11 +108,11 @@ impl CpuMembershipRef<'_> {
     }
 
     #[cfg(not(any(test, feature = "cpu-dynamic")))]
-    pub fn for_each(self, mut visit: impl FnMut(usize)) {
+    pub fn for_each(&self, mut visit: impl FnMut(usize)) {
         self.set.iter().for_each(&mut visit);
     }
 
-    pub fn online_bits_u64(self, online: CpuSet) -> Option<u64> {
+    pub fn online_bits_u64(&self, online: &CpuSet) -> Option<u64> {
         let mut bits = 0u64;
         let mut representable = true;
         self.for_each(|cpu| {
@@ -127,7 +127,7 @@ impl CpuMembershipRef<'_> {
         representable.then_some(bits)
     }
 
-    pub fn to_cpu_set(self) -> Option<CpuSet> {
+    pub fn to_cpu_set(&self) -> Option<CpuSet> {
         let mut legacy = CpuSet::EMPTY;
         let mut representable = true;
         self.for_each(|cpu| {
@@ -171,7 +171,7 @@ impl CoreLoad {
 
 /// 一个可以被搬动的候选任务（调用者只交「可运行、未在任何处理器上、未被限速」的任务）。
 /// A movable candidate task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate<'a> {
     /// 调用者定义的槽位编号。
     pub slot: usize,
@@ -333,9 +333,9 @@ impl Balancer {
         }
         let mut best: Option<Candidate> = None;
         for c in candidates.filter(|c| c.home != thief && c.affinity.contains(thief)) {
-            let better = match best {
+            let better = match &best {
                 None => true,
-                Some(b) => self.rank(&c, now, loads) > self.rank(&b, now, loads),
+                Some(b) => self.rank(&c, now, loads) > self.rank(b, now, loads),
             };
             if better {
                 best = Some(c);
@@ -368,7 +368,7 @@ impl Balancer {
         }
         let mut best: Option<Candidate> = None;
         for c in allowed.filter(|c| !self.hot(c.last_ran, now)) {
-            if best.is_none_or(|b| c.qos.above(b.qos)) {
+            if best.as_ref().is_none_or(|b| c.qos.above(b.qos)) {
                 best = Some(c);
             }
         }
@@ -393,7 +393,7 @@ mod tests {
         CoreLoad { online: true, queued, running: Some(q) }
     }
     const IDLE: CoreLoad = CoreLoad { online: true, queued: 0, running: None };
-    const ALL4: CpuSet = CpuSet::first(4);
+    const ALL4: CpuSet = CpuSet::bootstrap_first(4);
 
     fn cand(slot: usize, home: usize, qos: Qos, last_ran: Option<u64>) -> Candidate<'static> {
         Candidate {
@@ -409,9 +409,9 @@ mod tests {
     fn place_prefers_idle_prev_then_any_idle() {
         let loads = [busy(Qos::Utility, 1), IDLE, IDLE, IDLE];
         let all = CpuMembershipRef::Bootstrap(ALL4);
-        assert_eq!(B.place(all, Some(2), Qos::Utility, None, 10, &loads), Ok(2));
-        assert_eq!(B.place(all, Some(0), Qos::Utility, None, 10, &loads), Ok(1));
-        assert_eq!(B.place(all, None, Qos::Utility, None, 10, &loads), Ok(1));
+        assert_eq!(B.place(all.clone(), Some(2), Qos::Utility, None, 10, &loads), Ok(2));
+        assert_eq!(B.place(all.clone(), Some(0), Qos::Utility, None, 10, &loads), Ok(1));
+        assert_eq!(B.place(all.clone(), None, Qos::Utility, None, 10, &loads), Ok(1));
     }
 
     #[test]
@@ -425,9 +425,9 @@ mod tests {
     fn place_keeps_hot_prev_else_least_loaded() {
         let loads = [busy(Qos::Utility, 3), busy(Qos::Utility, 0), busy(Qos::Utility, 1), busy(Qos::Utility, 1)];
         let all = CpuMembershipRef::Bootstrap(ALL4);
-        assert_eq!(B.place(all, Some(0), Qos::Utility, Some(9), 10, &loads), Ok(0), "缓存仍热：留在原处");
-        assert_eq!(B.place(all, Some(0), Qos::Utility, Some(1), 10, &loads), Ok(1), "缓存已冷：去负载最小的核");
-        assert_eq!(B.place(all, Some(2), Qos::Utility, None, 10, &[busy(Qos::Utility, 1); 4]), Ok(2), "负载相等时偏向原处");
+        assert_eq!(B.place(all.clone(), Some(0), Qos::Utility, Some(9), 10, &loads), Ok(0), "缓存仍热：留在原处");
+        assert_eq!(B.place(all.clone(), Some(0), Qos::Utility, Some(1), 10, &loads), Ok(1), "缓存已冷：去负载最小的核");
+        assert_eq!(B.place(all.clone(), Some(2), Qos::Utility, None, 10, &[busy(Qos::Utility, 1); 4]), Ok(2), "负载相等时偏向原处");
     }
 
     #[test]
@@ -466,20 +466,20 @@ mod tests {
     fn pull_moves_one_cold_task_from_busiest() {
         let loads = [busy(Qos::Utility, 3), busy(Qos::Utility, 0), busy(Qos::Utility, 1), busy(Qos::Utility, 0)];
         let cs = [cand(20, 0, Qos::Utility, Some(9)), cand(21, 0, Qos::Background, None), cand(22, 0, Qos::Utility, Some(1)), cand(23, 2, Qos::Interactive, None)];
-        assert_eq!(B.pull(1, 10, &loads, cs.iter().copied()), Ok(22), "只从最忙的 0 号核拉；冷的里挑最高档");
+        assert_eq!(B.pull(1, 10, &loads, cs.iter().cloned()), Ok(22), "只从最忙的 0 号核拉；冷的里挑最高档");
     }
 
     #[test]
     fn pull_refusals_balanced_all_hot_no_candidate() {
         let even = [busy(Qos::Utility, 1), busy(Qos::Utility, 0), busy(Qos::Utility, 1), busy(Qos::Utility, 1)];
-        assert_eq!(B.pull(1, 10, &even, [cand(1, 0, Qos::Utility, None)].iter().copied()), Err(Refusal::Balanced), "差 1 不搬");
+        assert_eq!(B.pull(1, 10, &even, [cand(1, 0, Qos::Utility, None)].iter().cloned()), Err(Refusal::Balanced), "差 1 不搬");
         let skew = [busy(Qos::Utility, 3), busy(Qos::Utility, 0), IDLE, IDLE];
         let hot = [cand(1, 0, Qos::Utility, Some(9)), cand(2, 0, Qos::Utility, Some(10))];
-        assert_eq!(B.pull(1, 10, &skew, hot.iter().copied()), Err(Refusal::AllHot));
+        assert_eq!(B.pull(1, 10, &skew, hot.iter().cloned()), Err(Refusal::AllHot));
         let pinned = [Candidate { affinity: CpuMembershipRef::Bootstrap(CpuSet::first(1)), ..cand(3, 0, Qos::Utility, None) }];
-        assert_eq!(B.pull(1, 10, &skew, pinned.iter().copied()), Err(Refusal::NoCandidate));
-        assert_eq!(B.pull(1, 10, &[busy(Qos::Utility, 3), CoreLoad::OFFLINE], hot.iter().copied()), Err(Refusal::Offline));
-        assert_eq!(B.pull(0, 10, &[busy(Qos::Utility, 3)], hot.iter().copied()), Err(Refusal::Balanced), "只有一个核");
+        assert_eq!(B.pull(1, 10, &skew, pinned.iter().cloned()), Err(Refusal::NoCandidate));
+        assert_eq!(B.pull(1, 10, &[busy(Qos::Utility, 3), CoreLoad::OFFLINE], hot.iter().cloned()), Err(Refusal::Offline));
+        assert_eq!(B.pull(0, 10, &[busy(Qos::Utility, 3)], hot.iter().cloned()), Err(Refusal::Balanced), "只有一个核");
     }
 
     #[test]
@@ -499,7 +499,7 @@ mod tests {
         let mut loads = [IDLE; 4097];
         loads[129] = busy(Qos::Utility, 2);
         let view = CpuMembershipRef::Dynamic(&affinity);
-        assert_eq!(B.place(view, Some(129), Qos::Utility, None, 10, &loads), Ok(4096));
+        assert_eq!(B.place(view.clone(), Some(129), Qos::Utility, None, 10, &loads), Ok(4096));
 
         let candidate = Candidate {
             slot: 7,
@@ -521,9 +521,16 @@ mod tests {
         assert!(view.contains(129));
         assert!(view.contains(4096));
         assert_eq!(
-            B.place(view, Some(129), Qos::Utility, None, 10, &loads),
+            B.place(view.clone(), Some(129), Qos::Utility, None, 10, &loads),
             Ok(129)
         );
+        #[cfg(feature = "cpu-dynamic")]
+        {
+            let set = view.to_cpu_set().expect("high CPU set remains representable");
+            assert!(set.contains(129));
+            assert!(set.contains(4096));
+        }
+        #[cfg(not(feature = "cpu-dynamic"))]
         assert_eq!(view.to_cpu_set(), None);
     }
 }

@@ -140,11 +140,11 @@ pub fn run() {
     let one = CpuSet::first(1);
     let irq=crate::arch::irq_save_disable();
     quiet(|| {
-        let ok_rt = sched::spawn_on(TaskId(TASK_RT), "arb-rt", rt_task, None, one).is_ok();
-        let ok_ui = sched::spawn_on(TaskId(TASK_UI), "arb-ui", ui_task, None, one).is_ok();
+        let ok_rt = sched::spawn_on(TaskId(TASK_RT), "arb-rt", rt_task, None, one.clone()).is_ok();
+        let ok_ui = sched::spawn_on(TaskId(TASK_UI), "arb-ui", ui_task, None, one.clone()).is_ok();
         let mut ok_batch = true;
         for i in 0..3u64 {
-            ok_batch &= sched::spawn_on(TaskId(TASK_BATCH_BASE + i), "arb-load", batch_task, None, one).is_ok();
+            ok_batch &= sched::spawn_on(TaskId(TASK_BATCH_BASE + i), "arb-load", batch_task, None, one.clone()).is_ok();
         }
         ok_rt && ok_ui && ok_batch
     });

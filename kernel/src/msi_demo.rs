@@ -105,7 +105,7 @@ pub fn run() {
     match arch::msi_vector_range() {
         Some(range) => {
             vectors_per_cpu = range.count as usize;
-            let bitmap_online = kernel_core::cpu_bitmap::CpuBitmap::from_cpu_set(online)
+            let bitmap_online = kernel_core::cpu_bitmap::CpuBitmap::from_cpu_set(online.clone())
                 .expect("MSI online bitmap");
             match VectorPool::new(range.first, range.count, bitmap_online) {
                 Ok(pool) => delivered = exercise(&pool, online),
@@ -202,16 +202,16 @@ fn exercise(pool: &VectorPool, online: CpuSet) -> usize {
             delivered += 1;
         }
     }
-    check(distinct_addresses(&addresses, online), "不同处理器的 MSI 目标地址相同");
+    check(distinct_addresses(&addresses, online.clone()), "不同处理器的 MSI 目标地址相同");
 
     // 改绑：释放并解绑后同一向量变成伪 MSI；重新分配并绑定新处理函数后恢复投递。
-    rebind_check(pool, online, &mut vectors);
+    rebind_check(pool, online.clone(), &mut vectors);
 
     // 拒绝路径：释放别核的向量、未分配、重复释放、越界向量。
-    refusal_check(pool, online);
+    refusal_check(pool, online.clone());
 
     // 某核耗尽：再分配被拒且位图不变；其他核仍可分配。
-    exhaustion_check(pool, online);
+    exhaustion_check(pool, online.clone());
 
     // 全部释放并解绑，回到零分配基线，然后每核都能重新分配一次。
     let mut zero = true;

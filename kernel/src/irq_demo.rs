@@ -136,7 +136,7 @@ pub fn run() {
     for l in 0..lines {
         kprintln!("[JSR-SMP3] line index={} name={}", l, device::line_name(l));
     }
-    irq_refusals(online, lines);
+    irq_refusals(online.clone(), lines);
     shard_refusals();
     if lines > 0 && n > 1 {
         route(online, lines);
@@ -178,7 +178,7 @@ fn irq_refusals(online: CpuSet, lines: usize) {
     let before = baseline();
     let quota = device::quota();
     let bad = lines;
-    let no_line = device::set_affinity(bad, online) == Err(IrqError::NoLine)
+    let no_line = device::set_affinity(bad, online.clone()) == Err(IrqError::NoLine)
         && device::set_handler(bad, Some(count_handler)) == Err(IrqError::NoLine)
         && device::set_enabled(bad, true) == Err(IrqError::NoLine)
         && device::set_self_trigger(bad, true) == Err(IrqError::NoLine)
@@ -370,7 +370,7 @@ fn balance(n: usize, lines: usize) {
     let mut ok = true;
     for l in 0..lines {
         // 先钉到 0 号，再放宽：当前位置仍合法，保持在 0 号
-        ok &= device::set_affinity(l, only(0)) == Ok(0) && device::set_affinity(l, all) == Ok(0);
+        ok &= device::set_affinity(l, only(0)) == Ok(0) && device::set_affinity(l, all.clone()) == Ok(0);
         ok &= device::set_enabled(l, true).is_ok();
     }
     device::reset_stats();
@@ -460,7 +460,7 @@ fn storm(n: usize, lines: usize) {
     let all = CpuSet::first(n);
     let mut ok = true;
     for l in 0..lines {
-        ok &= device::set_affinity(l, all).is_ok() && device::set_enabled(l, true).is_ok();
+        ok &= device::set_affinity(l, all.clone()).is_ok() && device::set_enabled(l, true).is_ok();
     }
     device::set_balancer(Some(&SPREAD));
     let count = 2 * n as u64;
@@ -473,9 +473,9 @@ fn storm(n: usize, lines: usize) {
         HOG_END.store(sched::timer_ticks() + WINDOW, Ordering::Relaxed);
         let mut ok = storm_all(lines, true);
         for i in 0..count {
-            ok &= sched::spawn_on(TaskId(TASK_ID_BASE + 10 + i), "smp3-load", hog, None, all).is_ok();
+            ok &= sched::spawn_on(TaskId(TASK_ID_BASE + 10 + i), "smp3-load", hog, None, all.clone()).is_ok();
         }
-        ok && sched::spawn_on(TaskId(TASK_ID_BASE + 9), "smp3-ui", interactive, None, all).is_ok()
+        ok && sched::spawn_on(TaskId(TASK_ID_BASE + 9), "smp3-ui", interactive, None, all.clone()).is_ok()
     });
     sched::run();
     ok &= storm_all(lines, false);

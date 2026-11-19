@@ -591,10 +591,10 @@ pub fn tlb_shootdown_on(active: CpuSet, va: u64, pages: u64) -> Result<(), SmpEr
     // 别的处理器正在发起时：服务它发给我们的请求，直到公告板空出来
     let posted = wait_until(|| {
         let admitted = match admitted_shootdown_boards() {
-            Some(boards) if whole => boards.begin_all(me, targets),
-            Some(boards) => boards.begin(me, targets, va, pages),
-            None if me == 0 && whole => BOOT_SHOOTDOWN.begin_all(targets),
-            None if me == 0 => BOOT_SHOOTDOWN.begin(targets, va, pages),
+            Some(boards) if whole => boards.begin_all(me, targets.clone()),
+            Some(boards) => boards.begin(me, targets.clone(), va, pages),
+            None if me == 0 && whole => BOOT_SHOOTDOWN.begin_all(targets.clone()),
+            None if me == 0 => BOOT_SHOOTDOWN.begin(targets.clone(), va, pages),
             None => Err(SmpError::NoSuchCpu),
         };
         match admitted {

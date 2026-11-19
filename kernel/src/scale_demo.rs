@@ -783,7 +783,7 @@ fn spawn_sleepers(base: u64, count: usize, until: u64, all: CpuSet) -> bool {
     ASLEEP.store(0, Ordering::Relaxed);
     AWAKE.store(0, Ordering::Relaxed);
     SLEEP_END.store(until, Ordering::Relaxed);
-    let ok = quiet(|| (0..count).all(|i| sched::spawn_on(TaskId(base + i as u64), "scale-sleep", sleeper, None, all).is_ok()));
+    let ok = quiet(|| (0..count).all(|i| sched::spawn_on(TaskId(base + i as u64), "scale-sleep", sleeper, None, all.clone()).is_ok()));
     // 让它们运行到睡下（引导线程睡一会儿，把处理器交给它们）
     let give_up = sched::timer_ticks() + 20;
     while (ASLEEP.load(Ordering::Relaxed) as usize) < count && sched::timer_ticks() < give_up {
@@ -902,12 +902,12 @@ fn scale(n: usize) {
         TASK_ID_BASE + 100,
         sleepers,
         t0.saturating_add(WINDOW).saturating_add(4096),
-        all,
+        all.clone(),
     );
     check(slept, "睡眠任务创建失败或没有全部睡下");
     prepare_load(hogs, WINDOW, false);
     let ok = quiet(|| {
-        (0..hogs).all(|i| sched::spawn_on(TaskId(TASK_ID_BASE + 10 + i as u64), "scale-hog", aligned_hog, None, all).is_ok())
+        (0..hogs).all(|i| sched::spawn_on(TaskId(TASK_ID_BASE + 10 + i as u64), "scale-hog", aligned_hog, None, all.clone()).is_ok())
     });
     check(ok, "吃满处理器的任务创建失败");
     let aligned = ok && align_load(hogs);
@@ -978,14 +978,14 @@ fn overload(n: usize) {
         TASK_ID_BASE + 300,
         sleepers,
         t0.saturating_add(window).saturating_add(4096),
-        all,
+        all.clone(),
     );
     check(slept, "睡眠任务创建失败或没有全部睡下");
     prepare_load(hogs + 1, window, true);
     let ok = quiet(|| {
         INTERACTIVE_DONE.store(0, Ordering::Relaxed);
-        let mut ok = (0..hogs).all(|i| sched::spawn_on(TaskId(TASK_ID_BASE + 40 + i as u64), "scale-load", aligned_hog, None, all).is_ok());
-        ok &= sched::spawn_on(TaskId(TASK_ID_BASE + 39), "scale-ui", aligned_interactive, None, all).is_ok();
+        let mut ok = (0..hogs).all(|i| sched::spawn_on(TaskId(TASK_ID_BASE + 40 + i as u64), "scale-load", aligned_hog, None, all.clone()).is_ok());
+        ok &= sched::spawn_on(TaskId(TASK_ID_BASE + 39), "scale-ui", aligned_interactive, None, all.clone()).is_ok();
         ok
     });
     check(ok, "过载用例任务创建失败");

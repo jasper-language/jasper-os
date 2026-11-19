@@ -136,7 +136,7 @@ pub fn run() {
     quiet(|| {
         let all = CpuSet::first(smp::cpu_count());
         for i in 0..4u64 {
-            let _ = sched::spawn_on(TaskId(TASK_BASE + 10 + i), "job-hog", batch_hog, None, all);
+            let _ = sched::spawn_on(TaskId(TASK_BASE + 10 + i), "job-hog", batch_hog, None, all.clone());
         }
         sched::spawn(TaskId(TASK_BASE + 9), "job-ui", interactive).is_ok()
     });

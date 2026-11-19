@@ -214,17 +214,272 @@ impl IpiKind {
     }
 }
 
-/// 逻辑处理器下标的位集合。
-/// Bit set of logical processor indices.
+#[cfg(feature = "cpu-dynamic")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CpuSet {
+    Inline(u128),
+    Heap(crate::cpu_bitmap::CpuBitmap),
+}
+
+#[cfg(feature = "cpu-dynamic")]
+impl Default for CpuSet {
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
+
+#[cfg(feature = "cpu-dynamic")]
+impl CpuSet {
+    pub const EMPTY: CpuSet = CpuSet::Inline(0);
+    pub const BOOTSTRAP_CPU0: CpuSet = CpuSet::Inline(1);
+
+    pub const fn bootstrap_first(n: usize) -> CpuSet {
+        CpuSet::Inline(if n >= 128 {
+            u128::MAX
+        } else if n == 0 {
+            0
+        } else {
+            (1u128 << n) - 1
+        })
+    }
+
+    pub fn first(n: usize) -> CpuSet {
+        if n <= 128 {
+            CpuSet::Inline(if n == 128 {
+                u128::MAX
+            } else if n == 0 {
+                0
+            } else {
+                (1u128 << n) - 1
+            })
+        } else {
+            match crate::cpu_bitmap::CpuBitmap::first(n) {
+                Ok(bitmap) => CpuSet::Heap(bitmap),
+                Err(_) => Self::EMPTY,
+            }
+        }
+    }
+
+    pub fn insert(&mut self, cpu: usize) -> bool {
+        if let CpuSet::Inline(bits) = self {
+            if cpu < 128 {
+                *bits |= 1u128 << cpu;
+                return true;
+            }
+        }
+        let Ok(mut bitmap) = self.as_bitmap() else {
+            return false;
+        };
+        if bitmap.insert(cpu).is_err() {
+            return false;
+        }
+        *self = CpuSet::Heap(bitmap);
+        true
+    }
+
+    pub fn remove(&mut self, cpu: usize) {
+        match self {
+            CpuSet::Inline(bits) if cpu < 128 => *bits &= !(1u128 << cpu),
+            CpuSet::Heap(bitmap) => bitmap.remove(cpu),
+            _ => {}
+        }
+    }
+
+    pub fn contains(&self, cpu: usize) -> bool {
+        match self {
+            CpuSet::Inline(bits) => cpu < 128 && *bits & (1u128 << cpu) != 0,
+            CpuSet::Heap(bitmap) => bitmap.contains(cpu),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            CpuSet::Inline(bits) => *bits == 0,
+            CpuSet::Heap(bitmap) => bitmap.is_empty(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            CpuSet::Inline(bits) => bits.count_ones() as usize,
+            CpuSet::Heap(bitmap) => bitmap.len(),
+        }
+    }
+
+    pub fn without(mut self, cpu: usize) -> CpuSet {
+        self.remove(cpu);
+        self
+    }
+
+    pub fn intersect(self, other: CpuSet) -> CpuSet {
+        if let (CpuSet::Inline(a), CpuSet::Inline(b)) = (&self, &other) {
+            return CpuSet::Inline(a & b);
+        }
+        let Ok(a) = self.into_bitmap() else {
+            return Self::EMPTY;
+        };
+        let Ok(b) = other.into_bitmap() else {
+            return Self::EMPTY;
+        };
+        match a.intersect(&b) {
+            Ok(bitmap) => CpuSet::Heap(bitmap),
+            Err(_) => Self::EMPTY,
+        }
+    }
+
+    pub fn bits(&self) -> u128 {
+        match self {
+            CpuSet::Inline(bits) => *bits,
+            CpuSet::Heap(bitmap) => bitmap
+                .iter()
+                .filter(|&cpu| cpu < 128)
+                .fold(0u128, |bits, cpu| bits | (1u128 << cpu)),
+        }
+    }
+
+    pub fn bits_u64(&self) -> Option<u64> {
+        if self.iter().any(|cpu| cpu >= 64) {
+            return None;
+        }
+        Some(self.bits() as u64)
+    }
+
+    pub fn word(&self, index: usize) -> u64 {
+        if index >= 2 {
+            return 0;
+        }
+        self.iter()
+            .filter(|&cpu| cpu / 64 == index)
+            .fold(0u64, |word, cpu| word | (1u64 << (cpu % 64)))
+    }
+
+    pub fn iter(&self) -> CpuSetIter<'_> {
+        match self {
+            CpuSet::Inline(bits) => CpuSetIter::Inline { bits: *bits },
+            CpuSet::Heap(bitmap) => CpuSetIter::Heap {
+                words: bitmap.words(),
+                word: 0,
+                bits: match bitmap.words().first() {
+                    Some(bits) => *bits,
+                    None => 0,
+                },
+            },
+        }
+    }
+
+    fn as_bitmap(&self) -> Result<crate::cpu_bitmap::CpuBitmap, crate::cpu_bitmap::CpuBitmapError> {
+        match self {
+            CpuSet::Inline(bits) => {
+                let mut bitmap = crate::cpu_bitmap::CpuBitmap::empty();
+                for cpu in (0..128).filter(|&cpu| *bits & (1u128 << cpu) != 0) {
+                    bitmap.insert(cpu)?;
+                }
+                Ok(bitmap)
+            }
+            CpuSet::Heap(bitmap) => Ok(bitmap.clone()),
+        }
+    }
+
+    fn into_bitmap(
+        self,
+    ) -> Result<crate::cpu_bitmap::CpuBitmap, crate::cpu_bitmap::CpuBitmapError> {
+        self.as_bitmap()
+    }
+}
+
+#[cfg(feature = "cpu-dynamic")]
+pub enum CpuSetIter<'a> {
+    Inline { bits: u128 },
+    Heap {
+        words: &'a [u64],
+        word: usize,
+        bits: u64,
+    },
+}
+
+#[cfg(feature = "cpu-dynamic")]
+impl Iterator for CpuSetIter<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            CpuSetIter::Inline { bits } => {
+                if *bits == 0 {
+                    return None;
+                }
+                let cpu = bits.trailing_zeros() as usize;
+                *bits &= *bits - 1;
+                Some(cpu)
+            }
+            CpuSetIter::Heap { words, word, bits } => {
+                loop {
+                    if *bits != 0 {
+                        let cpu = bits.trailing_zeros() as usize;
+                        *bits &= *bits - 1;
+                        return Some(*word * 64 + cpu);
+                    }
+                    *word += 1;
+                    *bits = *words.get(*word)?;
+                }
+            }
+        }
+    }
+}
+
+/// Copyable 128-bit staging mask for task control blocks built before growth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BootstrapCpuSet([u64; 2]);
+
+impl BootstrapCpuSet {
+    pub const EMPTY: Self = Self([0; 2]);
+    pub const CPU0: Self = Self([1, 0]);
+
+    pub fn insert(&mut self, cpu: usize) -> bool {
+        if cpu >= 128 {
+            return false;
+        }
+        self.0[cpu / 64] |= 1u64 << (cpu % 64);
+        true
+    }
+
+    pub fn from_cpu_set(set: &CpuSet) -> Option<Self> {
+        let mut words = [0u64; 2];
+        for cpu in set.iter() {
+            if cpu >= 128 {
+                return None;
+            }
+            words[cpu / 64] |= 1u64 << (cpu % 64);
+        }
+        Some(Self(words))
+    }
+
+    pub fn to_cpu_set(self) -> CpuSet {
+        let mut set = CpuSet::EMPTY;
+        for (word, bits) in self.0.into_iter().enumerate() {
+            for bit in (0..64).filter(|&bit| bits & (1u64 << bit) != 0) {
+                set.insert(word * 64 + bit);
+            }
+        }
+        set
+    }
+}
+
+#[cfg(not(feature = "cpu-dynamic"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CpuSet([u64; CPU_SET_WORDS]);
 
 const CPU_SET_WORDS: usize = MAX_CPUS.div_ceil(64);
 
+#[cfg(not(feature = "cpu-dynamic"))]
 impl CpuSet {
     /// 空集合。
     /// Empty set.
     pub const EMPTY: CpuSet = CpuSet([0; CPU_SET_WORDS]);
+    pub const BOOTSTRAP_CPU0: CpuSet = CpuSet::first(1);
+
+    pub const fn bootstrap_first(n: usize) -> CpuSet {
+        Self::first(n)
+    }
 
     /// 前 `n` 个处理器；`n` 超过容量时返回全部可表示成员。
     /// The first `n` processors, capped to the explicit capacity.
@@ -813,7 +1068,7 @@ impl ShootdownBoard {
         let mut st = self.state.lock();
         match &st.request {
             Some(req) if req.generation == generation => {
-                let left = req.pending;
+                let left = req.pending.clone();
                 st.request = None;
                 left
             }
@@ -1032,14 +1287,36 @@ mod tests {
 
     #[test]
     fn cpuset_basic_and_out_of_range_rejected() {
-        let mut s = CpuSet::EMPTY;
-        assert!(s.is_empty());
-        assert!(s.insert(0) && s.insert(3) && s.insert(MAX_CPUS - 1));
-        assert!(!s.insert(MAX_CPUS));
-        assert_eq!(s.len(), 3);
-        assert!(s.contains(3) && !s.contains(2) && !s.contains(MAX_CPUS));
-        assert_eq!(s.iter().collect::<Vec<_>>(), vec![0, 3, MAX_CPUS - 1]);
-        assert_eq!(s.without(3).len(), 2);
+        #[cfg(feature = "cpu-dynamic")]
+        {
+            let mut s = CpuSet::EMPTY;
+            assert!(s.is_empty());
+            assert!(
+                s.insert(0)
+                    && s.insert(3)
+                    && s.insert(MAX_CPUS - 1)
+                    && s.insert(MAX_CPUS)
+                    && s.insert(1024)
+            );
+            assert_eq!(s.len(), 5);
+            assert!(s.contains(3) && !s.contains(2) && s.contains(MAX_CPUS) && s.contains(1024));
+            assert_eq!(
+                s.iter().collect::<Vec<_>>(),
+                vec![0, 3, MAX_CPUS - 1, MAX_CPUS, 1024]
+            );
+            assert_eq!(s.without(3).len(), 4);
+        }
+        #[cfg(not(feature = "cpu-dynamic"))]
+        {
+            let mut s = CpuSet::EMPTY;
+            assert!(s.is_empty());
+            assert!(s.insert(0) && s.insert(3) && s.insert(MAX_CPUS - 1));
+            assert!(!s.insert(MAX_CPUS));
+            assert_eq!(s.len(), 3);
+            assert!(s.contains(3) && !s.contains(2) && !s.contains(MAX_CPUS));
+            assert_eq!(s.iter().collect::<Vec<_>>(), vec![0, 3, MAX_CPUS - 1]);
+            assert_eq!(s.without(3).len(), 2);
+        }
         assert_eq!(CpuSet::first(4).bits(), 0b1111);
         assert_eq!(CpuSet::first(100).len(), 100);
         assert!(CpuSet::first(0).is_empty());
@@ -1047,7 +1324,11 @@ mod tests {
 
     #[test]
     fn cpu_set_covers_issue_35_topologies_without_silent_32_cpu_cap() {
-        for count in [1, 32, 33, 64, 128] {
+        #[cfg(feature = "cpu-dynamic")]
+        let counts = [1, 32, 33, 64, 128, 129, 256, 1024];
+        #[cfg(not(feature = "cpu-dynamic"))]
+        let counts = [1, 32, 33, 64, 128];
+        for count in counts {
             let set = CpuSet::first(count);
             assert_eq!(set.len(), count);
             for cpu in 0..count {
@@ -1056,6 +1337,9 @@ mod tests {
         }
         let all = CpuSet::first(MAX_CPUS);
         assert_eq!(all.len(), MAX_CPUS);
+        #[cfg(feature = "cpu-dynamic")]
+        assert!(CpuSet::first(MAX_CPUS.saturating_add(1)).contains(MAX_CPUS));
+        #[cfg(not(feature = "cpu-dynamic"))]
         assert!(!CpuSet::first(MAX_CPUS.saturating_add(1)).contains(MAX_CPUS));
         assert_eq!(CpuSet::first(64).bits_u64(), Some(u64::MAX));
         let high = CpuSet::first(65);
@@ -1164,16 +1448,16 @@ mod tests {
     fn shootdown_rejections_leave_board_unchanged() {
         let b = ShootdownBoard::new();
         let one = CpuSet::first(2).without(0);
-        assert_eq!(b.begin(one, 0x1001, 1), Err(SmpError::BadRange));
-        assert_eq!(b.begin(one, 0x1000, 0), Err(SmpError::BadRange));
+        assert_eq!(b.begin(one.clone(), 0x1001, 1), Err(SmpError::BadRange));
+        assert_eq!(b.begin(one.clone(), 0x1000, 0), Err(SmpError::BadRange));
         assert_eq!(
-            b.begin(one, 0x1000, MAX_SHOOTDOWN_PAGES + 1),
+            b.begin(one.clone(), 0x1000, MAX_SHOOTDOWN_PAGES + 1),
             Err(SmpError::BadRange)
         );
-        assert_eq!(b.begin(one, u64::MAX - 0xfff, 2), Err(SmpError::BadRange));
+        assert_eq!(b.begin(one.clone(), u64::MAX - 0xfff, 2), Err(SmpError::BadRange));
         assert!(b.is_idle());
-        let g = b.begin(one, 0x1000, 1).unwrap();
-        assert_eq!(b.begin(one, 0x2000, 1), Err(SmpError::Busy));
+        let g = b.begin(one.clone(), 0x1000, 1).unwrap();
+        assert_eq!(b.begin(one.clone(), 0x2000, 1), Err(SmpError::Busy));
         // Busy 不改动在途请求：目标看到的仍是第一次的范围
         let mut got = 0;
         assert!(b.service(1, |s, _| got = s));
@@ -1241,8 +1525,8 @@ mod tests {
         let mut target = CpuSet::EMPTY;
         assert!(target.insert(1));
 
-        let first = set.begin(0, target, 0x7000, 1).unwrap();
-        let second = set.begin(1, target, 0x9000, 2).unwrap();
+        let first = set.begin(0, target.clone(), 0x7000, 1).unwrap();
+        let second = set.begin(1, target.clone(), 0x9000, 2).unwrap();
         assert!(!set.is_complete(0, first));
         assert!(!set.is_complete(1, second));
 
@@ -1259,8 +1543,8 @@ mod tests {
         let boards = [ShootdownBoard::new(), ShootdownBoard::new()];
         let set = ShootdownBoards::new(&boards);
         let target = CpuSet::first(2).without(0);
-        let first = set.begin(0, target, 0xa000, 1).unwrap();
-        let second = set.begin(1, target, 0xb000, 1).unwrap();
+        let first = set.begin(0, target.clone(), 0xa000, 1).unwrap();
+        let second = set.begin(1, target.clone(), 0xb000, 1).unwrap();
 
         assert_eq!(set.abandon(0, first), target);
         assert!(set.is_complete(0, first));
@@ -1275,7 +1559,7 @@ mod tests {
         let boards = [ShootdownBoard::new()];
         let set = ShootdownBoards::new(&boards);
         let target = CpuSet::first(2).without(0);
-        let live = set.begin(0, target, 0xc000, 1).unwrap();
+        let live = set.begin(0, target.clone(), 0xc000, 1).unwrap();
 
         assert_eq!(set.begin(1, target, 0xd000, 1), Err(SmpError::NoSuchCpu));
         assert!(!set.is_complete(0, live));

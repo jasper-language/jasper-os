@@ -123,7 +123,7 @@ pub fn run_preemptive() {
     // would strand Q/R until P reaches the demo deadline.
     let irq = crate::arch::irq_save_disable();
     for (id, name) in [(11, "P"), (12, "Q"), (13, "R")] {
-        if super::spawn_on(TaskId(id), name, busy_task, None, here).is_err() {
+        if super::spawn_on(TaskId(id), name, busy_task, None, here.clone()).is_err() {
             console::_print(format_args!("[JSR-SCHED] spawn failed name={}\n", name));
         }
     }

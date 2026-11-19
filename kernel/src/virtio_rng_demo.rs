@@ -176,15 +176,15 @@ pub fn run() {
     let mut masked_pending = false;
 
     if let Some(range) = arch::msi_vector_range() {
-        match kernel_core::cpu_bitmap::CpuBitmap::from_cpu_set(online) {
+        match kernel_core::cpu_bitmap::CpuBitmap::from_cpu_set(online.clone()) {
             Ok(bitmap_online) => match VectorPool::new(range.first, range.count, bitmap_online) {
                 Ok(pool) => {
-                    if prepare_vectors(&pool, online, &mut vectors, &mut extra_vector) {
+                    if prepare_vectors(&pool, online.clone(), &mut vectors, &mut extra_vector) {
                         mmio::prepare_window().map_or_else(
                             |e| check(false, e.name()),
                             |_| {
                                 let baseline = mm::frame::free_frames();
-                                match exercise(device, online, &vectors, extra_vector) {
+                                match exercise(device, online.clone(), &vectors, extra_vector) {
                                     Ok(result) => {
                                         outcome = result;
                                         masked_pending = result.masked_pending;
@@ -196,7 +196,7 @@ pub fn run() {
                             },
                         );
                     }
-                    release_vectors(&pool, online, &vectors, extra_vector);
+                    release_vectors(&pool, online.clone(), &vectors, extra_vector);
                 }
                 Err(e) => check(false, e.name()),
             },
@@ -307,7 +307,7 @@ fn exercise(
     let mut target_cpu = first;
     let mut target_vector = first_vector;
 
-    if deliver(&mut rig, bdf, target_cpu, target_vector, online, vectors, &mut outcome) {
+    if deliver(&mut rig, bdf, target_cpu, target_vector, online.clone(), vectors, &mut outcome) {
         // 初始送达已经发生；以下改核都基于它继续。
     } else {
         return Ok(outcome);
@@ -324,7 +324,7 @@ fn exercise(
         }
         target_cpu = cpu;
         target_vector = vector;
-        if deliver(&mut rig, bdf, cpu, vector, online, vectors, &mut outcome) {
+        if deliver(&mut rig, bdf, cpu, vector, online.clone(), vectors, &mut outcome) {
             outcome.retargets = outcome.retargets.saturating_add(1);
         } else {
             return Ok(outcome);
