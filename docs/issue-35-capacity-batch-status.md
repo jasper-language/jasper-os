@@ -58,6 +58,14 @@ Linux ET_EXEC 一次创建 40 个 eventfd，完成 write/read，再全部 close�
 `syscall1` 调用 `eventfd2`，未初始化 flags 在第三轮变成 2 并被内核正确拒绝；
 修正为显式 `flags=0`。证据见 `evidence/issue35-eventfd-capacity-20261119/`。
 
+### timerfd 与 signalfd 实例数量
+
+timerfd 和 signalfd 原先各自还有每进程 32 实例的独立上限；它们同样由
+FdTable、metadata `try_reserve` 和 Rights 决定，现一并移除。真实 Linux ELF
+分别创建并关闭 40 个 timerfd 与 40 个 signalfd，随后继续 futex/mmap/io_uring，
+以 0 退出且进程资源回基线。证据见
+`evidence/issue35-timerfd-signalfd-capacity-20261119/`。
+
 ## 验证
 
 ```text
@@ -78,6 +86,7 @@ python3 scripts/check-hardcode-inventory-ledger.py --check \
 ## 未完成
 
 - 配置上限的更高容量实现、真实 256/1024 Task 和 65536 Object 压力矩阵；
-- poll、signalfd、fanotify、epoll/eventfd 大规模批次、sendfile/copy 在真实 Ubuntu/Android 程序中的
+- poll、signalfd 投递、fanotify、epoll/eventfd/timerfd 大规模批次、
+  sendfile/copy 在真实 Ubuntu/Android 程序中的
   大规模分批、取消和资源回基线；
 - 所有固定批次值最终应与 Workload/Profile 资源预算统一，而不是成为跨设备 ABI。

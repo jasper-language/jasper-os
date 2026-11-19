@@ -26,6 +26,8 @@ const SYS_EPOLL_WAIT: u64 = 232;
 const SYS_EPOLL_CTL: u64 = 233;
 const SYS_EPOLL_CREATE1: u64 = 291;
 const SYS_EVENTFD2: u64 = 290;
+const SYS_TIMERFD_CREATE: u64 = 283;
+const SYS_SIGNALFD4: u64 = 289;
 const SYS_PIPE2: u64 = 293;
 const SYS_IO_URING_SETUP: u64 = 425;
 const SYS_IO_URING_ENTER: u64 = 426;
@@ -293,6 +295,55 @@ unsafe fn test_many_eventfds() -> bool {
 }
 
 #[cfg(target_arch = "x86_64")]
+unsafe fn test_many_timerfds() -> bool {
+    const COUNT: usize = 40;
+    let mut fds = [-1i64; COUNT];
+    for index in 0..COUNT {
+        fds[index] = syscall3(SYS_TIMERFD_CREATE, 1, 0, 0);
+        if fds[index] < 0 {
+            for opened in &fds[..index] {
+                let _ = syscall1(SYS_CLOSE, *opened as u64);
+            }
+            return false;
+        }
+    }
+    let mut closed = true;
+    for fd in fds {
+        closed &= syscall1(SYS_CLOSE, fd as u64) == 0;
+    }
+    closed
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe fn test_many_signalfds() -> bool {
+    const COUNT: usize = 40;
+    let mask = 1u64 << 10;
+    let mut fds = [-1i64; COUNT];
+    for index in 0..COUNT {
+        fds[index] = syscall6(
+            SYS_SIGNALFD4,
+            u64::MAX,
+            (&mask) as *const u64 as u64,
+            8,
+            0,
+            0,
+            0,
+        );
+        if fds[index] < 0 {
+            for opened in &fds[..index] {
+                let _ = syscall1(SYS_CLOSE, *opened as u64);
+            }
+            return false;
+        }
+    }
+    let mut closed = true;
+    for fd in fds {
+        closed &= syscall1(SYS_CLOSE, fd as u64) == 0;
+    }
+    closed
+}
+
+#[cfg(target_arch = "x86_64")]
 unsafe fn test_mmap() -> bool {
     let address = syscall6(
         SYS_MMAP,
@@ -549,6 +600,12 @@ pub extern "C" fn _start() -> ! {
     if !unsafe { test_many_eventfds() } {
         unsafe { exit(103) }
     }
+    if !unsafe { test_many_timerfds() } {
+        unsafe { exit(104) }
+    }
+    if !unsafe { test_many_signalfds() } {
+        unsafe { exit(105) }
+    }
     if !unsafe { test_mmap() } {
         unsafe { exit(98) }
     }
@@ -558,7 +615,7 @@ pub extern "C" fn _start() -> ! {
     if !unsafe { test_io_uring() } {
         unsafe { exit(100) }
     }
-    let summary = b"linux-native: epoll=true many_epolls=true many_eventfds=true futex=true mmap=true io_uring=true\n";
+    let summary = b"linux-native: epoll=true many_epolls=true many_eventfds=true many_timerfds=true many_signalfds=true futex=true mmap=true io_uring=true\n";
     if !unsafe { write_bytes(1, summary) } {
         unsafe { exit(101) }
     }

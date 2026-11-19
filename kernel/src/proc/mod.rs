@@ -2762,9 +2762,6 @@ pub(crate) fn linux_timerfd_create(
 ) -> Option<u32> {
     with_proc(pid, |process| {
         let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
-        if linux.timerfds.len() >= 32 {
-            return Err(ProcError::NoTaskSlot);
-        }
         linux
             .timerfds
             .try_reserve(1)
@@ -2832,9 +2829,6 @@ pub(crate) fn linux_signalfd_create(
 ) -> Option<u32> {
     with_proc(pid, |process| {
         let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
-        if linux.signalfds.len() >= 32 {
-            return Err(ProcError::NoTaskSlot);
-        }
         linux
             .signalfds
             .try_reserve(1)

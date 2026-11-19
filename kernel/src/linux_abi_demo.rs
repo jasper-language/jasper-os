@@ -46,6 +46,8 @@ pub fn run() {
         LinuxSyscall::EpollCtl,
         LinuxSyscall::EpollWait,
         LinuxSyscall::EventFd2,
+        LinuxSyscall::TimerFdCreate,
+        LinuxSyscall::Signalfd4,
         LinuxSyscall::IoUringSetup,
         LinuxSyscall::IoUringEnter,
         LinuxSyscall::IoUringRegister,
