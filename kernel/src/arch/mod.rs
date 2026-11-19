@@ -1001,13 +1001,10 @@ pub unsafe fn cpu_start(
 #[inline(always)]
 pub fn cpu_index() -> usize {
     let index = Current::cpu_index();
-    match kernel_core::cpu_identity::validate_online(
-        index,
-        kernel_core::smp::MAX_CPUS,
-        true,
-    ) {
-        Ok(index) => index,
-        Err(_) => Current::halt_forever(),
+    if crate::smp::cpu_index_admitted(index) {
+        index
+    } else {
+        Current::halt_forever()
     }
 }
 /// 见 [`Platform::send_ipi`]。

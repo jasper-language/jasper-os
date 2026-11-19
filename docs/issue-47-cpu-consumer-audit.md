@@ -149,4 +149,9 @@
 - `kernel/src/smp/percpu.rs`：每核数据保留堆前 bootstrap 区，并在 AP 启动前按
   已准入 CPU 数量一次性预留堆后备记录；`get`/`this` 已能通过同一逻辑索引访问
   bootstrap 之外的记录。分配失败会阻止任何 secondary 上线，不在中断路径扩容。
+- `kernel/src/arch/mod.rs`、`kernel/src/smp/mod.rs`：全局 `cpu_index` 在 runtime
+  registry 发布后按 lock-free 的 admitted CPU 数量校验，避免架构门面再次把合法
+  逻辑 CPU 截断到 bootstrap 宽度。该快路径不能取 runtime 的 IRQ 安全锁，否则会
+  形成 `lock -> per-CPU -> cpu_index -> lock` 自依赖；x86/LoongArch 的硬件 ID
+  映射表仍需后续单独迁移。
 - 其余调度器每核数组、架构入口和亲和 ABI 尚未迁移。

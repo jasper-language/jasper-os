@@ -25,7 +25,7 @@ pub mod percpu;
 pub mod shared_demo;
 
 use alloc::{vec, vec::Vec};
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use kernel_core::cpu_runtime::{CpuInventoryEntry, CpuRuntimeRegistry};
 use kernel_core::frame::PhysFrame;
 use kernel_core::paging::{MapFlags, VirtPage};
@@ -45,6 +45,8 @@ const IDLE_STACK_SIZE: usize = 16 * 1024;
 
 /// 堆后唯一 CPU 身份与生命周期事实源（启动其他处理器时写入一次）。
 static CPU_RUNTIME: Once<IrqSpinLock<CpuRuntimeRegistry>> = Once::new();
+/// Lock-free admitted logical-index bound for the CPU-identity fast path.
+static CPU_ADMITTED_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// 平台要求的低端启动帧（只预留一次，永久保留供以后再次启动处理器）。
 static START_FRAME: Once<Option<PhysFrame>> = Once::new();
 /// One board per initiating logical CPU. The vector is allocated after the
@@ -260,6 +262,7 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
         admission.required_bytes,
         admission.available_bytes
     );
+    CPU_ADMITTED_COUNT.store(admission.enabled, Ordering::Release);
     CPU_RUNTIME.call_once(|| {
         IrqSpinLock::ranked(crate::lockorder::CPU_RUNTIME, runtime)
     });
@@ -429,6 +432,20 @@ fn runtime_hw_id(cpu: usize) -> Option<u32> {
     CPU_RUNTIME
         .get()
         .and_then(|runtime| runtime.lock().identity(cpu).map(|identity| identity.hardware_id))
+}
+
+/// Validate a logical CPU without taking the runtime registry lock.
+///
+/// CPU identity is required by the IRQ-safe lock implementation itself, so
+/// this fast path must be lock-free to avoid a lock -> per-CPU -> identity
+/// cycle. Logical IDs are contiguous and the admitted count is published
+/// before secondaries can execute.
+pub fn cpu_index_admitted(index: usize) -> bool {
+    if CPU_RUNTIME.get().is_some() {
+        index < CPU_ADMITTED_COUNT.load(Ordering::Acquire)
+    } else {
+        index < kernel_core::smp::MAX_CPUS
+    }
 }
 
 /// 当前在线的处理器集合。
