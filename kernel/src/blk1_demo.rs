@@ -30,7 +30,6 @@ pub fn run() {
         check(false, error.name());
         return;
     }
-    let before = crate::baseline::baseline();
     let Some(device) = pci::table()
         .devices()
         .find(|device| device.header.vendor == virtio::VIRTIO_VENDOR && virtio::is_blk_device(device.header.device))
@@ -38,6 +37,18 @@ pub fn run() {
         check(false, "no virtio-blk device");
         return;
     };
+    // Warm one complete block-device lifetime so first-use MMIO page-table
+    // frames are persistent setup, not a per-request leak. Drop still proves
+    // that RAM, DMA, IRQ and object resources from the device are reclaimed.
+    match BlockDevice::new(device, DATA_PAGES) {
+        Ok(warm) => drop(warm),
+        Err(error) => {
+            kprintln!("[JSR-BLK1-FAIL] warmup={}", error.name());
+            FAILED.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    }
+    let before = crate::baseline::baseline();
 
     let restored;
     {
