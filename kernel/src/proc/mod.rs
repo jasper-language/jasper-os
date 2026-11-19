@@ -10217,6 +10217,21 @@ pub(crate) fn put_handle_in(
         .map_err(ProcError::Handle)
 }
 
+/// Install all message handles into one receiver with a single all-or-none
+/// result. On failure the receiver handle table and external ownership counts
+/// are unchanged.
+pub(crate) fn put_handles_in(
+    t: &mut kobj::Table,
+    pid: ObjId,
+    handles: &[(ObjectRef, Rights)],
+    out: &mut [HandleId],
+) -> Result<(), ProcError> {
+    receiver(t, pid)?
+        .handles
+        .put_many_into(handles, out)
+        .map_err(ProcError::Handle)
+}
+
 /// 在锁内查询进程 `pid` 句柄表的空位数（进程不在运行时为 0）。
 pub(crate) fn free_slots_in(t: &mut kobj::Table, pid: ObjId) -> usize {
     receiver(t, pid)

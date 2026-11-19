@@ -303,7 +303,8 @@ fn leaf_released_on_receiver_exit() {
     kobj::run_cleanup(usize::MAX);
 }
 
-/// 5：接收方句柄表满 ⇒ recv 以 table_full 结束，消息保留，接收方无变化。
+/// 5：接收方只能再容纳一个句柄、消息携带两个句柄 ⇒ recv 以 table_full
+/// 结束，消息与两个句柄全部保留；腾出一个槽位后两者一起交付。
 fn receiver_table_full() {
     let calls = SyscallSet::of(&[abi::SYSTEM_CHANNEL_SEND, abi::SYSTEM_CHANNEL_RECV]);
     let (Ok(s), Ok(r)) = (proc::create("ipc-s2", calls), proc::create("ipc-r2", calls)) else {
@@ -318,11 +319,21 @@ fn receiver_table_full() {
     let desc_va = base + DESC_OFF;
     let _ = proc::map_new(r, desc_va, MapFlags::USER | MapFlags::WRITE);
     let _ = proc::map_new(r, base + BUF_OFF, MapFlags::USER | MapFlags::WRITE);
-    let ev = proc::grant_new(s, KObject::Event { signaled: false }, ObjectType::Event, Rights::WAIT.union(Rights::TRANSFER));
-    let sent = ev.map(|h| ring::submit_send_for(s, srh, hs, b"with-handle".to_vec(), vec![h.raw()]));
-    // 填满接收方句柄表
+    let ev1 = proc::grant_new(s, KObject::Event { signaled: false }, ObjectType::Event, Rights::WAIT.union(Rights::TRANSFER));
+    let ev2 = proc::grant_new(s, KObject::Event { signaled: false }, ObjectType::Event, Rights::WAIT.union(Rights::TRANSFER));
+    let sent = match (ev1, ev2) {
+        (Ok(a), Ok(b)) => Ok(ring::submit_send_for(
+            s,
+            srh,
+            hs,
+            b"with-handles".to_vec(),
+            vec![a.raw(), b.raw()],
+        )),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    };
+    // 只留一个接收句柄槽位；消息需要两个，因此提交必须整体失败。
     let mut fillers: Vec<HandleId> = Vec::new();
-    while proc::free_handle_slots(r) > 0 {
+    while proc::free_handle_slots(r) > 1 {
         match proc::grant_new(r, KObject::Event { signaled: false }, ObjectType::Event, Rights::WAIT) {
             Ok(h) => fillers.push(h),
             Err(_) => break,
@@ -332,9 +343,35 @@ fn receiver_table_full() {
     let req = ring::submit_recv_for(r, rrh, hr, desc_va, &d);
     let done = ring::ring_of(r, rrh).map(|x| ring::reap_kernel(x, 4)).unwrap_or_default();
     let table_full = req.map(|id| done.contains(&(id, err(abi::SYSTEM_HANDLE_ERROR_TABLE_FULL)))).unwrap_or(false);
-    let kept = ipc::queued(r, hr) == Some(1) && proc::free_handle_slots(r) == 0;
-    check(matches!(sent, Ok(Ok(_))) && table_full && kept, "接收方句柄表满：recv 应以 table_full 结束且消息保留");
-    kprintln!("[JSR-IPC] receiver_table_full result_table_full={} message_kept={} fillers={}", table_full, kept, fillers.len());
+    let kept =
+        ipc::queued(r, hr) == Some(1) && proc::free_handle_slots(r) == 1;
+
+    let released = fillers.pop().map(|handle| {
+        kobj::with(|t| match proc::take_handle_in(t, r, handle) {
+            Ok(object) => kobj::release_owner_in(t, object).is_ok(),
+            Err(_) => false,
+        })
+    }).unwrap_or(false);
+    let d2 = put_desc(r, desc_va, base + BUF_OFF, 64, desc_va + 0x100, 2);
+    let req2 = ring::submit_recv_for(r, rrh, hr, desc_va, &d2);
+    let done2 = ring::ring_of(r, rrh).map(|x| ring::reap_kernel(x, 4)).unwrap_or_default();
+    let delivered = req2
+        .map(|id| done2.contains(&(id, 12)))
+        .unwrap_or(false)
+        && proc::free_handle_slots(r) == 0;
+
+    check(
+        matches!(sent, Ok(Ok(_))) && table_full && kept && released && delivered,
+        "多句柄 recv 容量不足：失败不部分交付，扩容后两个句柄一起交付",
+    );
+    kprintln!(
+        "[JSR-IPC] receiver_table_full result_table_full={} message_kept={} released_slot={} complete_delivery={} fillers={}",
+        table_full,
+        kept,
+        released,
+        delivered,
+        fillers.len()
+    );
     check(proc::exit_idle(r, 0) && proc::exit_idle(s, 0), "进程未能退出");
     proc::reap(r);
     proc::reap(s);

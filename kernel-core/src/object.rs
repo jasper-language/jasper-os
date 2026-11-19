@@ -490,6 +490,45 @@ impl<V, const N: usize> HandleTable<V, N> {
         self.put_with_parent(value, rights, None)
     }
 
+    /// Insert several root handles with one all-or-none result.
+    ///
+    /// The destination slice must have one slot per value. Capacity and output
+    /// space are checked before mutation. If capability allocation unexpectedly
+    /// fails part-way through insertion, every handle inserted by this call is
+    /// removed before the error is returned.
+    pub fn put_many_into(
+        &mut self,
+        values: &[(V, Rights)],
+        out: &mut [HandleId],
+    ) -> Result<(), HandleError>
+    where
+        V: Copy,
+    {
+        if values.len() > out.len() {
+            return Err(HandleError::Invalid);
+        }
+        if self.free_slots() < values.len() {
+            return Err(HandleError::TableFull);
+        }
+
+        let mut inserted = 0usize;
+        for &(value, rights) in values {
+            match self.put(value, rights) {
+                Ok(handle) => {
+                    out[inserted] = handle;
+                    inserted += 1;
+                }
+                Err(error) => {
+                    for handle in &out[..inserted] {
+                        let _ = self.remove(*handle);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Create a delegated handle whose authority is derived from `parent`.
     ///
     /// The child cannot gain rights or survive a subtree revocation of the
@@ -984,6 +1023,36 @@ mod tests {
         assert_eq!(t.remove(h), Ok(7));
         assert!(t.is_empty());
         assert_eq!(t.get(HandleId::NULL), Err(HandleError::Invalid));
+    }
+
+    #[test]
+    fn put_many_is_all_or_none_before_mutation() {
+        let values = [(1, Rights::READ), (2, Rights::WAIT)];
+        let mut out = [HandleId::NULL; 2];
+
+        let mut short: HandleTable<u8, 2> = HandleTable::new();
+        let mut one = [HandleId::NULL; 1];
+        assert_eq!(
+            short.put_many_into(&values, &mut one),
+            Err(HandleError::Invalid)
+        );
+        assert!(short.is_empty());
+        assert_eq!(short.free_slots(), 2);
+
+        let mut full: HandleTable<u8, 2> = HandleTable::new();
+        full.put(0, Rights::READ).unwrap();
+        full.put(0, Rights::READ).unwrap();
+        assert_eq!(
+            full.put_many_into(&values, &mut out),
+            Err(HandleError::TableFull)
+        );
+        assert_eq!(full.live_handles(), 2);
+
+        let mut room: HandleTable<u8, 2> = HandleTable::new();
+        assert_eq!(room.put_many_into(&values, &mut out), Ok(()));
+        assert_eq!(room.live_handles(), 2);
+        assert_eq!(room.get(out[0]).unwrap().0, &1);
+        assert_eq!(room.get(out[1]).unwrap().0, &2);
     }
 
     #[test]

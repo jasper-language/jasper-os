@@ -378,12 +378,24 @@ pub(crate) fn send_in(
         }
         ids.push(hid);
     }
-    // 提交：以下步骤不会失败（全部条件已在同一把锁内确认）
+    // 提交：全部句柄已复核。若内部不变量意外失效，把先前移出的句柄
+    // 放回发送方，绝不带着部分句柄入队。
     let mut handles = Vec::with_capacity(ids.len());
     for hid in ids {
-        if let Ok((r, rights)) = proc::handle_in(t, pid, hid) {
-            let _ = proc::take_handle_in(t, pid, hid); // 外部所有权随句柄移进消息，总数不变
-            handles.push((r, rights));
+        match proc::handle_in(t, pid, hid)
+            .and_then(|(r, rights)| proc::take_handle_in(t, pid, hid).map(|_| (r, rights)))
+        {
+            Ok((r, rights)) => handles.push((r, rights)),
+            Err(error) => {
+                for (r, rights) in handles.drain(..) {
+                    if proc::put_handle_in(t, pid, r, rights).is_err() {
+                        if let Some(id) = ObjId::from_raw(r.id.0) {
+                            let _ = kobj::release_owner_in(t, id);
+                        }
+                    }
+                }
+                return proc_err(error);
+            }
         }
     }
     let n = charged;
@@ -604,29 +616,34 @@ pub(crate) fn try_deliver_in(t: &mut Table, target: &RecvTarget) -> Delivery {
         return Delivery::Done(err(SYSTEM_HANDLE_ERROR_TABLE_FULL));
     }
     // —— 执行（不再有可失败的步骤）——
-    let Some(e) = ep_mut(t, ep) else {
+    let Some(m) = ep_mut(t, ep).and_then(|e| e.queue.pop_front()) else {
         return Delivery::Empty;
     };
-    let Some(m) = e.queue.pop_front() else {
-        return Delivery::Empty;
-    };
-    e.queued_bytes = e.queued_bytes.saturating_sub(charged);
+    let mut vals = alloc::vec![HandleId::NULL; nh];
+    if let Err(error) =
+        proc::put_handles_in(t, target.receiver, &m.handles, &mut vals)
+    {
+        // Commit has not started: restore the same message at the queue head.
+        // Its bytes and handle ownership were never charged or released.
+        if let Some(e) = ep_mut(t, ep) {
+            e.queue.push_front(m);
+        } else {
+            drop_message(t, m);
+        }
+        write_out(target, n, nh, sender, sender_app);
+        return Delivery::Done(proc_err(error));
+    }
+
+    // All handles are installed. The remaining steps cannot fail.
+    if let Some(e) = ep_mut(t, ep) {
+        e.queued_bytes = e.queued_bytes.saturating_sub(charged);
+    }
     uncharge(t, &m);
     target.data.write_at(0, &m.body);
-    let mut vals = Vec::with_capacity(nh);
-    for (r, rights) in m.handles {
-        match proc::put_handle_in(t, target.receiver, r, rights) {
-            Ok(h) => vals.push(h.raw()),
-            Err(_) => {
-                // 已确认有空位，不会发生；防御：释放这份所有权，避免泄漏
-                if let Some(id) = ObjId::from_raw(r.id.0) {
-                    let _ = kobj::release_owner_in(t, id);
-                }
-            }
-        }
-    }
-    for (i, v) in vals.iter().enumerate() {
-        target.handles.write_at(i * HANDLE_BYTES, &v.to_le_bytes());
+    for (i, handle) in vals.iter().enumerate() {
+        target
+            .handles
+            .write_at(i * HANDLE_BYTES, &handle.raw().to_le_bytes());
     }
     write_out(target, n, vals.len(), sender, sender_app);
     Delivery::Done(n as i64)
