@@ -133,6 +133,10 @@ impl Platform for Riscv {
         timer::init(timer_hz);
     }
 
+    fn prepare_cpu_runtime(cpus: usize) -> Result<(), &'static str> {
+        user::prepare(cpus).map_err(user::RuntimeStorageError::name)
+    }
+
     fn timer_stretch(ticks: u32) -> bool {
         timer::stretch(ticks)
     }

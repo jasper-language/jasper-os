@@ -1640,12 +1640,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "f79f1beb399e83ea86a5af7f26d6e337237ffc586c339bcd9ec2203d8cfa15d3",
-      "path": "kernel/src/arch/riscv/user.rs",
-      "rules": "HC-G7"
-    },
-    {
-      "count": 1,
       "fingerprint": "f83fc8de7fbc4dee4e0195efcd4c51cf3d33cf3f82e1cba51195d907e23903c9",
       "path": "kernel/src/arch/x86_64/ioapic.rs",
       "rules": "HC-G7"
@@ -1737,5 +1731,5 @@
     "user",
     "xtask"
   ],
-  "total": 365
+  "total": 364
 }

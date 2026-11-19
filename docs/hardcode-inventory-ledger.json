@@ -1,5 +1,5 @@
 {
-  "baseline_total": 365,
+  "baseline_total": 364,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,7 +10,7 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 140,
+    "explicit-safety-policy": 139,
     "platform-adapter": 31,
     "protocol-abi": 38,
     "runtime-resource-capacity": 71,
@@ -1938,16 +1938,6 @@
       "source": "Err(e) => return Err(sbi::decode(e).err().unwrap_or(SbiError::Failed).to_smp()),"
     },
     {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "f79f1beb399e83ea86a5af7f26d6e337237ffc586c339bcd9ec2203d8cfa15d3",
-      "line": 38,
-      "path": "kernel/src/arch/riscv/user.rs",
-      "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
-      "rules": "HC-G7",
-      "source": "KERNEL_STACK_TOP.get(index).unwrap_or_else(|| {"
-    },
-    {
       "category": "protocol-abi",
       "count": 1,
       "fingerprint": "f867c16208d540069d383b9d5ad73d0a5a7411230d336b265be77a50d0d6b1f3",
@@ -2880,7 +2870,7 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 157,
+    "explicit-safety-policy": 156,
     "platform-adapter": 47,
     "protocol-abi": 41,
     "runtime-resource-capacity": 113,

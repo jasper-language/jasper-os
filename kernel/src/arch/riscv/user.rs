@@ -23,6 +23,9 @@
 use core::arch::{asm, global_asm};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use alloc::vec::Vec;
+use spin::Once;
+
 use super::cpu::{self, read_csr};
 use super::mode::{xlen_asm_begin, xlen_asm_end};
 use super::trap::{FRAME_BYTES, SEPC_OFF, SSTATUS_OFF, WB};
@@ -32,17 +35,69 @@ use kernel_core::smp::MAX_CPUS;
 /// 每个处理器当前任务的内核栈顶（下标 = 逻辑下标；调度器每次切换任务时经 `set_kernel_stack` 更新本核一项）。
 static KERNEL_STACK_TOP: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(0) }; MAX_CPUS];
 
+static EXTRA_KERNEL_STACK_TOP: Once<Result<Vec<AtomicUsize>, RuntimeStorageError>> = Once::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RuntimeStorageError {
+    Allocation,
+    AlreadyPreparedTooSmall,
+}
+
+impl RuntimeStorageError {
+    pub(super) const fn name(self) -> &'static str {
+        match self {
+            Self::Allocation => "system.cpu.error.riscv_user_storage_allocation",
+            Self::AlreadyPreparedTooSmall => "system.cpu.error.riscv_user_storage_capacity",
+        }
+    }
+}
+
+fn stack_top_slot(index: usize) -> Option<&'static AtomicUsize> {
+    if let Some(slot) = KERNEL_STACK_TOP.get(index) {
+        return Some(slot);
+    }
+    let extra = index.checked_sub(MAX_CPUS)?;
+    EXTRA_KERNEL_STACK_TOP.get()?.as_ref().ok()?.get(extra)
+}
+
+/// Reserve per-CPU user-return stack records before secondary CPUs start.
+pub(super) fn prepare(cpus: usize) -> Result<(), RuntimeStorageError> {
+    let needed = cpus.saturating_sub(MAX_CPUS);
+    let slots = EXTRA_KERNEL_STACK_TOP.call_once(|| {
+        let mut slots = Vec::new();
+        slots
+            .try_reserve_exact(needed)
+            .map_err(|_| RuntimeStorageError::Allocation)?;
+        for _ in MAX_CPUS..cpus {
+            slots.push(AtomicUsize::new(0));
+        }
+        Ok(slots)
+    });
+    match slots {
+        Ok(slots) if slots.len() >= needed => Ok(()),
+        Ok(_) => Err(RuntimeStorageError::AlreadyPreparedTooSmall),
+        Err(error) => Err(*error),
+    }
+}
+
 /// 本处理器的内核栈顶记录。
 fn this_cpu_top() -> &'static AtomicUsize {
     let index = super::smp::cpu_index();
-    KERNEL_STACK_TOP.get(index).unwrap_or_else(|| {
-        crate::kprintln!(
-            "[JSR-SMP] reject=cpu_index_out_of_range index={} max={}",
-            index,
-            MAX_CPUS
-        );
-        crate::arch::halt_forever()
-    })
+    match stack_top_slot(index) {
+        Some(slot) => slot,
+        None => {
+            crate::kprintln!(
+                "[JSR-SMP] reject=cpu_index_out_of_range index={} prepared={}",
+                index,
+                MAX_CPUS
+                    + EXTRA_KERNEL_STACK_TOP
+                        .get()
+                        .and_then(|slots| slots.as_ref().ok())
+                        .map_or(0, |slots| slots.len())
+            );
+            crate::arch::halt_forever()
+        }
+    }
 }
 
 /// 记录本处理器当前任务的内核栈顶。

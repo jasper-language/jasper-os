@@ -163,6 +163,10 @@
   任意 AP 启动前全部预留。CPU 指针表采用 bootstrap 加堆后备扩展，具体 GDT/TSS
   使用稳定独立分配；任一表或栈分配失败都不会启动 secondary。`set_kernel_stack`
   和 AP 入口只查询已发布表，不在中断路径扩容。
+- `kernel/src/arch/riscv/user.rs`：RV32/RV64 共用的每核用户返回内核栈记录改为
+  bootstrap 加 AP 启动前堆扩展。4 处理器 RISC-V64 QEMU 中 SMP 汇总与
+  `kstack per_cpu set/kept/restored=3/3` 通过；同轮已有的 IRQ 路由/PIC 失败另行
+  保留，不能据此宣称 RISC-V 全量验收通过。
 - `kernel/src/sched/scheduler.rs`：`cpu_stats`、`cpu_residency`、类别仲裁窗口和
   idle context 改用调度器内联 bootstrap + 堆后备扩展表，在 AP 启动前与 CPU
   容量一起原子预留。运行期这些每核统计与上下文不再由固定 128 槽决定容量。
