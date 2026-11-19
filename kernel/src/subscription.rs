@@ -161,7 +161,12 @@ pub(crate) fn prepare_wait_in(t:&mut Table,pid:ObjId,h:HandleId,args:WaitArgs)->
  Ok(WaitTarget {sub,buffer,capacity:args.capacity as usize})
 }
 pub(crate) fn check_wait_in(t:&mut Table,sub:ObjId)->Result<(),i64> {
- match t.get(sub) {Ok(KObject::Subscription(s)) if s.waiter.is_none()=>Ok(()),Ok(KObject::Subscription(_))=>Err(err(SYSTEM_EVENT_ERROR_BUSY)),_=>Err(err(SYSTEM_HANDLE_ERROR_INVALID))}
+ match t.get(sub) {
+  Ok(KObject::Subscription(s)) if s.closed=>Err(err(SYSTEM_EVENT_ERROR_CLOSED)),
+  Ok(KObject::Subscription(s)) if s.waiter.is_none()=>Ok(()),
+  Ok(KObject::Subscription(_))=>Err(err(SYSTEM_EVENT_ERROR_BUSY)),
+  _=>Err(err(SYSTEM_HANDLE_ERROR_INVALID)),
+ }
 }
 pub(crate) fn deliver_in(t:&mut Table,target:&WaitTarget)->Attempt {
  let (mut queue,closed,source)=match t.get(target.sub) {Ok(KObject::Subscription(s))=>(s.queue.clone(),s.closed,s.source),_=>return Attempt::Done(err(SYSTEM_HANDLE_ERROR_INVALID))};
@@ -175,8 +180,13 @@ pub(crate) fn deliver_in(t:&mut Table,target:&WaitTarget)->Attempt {
  let closed=closed || !matches!(t.get(source),Ok(KObject::EventSource(s)) if !s.closed);
  if closed {Attempt::Done(err(SYSTEM_EVENT_ERROR_CLOSED))} else {Attempt::Empty}
 }
-pub(crate) fn enroll_in(t:&mut Table,sub:ObjId,waiter:(ObjId,u64)) {
- if let Ok(KObject::Subscription(s))=t.get_mut(sub) {assert!(s.waiter.is_none());s.waiter=Some(waiter);}
+pub(crate) fn enroll_in(t:&mut Table,sub:ObjId,waiter:(ObjId,u64))->Result<(),i64> {
+ match t.get_mut(sub) {
+  Ok(KObject::Subscription(s)) if s.closed=>Err(err(SYSTEM_EVENT_ERROR_CLOSED)),
+  Ok(KObject::Subscription(s)) if s.waiter.is_none()=>{s.waiter=Some(waiter);Ok(())},
+  Ok(KObject::Subscription(_))=>Err(err(SYSTEM_EVENT_ERROR_BUSY)),
+  _=>Err(err(SYSTEM_HANDLE_ERROR_INVALID)),
+ }
 }
 pub(crate) fn release_target_in(t:&mut Table,target:WaitTarget,waiter:Option<(ObjId,u64)>) {
  if let Ok(KObject::Subscription(s))=t.get_mut(target.sub) {if waiter.is_some() && s.waiter==waiter {s.waiter=None;}}
@@ -235,7 +245,10 @@ pub fn sys_subscribe(source:u64,ptr:u64)->i64 {
   let Some(output)=ptr.checked_add(16) else {return err(SYSTEM_ERROR_INVALID_ARGUMENT)};
   let pin=match proc::pin_user_in(t,pid,output,16,true) {Ok(pin)=>pin,Err(_)=>return err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS)};
   match subscribe_in(t,pid,crate::syscall::handle_arg(source),args.policy) {
-   Ok((handle,snapshot))=>{let mut out=[0;16];out[..8].copy_from_slice(&snapshot.version.to_le_bytes());out[8..].copy_from_slice(&snapshot.value.to_le_bytes());assert!(pin.write_at(0,&out));handle.raw() as i64},
+   Ok((handle,snapshot))=>{let mut out=[0;16];out[..8].copy_from_slice(&snapshot.version.to_le_bytes());out[8..].copy_from_slice(&snapshot.value.to_le_bytes());if !pin.write_at(0,&out) {
+     if let Ok(obj)=proc::take_handle_in(t,pid,handle) {let _=kobj::release_owner_in(t,obj);}
+     return err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS);
+    }handle.raw() as i64},
    Err(e)=>report_error(e),
   }
  })

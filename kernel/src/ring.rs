@@ -428,10 +428,15 @@ fn run_backend_in(t: &mut Table, ring: ObjId, entry: BackendEntry, action: Backe
         let owner = ring_mut(t, ring).map(|ring| ring.owner);
         if let (Some(owner), Some(authority)) = (owner, entry.authority) {
             if !proc::authority_active_in(t, owner, authority) {
-                return BackendOutcome::Complete {
-                    entry,
-                    value: err(SYSTEM_HANDLE_ERROR_INVALID),
-                };
+                // A closed subscription is a normal terminal condition of its
+                // in-flight wait. Let that backend observe `closed` instead of
+                // replacing it with the lower-level revoked-handle error.
+                if !matches!(entry.backend, Backend::SubscriptionWait(_)) {
+                    return BackendOutcome::Complete {
+                        entry,
+                        value: err(SYSTEM_HANDLE_ERROR_INVALID),
+                    };
+                }
             }
         }
     }
@@ -1034,8 +1039,16 @@ fn launch_subscription_wait_in(t: &mut Table, ring: ObjId, request: u64, exec: E
     start_request_in(t, ring, request, exec);
     match crate::subscription::deliver_in(t, &target) {
         crate::subscription::Attempt::Empty => {
-            crate::subscription::enroll_in(t, target.sub, (ring, request));
-            park_backend_in(t, ring, request, Backend::SubscriptionWait(target), true, Some(authority));
+            match crate::subscription::enroll_in(t, target.sub, (ring, request)) {
+                Ok(()) => park_backend_in(t, ring, request, Backend::SubscriptionWait(target), true, Some(authority)),
+                Err(error) => finish_accepted_work_in(
+                    t,
+                    ring,
+                    request,
+                    Work::SubscriptionWait { target, authority },
+                    error,
+                ),
+            }
         }
         crate::subscription::Attempt::Done(value) => {
             finish_accepted_work_in(t, ring, request, Work::SubscriptionWait { target, authority }, value);

@@ -1,6 +1,6 @@
 # Issue #42 原生订阅版本连续性状态
 
-更新时间：2026-11-18。
+更新时间：2026-11-19。
 
 状态：**软件修复、定向测试和百万事件真实 QEMU 专项均已完成；该结论只覆盖
 订阅版本连续性切片，不等于 Issue #42 全部审计项完成。**
@@ -68,3 +68,36 @@ Process、EventSource、Subscription 和 ExitState 均在两轮结束后回收�
 该演练使用真实内核对象与调度 API，但不是 CPL3 客户端压力、硬件吞吐或 p99
 声明；Issue #42 中原生地址同步、Pager、各 AsyncRing 后端静止等专题仍按各自
 DAG 退出门验证。
+
+## 订阅等待关闭 fail-closed
+
+复核 EVT-2 对象级路径时，在未修改的公开 `main` `130cbb0` 上复现了一个已有回归：
+关闭仍有在飞等待的 Subscription 后，Ring 前置的 Handle authority 检查先返回
+`system.handle.error.invalid`，覆盖了该后端本应返回的
+`system.event.error.closed`。
+
+修复保持既有对象与能力权威不变：
+
+- Subscription Wait 的 authority 失效时，继续进入订阅后端观察自身关闭状态；
+- 等待登记不再使用 `assert!`；重复、关闭或无效目标分别返回
+  `busy`、`closed`、`invalid`，不以内核 panic 处理外部状态；
+- `system.event.subscription.create` 的输出写入若失败，会撤销刚创建的订阅句柄；
+- `check_wait_in` 同时拒绝已关闭订阅，避免先创建 Ring 控制块再失败。
+
+验证：
+
+```text
+cargo check -p jasper-kernel --target x86_64-unknown-none --features evt2-verify
+PASS
+
+1 vCPU: qemu_rc=33
+4 vCPU: qemu_rc=33
+[JSR-EVT2-RING] ... busy_atomic=true sub_close=true source_close=true pins=true resources=true failed=0
+[JSR-EVT2-QUOTA] ... refused=true atomic=true retry=true exit=true resources=true failed=0
+[JSR-EVT2-OBJECTS] ... source_close=true exit=true quota_return=true resources=true failed=0
+```
+
+8 vCPU TCG 与 KVM 重放均在无关的 SMP console 前置阶段达到 120/300 秒上限，未进入
+EVT-2，因此不计入本切片通过。证据为
+`evidence/evt1/issue42-subscription-failclosed-20261119f/`；该结果只关闭订阅等待
+错误优先级与 panic 路径，不代表 Issue #42 或 EVT-2 DAG 节点整体完成。
