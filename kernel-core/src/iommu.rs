@@ -5,7 +5,6 @@
 //! Responsibility: a fail-closed IOMMU domain contract, not a hardware driver.
 
 use crate::security_domain::DomainKey;
-use crate::smp::MAX_CPUS;
 
 pub const PAGE_BYTES: u64 = 4096;
 
@@ -298,11 +297,9 @@ impl<const DEVICES: usize, const MAPPINGS: usize, const IRQS: usize>
     pub fn map_irq(&mut self, key: DomainKey, request: IrqRequest) -> Result<(), IommuError> {
         self.check_domain(key)?;
         let binding = self.require_device(request.device)?;
-        if usize::from(request.target_cpu) >= MAX_CPUS
-            || self.irqs.iter().flatten().any(|entry| {
-                entry.sid == request.device.sid() && entry.route.source == request.source
-            })
-        {
+        if self.irqs.iter().flatten().any(|entry| {
+            entry.sid == request.device.sid() && entry.route.source == request.source
+        }) {
             return Err(IommuError::IrqConflict);
         }
         let slot = self
@@ -585,6 +582,33 @@ mod tests {
         assert_eq!(
             iommu.translate_irq(key, device(), 10),
             Err(IommuError::DeviceNotBound)
+        );
+    }
+
+    #[test]
+    fn interrupt_remapping_preserves_cpu_identity_above_legacy_width() {
+        let mut iommu = domain();
+        let key = iommu.key();
+        iommu.bind(key, device()).unwrap();
+        iommu
+            .map_irq(
+                key,
+                IrqRequest {
+                    device: device(),
+                    source: 11,
+                    target_cpu: u8::MAX,
+                    vector: 50,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            iommu.translate_irq(key, device(), 11),
+            Ok(IrqRoute {
+                source: 11,
+                target_cpu: u8::MAX,
+                vector: 50,
+                device_epoch: 1,
+            })
         );
     }
 

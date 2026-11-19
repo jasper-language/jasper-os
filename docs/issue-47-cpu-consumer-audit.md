@@ -113,4 +113,7 @@
 - `kernel-core/src/shard.rs`：删除 `MAX_SHARDS = MAX_CPUS * 4`。路由分片数只受
   32 位分片编号格式范围约束，不再从 CPU 位图宽度派生非规范容量上限；任意更大
   运行期分片预算由服务自身资源准入决定。
+- `kernel-core/src/iommu.rs`：中断重映射不再用 `MAX_CPUS` 拒绝目标 CPU；IOMMU
+  只保留 `u8` 路由字段的协议表示范围，具体 CPU 是否存在/在线由 IRQ/调度权威校验。
+  `target_cpu=255` 的保存与原样读回已有测试。
 - 其余 IRQ 全局路由、调度器、per-CPU、架构入口和亲和 ABI 尚未迁移。
