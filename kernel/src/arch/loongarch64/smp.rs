@@ -237,8 +237,9 @@ fn cpu_hw_id() -> u32 {
 pub fn cpu_index() -> usize {
     let hw = cpu_hw_id();
     let Some(topology) = topology() else {
-        crate::kprintln!("[JSR-SMP] reject=cpu_topology_unpublished hw={}", hw);
-        crate::arch::halt_forever()
+        // Only the boot hart executes before the heap-backed topology is
+        // published. Secondary CPUs start strictly after that transaction.
+        return 0;
     };
     let mut registered = None;
     for index in 0..topology.count() {

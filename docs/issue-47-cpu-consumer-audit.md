@@ -179,8 +179,10 @@
   0，整体仍因既有 PCI/KRN0 缺口退出失败。
 - `kernel/src/arch/loongarch64/{boot,smp}.rs`：LoongArch 堆前阶段只保存并校验
   FDT，不再提前分配动态 CPU Topology；硬件身份和 disabled 集合在堆后
-  `init_boot` 发布，固定 `HW_IDS`/`DISABLED_IDS` 已删除。目标构建通过，但标准
-  `accept-loongarch64.sh` 仍没有串口输出，因此不记录为运行验收通过。
+  `init_boot` 发布，固定 `HW_IDS`/`DISABLED_IDS` 已删除。堆前唯一执行流在
+  Topology 发布前明确映射为 bootstrap CPU0，修复了控制台错误路径递归。标准
+  4 vCPU QEMU 已达到 4/4 online 并跑完大部分阶段；剩余并行 TLB shootdown
+  完成性失败，因此仍不能标记 LoongArch 全量完成。
 - `kernel/src/arch/aarch64/user.rs`：每核用户返回内核栈记录改为 bootstrap 加
   AP 启动前堆扩展。Pixel 6a 无损 runtime 在 `4.49s` 到达 PSCI reset，恢复到同一
   Android build，`sys.boot_completed=1` 且 slot 仍为 `a`。
