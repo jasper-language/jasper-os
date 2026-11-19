@@ -84,6 +84,11 @@ per-CPU 与调度 leaf 的 AP 启动前堆扩容共同决定能否准入。任�
 仍失败关闭，不发布被截断的子集。设备 IRQ 行元数据成本也改为按实际
 `smp::cpu_count()` 计算，不再固定按 128 CPU 估算。
 
+Linux `sched_getaffinity`/`sched_setaffinity` 兼容适配已改为按调用者给定长度和
+当前已发现 CPU 数生成/读取字节位图，不再依赖单个 `u64`，也不再以
+`kernel_core::smp::MAX_CPUS` 拒绝高位 CPU。位图分配失败返回 `ENOMEM`，短缓冲、
+离线位或超出当前 CPU 数的置位返回 `EINVAL`。
+
 - 不能把 128 改成 256/1024 后声称“动态支持”；
 - 不能把本切片中的 4096-CPU 软件准入测试冒充真实内核运行；
 - 不能把 `Topology` 的高位库存保留冒充 `CpuSet`/调度器已支持高位 CPU；

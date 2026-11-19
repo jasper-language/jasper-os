@@ -215,4 +215,7 @@
   拒绝，不启动任意 128 子集。
 - `kernel/src/irq.rs` 的每行元数据预算从固定 `MAX_CPUS` 改为实际
   `smp::cpu_count()`，避免合法 >128 拓扑在设备 IRQ 容量规划阶段被错误拒绝。
+- `kernel/src/linux_abi.rs` 的 Linux affinity 适配改为按当前 CPU 数生成动态
+  字节位图；查询和设置不再依赖 `u64` 或 `MAX_CPUS`，高位 CPU 的可见性仍由统一
+  online/runtime registry 裁决。
 - 其余调度器固定表、共享 CpuSet 门面、部分诊断和亲和 ABI 尚未迁移。

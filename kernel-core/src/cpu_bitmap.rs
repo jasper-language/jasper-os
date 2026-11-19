@@ -206,6 +206,37 @@ impl CpuBitmap {
         Ok(())
     }
 
+    /// Encode membership as a little-endian byte mask.
+    ///
+    /// Returns the encoded byte length, or `None` when a member cannot be
+    /// represented by `output`. The destination is cleared before membership
+    /// bits are written.
+    pub fn write_le_bytes(&self, output: &mut [u8]) -> Option<usize> {
+        let bits = output.len().checked_mul(8)?;
+        if self.iter().any(|cpu| cpu >= bits) {
+            return None;
+        }
+        output.fill(0);
+        for cpu in self.iter() {
+            output[cpu / 8] |= 1u8 << (cpu % 8);
+        }
+        Some(output.len())
+    }
+
+    /// Decode a little-endian byte mask, rejecting allocation failure.
+    pub fn from_le_bytes(input: &[u8]) -> Option<Self> {
+        let bits = input.len().checked_mul(8)?;
+        let mut bitmap = Self::with_capacity(bits).ok()?;
+        for (byte_index, byte) in input.iter().copied().enumerate() {
+            for bit in 0..8 {
+                if byte & (1u8 << bit) != 0 {
+                    bitmap.insert(byte_index * 8 + bit).ok()?;
+                }
+            }
+        }
+        Some(bitmap)
+    }
+
     /// Borrow the set as the legacy mask when every member is representable.
     pub fn to_cpu_set(&self) -> Option<crate::smp::CpuSet> {
         let mut legacy = crate::smp::CpuSet::EMPTY;
@@ -334,5 +365,18 @@ mod tests {
             destination.to_cpu_set(),
             Some(crate::smp::CpuSet::first(128))
         );
+    }
+
+    #[test]
+    fn little_endian_masks_cover_high_sparse_cpus() {
+        let mut source = CpuBitmap::empty();
+        source.insert(129).unwrap();
+        source.insert(4096).unwrap();
+        let mut bytes = vec![0xff; 4097usize.div_ceil(8)];
+        assert_eq!(source.write_le_bytes(&mut bytes), Some(bytes.len()));
+        assert_eq!(bytes[129 / 8] & (1 << (129 % 8)), 1 << (129 % 8));
+        assert_eq!(bytes[4096 / 8] & (1 << (4096 % 8)), 1 << (4096 % 8));
+        assert_eq!(CpuBitmap::from_le_bytes(&bytes).unwrap(), source);
+        assert_eq!(source.write_le_bytes(&mut [0u8; 16]), None);
     }
 }

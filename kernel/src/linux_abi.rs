@@ -4687,9 +4687,12 @@ fn linux_sysinfo(destination: u64) -> Result<u64, CompatErrno> {
 ///
 /// 查询当前 Linux 进程内线程的实际亲和位图；短缓冲、伪造 TID 和坏用户指针失败关闭。
 fn linux_sched_getaffinity(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const KERNEL_MASK_BYTES: usize = 8;
     let size = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
-    if size < KERNEL_MASK_BYTES {
+    let required = crate::smp::cpu_count()
+        .checked_add(7)
+        .ok_or(CompatErrno::Invalid)?
+        / 8;
+    if required == 0 || size < required {
         return Err(CompatErrno::Invalid);
     }
     let task = if args[0] == 0 {
@@ -4701,32 +4704,40 @@ fn linux_sched_getaffinity(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrn
     let affinity = sched::task_affinity(task)
         .ok_or(CompatErrno::NoProcess)?
         .intersect(sched::online_cpus());
-    let mask = affinity.bits_u64().ok_or(CompatErrno::Invalid)?;
-    copy_to_user(args[2], &mask.to_le_bytes(), KERNEL_MASK_BYTES)
-        .map_err(|_| CompatErrno::Fault)?;
-    Ok(KERNEL_MASK_BYTES as u64)
+    let affinity =
+        kernel_core::cpu_bitmap::CpuBitmap::from_cpu_set(affinity).map_err(|_| {
+            CompatErrno::NoMemory
+        })?;
+    let mut mask = alloc::vec::Vec::new();
+    mask.try_reserve_exact(required)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    mask.resize(required, 0);
+    affinity.write_le_bytes(&mut mask).ok_or(CompatErrno::Invalid)?;
+    copy_to_user(args[2], &mask, required).map_err(|_| CompatErrno::Fault)?;
+    Ok(required as u64)
 }
 
 fn linux_sched_setaffinity(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const KERNEL_MASK_BYTES: usize = 8;
     let size = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
-    if size < KERNEL_MASK_BYTES {
+    let cpus = crate::smp::cpu_count();
+    let required = cpus.checked_add(7).ok_or(CompatErrno::Invalid)? / 8;
+    if required == 0 || size < required {
         return Err(CompatErrno::Invalid);
     }
-    let mut raw = [0u8; KERNEL_MASK_BYTES];
-    copy_from_user(&mut raw, args[2], KERNEL_MASK_BYTES)
-        .map_err(|_| CompatErrno::Fault)?;
-    let mask = u64::from_le_bytes(raw);
+    let mut mask = alloc::vec::Vec::new();
+    mask.try_reserve_exact(required)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    mask.resize(required, 0);
+    copy_from_user(&mut mask, args[2], required).map_err(|_| CompatErrno::Fault)?;
+    let bitmap =
+        kernel_core::cpu_bitmap::CpuBitmap::from_le_bytes(&mask).ok_or(CompatErrno::NoMemory)?;
     let online = sched::online_cpus();
-    let mut set = kernel_core::smp::CpuSet::EMPTY;
-    for cpu in 0..64 {
-        if mask & (1u64 << cpu) == 0 {
-            continue;
-        }
-        if cpu >= kernel_core::smp::MAX_CPUS || !online.contains(cpu) || !set.insert(cpu) {
+    for cpu in bitmap.iter() {
+        if cpu >= cpus || !online.contains(cpu) {
             return Err(CompatErrno::Invalid);
         }
     }
+    let set = bitmap.to_cpu_set().ok_or(CompatErrno::Invalid)?;
     if set.is_empty() {
         return Err(CompatErrno::Invalid);
     }
