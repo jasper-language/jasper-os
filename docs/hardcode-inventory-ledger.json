@@ -1,5 +1,5 @@
 {
-  "baseline_total": 344,
+  "baseline_total": 343,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -13,7 +13,7 @@
     "explicit-safety-policy": 129,
     "platform-adapter": 28,
     "protocol-abi": 38,
-    "runtime-resource-capacity": 68,
+    "runtime-resource-capacity": 67,
     "test-demo-fixture": 6
   },
   "entries": [
@@ -2048,16 +2048,6 @@
       "source": "const MAX_SPINS: u64 = 50_000_000;"
     },
     {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "dd1e888dfec78a5b384b2f53ab9bb6c726bd3240f46067a79406d121121734f4",
-      "line": 16,
-      "path": "kernel/src/diagnostic_sources.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
-      "rules": "HC-G8",
-      "source": "const SOURCE_CAPACITY: usize = 4;"
-    },
-    {
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "9dc5a9aca58d957b7ac5cdb49427e69f316c8257ce067f61616d61c4a0653062",
@@ -2713,7 +2703,7 @@
     "explicit-safety-policy": 145,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 107,
+    "runtime-resource-capacity": 106,
     "test-demo-fixture": 7
   }
 }

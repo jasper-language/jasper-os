@@ -13,7 +13,7 @@ use jasper_lifecycle_model::diagnostics::{
 
 use crate::sync::IrqSpinLock;
 
-const SOURCE_CAPACITY: usize = 4;
+const SOURCE_CAPACITY: usize = 4; // JASPER-HARDCODE-REVIEW: issue=35 source=diagnostic-source-panic-ring reason=no-allocation-no-blocking-emergency-ring
 
 static STORED: AtomicU32 = AtomicU32::new(0);
 static DROPPED: AtomicU32 = AtomicU32::new(0);

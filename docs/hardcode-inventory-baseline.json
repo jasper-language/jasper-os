@@ -1394,12 +1394,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "dd1e888dfec78a5b384b2f53ab9bb6c726bd3240f46067a79406d121121734f4",
-      "path": "kernel/src/diagnostic_sources.rs",
-      "rules": "HC-G8"
-    },
-    {
-      "count": 1,
       "fingerprint": "ddfdf2e125861136367346aecad3408095d59517145985544c28acd986040052",
       "path": "kernel-core/src/acpi.rs",
       "rules": "HC-G1"
@@ -1635,5 +1629,5 @@
     "user",
     "xtask"
   ],
-  "total": 344
+  "total": 343
 }
