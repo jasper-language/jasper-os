@@ -232,6 +232,8 @@ pub mod extension_abi;
 
 pub mod cpu_time;
 pub mod cpu_identity;
+#[cfg(any(test, feature = "cpu-dynamic"))]
+pub mod cpu_bitmap;
 pub mod capability_matrix;
 
 pub mod subscription;

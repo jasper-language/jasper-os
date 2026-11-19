@@ -25,6 +25,12 @@ SMP 门面在启动 secondary CPUs 前读取真实空闲页帧预算，并按每
 
 失败时输出结构化 `system.cpu.error.*` 原因并停机。
 
+阶段 2 的可扩展核心已开始：`kernel_core::cpu_bitmap::CpuBitmap` 使用 `Vec<u64>`
+按需扩容，支持稀疏高位 CPU、membership、first、union、intersection 和 remove-all，
+没有预设 CPU 数量常量。测试覆盖 1/32/64/128/129/256/1024/4096、130 位边界和
+分配结构行为。该类型尚未替换生产 `CpuSet`，所以只是阶段 2 进行中的核心，
+不是最终动态调度支持。
+
 ## 尚未完成
 
 当前生产 `CpuSet` 仍是 128 位静态位图；调度、每核状态、IRQ/MSI、TLB/IPI、
@@ -38,7 +44,7 @@ SMP 门面在启动 secondary CPUs 前读取真实空闲页帧预算，并按每
 ## Issue #47 阶段映射
 
 1. `CPU-DYNAMIC-ADMISSION-1`：消费链、bootstrap 生命周期、锁序和负例审计；
-2. `CPU-DYNAMIC-CORE-1`：动态 CPU 身份、拓扑和 `CpuSet` 核心；
+2. `CPU-DYNAMIC-CORE-1`：动态 CPU 身份、拓扑和 `CpuSet` 核心（进行中）；
 3. `CPU-DYNAMIC-CONSUMERS-1`：调度、per-CPU、IRQ/MSI、TLB/IPI、NUMA 和诊断；
 4. `CPU-DYNAMIC-ABI-1`：可变长/分页 CPU 枚举与亲和 ABI；
 5. `CPU-DYNAMIC-MATRIX-1`：多规模、多 ISA、热插拔和真实可用平台矩阵。

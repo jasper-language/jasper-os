@@ -1,0 +1,237 @@
+//! Heap-backed CPU membership bitmap with no preset processor-count ceiling.
+//!
+//! This is the scalable phase-2 representation used after the heap is ready.
+//! The existing copyable bootstrap `CpuSet` remains only for pre-heap code
+//! until every production consumer migrates.
+//!
+//! 堆后备、无预设 CPU 数量上限的成员位图。堆就绪后使用该阶段 2 表示；现有可复制
+//! bootstrap `CpuSet` 仅暂留于堆前代码，生产消费者仍需逐项迁移。
+
+use alloc::vec::Vec;
+
+/// Failure to construct or grow a dynamic CPU bitmap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuBitmapError {
+    /// The requested CPU or capacity cannot be represented by this address space.
+    InvalidCpu,
+    /// Heap allocation failed; existing membership remains unchanged.
+    Allocation,
+}
+
+impl CpuBitmapError {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::InvalidCpu => "system.cpu.error.invalid_cpu",
+            Self::Allocation => "system.cpu.error.bitmap_allocation",
+        }
+    }
+}
+
+/// Variable-length CPU membership set.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CpuBitmap {
+    words: Vec<u64>,
+}
+
+impl CpuBitmap {
+    /// Create storage for at least `capacity` possible CPU indices.
+    pub fn with_capacity(capacity: usize) -> Result<Self, CpuBitmapError> {
+        let words = words_for(capacity)?;
+        let mut storage = Vec::new();
+        storage
+            .try_reserve_exact(words)
+            .map_err(|_| CpuBitmapError::Allocation)?;
+        storage.resize(words, 0);
+        Ok(Self { words: storage })
+    }
+
+    /// Empty set with no allocated words.
+    pub const fn empty() -> Self {
+        Self { words: Vec::new() }
+    }
+
+    /// Create a set containing processors `0..count`.
+    pub fn first(count: usize) -> Result<Self, CpuBitmapError> {
+        let mut set = Self::with_capacity(count)?;
+        let full_words = count / 64;
+        for word in &mut set.words[..full_words] {
+            *word = u64::MAX;
+        }
+        if count % 64 != 0 {
+            set.words[full_words] = (1u64 << (count % 64)) - 1;
+        }
+        Ok(set)
+    }
+
+    /// Represented bits rounded up to whole 64-bit words.
+    pub fn capacity_bits(&self) -> Result<usize, CpuBitmapError> {
+        self.words
+            .len()
+            .checked_mul(64)
+            .ok_or(CpuBitmapError::InvalidCpu)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.words.iter().all(|word| *word == 0)
+    }
+
+    pub fn len(&self) -> usize {
+        self.words
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum()
+    }
+
+    pub fn contains(&self, cpu: usize) -> bool {
+        let Some((index, mask)) = word_mask(cpu) else {
+            return false;
+        };
+        self.words
+            .get(index)
+            .is_some_and(|word| word & mask != 0)
+    }
+
+    /// Insert one CPU, growing the backing set when required.
+    pub fn insert(&mut self, cpu: usize) -> Result<(), CpuBitmapError> {
+        let (index, mask) = word_mask(cpu).ok_or(CpuBitmapError::InvalidCpu)?;
+        let needed = index.checked_add(1).ok_or(CpuBitmapError::InvalidCpu)?;
+        if needed > self.words.len() {
+            self.words
+                .try_reserve(needed - self.words.len())
+                .map_err(|_| CpuBitmapError::Allocation)?;
+            self.words.resize(needed, 0);
+        }
+        self.words[index] |= mask;
+        Ok(())
+    }
+
+    /// Remove one CPU. Removing an out-of-range CPU is a no-op.
+    pub fn remove(&mut self, cpu: usize) {
+        let Some((index, mask)) = word_mask(cpu) else {
+            return;
+        };
+        if let Some(word) = self.words.get_mut(index) {
+            *word &= !mask;
+        }
+    }
+
+    /// Number of members in ascending CPU-index order.
+    pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        self.words
+            .iter()
+            .enumerate()
+            .flat_map(|(index, word)| {
+                let mut bits = *word;
+                core::iter::from_fn(move || {
+                    if bits == 0 {
+                        return None;
+                    }
+                    let offset = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    Some(index * 64 + offset)
+                })
+            })
+    }
+
+    pub fn union(&self, other: &Self) -> Result<Self, CpuBitmapError> {
+        let words = self.words.len().max(other.words.len());
+        let mut result = Self::with_words(words)?;
+        for (index, word) in result.words.iter_mut().enumerate() {
+            *word = self.words.get(index).copied().unwrap_or(0)
+                | other.words.get(index).copied().unwrap_or(0);
+        }
+        Ok(result)
+    }
+
+    pub fn intersect(&self, other: &Self) -> Result<Self, CpuBitmapError> {
+        let words = self.words.len().min(other.words.len());
+        let mut result = Self::with_words(words)?;
+        for (index, word) in result.words.iter_mut().enumerate() {
+            *word = self.words[index] & other.words[index];
+        }
+        Ok(result)
+    }
+
+    /// Remove every member present in `other`.
+    pub fn remove_all(&mut self, other: &Self) {
+        for (index, word) in self.words.iter_mut().enumerate() {
+            if let Some(remove) = other.words.get(index) {
+                *word &= !*remove;
+            }
+        }
+    }
+
+    fn with_words(words: usize) -> Result<Self, CpuBitmapError> {
+        let mut storage = Vec::new();
+        storage
+            .try_reserve_exact(words)
+            .map_err(|_| CpuBitmapError::Allocation)?;
+        storage.resize(words, 0);
+        Ok(Self { words: storage })
+    }
+}
+
+fn words_for(bits: usize) -> Result<usize, CpuBitmapError> {
+    bits.checked_add(63)
+        .map(|rounded| rounded / 64)
+        .ok_or(CpuBitmapError::InvalidCpu)
+}
+
+fn word_mask(cpu: usize) -> Option<(usize, u64)> {
+    let index = cpu / 64;
+    let mask = 1u64.checked_shl((cpu % 64) as u32)?;
+    Some((index, mask))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sparse_high_cpu_membership_grows_without_fixed_count_ceiling() {
+        for cpu in [1usize, 32, 64, 128, 129, 256, 1024, 4096] {
+            let mut set = CpuBitmap::empty();
+            set.insert(cpu).unwrap();
+            assert!(set.contains(cpu));
+            assert_eq!(set.iter().collect::<Vec<_>>(), vec![cpu]);
+        }
+    }
+
+    #[test]
+    fn first_union_intersection_and_removal_are_exact() {
+        let first = CpuBitmap::first(130).unwrap();
+        assert_eq!(first.len(), 130);
+        assert!(first.contains(129));
+        assert!(!first.contains(130));
+
+        let mut high = CpuBitmap::empty();
+        high.insert(65).unwrap();
+        high.insert(1024).unwrap();
+        let union = first.union(&high).unwrap();
+        assert_eq!(union.len(), 131);
+        let intersection = first.intersect(&high).unwrap();
+        assert_eq!(intersection.iter().collect::<Vec<_>>(), vec![65]);
+
+        let mut removed = union;
+        removed.remove_all(&high);
+        assert_eq!(removed.len(), 129);
+        assert!(removed.contains(64));
+        assert!(!removed.contains(65));
+        assert!(!removed.contains(1024));
+    }
+
+    #[test]
+    fn empty_and_capacity_boundaries_are_explicit() {
+        assert!(CpuBitmap::empty().is_empty());
+        assert!(CpuBitmap::first(0).unwrap().is_empty());
+        assert_eq!(CpuBitmap::first(1).unwrap().iter().collect::<Vec<_>>(), vec![0]);
+        assert_eq!(
+            CpuBitmap::first(64).unwrap().capacity_bits(),
+            Ok(64)
+        );
+        assert_eq!(
+            CpuBitmap::first(65).unwrap().capacity_bits(),
+            Ok(128)
+        );
+    }
+}

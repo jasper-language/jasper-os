@@ -1,0 +1,104 @@
+# Issue #47 阶段 1：CPU 固定容量消费链审计
+
+更新时间：2026-11-19。
+
+状态：**阶段 1 审计清单；当前 128 槽生产实现仍存在，阶段 2/3 尚未完成。**
+
+## 已知固定事实
+
+| 位置 | 当前事实 | 性质 |
+| --- | --- | --- |
+| `kernel-core/src/smp.rs` | `BOOTSTRAP_CPUS = 128` | 堆就绪前的 bootstrap 暂存容量；不得成为最终运行期上限 |
+| `kernel-core/src/smp.rs` | `MAX_CPUS = BOOTSTRAP_CPUS` | 过渡期位图容量，当前仍限制生产拓扑 |
+| `kernel-core/src/smp.rs` | `CpuSet([u64; CPU_SET_WORDS])` | 固定 128 位集合，需迁移到动态/分段结构 |
+| `Topology` (`cpu-dynamic`) | 128 项 bootstrap + `Vec<u32>` overflow | 固件库存可超过 128，但最终调度集合仍无法表达 |
+| 旧原生亲和 ABI | 固定宽度字 | 高位 CPU 必须显式拒绝或由新可变长 ABI 替代 |
+
+`discovered`、`supported`、`admitted`、`online` 和 `rejected` 必须保持独立；
+`Topology` 保留全部固件身份不代表调度器、IRQ 或原生 ABI 已支持对应 CPU。
+
+## 生产消费链
+
+以下清单排除了 `_demo`、`*/demo/*` 和测试文件。
+
+| 消费域 | 生产文件 | 当前依赖 | 迁移归属 |
+| --- | --- | --- | --- |
+| CPU 集合/拓扑/击落/IPI | `kernel-core/src/smp.rs` | 33 处固定集合引用；固定 bitmap、定时数组、CallSlot 测试边界 | 阶段 2 核心 |
+| 环境/亲和策略 | `kernel-core/src/environment.rs` | 用 `MAX_CPUS` 校验 demand CPU | 阶段 2/3 |
+| FDT/IOMMU CPU 校验 | `kernel-core/src/fdt.rs`, `iommu.rs` | 固定 CPU 上限校验 target CPU | 阶段 2/3 |
+| IRQ 路由/配额 | `kernel-core/src/irq.rs`, `kernel/src/irq.rs` | 每核 MSI handler/count/quota、固定行投影数组 | 阶段 3 |
+| MSI 向量池 | `kernel-core/src/msi.rs` | 每核固定向量位图 | 阶段 3 |
+| sharding/tickless | `kernel-core/src/shard.rs`, `tickless.rs` | shard 数量、每核 stop 时间数组 | 阶段 3 |
+| per-CPU 数据/IPI/AOK | `kernel/src/smp/percpu.rs`, `kernel/src/smp/mod.rs` | `[PerCpu; MAX_CPUS]`、固定 board 初始化 | 阶段 2/3 |
+| x86 SMP/GDT/TSS/syscall/user | `kernel/src/arch/x86_64/{smp,gdt,syscall,user}.rs` | 每核 HW ID、TSS/GDT、syscall 返回帧 | 阶段 3 |
+| AArch64 SMP/GIC/user | `kernel/src/arch/aarch64/{smp,gic,user}.rs` | 每核接口、affinity、GIC 状态、用户栈 | 阶段 3 |
+| RISC-V SMP/PLIC/devIRQ/user/boot | `kernel/src/arch/riscv/{smp,plic,devirq,user,boot}.rs` | mailbox、context、每核启动/用户状态 | 阶段 3 |
+| LoongArch SMP | `kernel/src/arch/loongarch64/smp.rs` | HW ID 表、AP 静态栈和拓扑截断迁移 | 阶段 2/3 |
+| 调度器 | `kernel/src/sched/scheduler.rs`, `sched/mod.rs` | 86+13 处固定数组：运行队列、wake/RT/NS heap、idle context、统计、timer | 阶段 3 |
+| 调度探针/统计 | `kernel/src/sched/pex4_probe.rs`, `wcet.rs` | 每核采样数组、IRQ-off 计数 | 阶段 3 |
+| 同步/锁诊断 | `kernel/src/sync.rs` | 每核 acquired 计数 | 阶段 3 |
+| 配置/架构门 | `kernel/src/config.rs`, `kernel/src/arch/mod.rs` | CPU 容量检查/架构每核门面 | 阶段 2 |
+| Linux 亲和兼容 | `kernel/src/linux_abi.rs` | 旧固定掩码语义 | 阶段 4 兼容适配 |
+
+未纳入迁移的生产宏/生成代码必须在阶段 1 结束前补充；演示代码可以继续使用固定夹具，
+但只能作为软件测试夹具，不能定义生产容量。
+
+## 启动生命周期与分配约束
+
+### 1. 堆前固件发现
+
+- 尚无 `alloc` 时只允许写入受审计 bootstrap 暂存区；
+- bootstrap 暂存区溢出必须保留 discovered/overflow 事实，禁止发布 `inventory_complete=true`；
+- 固件 ID 可以稀疏、重复或非法，逻辑索引不得由硬件 ID 直接充当；
+- disabled、转换失败、重复项和容量不足必须分别计数；
+- 此阶段不得声称 CPU 已 supported/admitted/online。
+
+### 2. 堆后拓扑迁移
+
+- bootstrap 记录必须无损迁移到堆后备身份和动态集合；
+- 迁移前冻结唯一 owner，完成后旧暂存区不得继续作为第二事实源；
+- 分配失败时保留完整 discovered 事实并拒绝启动，不得回退为启动 128 个子集；
+- 逻辑 CPU ID 分配、硬件 ID、NUMA 节点和 generation 必须在同一次发布中提交。
+
+### 3. 资源准入与上线
+
+- 准入成本至少包含身份/拓扑、per-CPU 状态、空闲栈、调度队列/统计、IRQ/MSI、
+  timer/RT、TLB/IPI 与诊断元数据；
+- 完整 enabled 库存必须同时满足预算；本阶段已加入无固定数量的预算函数，但当前
+  只对 secondary idle stack 做了真实预算接线，其他静态元数据仍待阶段 3；
+- 每个 secondary 的资源预留在 Start IPI 前完成；
+- 分配失败、元数据初始化失败和状态迁移失败不得发布 Online；
+- 迟到报到、超时或 reset 后，旧 generation 的 Handle/I/O/IRQ completion 不得复活。
+
+### 4. Lock/IRQ 约束
+
+- 拓扑发布锁、CPU 状态锁、调度锁和 IRQ 锁保持既有全局顺序；
+- 不得在 IRQ 关闭或 IRQ-safe spinlock 持有时调用堆分配；
+- 动态扩容/收缩先冻结候选集合，再在锁外分配，随后原子发布或整体回滚；
+- IPI/TLB/cross-CPU call 只访问已发布且仍在线的 generation；
+- CPU 下线时先停止新投递，再迁移/排空任务与 IRQ，最后撤销资源和集合成员。
+
+## 阶段 2/3 迁移顺序
+
+1. 把 `CpuSet` 从 `Copy` 固定位图迁为可扩展集合，提供运行期 `capacity/word`、成员迭代、
+   union/intersection/without 和失败原子扩容；
+2. 转换拓扑 bootstrap -> 堆后备 inventory，并建立唯一 CPU runtime registry；
+3. 迁移 `PerCpu`、shootdown boards、mailbox/call slots 和 TLB/IPI；
+4. 迁移四个架构 SMP/GIC/PLIC/TSS/syscall/user 入口；
+5. 迁移调度器、timer/RT、IRQ/MSI 和 Workload/NUMA；
+6. 迁移诊断/统计/探针，最后迁移原生亲和 ABI 和兼容翻译。
+
+## 阶段 1 负例清单
+
+- `present=129, disabled=1` 可准入 128；`disabled=0` 且预算只足够 128 时整体拒绝；
+- 129/256/1024/4096 软件准入无固定数量上限；
+- disabled 数大于 present、零 enabled、乘法溢出失败关闭；
+- 重复、稀疏、异常硬件 ID 在 Topology/架构适配层保留并拒绝不完整拓扑；
+- bootstrap 溢出不能被报告为 complete；
+- 当前 128 边界必须保留正向与拒绝测试，直到动态结构替换完成。
+
+## 尚未完成
+
+本审计没有删除固定 `CpuSet`，也没有迁移生产每核数组。Issue #47 阶段 1 的清单已完成
+第一版，但仍需在阶段 2 开工前逐文件确认生成代码、宏和构建期条件没有遗漏；阶段 2/3
+完成前 `CPU-DYNAMIC-ADMISSION-1` 不能标记 done。
