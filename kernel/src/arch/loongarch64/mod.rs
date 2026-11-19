@@ -57,6 +57,10 @@ impl Platform for LoongArch64 {
         }
     }
 
+    fn prepare_cpu_runtime(cpus: usize) -> Result<(), &'static str> {
+        smp::prepare(cpus).map_err(smp::RuntimeStorageError::name)
+    }
+
     fn timer_stretch(ticks: u32) -> bool {
         timer::stretch(ticks)
     }

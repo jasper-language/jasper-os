@@ -7,8 +7,11 @@
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use alloc::vec::Vec;
 use kernel_core::fdt::Fdt;
-use kernel_core::smp::{CpuSet, IpiKind, SmpError, Topology, MAX_CPUS};
+use kernel_core::frame::{PhysFrame, FRAME_SIZE};
+use kernel_core::paging::{MapFlags, VirtPage};
+use kernel_core::smp::{CpuSet, IpiKind, SmpError, Topology};
 use spin::Once;
 
 use super::qemu_virt::{
@@ -31,12 +34,73 @@ static FIRMWARE_FDT: Once<(Fdt<'static>, u32)> = Once::new();
 static FIRMWARE_TOPOLOGY: Once<Topology> = Once::new();
 
 const AP_STACK_BYTES: usize = 16 * 1024;
-#[repr(C, align(16))]
-struct ApStack([u8; AP_STACK_BYTES]);
+const AP_STACK_FRAMES: usize = AP_STACK_BYTES / FRAME_SIZE as usize;
+
+struct ApStack {
+    first: PhysFrame,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RuntimeStorageError {
+    Allocation,
+    Mapping,
+    AlreadyPreparedTooSmall,
+}
+
+impl RuntimeStorageError {
+    pub(super) const fn name(self) -> &'static str {
+        match self {
+            Self::Allocation => "system.cpu.error.loongarch64_smp_storage_allocation",
+            Self::Mapping => "system.cpu.error.loongarch64_smp_storage_mapping",
+            Self::AlreadyPreparedTooSmall => "system.cpu.error.loongarch64_smp_storage_capacity",
+        }
+    }
+}
+
+static AP_STACKS: Once<Result<Vec<ApStack>, RuntimeStorageError>> = Once::new();
 
 #[no_mangle]
-static mut JSR_LOONGARCH64_AP_STACKS: [ApStack; MAX_CPUS] =
-    [const { ApStack([0; AP_STACK_BYTES]) }; MAX_CPUS];
+static mut JSR_LOONGARCH64_AP_START_STACK: u64 = 0;
+
+pub(super) fn prepare(cpus: usize) -> Result<(), RuntimeStorageError> {
+    let stacks = AP_STACKS.call_once(|| {
+        let mut stacks = Vec::new();
+        stacks
+            .try_reserve_exact(cpus)
+            .map_err(|_| RuntimeStorageError::Allocation)?;
+        for _ in 0..cpus {
+            let first = crate::mm::frame::allocate_contiguous(AP_STACK_FRAMES)
+                .map_err(|_| RuntimeStorageError::Allocation)?;
+            for page in 0..AP_STACK_FRAMES {
+                let physical = first
+                    .start()
+                    .checked_add(page as u64 * FRAME_SIZE as u64)
+                    .ok_or(RuntimeStorageError::Mapping)?;
+                let frame = PhysFrame::from_start(physical).ok_or(RuntimeStorageError::Mapping)?;
+                let virtual_page =
+                    VirtPage::from_start(physical).ok_or(RuntimeStorageError::Mapping)?;
+                crate::mm::map::map(
+                    virtual_page,
+                    frame,
+                    MapFlags::WRITE.union(MapFlags::GLOBAL),
+                )
+                .map_err(|_| RuntimeStorageError::Mapping)?;
+            }
+            stacks.push(ApStack { first });
+        }
+        Ok(stacks)
+    });
+    match stacks {
+        Ok(stacks) if stacks.len() >= cpus => Ok(()),
+        Ok(_) => Err(RuntimeStorageError::AlreadyPreparedTooSmall),
+        Err(error) => Err(*error),
+    }
+}
+
+fn stack_top(index: usize) -> Option<u64> {
+    let stack = AP_STACKS.get()?.as_ref().ok()?.get(index)?;
+    Some(stack.first.start() + AP_STACK_BYTES as u64)
+}
 
 extern "C" {
     fn jsr_loongarch64_secondary_entry() -> !;
@@ -50,12 +114,8 @@ global_asm!(
 jsr_loongarch64_secondary_entry:
     csrrd  $a0, 0x20
     csrwr  $zero, 0x2
-    la.local $t0, JSR_LOONGARCH64_AP_STACKS
-    slli.d $t1, $a0, 14
-    add.d  $t0, $t0, $t1
-    li.d   $t1, 16384
-    add.d  $t0, $t0, $t1
-    move   $sp, $t0
+    la.local $t0, JSR_LOONGARCH64_AP_START_STACK
+    ld.d   $sp, $t0, 0
     bl     jsr_loongarch64_secondary_rust
 1:
     idle   0
@@ -307,6 +367,13 @@ pub unsafe fn start_cpu(
         return Err(SmpError::NoSuchCpu);
     }
     TIMER_HZ.store(start.timer_hz, Ordering::Release);
+    let Some(stack_top) = stack_top(start.index) else {
+        return Err(SmpError::StartFailed);
+    };
+    // The BSP starts and waits for each AP serially, so the target consumes
+    // this start block before another AP can replace it.
+    unsafe { JSR_LOONGARCH64_AP_START_STACK = stack_top };
+    core::sync::atomic::fence(Ordering::SeqCst);
     let entry = jsr_loongarch64_secondary_entry as *const () as u64;
     mail_send(entry, start.hw_id);
     let value = (1u32 << 31) | (start.hw_id << 16) | 1;
