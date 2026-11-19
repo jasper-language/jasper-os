@@ -234,6 +234,8 @@ pub mod cpu_time;
 pub mod cpu_identity;
 #[cfg(any(test, feature = "cpu-dynamic"))]
 pub mod cpu_bitmap;
+#[cfg(any(test, feature = "cpu-dynamic"))]
+pub mod cpu_runtime;
 pub mod capability_matrix;
 
 pub mod subscription;

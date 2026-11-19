@@ -55,6 +55,13 @@ NUMA 节点 CPU 本地域也已改用动态集合，重复 CPU、离线节点和
 继续由同一拓扑快照裁决；CPU 4096 的 NUMA 归属已有测试。该迁移不改变页分配器或
 迁移策略，后续仍需把调度放置输入 `Candidate::affinity` 从固定集合迁出。
 
+堆后 CPU runtime registry 已接入真实启动路径：Topology 保留 disabled 硬件 ID，
+registry 在一个事务中发布 discovered、supported、admitted、online/rejected 事实，
+AP 上线时更新 CPU 代际，启动路径也通过 registry 解析硬件 ID。IRQ 路由和均衡器
+已改用动态集合，宿主覆盖 129/4096 号 CPU；QEMU 4 vCPU IOAPIC 路由与 4 vCPU/q35
+NOHZ 均通过。调度均衡决策已有动态 view，但 `Task.affinity` 仍是 `CpuSet`，
+所以没有把这一阶段冒充为调度亲和 ABI 完成。
+
 ## 尚未完成
 
 当前生产 `CpuSet` 仍是 128 位静态位图；调度、每核状态、IRQ/MSI、TLB/IPI、

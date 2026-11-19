@@ -173,6 +173,21 @@ impl CpuBitmap {
         }
     }
 
+    /// Copy membership into this preallocated bitmap without growing it.
+    ///
+    /// Returns [`CpuBitmapError::Allocation`] when the destination lacks the
+    /// words needed for the source. Callers use this on IRQ/timer hot paths
+    /// after reserving storage outside the protected transaction.
+    pub fn copy_from(&mut self, other: &Self) -> Result<(), CpuBitmapError> {
+        if other.words.len() > self.words.len() {
+            return Err(CpuBitmapError::Allocation);
+        }
+        let source_len = other.words.len();
+        self.words[..source_len].copy_from_slice(&other.words);
+        self.words[source_len..].fill(0);
+        Ok(())
+    }
+
     fn with_words(words: usize) -> Result<Self, CpuBitmapError> {
         let mut storage = Vec::new();
         storage
@@ -252,5 +267,20 @@ mod tests {
         set.insert(129).unwrap();
         assert!(set.contains(129));
         assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn copy_from_requires_preallocated_destination() {
+        let source = CpuBitmap::first(130).unwrap();
+        let mut destination = CpuBitmap::with_capacity(130).unwrap();
+        destination.copy_from(&source).unwrap();
+        assert_eq!(destination, source);
+
+        let mut too_small = CpuBitmap::first(64).unwrap();
+        assert_eq!(
+            too_small.copy_from(&source),
+            Err(CpuBitmapError::Allocation)
+        );
+        assert_eq!(too_small, CpuBitmap::first(64).unwrap());
     }
 }

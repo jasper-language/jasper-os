@@ -128,4 +128,19 @@
 - `kernel-core/src/numa.rs`：NUMA 节点的 CPU 本地域在生产 `cpu-dynamic` 构建中
   使用 `CpuBitmap`，节点查询与跨节点重复 CPU 校验消费同一动态成员集合。CPU 4096
   的本地节点和距离优先顺序已有宿主测试；无堆轻量构建保留 `CpuSet` 兼容路径。
-- 其余 IRQ 全局路由、调度器、per-CPU、架构入口和亲和 ABI 尚未迁移。
+- `kernel-core/src/cpu_runtime.rs`：新增堆后 CPU runtime registry，以同一次事务发布
+  discovered / supported / admitted / online / offline / rejected 事实。逻辑 CPU
+  与稀疏硬件 ID 分离，完整 enabled 库存必须同时满足支持与资源预算；重复硬件 ID、
+  未支持 CPU、资源不足均不发布部分状态。内核启动已用该 registry 做准入、硬件 ID
+  解析和 AP 上线代际登记。
+- `kernel-core/src/{fdt,acpi,smp}.rs`：disabled CPU 不再只保留计数，具体硬件 ID
+  进入 Topology；LoongArch 的堆前暂存路径也保留 disabled ID，暂存不足计入
+  `dropped` 并失败关闭。
+- `kernel-core/src/irq.rs` 与 `kernel/src/irq.rs`：IRQ 路由允许集合、在线集合、
+  负载投影和自动均衡全部使用动态 CPU membership；`set_affinity_dynamic` 可直接
+  接收高位稀疏集合。129/4096 号 CPU 的 spread/keep 决策已有宿主测试，真实
+  QEMU IOAPIC 路由在 4 vCPU 上通过。
+- `kernel-core/src/sched/balance.rs`：均衡决策已支持 bootstrap 与动态 membership
+  的统一 view，129/4096 号 CPU 的 placement/steal 已有测试。任务自身仍暂存
+  `CpuSet`，因此这一层只是决策接口迁移，不能据此宣称调度亲和已支持高位 CPU。
+- 其余调度任务亲和、per-CPU、架构入口和亲和 ABI 尚未迁移。

@@ -26,6 +26,7 @@ pub mod shared_demo;
 
 use alloc::{vec, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
+use kernel_core::cpu_runtime::{CpuInventoryEntry, CpuRuntimeRegistry};
 use kernel_core::frame::PhysFrame;
 use kernel_core::paging::{MapFlags, VirtPage};
 use kernel_core::smp::{
@@ -35,14 +36,15 @@ use spin::Once;
 
 use crate::arch;
 use crate::mm;
+use crate::sync::IrqSpinLock;
 
 /// 等待其他处理器应答的自旋上限（超过即判超时并撤销请求，不无限等待）。
 const WAIT_SPINS: u64 = 200_000_000;
 /// 每个其他处理器空闲执行流的栈大小。
 const IDLE_STACK_SIZE: usize = 16 * 1024;
 
-/// 发现得到的拓扑（启动其他处理器时写入一次）。
-static TOPOLOGY: Once<Topology> = Once::new();
+/// 堆后唯一 CPU 身份与生命周期事实源（启动其他处理器时写入一次）。
+static CPU_RUNTIME: Once<IrqSpinLock<CpuRuntimeRegistry>> = Once::new();
 /// 平台要求的低端启动帧（只预留一次，永久保留供以后再次启动处理器）。
 static START_FRAME: Once<Option<PhysFrame>> = Once::new();
 /// One board per initiating logical CPU. The vector is allocated after the
@@ -149,6 +151,40 @@ pub fn reserve_start_frame() -> bool {
         || arch::CPU_START_FRAME_LIMIT.is_none()
 }
 
+fn runtime_cpu_inventory(
+    topology: &Topology,
+    per_cpu_bytes: u64,
+    available_bytes: u64,
+) -> Result<CpuRuntimeRegistry, &'static str> {
+    if topology.disabled_ids().len() != topology.disabled {
+        return Err("disabled_cpu_identity_missing");
+    }
+    let total = topology
+        .count()
+        .checked_add(topology.disabled)
+        .ok_or("cpu_inventory_overflow")?;
+    let mut entries = Vec::new();
+    entries
+        .try_reserve_exact(total)
+        .map_err(|_| "cpu_inventory_allocation")?;
+    for hardware_id in topology.iter() {
+        entries.push(CpuInventoryEntry {
+            hardware_id,
+            enabled: true,
+            supported: true,
+        });
+    }
+    for &hardware_id in topology.disabled_ids() {
+        entries.push(CpuInventoryEntry {
+            hardware_id,
+            enabled: false,
+            supported: false,
+        });
+    }
+    CpuRuntimeRegistry::admit_complete(&entries, per_cpu_bytes, available_bytes, 0)
+        .map_err(|error| error.name())
+}
+
 /// 发现并启动其他处理器（只调用一次，在内核地址空间中、开启任何用户空间之前之后均可）。
 /// 每个处理器依次启动：发出启动命令后等它报到，超时则判失败、不再给它任何工作。
 /// Discover and start the other processors one by one.
@@ -172,37 +208,7 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
         );
         arch::halt_forever();
     }
-    let topo = TOPOLOGY.call_once(|| discovery.topology);
-    let per_cpu_bytes = IDLE_STACK_SIZE as u64;
-    let available_bytes =
-        mm::frame::free_frames() as u64 * kernel_core::frame::FRAME_SIZE as u64;
-    match kernel_core::smp::admit_cpu_inventory(
-        topo.count().saturating_add(topo.disabled),
-        topo.disabled,
-        per_cpu_bytes,
-        available_bytes,
-    ) {
-        Ok(admission) => crate::kprintln!(
-            "[JSR-SMP] admit present={} enabled={} disabled={} per_cpu_bytes={} required_bytes={} available_bytes={} source=resource-budget",
-            admission.present,
-            admission.enabled,
-            admission.disabled,
-            per_cpu_bytes,
-            admission.required_bytes,
-            admission.available_bytes
-        ),
-        Err(error) => {
-            crate::kprintln!(
-                "[JSR-SMP] reject=cpu_resource_admission present={} disabled={} per_cpu_bytes={} available_bytes={} reason={}",
-                topo.count().saturating_add(topo.disabled),
-                topo.disabled,
-                per_cpu_bytes,
-                available_bytes,
-                error.name()
-            );
-            arch::halt_forever();
-        }
-    }
+    let topo = discovery.topology;
     if topo.dropped > 0 {
         crate::kprintln!(
             "[JSR-SMP] reject=cpu_set_capacity discovered={} admitted={} capacity={} dropped={}",
@@ -221,6 +227,34 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
         );
         arch::halt_forever();
     }
+    let per_cpu_bytes = IDLE_STACK_SIZE as u64;
+    let available_bytes =
+        mm::frame::free_frames() as u64 * kernel_core::frame::FRAME_SIZE as u64;
+    let runtime = match runtime_cpu_inventory(&topo, per_cpu_bytes, available_bytes) {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            crate::kprintln!(
+                "[JSR-SMP] reject=cpu_runtime_registry present={} disabled={} reason={}",
+                topo.count().saturating_add(topo.disabled),
+                topo.disabled,
+                reason
+            );
+            arch::halt_forever();
+        }
+    };
+    let admission = runtime.admission();
+    crate::kprintln!(
+        "[JSR-SMP] admit present={} enabled={} disabled={} per_cpu_bytes={} required_bytes={} available_bytes={} source=resource-budget",
+        admission.present,
+        admission.enabled,
+        admission.disabled,
+        per_cpu_bytes,
+        admission.required_bytes,
+        admission.available_bytes
+    );
+    CPU_RUNTIME.call_once(|| {
+        IrqSpinLock::ranked(crate::lockorder::CPU_RUNTIME, runtime)
+    });
     if let Err(error) = crate::sched::prepare_nohz_cpus(topo.count()) {
         crate::kprintln!(
             "[JSR-SMP] reject=tickless_cpu_storage cpus={} reason={}",
@@ -239,7 +273,7 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
         arch::halt_forever();
     }
     let me = percpu::get(0).expect("引导处理器的每核数据");
-    let Some(boot_hw_id) = topo.hw_id(0) else {
+    let Some(boot_hw_id) = runtime_hw_id(0) else {
         crate::kprintln!("[JSR-SMP] reject=boot_cpu_identity_missing");
         arch::halt_forever();
     };
@@ -264,7 +298,7 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
             crate::kprintln!("[JSR-SMP] reject=percpu_missing cpu={}", cpu);
             arch::halt_forever();
         };
-        let Some(hw_id) = topo.hw_id(cpu) else {
+        let Some(hw_id) = runtime_hw_id(cpu) else {
             crate::kprintln!("[JSR-SMP] reject=cpu_identity_missing cpu={}", cpu);
             arch::halt_forever();
         };
@@ -331,6 +365,18 @@ pub fn secondary_main(index: usize) -> ! {
         // 发起方已判超时：不再参与任何工作
         arch::halt_forever();
     }
+    let Some(runtime) = CPU_RUNTIME.get() else {
+        crate::kprintln!("[JSR-SMP] reject=cpu_runtime_missing cpu={}", index);
+        arch::halt_forever();
+    };
+    if let Err(error) = runtime.lock().mark_online(index) {
+        crate::kprintln!(
+            "[JSR-SMP] reject=cpu_online_registry cpu={} reason={}",
+            index,
+            error.name()
+        );
+        arch::halt_forever();
+    }
     // 加入调度：此后本处理器从自己的运行队列取任务，队列空时窃取，仍没有则休眠
     crate::sched::idle_loop(index)
 }
@@ -365,7 +411,16 @@ pub fn on_ipi(kind: IpiKind) {
 /// 拓扑中的处理器数（未启动多处理器时为 1）。
 /// Number of processors in the topology.
 pub fn cpu_count() -> usize {
-    TOPOLOGY.get().map(|t| t.count()).unwrap_or(1)
+    CPU_RUNTIME
+        .get()
+        .map(|runtime| runtime.lock().identities().len())
+        .unwrap_or(1)
+}
+
+fn runtime_hw_id(cpu: usize) -> Option<u32> {
+    CPU_RUNTIME
+        .get()
+        .and_then(|runtime| runtime.lock().identity(cpu).map(|identity| identity.hardware_id))
 }
 
 /// 当前在线的处理器集合。

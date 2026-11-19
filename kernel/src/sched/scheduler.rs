@@ -50,6 +50,7 @@ use kernel_core::task_hot::Slot as HotSlot;
 use kernel_core::timer_event::{OwnerBudget, Request, TimerId, TimerTable, Urgency};
 
 use kernel_core::object::{advance_generation, GENERATION_RETIRED};
+use kernel_core::sched::balance::CpuMembershipRef;
 use kernel_core::smp::{CpuSet, MAX_CPUS};
 use kernel_core::tickless::{plan_with, StopBoard, TickPlan};
 
@@ -1502,7 +1503,7 @@ impl Scheduler {
         let affinity = affinity.unwrap_or(creator.map(|c| c.affinity).unwrap_or(CpuSet::first(1)));
         let base = creator.map(|c| c.base_qos).unwrap_or(Qos::UserInitiated);
         let loads = self.loads();
-        let home = self.balancer.place(affinity, None, base, None, self.now, &loads).map_err(|_| SpawnError::BadAffinity)?;
+        let home = self.balancer.place(CpuMembershipRef::Bootstrap(affinity), None, base, None, self.now, &loads).map_err(|_| SpawnError::BadAffinity)?;
         // 空槽位或「已退出且已被完全换下」的槽位都可复用：
         // 已退出任务一旦被切走（`on_cpu` 清除），就再也不会在它的栈上执行，栈与 TCB 可以安全覆盖。
         self.ensure_id_index();
@@ -2189,9 +2190,19 @@ impl Scheduler {
             // 还在被换下：等切换完成后由目标处理器的下一次检查（或窃取）接手，仍按原队列记
             return;
         }
-        let (affinity, prev, qos, last_ran) = (t.affinity, t.home, t.sched.qos, t.last_ran);
         let loads = self.loads();
-        if let Ok(home) = self.balancer.place(affinity, Some(prev), qos, last_ran, self.now, &loads) {
+        let home = {
+            let task = self.task(i).expect("live rebalance task");
+            self.balancer.place(
+                CpuMembershipRef::Bootstrap(task.affinity),
+                Some(task.home),
+                task.sched.qos,
+                task.last_ran,
+                self.now,
+                &loads,
+            )
+        };
+        if let Ok(home) = home {
             self.rehome(i, home);
         }
     }
@@ -2709,10 +2720,10 @@ impl Scheduler {
     }
 
     /// 可以被搬动的任务：可运行、未被任何处理器占用、未被限速（只遍历各运行列表：可运行任务一定在列表上）。
-    fn candidates(&self) -> impl Iterator<Item = Candidate> + Clone + '_ {
+    fn candidates(&self) -> impl Iterator<Item = Candidate<'_>> + Clone + '_ {
         (0..MAX_CPUS).flat_map(move |q| self.listed(q)).filter_map(move |(i, t)| {
             (t.rt_period == 0 && t.state == TaskState::Runnable && t.on_cpu.is_none() && self.eligible(t))
-                .then_some(Candidate { slot: i, home: t.home, affinity: t.affinity, qos: t.sched.qos, last_ran: t.last_ran })
+                .then_some(Candidate { slot: i, home: t.home, affinity: CpuMembershipRef::Bootstrap(t.affinity), qos: t.sched.qos, last_ran: t.last_ran })
         })
     }
 
@@ -2779,7 +2790,7 @@ impl Scheduler {
         }
         let loads = self.loads();
         let (qos, last_ran) = self.task(i).map(|t| (t.sched.qos, t.last_ran)).unwrap_or((Qos::Background, None));
-        let new_home = self.balancer.place(set, None, qos, last_ran, self.now, &loads).map_err(|_| AffinityError::NoOnlineCpu)?;
+        let new_home = self.balancer.place(CpuMembershipRef::Bootstrap(set), None, qos, last_ran, self.now, &loads).map_err(|_| AffinityError::NoOnlineCpu)?;
         self.rehome(i, new_home);
         if let Some(c) = on_cpu.filter(|&c| c != me) {
             self.kicks.insert(c);
@@ -3536,7 +3547,7 @@ impl Scheduler {
             {
                 Some(k.home)
             } else {
-                k.affinity.iter().find(|&cpu| {
+                k.affinity.find(|cpu| {
                     self.nohz.stopped().contains(cpu)
                         && self.online.contains(cpu)
                         && !wake.contains(cpu)

@@ -59,6 +59,8 @@ pub const SYSV_IPC: LockClass = LockClass::new(13, "system.compat.sysv_ipc");
 /// 内存压力参数与统计。
 /// Memory-pressure state.
 pub const MEMORY_PRESSURE: LockClass = LockClass::new(14, "system.memory.pressure");
+/// 堆后 CPU 身份、准入和在线生成状态。
+pub const CPU_RUNTIME: LockClass = LockClass::new(16, "system.cpu.runtime");
 /// 内核堆。
 /// Kernel heap.
 pub const MEMORY_HEAP: LockClass = LockClass::new(17, "system.memory.heap");
@@ -110,6 +112,7 @@ pub const REGISTRY: &[LockClass] = &[
     SYSV_IPC,
     MEMORY_PRESSURE,
     NATIVE_INSTALL,
+    CPU_RUNTIME,
     MEMORY_HEAP,
     SANDBOX_STORAGE,
     MEMORY_FRAME,

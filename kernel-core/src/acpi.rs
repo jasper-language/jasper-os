@@ -680,7 +680,7 @@ fn add_cpu(t: &mut Topology, id: u32, flags: u32) {
     if flags & 1 != 0 {
         t.push(id);
     } else {
-        t.disabled += 1;
+        t.push_disabled(id);
     }
 }
 
@@ -790,6 +790,7 @@ mod tests {
         assert_eq!(madt.local_controller, 0xFEE0_0000);
         assert_eq!(madt.topology.iter().collect::<Vec<_>>(), vec![0, 1, 3]);
         assert_eq!(madt.topology.disabled, 1);
+        assert_eq!(madt.topology.disabled_ids(), &[2]);
     }
 
     #[test]

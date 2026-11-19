@@ -308,7 +308,7 @@ impl<'a> Fdt<'a> {
             };
             match n.reg(0).and_then(|(addr, _)| hw_id_of(addr)) {
                 None => topology.dropped += 1,
-                Some(_) if !enabled => topology.disabled += 1,
+                Some(id) if !enabled => topology.push_disabled(id),
                 Some(id) if id == boot_hw_id => boot_listed = true,
                 Some(id) => topology.push(id),
             }
@@ -1167,6 +1167,7 @@ mod tests {
         assert_eq!(cpus.listed, 4);
         assert_eq!(cpus.topology.iter().collect::<Vec<_>>(), vec![2, 0, 1]);
         assert_eq!((cpus.topology.disabled, cpus.topology.dropped), (1, 0));
+        assert_eq!(cpus.topology.disabled_ids(), &[3]);
         let psci = fdt.find_compatible("arm,psci-0.2").unwrap().unwrap();
         assert_eq!(psci.string("method"), Some("hvc"));
         assert_eq!(psci.string("nothing"), None);

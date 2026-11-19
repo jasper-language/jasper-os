@@ -358,6 +358,8 @@ impl CpuSet {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Topology {
     hw_ids: [u32; MAX_CPUS],
+    disabled_ids: [u32; MAX_CPUS],
+    disabled_ids_len: usize,
     count: usize,
     /// 超出 [`MAX_CPUS`] 而未纳入的处理器数。
     pub dropped: usize,
@@ -374,6 +376,8 @@ impl Topology {
         hw_ids[0] = boot_hw_id;
         Topology {
             hw_ids,
+            disabled_ids: [0; MAX_CPUS],
+            disabled_ids_len: 0,
             count: 1,
             dropped: 0,
             disabled: 0,
@@ -392,6 +396,23 @@ impl Topology {
         } else {
             self.dropped += 1;
         }
+    }
+
+    /// Retain a firmware-reported disabled CPU identity without admitting it.
+    /// If bootstrap storage cannot retain the identity, the topology becomes
+    /// incomplete through `dropped` instead of publishing a partial inventory.
+    pub fn push_disabled(&mut self, hw_id: u32) {
+        self.disabled = self.disabled.saturating_add(1);
+        if self.disabled_ids_len < MAX_CPUS {
+            self.disabled_ids[self.disabled_ids_len] = hw_id;
+            self.disabled_ids_len += 1;
+        } else {
+            self.dropped = self.dropped.saturating_add(1);
+        }
+    }
+
+    pub fn disabled_ids(&self) -> &[u32] {
+        &self.disabled_ids[..self.disabled_ids_len]
     }
 
     /// 逻辑处理器数（含引导处理器）。
@@ -434,6 +455,7 @@ pub struct Topology {
     bootstrap: [u32; BOOTSTRAP_CPUS],
     bootstrap_len: usize,
     overflow: Vec<u32>,
+    disabled_ids: Vec<u32>,
     /// Firmware entries that could not identify a usable hardware CPU.
     pub dropped: usize,
     /// Firmware-reported CPUs that are disabled.
@@ -449,6 +471,7 @@ impl Topology {
             bootstrap,
             bootstrap_len: 1,
             overflow: Vec::new(),
+            disabled_ids: Vec::new(),
             dropped: 0,
             disabled: 0,
         }
@@ -468,6 +491,21 @@ impl Topology {
             return;
         }
         self.overflow.push(hw_id);
+    }
+
+    /// Retain a disabled firmware identity. Allocation failure preserves the
+    /// disabled count but marks the inventory incomplete for the startup gate.
+    pub fn push_disabled(&mut self, hw_id: u32) {
+        self.disabled = self.disabled.saturating_add(1);
+        if self.disabled_ids.try_reserve(1).is_err() {
+            self.dropped = self.dropped.saturating_add(1);
+            return;
+        }
+        self.disabled_ids.push(hw_id);
+    }
+
+    pub fn disabled_ids(&self) -> &[u32] {
+        &self.disabled_ids
     }
 
     pub fn count(&self) -> usize {
@@ -1029,9 +1067,11 @@ mod tests {
     fn topology_boot_first_dedup_and_grows_past_former_bitmap() {
         let mut t = Topology::boot_only(7);
         t.push(7); // 重复：忽略
+        t.push_disabled(9);
         t.push(1);
         t.push(2);
         assert_eq!(t.iter().collect::<Vec<_>>(), vec![7, 1, 2]);
+        assert_eq!(t.disabled_ids(), &[9]);
         assert_eq!(t.index_of(2), Some(2));
         assert_eq!(t.hw_id(0), Some(7));
         assert_eq!(t.hw_id(3), None);

@@ -33,6 +33,8 @@ static CPU_DISABLED: AtomicU32 = AtomicU32::new(0);
 static CPU_INVENTORY_COMPLETE: AtomicBool = AtomicBool::new(false);
 static TIMER_HZ: AtomicU32 = AtomicU32::new(100);
 static HW_IDS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+static DISABLED_IDS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+static DISABLED_STORED: AtomicU32 = AtomicU32::new(0);
 
 const AP_STACK_BYTES: usize = 16 * 1024;
 #[repr(C, align(16))]
@@ -151,12 +153,15 @@ pub fn discover_fdt(efi_boot: bool, system_table: u64) -> Result<FirmwareFdt, &'
         u32::try_from(conversion_failures).map_err(|_| "fdt-cpu-conversion-overflow")?;
     let disabled_u32 =
         u32::try_from(topology.disabled).map_err(|_| "fdt-cpu-disabled-overflow")?;
-    let dropped_u32 = u32::try_from(kernel_core::smp::unadmitted_inventory(
+    let mut dropped = kernel_core::smp::unadmitted_inventory(
         discovered,
         admitted,
         conversion_failures,
-    ))
-    .map_err(|_| "fdt-cpu-dropped-overflow")?;
+    );
+    let disabled_ids = topology.disabled_ids();
+    let disabled_stored = disabled_ids.len().min(MAX_CPUS);
+    dropped = dropped.saturating_add(disabled_ids.len().saturating_sub(disabled_stored));
+    let dropped_u32 = u32::try_from(dropped).map_err(|_| "fdt-cpu-dropped-overflow")?;
     // Preserve the firmware inventory overflow for the unified SMP gate.
     // Rebuilding from the fixed hardware-ID table must not make an unsupported
     // larger machine look like a complete smaller machine.
@@ -176,6 +181,13 @@ pub fn discover_fdt(efi_boot: bool, system_table: u64) -> Result<FirmwareFdt, &'
             .ok_or("fdt-cpu-identity-missing")?;
         HW_IDS[index].store(hw_id, Ordering::Release);
     }
+    for (index, &hw_id) in disabled_ids[..disabled_stored].iter().enumerate() {
+        DISABLED_IDS[index].store(hw_id, Ordering::Release);
+    }
+    DISABLED_STORED.store(
+        u32::try_from(disabled_stored).map_err(|_| "fdt-disabled-stored-overflow")?,
+        Ordering::Release,
+    );
     CPU_INVENTORY_COMPLETE.store(true, Ordering::Release);
     Ok(FirmwareFdt {
         physical: fdt_physical,
@@ -253,12 +265,15 @@ fn topology() -> Topology {
     for index in 1..CPU_COUNT.load(Ordering::Acquire) as usize {
         topology.push(HW_IDS[index].load(Ordering::Acquire));
     }
+    for index in 0..DISABLED_STORED.load(Ordering::Acquire) as usize {
+        topology.push_disabled(DISABLED_IDS[index].load(Ordering::Acquire));
+    }
     topology.dropped = topology
         .dropped
         .saturating_add(CPU_DROPPED.load(Ordering::Acquire) as usize);
-    topology.disabled = topology
-        .disabled
-        .saturating_add(CPU_DISABLED.load(Ordering::Acquire) as usize);
+    let disabled_not_stored = (CPU_DISABLED.load(Ordering::Acquire) as usize)
+        .saturating_sub(DISABLED_STORED.load(Ordering::Acquire) as usize);
+    topology.dropped = topology.dropped.saturating_add(disabled_not_stored);
     topology
 }
 

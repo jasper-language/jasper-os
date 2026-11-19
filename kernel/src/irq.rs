@@ -25,6 +25,7 @@
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use alloc::vec::Vec;
+use kernel_core::cpu_bitmap::CpuBitmap;
 use kernel_core::irq::{
     plan_runtime_lines, AffinityPolicy, Charge, CoreQuota, IrqError, LineLoad, QuotaParams,
 };
@@ -400,7 +401,7 @@ pub mod device {
 
     /// 路由表：允许集合、当前目标、启用集合与均衡策略（一把登记过级别的锁）。
     struct Routing {
-        allowed: Vec<CpuSet>,
+        allowed: Vec<CpuBitmap>,
         target: Vec<Option<usize>>,
         enabled: Vec<bool>,
         policy: Option<&'static (dyn AffinityPolicy + Sync)>,
@@ -422,7 +423,7 @@ pub mod device {
 
         fn initialize(
             &mut self,
-            allowed: Vec<CpuSet>,
+            allowed: Vec<CpuBitmap>,
             target: Vec<Option<usize>>,
             enabled: Vec<bool>,
         ) -> bool {
@@ -441,6 +442,9 @@ pub mod device {
 
     static ROUTING: IrqSpinLock<Routing> =
         IrqSpinLock::ranked(lockorder::IRQ_ROUTING, Routing::new());
+    /// Highest represented CPU bit in any admitted IRQ affinity. Affinity
+    /// copies reserve this capacity before taking the routing lock.
+    static ROUTING_CPU_BITS: AtomicUsize = AtomicUsize::new(0);
 
     /// 每核预算（只由所属处理器在中断里改写；参数与统计可由其他处理器读写）。
     static QUOTAS: [IrqSpinLock<CoreQuota>; MAX_CPUS] =
@@ -472,7 +476,7 @@ pub mod device {
     }
 
     fn line_cost() -> usize {
-        core::mem::size_of::<CpuSet>()
+        core::mem::size_of::<CpuBitmap>()
             + core::mem::size_of::<Option<usize>>()
             + core::mem::size_of::<bool>()
             + core::mem::size_of::<AtomicUsize>()
@@ -496,7 +500,7 @@ pub mod device {
         {
             return false;
         }
-        allowed.resize(lines, CpuSet::EMPTY);
+        allowed.resize_with(lines, CpuBitmap::empty);
         target.resize(lines, None);
         enabled.resize(lines, false);
         let initialized = {
@@ -657,26 +661,52 @@ pub mod device {
     /// 返回路由到的处理器。
     /// Set the affinity of a line and route it.
     pub fn set_affinity(line: usize, set: CpuSet) -> Result<usize, IrqError> {
+        let allowed = CpuBitmap::from_cpu_set(set).map_err(|_| IrqError::NoMemory)?;
+        set_affinity_dynamic(line, allowed)
+    }
+
+    /// Set a line affinity from the scalable native CPU membership type.
+    ///
+    /// The legacy `CpuSet` entry point above is an adapter until the system
+    /// affinity ABI is versioned. Both paths use the same dynamic routing
+    /// authority and hardware transaction.
+    pub fn set_affinity_dynamic(
+        line: usize,
+        allowed: CpuBitmap,
+    ) -> Result<usize, IrqError> {
         check_line(line)?;
-        if set.is_empty() {
+        if allowed.is_empty() {
             return Err(IrqError::EmptySet);
         }
-        let online = sched::online_cpus();
-        let cands = set.intersect(online);
+        let online = CpuBitmap::from_cpu_set(sched::online_cpus())
+            .map_err(|_| IrqError::NoMemory)?;
+        let cpu_bits = allowed.capacity_bits().map_err(|_| IrqError::NoLine)?;
         let (target, reroute) = {
             let r = ROUTING.lock();
             let target = r.target[line]
-                .filter(|&c| cands.contains(c))
-                .or_else(|| cands.iter().next())
+                .filter(|&c| allowed.contains(c) && online.contains(c))
+                .or_else(|| {
+                    allowed
+                        .iter()
+                        .find(|&c| online.contains(c))
+                })
                 .ok_or(IrqError::Offline)?;
             (target, r.target[line] != Some(target))
         };
         if reroute {
             arch::device_irq_route(line, target)?;
         }
-        let mut r = ROUTING.lock();
-        r.allowed[line] = set;
-        r.target[line] = Some(target);
+        let replaced = {
+            let mut r = ROUTING.lock();
+            let replaced = core::mem::replace(&mut r.allowed[line], allowed);
+            r.target[line] = Some(target);
+            replaced
+        };
+        // The previous bitmap may own heap words. Release it only after the
+        // IRQ-routing guard is gone so heap lock order remains routing -> heap
+        // only outside the protected routing transaction.
+        drop(replaced);
+        ROUTING_CPU_BITS.fetch_max(cpu_bits, Ordering::Relaxed);
         Ok(target)
     }
 
@@ -950,7 +980,11 @@ pub mod device {
     /// Run the balancing policy once.
     pub fn rebalance() -> Result<u32, IrqError> {
         let n = line_count();
-        let online = sched::online_cpus();
+        let online = CpuBitmap::from_cpu_set(sched::online_cpus())
+            .map_err(|_| IrqError::NoMemory)?;
+        let cpu_bits = ROUTING_CPU_BITS
+            .load(Ordering::Relaxed)
+            .max(online.capacity_bits().map_err(|_| IrqError::NoLine)?);
         let policy = ROUTING.lock().policy;
         let Some(policy) = policy else {
             return Ok(0);
@@ -961,28 +995,45 @@ pub mod device {
         let mut idx = Vec::new();
         lines.try_reserve_exact(n).map_err(|_| IrqError::NoLine)?;
         idx.try_reserve_exact(n).map_err(|_| IrqError::NoLine)?;
+        for _ in 0..n {
+            lines.push(LineLoad {
+                allowed: CpuBitmap::with_capacity(cpu_bits)
+                    .map_err(|_| IrqError::NoMemory)?,
+                current: None,
+                load: 0,
+            });
+        }
         let mut out = Vec::new();
         out.try_reserve_exact(n).map_err(|_| IrqError::NoLine)?;
         out.resize(n, 0);
+        let mut base = Vec::new();
+        base.try_reserve_exact(cpu_bits)
+            .map_err(|_| IrqError::NoMemory)?;
+        base.resize(cpu_bits, 0);
         {
             let r = ROUTING.lock();
+            let mut used = 0;
             for line in 0..n {
                 if r.enabled[line] {
                     let storage = LINES
                         .get()
                         .and_then(Option::as_ref)
                         .ok_or(IrqError::NoLine)?;
-                    lines.push(LineLoad {
-                        allowed: r.allowed[line],
-                        current: r.target[line],
-                        load: storage.window[line].swap(0, Ordering::Relaxed),
-                    });
+                    lines[used]
+                        .allowed
+                        .copy_from(&r.allowed[line])
+                        .map_err(|_| IrqError::NoMemory)?;
+                    lines[used].current = r.target[line];
+                    lines[used].load =
+                        storage.window[line].swap(0, Ordering::Relaxed);
                     idx.push(line);
+                    used += 1;
                 }
             }
+            lines.truncate(used);
         }
         out.truncate(lines.len());
-        policy.assign(&lines, online, &[0; MAX_CPUS], &mut out)?;
+        policy.assign(&lines, &online, &base, &mut out)?;
         let mut r = ROUTING.lock();
         let mut moved = 0;
         for i in 0..lines.len() {

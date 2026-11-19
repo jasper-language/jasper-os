@@ -18,9 +18,17 @@
 //!   任一中断线无处可放时整次分配失败，输出不被修改。
 
 use crate::msi::MAX_SLOTS;
-use crate::smp::{CpuSet, MAX_CPUS};
+#[cfg(any(test, feature = "irq-dynamic"))]
+use crate::cpu_bitmap::CpuBitmap;
+#[cfg(not(any(test, feature = "irq-dynamic")))]
+use crate::smp::CpuSet;
 #[cfg(any(test, feature = "irq-dynamic"))]
 use alloc::vec::Vec;
+
+#[cfg(any(test, feature = "irq-dynamic"))]
+type IrqCpuSet = CpuBitmap;
+#[cfg(not(any(test, feature = "irq-dynamic")))]
+type IrqCpuSet = CpuSet;
 
 /// 中断子系统的错误。
 /// Errors of the interrupt subsystem.
@@ -36,6 +44,8 @@ pub enum IrqError {
     BadQuota,
     /// 中断控制器拒绝了路由（例如目标处理器不可寻址）。
     RouteFailed,
+    /// Metadata allocation failed; no routing state was changed.
+    NoMemory,
 }
 
 impl IrqError {
@@ -48,6 +58,7 @@ impl IrqError {
             IrqError::Offline => "system.irq.error.offline",
             IrqError::BadQuota => "system.irq.error.bad_quota",
             IrqError::RouteFailed => "system.irq.error.route_failed",
+            IrqError::NoMemory => "system.irq.error.no_memory",
         }
     }
 }
@@ -473,10 +484,10 @@ impl CoreQuota {
 
 /// 一条中断线的分配输入。
 /// Assignment input of one line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineLoad {
     /// 允许的处理器集合（用户或驱动设定的亲和）。
-    pub allowed: CpuSet,
+    pub allowed: IrqCpuSet,
     /// 当前路由到的处理器。
     pub current: Option<usize>,
     /// 最近一个窗口的负载（处理周期计数或次数，单位由调用者统一）。
@@ -496,7 +507,7 @@ pub trait AffinityPolicy {
     fn assign(
         &self,
         lines: &[LineLoad],
-        online: CpuSet,
+        online: &IrqCpuSet,
         base: &[u64],
         out: &mut [usize],
     ) -> Result<(), IrqError>;
@@ -505,26 +516,38 @@ pub trait AffinityPolicy {
 /// 每条线的候选集合 = 允许 ∩ 在线；任一为空即拒绝（空允许集合单独报告）。
 fn validate(
     lines: &[LineLoad],
-    online: CpuSet,
+    online: &IrqCpuSet,
     base: &[u64],
     out: &[usize],
 ) -> Result<(), IrqError> {
-    if base.len() < MAX_CPUS || out.len() < lines.len() {
+    if out.len() < lines.len() {
         return Err(IrqError::NoLine);
     }
     for l in lines {
         if l.allowed.is_empty() {
             return Err(IrqError::EmptySet);
         }
-        if l.allowed.intersect(online).is_empty() {
+        let mut online_candidate = false;
+        for cpu in l.allowed.iter() {
+            if online.contains(cpu) {
+                online_candidate = true;
+                if cpu >= base.len() {
+                    return Err(IrqError::NoLine);
+                }
+            }
+        }
+        if !online_candidate {
             return Err(IrqError::Offline);
         }
     }
     Ok(())
 }
 
-fn candidates(l: &LineLoad, online: CpuSet) -> CpuSet {
-    l.allowed.intersect(online)
+fn candidates<'a>(
+    l: &'a LineLoad,
+    online: &'a IrqCpuSet,
+) -> impl Iterator<Item = usize> + 'a {
+    l.allowed.iter().filter(move |&cpu| online.contains(cpu))
 }
 
 /// 均衡策略：按负载从大到小，把每条线放到预计负载最小的合法处理器；
@@ -553,7 +576,7 @@ impl AffinityPolicy for Spread {
     fn assign(
         &self,
         lines: &[LineLoad],
-        online: CpuSet,
+        online: &IrqCpuSet,
         base: &[u64],
         out: &mut [usize],
     ) -> Result<(), IrqError> {
@@ -562,19 +585,20 @@ impl AffinityPolicy for Spread {
         let mut order = Vec::new();
         order
             .try_reserve_exact(lines.len())
-            .map_err(|_| IrqError::NoLine)?;
+            .map_err(|_| IrqError::NoMemory)?;
         order.extend(0..lines.len());
         order.sort_unstable_by(|&a, &b| lines[b].load.cmp(&lines[a].load).then(a.cmp(&b)));
-        let mut proj = [0u64; MAX_CPUS];
-        proj.copy_from_slice(&base[..MAX_CPUS]);
+        let mut proj = Vec::new();
+        proj.try_reserve_exact(base.len())
+            .map_err(|_| IrqError::NoMemory)?;
+        proj.extend_from_slice(base);
         for &i in order.iter() {
             let l = &lines[i];
             let cands = candidates(l, online);
             let best = cands
-                .iter()
                 .min_by_key(|&c| (proj[c], c))
                 .ok_or(IrqError::Offline)?;
-            let target = match l.current.filter(|&c| cands.contains(c)) {
+            let target = match l.current.filter(|&c| l.allowed.contains(c) && online.contains(c)) {
                 Some(cur) if cur != best => {
                     let (a, b, load) = (proj[cur], proj[best], l.load);
                     let stay = (a + load).max(b);
@@ -609,7 +633,7 @@ impl AffinityPolicy for Keep {
     fn assign(
         &self,
         lines: &[LineLoad],
-        online: CpuSet,
+        online: &IrqCpuSet,
         base: &[u64],
         out: &mut [usize],
     ) -> Result<(), IrqError> {
@@ -618,8 +642,8 @@ impl AffinityPolicy for Keep {
             let cands = candidates(l, online);
             out[i] = l
                 .current
-                .filter(|&c| cands.contains(c))
-                .or_else(|| cands.iter().next())
+                .filter(|&c| l.allowed.contains(c) && online.contains(c))
+                .or_else(|| cands.into_iter().next())
                 .ok_or(IrqError::Offline)?;
         }
         Ok(())
@@ -630,15 +654,19 @@ impl AffinityPolicy for Keep {
 mod tests {
     use super::*;
 
-    fn set(cpus: &[usize]) -> CpuSet {
-        let mut s = CpuSet::EMPTY;
+    fn set(cpus: &[usize]) -> IrqCpuSet {
+        let mut s = CpuBitmap::empty();
         for &c in cpus {
-            s.insert(c);
+            s.insert(c).unwrap();
         }
         s
     }
 
-    fn line(allowed: CpuSet, current: Option<usize>, load: u64) -> LineLoad {
+    fn first(cpus: usize) -> IrqCpuSet {
+        CpuBitmap::first(cpus).unwrap()
+    }
+
+    fn line(allowed: IrqCpuSet, current: Option<usize>, load: u64) -> LineLoad {
         LineLoad {
             allowed,
             current,
@@ -830,34 +858,37 @@ mod tests {
 
     #[test]
     fn spread_puts_equal_lines_on_distinct_cores() {
-        let all = CpuSet::first(4);
+        let all = first(4);
         let lines = [
-            line(all, Some(0), 100),
-            line(all, Some(0), 100),
-            line(all, Some(0), 100),
-            line(all, Some(0), 100),
+            line(all.clone(), Some(0), 100),
+            line(all.clone(), Some(0), 100),
+            line(all.clone(), Some(0), 100),
+            line(all.clone(), Some(0), 100),
         ];
         let mut out = [9usize; 4];
         Spread::DEFAULT
-            .assign(&lines, all, &[0; MAX_CPUS], &mut out)
+            .assign(&lines, &all, &[0; 4], &mut out)
             .unwrap();
-        let mut seen = CpuSet::EMPTY;
+        let mut seen = CpuBitmap::empty();
         for &c in &out {
-            assert!(seen.insert(c), "两条线落在同一个核 {out:?}");
+            assert!(seen.insert(c).is_ok(), "两条线落在同一个核 {out:?}");
         }
         assert_eq!(seen, all);
     }
 
     #[test]
     fn spread_avoids_busy_cores_and_respects_allowed() {
-        let all = CpuSet::first(4);
-        let mut base = [0u64; MAX_CPUS];
+        let all = first(4);
+        let mut base = [0u64; 4];
         base[0] = 1000;
         base[1] = 500;
-        let lines = [line(all, None, 300), line(set(&[0, 1]), None, 300)];
+        let lines = [
+            line(all.clone(), None, 300),
+            line(set(&[0, 1]), None, 300),
+        ];
         let mut out = [0usize; 2];
         Spread::DEFAULT
-            .assign(&lines, all, &base, &mut out)
+            .assign(&lines, &all, &base, &mut out)
             .unwrap();
         assert!(out[0] == 2 || out[0] == 3);
         assert_eq!(out[1], 1);
@@ -865,66 +896,90 @@ mod tests {
 
     #[test]
     fn spread_hysteresis_keeps_nearly_balanced_line() {
-        let all = CpuSet::first(2);
-        let mut base = [0u64; MAX_CPUS];
+        let all = first(2);
+        let mut base = [0u64; 2];
         // 当前核比最闲的核只多一点：不值得搬
         base[0] = 110;
         base[1] = 100;
-        let lines = [line(all, Some(0), 100)];
+        let lines = [line(all.clone(), Some(0), 100)];
         let mut out = [9usize; 1];
         Spread::DEFAULT
-            .assign(&lines, all, &base, &mut out)
+            .assign(&lines, &all, &base, &mut out)
             .unwrap();
         assert_eq!(out[0], 0);
         // 差距远大于迟滞：搬
         base[0] = 400;
         Spread::DEFAULT
-            .assign(&lines, all, &base, &mut out)
+            .assign(&lines, &all, &base, &mut out)
             .unwrap();
         assert_eq!(out[0], 1);
     }
 
     #[test]
     fn assign_refuses_empty_offline_and_leaves_output() {
-        let online = CpuSet::first(2);
+        let online = first(2);
         let mut out = [7usize; 2];
-        let bad_empty = [line(online, Some(0), 1), line(CpuSet::EMPTY, None, 1)];
+        let bad_empty = [
+            line(online.clone(), Some(0), 1),
+            line(CpuBitmap::empty(), None, 1),
+        ];
         assert_eq!(
-            Spread::DEFAULT.assign(&bad_empty, online, &[0; MAX_CPUS], &mut out),
+            Spread::DEFAULT.assign(&bad_empty, &online, &[0; 2], &mut out),
             Err(IrqError::EmptySet)
         );
         assert_eq!(out, [7, 7]);
         let bad_off = [line(set(&[3]), None, 1)];
         assert_eq!(
-            Keep.assign(&bad_off, online, &[0; MAX_CPUS], &mut out),
+            Keep.assign(&bad_off, &online, &[0; 4], &mut out),
             Err(IrqError::Offline)
         );
         assert_eq!(out, [7, 7]);
-        let many = [line(online, None, 1); 40];
+        let many = vec![line(online.clone(), None, 1); 40];
         let mut big = [0usize; 40];
         Spread::DEFAULT
-            .assign(&many, online, &[0; MAX_CPUS], &mut big)
+            .assign(&many, &online, &[0; 2], &mut big)
             .unwrap();
         assert_eq!(
-            Spread::DEFAULT.assign(&bad_off[..0], online, &[0; MAX_CPUS], &mut out[..0]),
+            Spread::DEFAULT.assign(&bad_off[..0], &online, &[0; 2], &mut out[..0]),
             Ok(())
         );
     }
 
     #[test]
     fn keep_only_repairs_illegal_placement() {
-        let online = CpuSet::first(4);
+        let online = first(4);
         let lines = [
-            line(online, Some(3), 1000),
+            line(online.clone(), Some(3), 1000),
             line(set(&[1, 2]), Some(0), 1),
-            line(online, None, 1),
+            line(online.clone(), None, 1),
         ];
         let mut out = [0usize; 3];
-        Keep.assign(&lines, online, &[0; MAX_CPUS], &mut out)
+        Keep.assign(&lines, &online, &[0; 4], &mut out)
             .unwrap();
         assert_eq!(out, [3, 1, 0]);
         assert_eq!(Keep.name(), "keep");
         assert_eq!(Spread::DEFAULT.name(), "spread");
+    }
+
+    #[test]
+    fn spread_assigns_sparse_high_cpus_without_a_fixed_mask() {
+        let online = set(&[129, 4096]);
+        let lines = [
+            line(online.clone(), Some(129), 100),
+            line(online.clone(), Some(129), 100),
+        ];
+        let mut base = vec![0u64; 4097];
+        let mut out = [0usize; 2];
+        Spread::DEFAULT
+            .assign(&lines, &online, &base, &mut out)
+            .unwrap();
+        assert_eq!(out, [129, 4096]);
+
+        base[129] = 1000;
+        base[4096] = 0;
+        Keep.assign(&lines[..1], &online, &base, &mut out[..1])
+            .unwrap();
+        assert_eq!(out[0], 129);
     }
 
     /// 测得 tick 长度 1000（时间预算 = 1000 × permille / 1000）的预算。

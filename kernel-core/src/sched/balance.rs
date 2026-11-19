@@ -15,7 +15,60 @@
 //!   发出重新调度请求让它立即抢占），这样高档任务的唤醒延迟不受其他处理器负载的影响。
 
 use crate::sched::Qos;
+#[cfg(any(test, feature = "cpu-dynamic"))]
+use crate::cpu_bitmap::CpuBitmap;
 use crate::smp::CpuSet;
+
+/// CPU membership view accepted by balancing decisions.
+#[cfg(any(test, feature = "cpu-dynamic"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CpuMembershipRef<'a> {
+    Bootstrap(CpuSet),
+    Dynamic(&'a CpuBitmap),
+}
+
+#[cfg(not(any(test, feature = "cpu-dynamic")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CpuMembershipRef<'a> {
+    set: CpuSet,
+    marker: core::marker::PhantomData<&'a ()>,
+}
+
+#[cfg(not(any(test, feature = "cpu-dynamic")))]
+impl<'a> CpuMembershipRef<'a> {
+    pub const fn bootstrap(set: CpuSet) -> Self {
+        Self {
+            set,
+            marker: core::marker::PhantomData,
+        }
+    }
+}
+
+impl CpuMembershipRef<'_> {
+    pub fn contains(self, cpu: usize) -> bool {
+        match self {
+            #[cfg(any(test, feature = "cpu-dynamic"))]
+            Self::Bootstrap(set) => set.contains(cpu),
+            #[cfg(any(test, feature = "cpu-dynamic"))]
+            Self::Dynamic(set) => set.contains(cpu),
+            #[cfg(not(any(test, feature = "cpu-dynamic")))]
+            Self { set, .. } => set.contains(cpu),
+        }
+    }
+
+    #[cfg(any(test, feature = "cpu-dynamic"))]
+    pub fn find(self, mut predicate: impl FnMut(usize) -> bool) -> Option<usize> {
+        match self {
+            Self::Bootstrap(set) => set.iter().find(|&cpu| predicate(cpu)),
+            Self::Dynamic(set) => set.iter().find(|&cpu| predicate(cpu)),
+        }
+    }
+
+    #[cfg(not(any(test, feature = "cpu-dynamic")))]
+    pub fn find(self, mut predicate: impl FnMut(usize) -> bool) -> Option<usize> {
+        self.set.iter().find(|&cpu| predicate(cpu))
+    }
+}
 
 /// 一个处理器的负载快照。
 /// Load snapshot of one processor.
@@ -50,13 +103,13 @@ impl CoreLoad {
 /// 一个可以被搬动的候选任务（调用者只交「可运行、未在任何处理器上、未被限速」的任务）。
 /// A movable candidate task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Candidate {
+pub struct Candidate<'a> {
     /// 调用者定义的槽位编号。
     pub slot: usize,
     /// 当前所在运行队列的处理器下标。
     pub home: usize,
     /// 亲和集合（允许运行的处理器）。
-    pub affinity: CpuSet,
+    pub affinity: CpuMembershipRef<'a>,
     /// 有效档位。
     pub qos: Qos,
     /// 上次被换下的时刻（tick；`None` = 从未运行过，缓存一定是冷的）。
@@ -143,7 +196,7 @@ impl Balancer {
     /// Choose the run queue for a task that became runnable.
     pub fn place(
         &self,
-        affinity: CpuSet,
+        affinity: CpuMembershipRef<'_>,
         prev: Option<usize>,
         qos: Qos,
         last_ran: Option<u64>,
@@ -198,12 +251,12 @@ impl Balancer {
     /// 空闲处理器 `thief` 窃取一个任务：只考虑亲和集合含 `thief` 的候选；先挑最高档，
     /// 同档挑所在队列最长者，再优先冷的任务。返回候选的槽位。空闲时缓存热也照样搬（空闲比迁移更浪费）。
     /// An idle processor steals one task.
-    pub fn steal(
+    pub fn steal<'a>(
         &self,
         thief: usize,
         now: u64,
         loads: &[CoreLoad],
-        candidates: impl Iterator<Item = Candidate>,
+        candidates: impl Iterator<Item = Candidate<'a>>,
     ) -> Result<usize, Refusal> {
         if !loads.get(thief).is_some_and(|l| l.online) {
             return Err(Refusal::Offline);
@@ -224,12 +277,12 @@ impl Balancer {
     /// 周期均衡：处理器 `me` 的负载比最忙的处理器少至少 `imbalance` 时，从最忙的队列拉一个**冷**任务过来。
     /// 已均衡、没有允许的候选、候选全热时分别拒绝。
     /// Periodic balancing: pull one cold task from the busiest processor.
-    pub fn pull(
+    pub fn pull<'a>(
         &self,
         me: usize,
         now: u64,
         loads: &[CoreLoad],
-        candidates: impl Iterator<Item = Candidate> + Clone,
+        candidates: impl Iterator<Item = Candidate<'a>> + Clone,
     ) -> Result<usize, Refusal> {
         let Some(mine) = loads.get(me).filter(|l| l.online) else { return Err(Refusal::Offline) };
         let busiest = (0..loads.len())
@@ -253,7 +306,7 @@ impl Balancer {
     }
 
     /// 窃取时的排序键：档位越高越先（0 = 最高档取反后最大）、所在队列越长越先、冷的先。
-    fn rank(&self, c: &Candidate, now: u64, loads: &[CoreLoad]) -> (u8, u32, bool) {
+    fn rank(&self, c: &Candidate<'_>, now: u64, loads: &[CoreLoad]) -> (u8, u32, bool) {
         let class = (crate::sched::QOS_CLASSES - c.qos.index()) as u8;
         let queued = loads.get(c.home).map(|l| l.queued).unwrap_or(0);
         (class, queued, !self.hot(c.last_ran, now))
@@ -272,42 +325,50 @@ mod tests {
     const IDLE: CoreLoad = CoreLoad { online: true, queued: 0, running: None };
     const ALL4: CpuSet = CpuSet::first(4);
 
-    fn cand(slot: usize, home: usize, qos: Qos, last_ran: Option<u64>) -> Candidate {
-        Candidate { slot, home, affinity: ALL4, qos, last_ran }
+    fn cand(slot: usize, home: usize, qos: Qos, last_ran: Option<u64>) -> Candidate<'static> {
+        Candidate {
+            slot,
+            home,
+            affinity: CpuMembershipRef::Bootstrap(ALL4),
+            qos,
+            last_ran,
+        }
     }
 
     #[test]
     fn place_prefers_idle_prev_then_any_idle() {
         let loads = [busy(Qos::Utility, 1), IDLE, IDLE, IDLE];
-        assert_eq!(B.place(ALL4, Some(2), Qos::Utility, None, 10, &loads), Ok(2));
-        assert_eq!(B.place(ALL4, Some(0), Qos::Utility, None, 10, &loads), Ok(1));
-        assert_eq!(B.place(ALL4, None, Qos::Utility, None, 10, &loads), Ok(1));
+        let all = CpuMembershipRef::Bootstrap(ALL4);
+        assert_eq!(B.place(all, Some(2), Qos::Utility, None, 10, &loads), Ok(2));
+        assert_eq!(B.place(all, Some(0), Qos::Utility, None, 10, &loads), Ok(1));
+        assert_eq!(B.place(all, None, Qos::Utility, None, 10, &loads), Ok(1));
     }
 
     #[test]
     fn place_goes_where_it_can_preempt_lowest_class() {
         let loads = [busy(Qos::Utility, 0), busy(Qos::Background, 0), busy(Qos::Background, 2), busy(Qos::Interactive, 0)];
         // 交互任务被唤醒：去运行后台档且队列空的 1 号核（2 号核队列不空，3 号核运行同档）
-        assert_eq!(B.place(ALL4, Some(3), Qos::Interactive, Some(9), 10, &loads), Ok(1));
+        assert_eq!(B.place(CpuMembershipRef::Bootstrap(ALL4), Some(3), Qos::Interactive, Some(9), 10, &loads), Ok(1));
     }
 
     #[test]
     fn place_keeps_hot_prev_else_least_loaded() {
         let loads = [busy(Qos::Utility, 3), busy(Qos::Utility, 0), busy(Qos::Utility, 1), busy(Qos::Utility, 1)];
-        assert_eq!(B.place(ALL4, Some(0), Qos::Utility, Some(9), 10, &loads), Ok(0), "缓存仍热：留在原处");
-        assert_eq!(B.place(ALL4, Some(0), Qos::Utility, Some(1), 10, &loads), Ok(1), "缓存已冷：去负载最小的核");
-        assert_eq!(B.place(ALL4, Some(2), Qos::Utility, None, 10, &[busy(Qos::Utility, 1); 4]), Ok(2), "负载相等时偏向原处");
+        let all = CpuMembershipRef::Bootstrap(ALL4);
+        assert_eq!(B.place(all, Some(0), Qos::Utility, Some(9), 10, &loads), Ok(0), "缓存仍热：留在原处");
+        assert_eq!(B.place(all, Some(0), Qos::Utility, Some(1), 10, &loads), Ok(1), "缓存已冷：去负载最小的核");
+        assert_eq!(B.place(all, Some(2), Qos::Utility, None, 10, &[busy(Qos::Utility, 1); 4]), Ok(2), "负载相等时偏向原处");
     }
 
     #[test]
     fn place_respects_affinity_and_rejects_empty_or_offline() {
         let loads = [busy(Qos::Utility, 5), IDLE, IDLE, CoreLoad::OFFLINE];
         let only0 = CpuSet::first(1);
-        assert_eq!(B.place(only0, Some(0), Qos::Interactive, None, 0, &loads), Ok(0), "亲和只含 0 号核：再忙也只能去 0 号");
-        assert_eq!(B.place(CpuSet::EMPTY, None, Qos::Utility, None, 0, &loads), Err(PlaceError::NoAllowedCpu));
+        assert_eq!(B.place(CpuMembershipRef::Bootstrap(only0), Some(0), Qos::Interactive, None, 0, &loads), Ok(0), "亲和只含 0 号核：再忙也只能去 0 号");
+        assert_eq!(B.place(CpuMembershipRef::Bootstrap(CpuSet::EMPTY), None, Qos::Utility, None, 0, &loads), Err(PlaceError::NoAllowedCpu));
         let mut only3 = CpuSet::EMPTY;
         only3.insert(3);
-        assert_eq!(B.place(only3, Some(3), Qos::Utility, None, 0, &loads), Err(PlaceError::NoAllowedCpu), "唯一允许的核离线");
+        assert_eq!(B.place(CpuMembershipRef::Bootstrap(only3), Some(3), Qos::Utility, None, 0, &loads), Err(PlaceError::NoAllowedCpu), "唯一允许的核离线");
     }
 
     #[test]
@@ -324,7 +385,7 @@ mod tests {
     #[test]
     fn steal_refuses_affinity_own_queue_and_offline() {
         let loads = [busy(Qos::Utility, 2), IDLE, IDLE, CoreLoad::OFFLINE];
-        let pinned = Candidate { affinity: CpuSet::first(1), ..cand(5, 0, Qos::Utility, None) };
+        let pinned = Candidate { affinity: CpuMembershipRef::Bootstrap(CpuSet::first(1)), ..cand(5, 0, Qos::Utility, None) };
         assert_eq!(B.steal(1, 10, &loads, [pinned].into_iter()), Err(Refusal::NoCandidate), "亲和不含窃取者");
         assert_eq!(B.steal(1, 10, &loads, [cand(6, 1, Qos::Utility, None)].into_iter()), Err(Refusal::NoCandidate), "已在自己队列");
         assert_eq!(B.steal(3, 10, &loads, [cand(7, 0, Qos::Utility, None)].into_iter()), Err(Refusal::Offline));
@@ -345,7 +406,7 @@ mod tests {
         let skew = [busy(Qos::Utility, 3), busy(Qos::Utility, 0), IDLE, IDLE];
         let hot = [cand(1, 0, Qos::Utility, Some(9)), cand(2, 0, Qos::Utility, Some(10))];
         assert_eq!(B.pull(1, 10, &skew, hot.iter().copied()), Err(Refusal::AllHot));
-        let pinned = [Candidate { affinity: CpuSet::first(1), ..cand(3, 0, Qos::Utility, None) }];
+        let pinned = [Candidate { affinity: CpuMembershipRef::Bootstrap(CpuSet::first(1)), ..cand(3, 0, Qos::Utility, None) }];
         assert_eq!(B.pull(1, 10, &skew, pinned.iter().copied()), Err(Refusal::NoCandidate));
         assert_eq!(B.pull(1, 10, &[busy(Qos::Utility, 3), CoreLoad::OFFLINE], hot.iter().copied()), Err(Refusal::Offline));
         assert_eq!(B.pull(0, 10, &[busy(Qos::Utility, 3)], hot.iter().copied()), Err(Refusal::Balanced), "只有一个核");
@@ -358,5 +419,25 @@ mod tests {
         assert!(!B.hot(None, 10));
         assert!(B.due(8) && !B.due(9));
         assert!(!Balancer::new(BalanceParams { balance_interval: 0, ..BalanceParams::DEFAULT }).due(0), "间隔 0 = 关闭周期均衡");
+    }
+
+    #[test]
+    fn dynamic_affinity_places_and_steals_on_sparse_high_cpus() {
+        let mut affinity = CpuBitmap::empty();
+        affinity.insert(129).unwrap();
+        affinity.insert(4096).unwrap();
+        let mut loads = [IDLE; 4097];
+        loads[129] = busy(Qos::Utility, 2);
+        let view = CpuMembershipRef::Dynamic(&affinity);
+        assert_eq!(B.place(view, Some(129), Qos::Utility, None, 10, &loads), Ok(4096));
+
+        let candidate = Candidate {
+            slot: 7,
+            home: 129,
+            affinity: view,
+            qos: Qos::Interactive,
+            last_ran: None,
+        };
+        assert_eq!(B.steal(4096, 10, &loads, [candidate].into_iter()), Ok(7));
     }
 }
