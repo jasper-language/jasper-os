@@ -129,6 +129,11 @@ def classify(path: str, rules: str, source: str) -> tuple[str, str]:
             "platform-adapter",
             "explicit Pixel verification linker layout selected only by the verification build",
         )
+    if path == "kernel-core/src/persistent_install.rs" and name == "BLOB_SLOTS":
+        return (
+            "protocol-abi",
+            "fixed v4 on-disk blob slot map; resize requires a format migration and crash recovery test",
+        )
     if path == "kernel/src/kmain.rs" and "pixel6a-smp-probe" in source:
         return (
             "platform-adapter",

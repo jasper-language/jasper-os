@@ -194,12 +194,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "1e718c0c6ad461bc76095f8de4c1c781ad47e5668ed5682d1c7f5d961f7d8b55",
-      "path": "kernel-core/src/persistent_install.rs",
-      "rules": "HC-G8"
-    },
-    {
-      "count": 1,
       "fingerprint": "1fab4168ad16d1ae91704a94d0c1e3aec9f96bfb6b84dc88a7e1a669ec540335",
       "path": "kernel/src/subscription.rs",
       "rules": "HC-G1"
@@ -1373,6 +1367,12 @@
       "fingerprint": "edbd58823959c3f4a5bc5a99252cd0b089344e97ecb955b402430ebf6e16e89e",
       "path": "kernel-core/src/config.rs",
       "rules": "HC-G1"
+    },
+    {
+      "count": 1,
+      "fingerprint": "f0aa3d37e85012876652fbf2b4c47dcf49d74ba117b921bfbc3091709f87ce76",
+      "path": "kernel-core/src/persistent_install.rs",
+      "rules": "HC-G8"
     },
     {
       "count": 1,

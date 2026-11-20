@@ -29,7 +29,7 @@ const SLOT_BODY_UNITS: usize = 4;
 const SLOT_MARKER_UNITS: usize = 1;
 const SLOT_UNITS: usize = SLOT_BODY_UNITS + SLOT_MARKER_UNITS;
 const METADATA_UNITS: usize = FORMAT_UNITS + 2 * SLOT_UNITS;
-const BLOB_SLOTS: usize = 16;
+const BLOB_SLOTS: usize = 16; // JASPER-HARDCODE-REVIEW: issue=35 source=persistent-install-format-v4 reason=fixed-on-disk-slot-map
 const BLOB_BODY_UNITS: usize = 1;
 const BLOB_UNITS: usize = 1 + BLOB_BODY_UNITS;
 const TOTAL_UNITS: usize = METADATA_UNITS + BLOB_SLOTS * BLOB_UNITS;

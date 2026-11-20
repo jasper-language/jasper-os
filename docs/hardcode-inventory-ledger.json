@@ -12,8 +12,8 @@
   "counts": {
     "explicit-safety-policy": 125,
     "platform-adapter": 28,
-    "protocol-abi": 38,
-    "runtime-resource-capacity": 49,
+    "protocol-abi": 39,
+    "runtime-resource-capacity": 48,
     "test-demo-fixture": 6
   },
   "entries": [
@@ -1098,14 +1098,14 @@
       "source": "let mask = self.masks.get(&(bdf, slot)).copied().unwrap_or(0);"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "protocol-abi",
       "count": 1,
-      "fingerprint": "1e718c0c6ad461bc76095f8de4c1c781ad47e5668ed5682d1c7f5d961f7d8b55",
+      "fingerprint": "f0aa3d37e85012876652fbf2b4c47dcf49d74ba117b921bfbc3091709f87ce76",
       "line": 32,
       "path": "kernel-core/src/persistent_install.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
+      "reason": "fixed v4 on-disk blob slot map; resize requires a format migration and crash recovery test",
       "rules": "HC-G8",
-      "source": "const BLOB_SLOTS: usize = 16;"
+      "source": "const BLOB_SLOTS: usize = 16; // JASPER-HARDCODE-REVIEW: issue=35 source=persistent-install-format-v4 reason=fixed-on-disk-slot-map"
     },
     {
       "category": "explicit-safety-policy",
@@ -2482,8 +2482,8 @@
   "weighted_counts": {
     "explicit-safety-policy": 141,
     "platform-adapter": 44,
-    "protocol-abi": 41,
-    "runtime-resource-capacity": 86,
+    "protocol-abi": 42,
+    "runtime-resource-capacity": 85,
     "test-demo-fixture": 7
   }
 }
