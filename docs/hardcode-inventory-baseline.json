@@ -1088,18 +1088,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "a6184143397f1d7b31dd42018b7768339052c1bbf97fdbc0b3fbf295e0f004b8",
-      "path": "kernel/src/linux_abi.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "a6ca4778214ef6044b0932bf7f5fc64877df7aca53837f95a6ab9b137aa48908",
-      "path": "kernel/src/linux_abi.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "a815f11890dc5e2e067a36e88ca343863f4786586dda452031f446ba209b03e6",
       "path": "kernel/src/arch/aarch64/boot.rs",
       "rules": "HC-G3"
@@ -1695,5 +1683,5 @@
     "user",
     "xtask"
   ],
-  "total": 302
+  "total": 300
 }

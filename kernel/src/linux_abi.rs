@@ -67,7 +67,6 @@ const MAX_SYSV_SEM_UNDOS: usize = 64;
 const SYSV_SEMVMX: i32 = 32767;
 const MAX_SYSV_SHARED_SEGMENTS: usize = 16;
 const MAX_SYSV_SHARED_ATTACHMENTS: usize = 32;
-const MAX_LINUX_KEYS: usize = 16;
 static NEXT_LINUX_TID: AtomicU32 = AtomicU32::new(0x10_0000);
 static NEXT_POSIX_TIMER_ID: AtomicU64 = AtomicU64::new(0x7000_0000_0000_0001);
 
@@ -3443,35 +3442,40 @@ fn linux_getgroups(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if (size as usize) < groups.len() {
         return Err(CompatErrno::Invalid);
     }
-    let mut output = [0u8; 32 * 4];
-    for (index, group) in groups.iter().copied().enumerate() {
-        output[index * 4..index * 4 + 4].copy_from_slice(&group.to_le_bytes());
+    let output_len = groups.len().checked_mul(4).ok_or(CompatErrno::Invalid)?;
+    let mut output = alloc::vec::Vec::new();
+    output
+        .try_reserve_exact(output_len)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    for group in groups.iter().copied() {
+        output.extend_from_slice(&group.to_le_bytes());
     }
-    proc::write(pid, args[1], &output[..groups.len() * 4])
-        .map_err(|_| CompatErrno::Fault)?;
+    proc::write(pid, args[1], &output).map_err(|_| CompatErrno::Fault)?;
     Ok(groups.len() as u64)
 }
 
 /// Replaces the supplementary group list when the ABI credential permits it.
 fn linux_setgroups(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const CAP_SETGID: u64 = 1 << 6;
-    const MAX_GROUPS: usize = 32;
     let credentials = proc::linux_credentials(pid).ok_or(CompatErrno::NoProcess)?;
     let capabilities = proc::linux_capabilities(pid).ok_or(CompatErrno::NoProcess)?;
     if credentials.euid != 0 && capabilities.effective & CAP_SETGID == 0 {
         return Err(CompatErrno::Perm);
     }
     let count = usize::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
-    if count > MAX_GROUPS {
-        return Err(CompatErrno::Invalid);
-    }
-    let mut groups = alloc::vec![0u32; count];
+    let mut groups = alloc::vec::Vec::new();
+    groups
+        .try_reserve_exact(count)
+        .map_err(|_| CompatErrno::NoMemory)?;
     if count != 0 {
-        let mut raw = [0u8; MAX_GROUPS * 4];
-        proc::read(pid, args[1], &mut raw[..count * 4])
-            .map_err(|_| CompatErrno::Fault)?;
-        for (index, group) in groups.iter_mut().enumerate() {
-            *group = u32::from_le_bytes(raw[index * 4..index * 4 + 4].try_into().unwrap());
+        for index in 0..count {
+            let offset = index.checked_mul(4).ok_or(CompatErrno::Fault)?;
+            let address = args[1]
+                .checked_add(offset as u64)
+                .ok_or(CompatErrno::Fault)?;
+            let mut raw = [0u8; 4];
+            proc::read(pid, address, &mut raw).map_err(|_| CompatErrno::Fault)?;
+            groups.push(u32::from_le_bytes(raw));
         }
         groups.sort_unstable();
         groups.dedup();
@@ -11906,9 +11910,6 @@ fn linux_process_keyring(
     {
         return Ok(binding.serial);
     }
-    if state.keys.len() >= MAX_LINUX_KEYS || state.process_keyrings.len() >= MAX_LINUX_KEYS {
-        return Err(CompatErrno::NoSpace);
-    }
     state.keys.try_reserve(1).map_err(|_| CompatErrno::NoMemory)?;
     state
         .process_keyrings
@@ -11983,9 +11984,6 @@ fn linux_add_key(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         key.revoked = false;
         key.linked = true;
         return Ok(key.serial as u32 as u64);
-    }
-    if state.keys.len() >= MAX_LINUX_KEYS {
-        return Err(CompatErrno::NoSpace);
     }
     state.keys.try_reserve(1).map_err(|_| CompatErrno::NoMemory)?;
     let serial = state.next_key_serial;
