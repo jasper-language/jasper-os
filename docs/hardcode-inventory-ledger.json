@@ -1,5 +1,5 @@
 {
-  "baseline_total": 229,
+  "baseline_total": 228,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,7 +10,7 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 133,
+    "explicit-safety-policy": 132,
     "platform-adapter": 28,
     "protocol-abi": 38,
     "test-demo-fixture": 11
@@ -1449,16 +1449,6 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "4e68856e4d58a4b0af3081f097df990fb8bf4ade7e71f10c2ce2d9bdb4401cf9",
-      "line": 36,
-      "path": "kernel/src/arch/x86_64/pci.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_ECAM_BYTES: u64 = 1 << 28;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
       "fingerprint": "c1d9b4b03bccb1eb632addff1aef2b70649897772b22e7647dea20ae0b36d367",
       "line": 31,
       "path": "kernel/src/arch/x86_64/pit.rs",
@@ -2119,7 +2109,7 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 136,
+    "explicit-safety-policy": 135,
     "platform-adapter": 44,
     "protocol-abi": 38,
     "test-demo-fixture": 11

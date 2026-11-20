@@ -344,12 +344,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "4e68856e4d58a4b0af3081f097df990fb8bf4ade7e71f10c2ce2d9bdb4401cf9",
-      "path": "kernel/src/arch/x86_64/pci.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "50439cff51e58600c84598fd317009b536a6e1d4161521cc99b9eb939ba9e631",
       "path": "kernel/src/arch/loongarch64/smp.rs",
       "rules": "HC-G3"
@@ -1281,5 +1275,5 @@
     "user",
     "xtask"
   ],
-  "total": 229
+  "total": 228
 }

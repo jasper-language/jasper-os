@@ -32,8 +32,6 @@ const CONFIG_ADDRESS: u16 = 0x0CF8;
 const CONFIG_DATA: u16 = 0x0CFC;
 /// ECAM 映射在内核高半区的固定虚拟基址（PML4 下标 288，启动期已预分配）。
 const ECAM_VA_BASE: u64 = 0xFFFF_9000_0000_0000;
-/// 单个 ECAM 窗口最多映射的字节数（256 条总线 = 256 MiB）。
-const MAX_ECAM_BYTES: u64 = 1 << 28;
 
 /// 取得本平台的配置空间访问者（启动期调用一次）。
 ///
@@ -61,7 +59,8 @@ fn ecam_window(boot: &BootSpec) -> Option<Ecam> {
 /// 把 ECAM 窗口映射为不可缓存 MMIO；任一步失败都归还窗口内已建立的映射并返回 `None`。
 fn map_ecam(window: Ecam) -> Option<u64> {
     let len = window.len();
-    if len == 0 || len > MAX_ECAM_BYTES || window.base % 4096 != 0 || window.base.checked_add(len).is_none() {
+    // Ecam 的总线范围来自 u8；len 本身已经由起止总线限定，不再叠加软件上限。
+    if len == 0 || window.base % 4096 != 0 || window.base.checked_add(len).is_none() {
         return None;
     }
     let pages = len / 4096;
