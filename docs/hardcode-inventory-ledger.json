@@ -10,10 +10,10 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 154,
+    "explicit-safety-policy": 156,
     "platform-adapter": 28,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 33,
+    "runtime-resource-capacity": 31,
     "test-demo-fixture": 9
   },
   "entries": [
@@ -2378,12 +2378,12 @@
       "source": "const MAX_WORKERS: usize = 8;"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "97f8dc4d80936b0ff31ad604e79241fb61041039323badef968e219a3bb008b6",
       "line": 81,
       "path": "kernel/src/sched/mod.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
+      "reason": "per-CPU interrupt-safe delivery mailbox: full returns to the caller for synchronous completion or retry and never overwrites or drops a wake/PI request",
       "rules": "HC-G8",
       "source": "const PI_MAILBOX_CAPACITY: usize = 16;"
     },
@@ -2418,12 +2418,12 @@
       "source": "static MAX_CANDIDATES: AtomicU32 = AtomicU32::new(0);"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "4db2dbeba27264cc51d8af78754fa3683e735df010f65b2d599f349dea0efcd6",
       "line": 71,
       "path": "kernel/src/sched/scheduler.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
+      "reason": "per-CPU interrupt-safe delivery mailbox: full returns to the caller for synchronous completion or retry and never overwrites or drops a wake/PI request",
       "rules": "HC-G8",
       "source": "pub const WAKE_MAILBOX_CAPACITY: usize = 16;"
     },
@@ -2670,10 +2670,10 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 161,
+    "explicit-safety-policy": 163,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 33,
+    "runtime-resource-capacity": 31,
     "test-demo-fixture": 9
   }
 }

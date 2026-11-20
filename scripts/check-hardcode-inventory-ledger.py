@@ -219,6 +219,15 @@ def classify(path: str, rules: str, source: str) -> tuple[str, str]:
             "explicit-safety-policy",
             "pre-heap bootloader handoff staging bound; overflow is counted and frame allocation fails closed until the complete memory map is retained",
         )
+    if (
+        path == "kernel/src/sched/mod.rs" and name == "PI_MAILBOX_CAPACITY"
+    ) or (
+        path == "kernel/src/sched/scheduler.rs" and name == "WAKE_MAILBOX_CAPACITY"
+    ):
+        return (
+            "explicit-safety-policy",
+            "per-CPU interrupt-safe delivery mailbox: full returns to the caller for synchronous completion or retry and never overwrites or drops a wake/PI request",
+        )
     if path == "kernel/src/linux_abi.rs" and name in {
         "MAX_REGISTRATIONS",
         "MAX_REQUESTS",
