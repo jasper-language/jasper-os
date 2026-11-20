@@ -60,6 +60,8 @@
   不变。
 - USI 请求幂等账本删除每进程 16 槽固定数组；completed 项仍按最老顺序复用，
   pending 项需要增长时使用 `try_reserve(1)`，分配失败返回 `Exhausted`。
+- Linux `flock` 删除每进程 64 lock/waiter 固定数组；记录按 `try_reserve(1)` 增长，
+  解锁时直接移走 waiter 集合后在锁外逐个唤醒，不在中断路径分配临时向量。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -79,7 +81,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=289, runtime-resource-capacity=48, unclassified=0, added=0
+findings=288, runtime-resource-capacity=47, unclassified=0, added=0
 ```
 
 ## 尚未完成
