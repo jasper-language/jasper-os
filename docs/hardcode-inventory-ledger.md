@@ -57,6 +57,9 @@ dmabuf、sync_file、AIO 与 sealed-range 不再使用 8/16/32/64 的私有实�
 识别的 `len() >= N` 行内容量，不能把扫描器 `runtime-resource-capacity=0` 当作
 整个问题的唯一证据。
 
+原生 CLI 的 `echo` 输出也删除了 256 字节输入上限和 300 字节拼接缓冲，改为按
+前缀、调用方文本、后缀分段写入；容量由终端会话和实际输入长度决定。
+
 `compat-loader` 删除 17 个实现包络：program-header/PT_LOAD 数、重定位数、
 Android packed-relocation 字节、动态库名数量与长度、TLS/生命周期/COPY 大小、
 模块与 lifecycle 数、入口调用数、初始栈字节/项数和 auxv 项数。段、重定位和

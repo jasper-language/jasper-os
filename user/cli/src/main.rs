@@ -65,15 +65,7 @@ fn redraw(editor: &LineEditor<256, 16, 256>) -> bool {
 fn write_echo(text: &[u8]) -> bool {
     const PREFIX: &[u8] = b"native-echo=";
     const SUFFIX: &[u8] = b"\nnative-echo-ok\n";
-    let mut output = [0u8; 300];
-    let length = PREFIX.len() + text.len() + SUFFIX.len();
-    if text.len() > 256 || length > output.len() {
-        return false;
-    }
-    output[..PREFIX.len()].copy_from_slice(PREFIX);
-    output[PREFIX.len()..PREFIX.len() + text.len()].copy_from_slice(text);
-    output[PREFIX.len() + text.len()..length].copy_from_slice(SUFFIX);
-    write(&output[..length])
+    write(PREFIX) && write(text) && write(SUFFIX)
 }
 
 struct FixedText {
