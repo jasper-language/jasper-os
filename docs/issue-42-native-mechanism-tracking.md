@@ -72,6 +72,7 @@ Issue #42 的所有外部内核经验只作为问题域来源：
 - Native userspace address synchronization 的 check/register/park 原子性；
 - 经原生场景证明必要后的用户态 Pager；
 - FS/NET/device/graphics 四类 AsyncRing backend 的 quiescence 与取消完成证明；
-- 385 项 Linux syscall disposition 到原生后端的完整矩阵；
+- 385 项 Linux syscall disposition 到原生后端的完整矩阵；当前枚举另有 1 个
+  Jasper `RseqSliceYield` 扩展（编号 471），不得混入 Linux 数量或兼容语义；
 - 关闭兼容层后的 native Profile 全链路；
 - NT-03/04/05 的代码与生产调用链专项审计。

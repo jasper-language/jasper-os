@@ -53,5 +53,6 @@ hardcode gate self-test + inventory-baseline: no new finding
 ## 边界
 
 本切片不关闭 Issue #42。Native address synchronization、受权用户态 Pager、
-AsyncRing backend quiescence、完整 385 项 syscall native disposition 以及关闭兼容层
+AsyncRing backend quiescence、完整 385 项 Linux syscall native disposition（另含
+Jasper `RseqSliceYield` 扩展）以及关闭兼容层
 后的原生 Profile 仍需独立实现和证据。
