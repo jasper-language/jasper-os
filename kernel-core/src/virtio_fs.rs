@@ -447,11 +447,7 @@ impl<const PENDING: usize, const HANDLES: usize, const FILE_BYTES: usize>
             .map_err(|_| (EINVAL, true))?;
         let payload_offset = FUSE_IN_HEADER_BYTES + 40;
         let payload = &request[payload_offset..];
-        if payload.len() != size
-            || offset
-                .checked_add(size)
-                .is_none_or(|end| end > FILE_BYTES)
-        {
+        if payload.len() != size || offset.checked_add(size).is_none_or(|end| end > FILE_BYTES) {
             return Err((EINVAL, true));
         }
         let len = FUSE_OUT_HEADER_BYTES + WRITE_OUT_BYTES;
@@ -803,7 +799,10 @@ mod tests {
             total_extlen: 0,
         };
         backend.admit(first).unwrap();
-        let second = RequestHeader { unique: 11, ..first };
+        let second = RequestHeader {
+            unique: 11,
+            ..first
+        };
         assert_eq!(backend.admit(second), Err(FsFrontendError::QueueFull));
         assert_eq!(backend.pending_count(), 1);
     }
