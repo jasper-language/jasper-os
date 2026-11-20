@@ -33,7 +33,7 @@ cargo check -p jasper-kernel --target x86_64-unknown-none
 PASS
 
 hardcode inventory
-findings=285; runtime-resource-capacity=20; unclassified=0; added=0
+findings=284; runtime-resource-capacity=19; unclassified=0; added=0
 ```
 
 隔离 harness 证明 keyring 状态机；完整 UEFI fscrypt/Android 文件生命周期仍由兼容层

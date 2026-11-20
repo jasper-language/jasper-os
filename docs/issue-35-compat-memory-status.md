@@ -69,6 +69,9 @@
 - System V message queue 删除每队列 64 条消息的隐藏上限；队列容量只由公开
   `qbytes` 字节配额和堆准入决定。入队前使用 `try_reserve(1)`，消息大小、字节配额、
   `IPC_NOWAIT` 与阻塞唤醒语义保持不变。
+- Linux futex waiter 删除每 word 16 项固定数组；注册、wake 快照和 requeue 批量复制
+  都在改变等待状态前使用可失败堆准入，分配失败返回 `ENOMEM`，原 waiter 状态不被
+  部分修改。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -88,7 +91,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=285, runtime-resource-capacity=20, unclassified=0, added=0
+findings=284, runtime-resource-capacity=19, unclassified=0, added=0
 ```
 
 ## 尚未完成

@@ -142,28 +142,15 @@ struct FutexWaiter {
     woken: bool,
 }
 
-impl FutexWaiter {
-    const EMPTY: Self = Self {
-        task: crate::task::TaskId(0),
-        key: None,
-        bitset: 0,
-        active: false,
-        woken: false,
-    };
-}
-
-const MAX_FUTEX_WAITERS: usize = 16;
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FutexKey {
     Private { process: ObjId, address: u64 },
     Shared(u64),
 }
 
-#[derive(Clone, Copy)]
 struct FutexWord {
     key: FutexKey,
-    waiters: [FutexWaiter; MAX_FUTEX_WAITERS],
+    waiters: alloc::vec::Vec<FutexWaiter>,
 }
 
 #[derive(Clone, Copy)]
@@ -381,7 +368,7 @@ impl CompatState {
         Self {
             threads: [None; MAX_LINUX_THREADS],
             thread_landlock_domains: [const { None }; MAX_LINUX_THREADS],
-            futexes: [None; MAX_FUTEX_WORDS],
+            futexes: [const { None }; MAX_FUTEX_WORDS],
             process_signals: [None; MAX_PROCESS_SIGNAL_SETS],
             flock_locks: alloc::vec::Vec::new(),
             flock_waiters: alloc::vec::Vec::new(),
@@ -2274,14 +2261,15 @@ fn futex_key(process: ObjId, address: u64) -> FutexKey {
 
 fn remove_futex_waiter(task: crate::task::TaskId) {
     let mut state = COMPAT.lock();
-    for word in state.futexes.iter_mut().flatten() {
-        for waiter in word.waiters.iter_mut() {
-            if waiter.active && waiter.task == task {
-                *waiter = FutexWaiter::EMPTY;
-            }
-        }
-    }
+    clear_task_futex_waiters_in(&mut state, task);
     prune_empty_futex_words(&mut state);
+}
+
+fn clear_task_futex_waiters_in(state: &mut CompatState, task: crate::task::TaskId) {
+    for word in state.futexes.iter_mut().flatten() {
+        word.waiters
+            .retain(|waiter| !(waiter.active && waiter.task == task));
+    }
 }
 
 fn futex_wait(
@@ -2305,7 +2293,7 @@ fn futex_wait(
     {
         let mut state = COMPAT.lock();
         let slot = if let Some(slot) = state.futexes.iter().position(|entry| {
-            entry.is_some_and(|entry| entry.key == key)
+            entry.as_ref().is_some_and(|entry| entry.key == key)
         }) {
             slot
         } else {
@@ -2316,23 +2304,22 @@ fn futex_wait(
                 .ok_or(CompatErrno::NoSpace)?;
             state.futexes[slot] = Some(FutexWord {
                 key,
-                waiters: [FutexWaiter::EMPTY; MAX_FUTEX_WAITERS],
+                waiters: alloc::vec::Vec::new(),
             });
             slot
         };
         let word = state.futexes[slot].as_mut().ok_or(CompatErrno::NoSpace)?;
-        let waiter_slot = word
-            .waiters
-            .iter()
-            .position(|waiter| !waiter.active)
-            .ok_or(CompatErrno::NoSpace)?;
-        word.waiters[waiter_slot] = FutexWaiter {
+        if word.waiters.try_reserve(1).is_err() {
+            prune_empty_futex_words(&mut state);
+            return Err(CompatErrno::NoMemory);
+        }
+        word.waiters.push(FutexWaiter {
             task,
             key: Some(key),
             bitset,
             active: true,
             woken: false,
-        };
+        });
     }
     // Close the check/register lost-wake window. A writer may change the
     // word and wake between the first value check and waiter publication;
@@ -2394,25 +2381,34 @@ fn futex_wake(
         return Err(CompatErrno::Invalid);
     }
     let key = futex_key(process, address);
-    let mut tasks = [crate::task::TaskId(0); MAX_FUTEX_WAITERS];
+    let mut tasks = alloc::vec::Vec::new();
     let mut woken = 0usize;
     {
         let mut state = COMPAT.lock();
         let Some(word) = state.futexes.iter_mut().flatten().find(|word| word.key == key) else {
             return Ok(0);
         };
+        let wake_count = count.min(
+            word.waiters
+                .iter()
+                .filter(|waiter| waiter.active && !waiter.woken && waiter.bitset & bitset != 0)
+                .count(),
+        );
+        tasks
+            .try_reserve_exact(wake_count)
+            .map_err(|_| CompatErrno::NoMemory)?;
         for waiter in word.waiters.iter_mut() {
-            if woken == count {
+            if woken == wake_count {
                 break;
             }
             if waiter.active && !waiter.woken && waiter.bitset & bitset != 0 {
                 waiter.woken = true;
-                tasks[woken] = waiter.task;
+                tasks.push(waiter.task);
                 woken += 1;
             }
         }
     }
-    for task in tasks[..woken].iter().copied() {
+    for task in tasks {
         sched::wake(task);
     }
     Ok(woken as u64)
@@ -2440,33 +2436,52 @@ fn futex_requeue(
     if source_key == target_key {
         return Err(CompatErrno::Invalid);
     }
-    let mut woken_tasks = [crate::task::TaskId(0); MAX_FUTEX_WAITERS];
-    let mut moved = [FutexWaiter::EMPTY; MAX_FUTEX_WAITERS];
-    let mut woken = 0usize;
-    let mut requeued = 0usize;
+    let mut woken_tasks = alloc::vec::Vec::new();
+    let mut moved = alloc::vec::Vec::new();
     let mut state = COMPAT.lock();
     let target_slot = state
         .futexes
         .iter()
-        .position(|word| word.is_some_and(|word| word.key == target_key));
-    let target_capacity = target_slot
-        .map(|slot| {
-            state.futexes[slot]
-                .expect("futex target slot")
-                .waiters
-                .iter()
-                .filter(|waiter| !waiter.active)
-                .count()
-        })
-        .unwrap_or(MAX_FUTEX_WAITERS);
-    let requeue_limit = requeue_count.min(target_capacity);
+        .position(|word| word.as_ref().is_some_and(|word| word.key == target_key));
     let Some(source_slot) = state
         .futexes
         .iter()
-        .position(|word| word.is_some_and(|word| word.key == source_key))
+        .position(|word| word.as_ref().is_some_and(|word| word.key == source_key))
     else {
         return Ok(0);
     };
+    let candidates = state.futexes[source_slot]
+        .as_ref()
+        .expect("futex source slot")
+        .waiters
+        .iter()
+        .filter(|waiter| waiter.active && !waiter.woken)
+        .count();
+    let wake_count = wake_count.min(candidates);
+    let requeue_count = requeue_count.min(candidates.saturating_sub(wake_count));
+    woken_tasks
+        .try_reserve_exact(wake_count)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    moved
+        .try_reserve_exact(requeue_count)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    if requeue_count != 0 && target_slot.is_none() {
+        state
+            .futexes
+            .iter()
+            .position(Option::is_none)
+            .ok_or(CompatErrno::NoSpace)?;
+    }
+    if requeue_count != 0 {
+        if let Some(slot) = target_slot {
+            state.futexes[slot]
+                .as_mut()
+                .expect("futex target slot")
+                .waiters
+                .try_reserve(requeue_count)
+                .map_err(|_| CompatErrno::NoMemory)?;
+        }
+    }
     for waiter in state.futexes[source_slot]
         .as_mut()
         .expect("futex source slot")
@@ -2476,20 +2491,24 @@ fn futex_requeue(
         if !waiter.active || waiter.woken {
             continue;
         }
-        if woken < wake_count {
+        if woken_tasks.len() < wake_count {
             waiter.woken = true;
-            woken_tasks[woken] = waiter.task;
-            woken += 1;
-        } else if requeued < requeue_limit {
-            moved[requeued] = *waiter;
-            moved[requeued].key = Some(target_key);
-            *waiter = FutexWaiter::EMPTY;
-            requeued += 1;
+            woken_tasks.push(waiter.task);
+        } else if moved.len() < requeue_count {
+            let mut replacement = *waiter;
+            replacement.key = Some(target_key);
+            moved.push(replacement);
+            waiter.active = false;
         } else {
             break;
         }
     }
-    if requeued != 0 {
+    state.futexes[source_slot]
+        .as_mut()
+        .expect("futex source slot")
+        .waiters
+        .retain(|waiter| waiter.active);
+    if !moved.is_empty() {
         let target_slot = if let Some(slot) = target_slot {
             slot
         } else {
@@ -2500,28 +2519,22 @@ fn futex_requeue(
                 .ok_or(CompatErrno::NoSpace)?;
             state.futexes[slot] = Some(FutexWord {
                 key: target_key,
-                waiters: [FutexWaiter::EMPTY; MAX_FUTEX_WAITERS],
+                waiters: alloc::vec::Vec::new(),
             });
             slot
         };
         let target = state.futexes[target_slot]
             .as_mut()
             .expect("futex target slot");
-        for installed in 0..requeued {
-            let slot = target
-                .waiters
-                .iter()
-                .position(|waiter| !waiter.active)
-                .expect("preflighted futex target capacity");
-            target.waiters[slot] = moved[installed];
-        }
+        target.waiters.append(&mut moved);
     }
+    let requeued = candidates.saturating_sub(wake_count).min(requeue_count);
     prune_empty_futex_words(&mut state);
     drop(state);
-    for task in woken_tasks[..woken].iter().copied() {
+    for task in woken_tasks {
         sched::wake(task);
     }
-    Ok((woken + requeued) as u64)
+    Ok((wake_count + requeued) as u64)
 }
 
 fn futex_timeout(
@@ -7086,13 +7099,7 @@ fn futex2_deadline(timeout: u64, clockid: u64) -> Result<Option<u64>, CompatErrn
 /// Removes every futex waiter owned by one task.
 fn clear_task_futex_waiters(task: crate::task::TaskId) {
     let mut state = COMPAT.lock();
-    for word in state.futexes.iter_mut().flatten() {
-        for waiter in word.waiters.iter_mut() {
-            if waiter.active && waiter.task == task {
-                *waiter = FutexWaiter::EMPTY;
-            }
-        }
-    }
+    clear_task_futex_waiters_in(&mut state, task);
     prune_empty_futex_words(&mut state);
 }
 
@@ -7100,7 +7107,7 @@ fn prune_empty_futex_words(state: &mut CompatState) {
     for slot in &mut state.futexes {
         if slot
             .as_ref()
-            .is_some_and(|word| word.waiters.iter().all(|waiter| !waiter.active))
+            .is_some_and(|word| word.waiters.is_empty())
         {
             *slot = None;
         }
@@ -7181,44 +7188,41 @@ fn linux_futex_waitv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             let slot = if let Some(slot) = state
                 .futexes
                 .iter()
-                .position(|entry| entry.is_some_and(|entry| entry.key == waiter.key))
+                .position(|entry| entry.as_ref().is_some_and(|entry| entry.key == waiter.key))
             {
                 slot
             } else {
                 let Some(slot) = state.futexes.iter().position(Option::is_none) else {
-                    for word in state.futexes.iter_mut().flatten() {
-                        for entry in word.waiters.iter_mut() {
-                            if entry.active && entry.task == task {
-                                *entry = FutexWaiter::EMPTY;
-                            }
-                        }
-                    }
+                    clear_task_futex_waiters_in(&mut state, task);
                     return Err(CompatErrno::NoSpace);
                 };
                 state.futexes[slot] = Some(FutexWord {
                     key: waiter.key,
-                    waiters: [FutexWaiter::EMPTY; MAX_FUTEX_WAITERS],
+                    waiters: alloc::vec::Vec::new(),
                 });
                 slot
             };
-            let word = state.futexes[slot].as_mut().ok_or(CompatErrno::NoSpace)?;
-            let Some(entry) = word.waiters.iter_mut().find(|entry| !entry.active) else {
-                for word in state.futexes.iter_mut().flatten() {
-                    for entry in word.waiters.iter_mut() {
-                        if entry.active && entry.task == task {
-                            *entry = FutexWaiter::EMPTY;
-                        }
-                    }
-                }
-                return Err(CompatErrno::NoSpace);
-            };
-            *entry = FutexWaiter {
+            let reserved = state.futexes[slot]
+                .as_mut()
+                .ok_or(CompatErrno::NoSpace)?
+                .waiters
+                .try_reserve(1)
+                .is_ok();
+            if !reserved {
+                clear_task_futex_waiters_in(&mut state, task);
+                return Err(CompatErrno::NoMemory);
+            }
+            state.futexes[slot]
+                .as_mut()
+                .ok_or(CompatErrno::NoSpace)?
+                .waiters
+                .push(FutexWaiter {
                 task,
                 key: Some(waiter.key),
                 bitset: u32::MAX,
                 active: true,
                 woken: false,
-            };
+            });
         }
     }
     let result = loop {
