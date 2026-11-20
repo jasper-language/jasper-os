@@ -6,7 +6,6 @@ use kernel_core::{object::{HandleId,ObjectType,Rights},objtable::ObjId,
  subscription::{Snapshot,Queue,Policy,Delivery}};
 use crate::{kobj::{self,KObject,Table},proc::{self,ProcError}};
 pub const QUEUE_SLOTS:usize=16;
-const MAX_SUBSCRIPTIONS:u64=64;
 pub(crate) const PROCESS_SUBSCRIPTIONS:u64=32;
 pub(crate) const PROCESS_QUEUE_SLOTS:u64=512;
 
@@ -36,7 +35,6 @@ pub(crate) fn subscribe_in(t:&mut Table,pid:ObjId,handle:HandleId,policy:Policy)
    Ok(KObject::EventSource(s)) if !s.closed=>{
     let bit=match policy {Policy::Events=>1,Policy::State=>2,Policy::Count=>4};
     if s.policies & bit==0 {return Err(Error::Policy);}
-    if s.subscribers.len()>=MAX_SUBSCRIPTIONS as usize {return Err(Error::Quota);}
     s.subscribers.try_reserve(1).map_err(|_|Error::Allocation)?;s.snapshot
    },_=>return Err(Error::Closed),
   };
@@ -60,19 +58,19 @@ pub(crate) fn subscribe_in(t:&mut Table,pid:ObjId,handle:HandleId,policy:Policy)
 pub(crate) fn publish_value_in(t:&mut Table,id:ObjId,value:u64,snapshot_value:u64)->Result<(),Error> {
  let (mut snapshot,subscribers)=match t.get(id) {
   Ok(KObject::EventSource(s)) if !s.closed=>{
-   // Bounded stack snapshot avoids a source borrow while accessing subscriptions.
-   let mut ids=[None;MAX_SUBSCRIPTIONS as usize];
-   for (slot,id) in ids.iter_mut().zip(&s.subscribers) {*slot=Some(*id);}
+   let mut ids=Vec::new();
+   ids.try_reserve_exact(s.subscribers.len()).map_err(|_|Error::Allocation)?;
+   ids.extend_from_slice(&s.subscribers);
    (s.snapshot,ids)
   },_=>return Err(Error::Closed),
  };
  let event=snapshot.publish(snapshot_value).map_err(|_|Error::Exhausted)?;
- for subid in subscribers.into_iter().flatten() {
+ for subid in subscribers.iter().copied() {
   if let Ok(KObject::Subscription(sub))=t.get(subid) {
    if sub.source==id && !sub.closed && !sub.queue.accepts(event.version) {return Err(Error::Invalid);}
   }
  }
- for subid in subscribers.into_iter().flatten() {
+ for subid in subscribers.iter().copied() {
   if let Ok(KObject::Subscription(sub))=t.get_mut(subid) {
    if sub.source==id && !sub.closed {
     if sub.queue.publish(Snapshot {version:event.version,value}).is_err() {sub.queue.resync_to(event);}
@@ -83,7 +81,7 @@ pub(crate) fn publish_value_in(t:&mut Table,id:ObjId,value:u64,snapshot_value:u6
   Ok(KObject::EventSource(source)) if !source.closed=>source.snapshot=event,
   _=>return Err(Error::Closed),
  }
- for subid in subscribers.into_iter().flatten() {notify_in(t,subid);}
+ for subid in subscribers {notify_in(t,subid);}
  Ok(())
 }
 pub(crate) fn publish_in(t:&mut Table,id:ObjId,value:u64)->Result<(),Error> {publish_value_in(t,id,value,value)}
@@ -197,9 +195,13 @@ fn notify_in(t:&mut Table,id:ObjId) {
  if let Some((ring,req))=waiter {crate::ring::poll_subscription_in(t,ring,req);}
 }
 fn notify_source_in(t:&mut Table,id:ObjId) {
- let mut ids=[None;MAX_SUBSCRIPTIONS as usize];
- if let Ok(KObject::EventSource(s))=t.get(id) {for (slot,id) in ids.iter_mut().zip(&s.subscribers) {*slot=Some(*id);}}
- for id in ids.into_iter().flatten() {notify_in(t,id);}
+ let mut index=0usize;
+ loop {
+  let next=match t.get(id) {Ok(KObject::EventSource(s))=>s.subscribers.get(index).copied(),_=>None};
+  let Some(id)=next else {break};
+  index+=1;
+  notify_in(t,id);
+ }
 }
 
 fn report_error(e:Error)->i64 {

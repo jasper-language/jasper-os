@@ -1,5 +1,5 @@
 {
-  "baseline_total": 281,
+  "baseline_total": 280,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -13,7 +13,7 @@
     "explicit-safety-policy": 164,
     "platform-adapter": 28,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 16,
+    "runtime-resource-capacity": 15,
     "test-demo-fixture": 9
   },
   "entries": [
@@ -2360,16 +2360,6 @@
     {
       "category": "runtime-resource-capacity",
       "count": 1,
-      "fingerprint": "1fab4168ad16d1ae91704a94d0c1e3aec9f96bfb6b84dc88a7e1a669ec540335",
-      "line": 9,
-      "path": "kernel/src/subscription.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
-      "rules": "HC-G1",
-      "source": "const MAX_SUBSCRIPTIONS:u64=64;"
-    },
-    {
-      "category": "runtime-resource-capacity",
-      "count": 1,
       "fingerprint": "280f8c8e0f5ab6f64a405e6aa0000202517b7f45b8bec16d086a613e89cb7444",
       "line": 8,
       "path": "kernel/src/subscription.rs",
@@ -2381,7 +2371,7 @@
       "category": "runtime-resource-capacity",
       "count": 1,
       "fingerprint": "6ad191054f941ff840b6b993d1e3dff31ec37c317875627ca43fa2e8b00d7c72",
-      "line": 11,
+      "line": 10,
       "path": "kernel/src/subscription.rs",
       "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
       "rules": "HC-G8",
@@ -2603,7 +2593,7 @@
     "explicit-safety-policy": 171,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 16,
+    "runtime-resource-capacity": 15,
     "test-demo-fixture": 9
   }
 }
