@@ -10,10 +10,10 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 153,
+    "explicit-safety-policy": 154,
     "platform-adapter": 28,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 34,
+    "runtime-resource-capacity": 33,
     "test-demo-fixture": 9
   },
   "entries": [
@@ -1798,12 +1798,12 @@
       "source": "const MAX_OFFSET_BYTES: usize = 4096;"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "8ef38c328065b40f0be7b47b7efe55d96bec5e2bb2880c1188746f2c673858d8",
       "line": 14,
       "path": "kernel/src/boot.rs",
-      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
+      "reason": "pre-heap bootloader handoff staging bound; overflow is counted and frame allocation fails closed until the complete memory map is retained",
       "rules": "HC-G1",
       "source": "pub const MAX_REGIONS: usize = 256;"
     },
@@ -2670,10 +2670,10 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 160,
+    "explicit-safety-policy": 161,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 34,
+    "runtime-resource-capacity": 33,
     "test-demo-fixture": 9
   }
 }
