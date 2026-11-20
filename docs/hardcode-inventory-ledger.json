@@ -1,5 +1,5 @@
 {
-  "baseline_total": 292,
+  "baseline_total": 291,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -13,7 +13,7 @@
     "explicit-safety-policy": 139,
     "platform-adapter": 28,
     "protocol-abi": 42,
-    "runtime-resource-capacity": 53,
+    "runtime-resource-capacity": 52,
     "test-demo-fixture": 7
   },
   "entries": [
@@ -2068,16 +2068,6 @@
       "source": "const MAX_NODES: usize = 64;"
     },
     {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "5f4c2aced75367dd33063e05d0437254ef2fb54355dee43441433c364935fc76",
-      "line": 18330,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "Linux compatibility collection or operation capacity; migrate the consumer to handle, memory, or Workload admission",
-      "rules": "HC-G1",
-      "source": "const MAX_REQUESTS: usize = 32;"
-    },
-    {
       "category": "explicit-safety-policy",
       "count": 2,
       "fingerprint": "6830f6a69b5d9fa29b6233bb3f68e16d82d336fb81581e043bffbc297e3b31f2",
@@ -2713,7 +2703,7 @@
     "explicit-safety-policy": 144,
     "platform-adapter": 44,
     "protocol-abi": 42,
-    "runtime-resource-capacity": 55,
+    "runtime-resource-capacity": 54,
     "test-demo-fixture": 7
   }
 }

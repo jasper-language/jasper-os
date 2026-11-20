@@ -18327,16 +18327,16 @@ fn linux_io_cancel(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 /// Submits legacy AIO requests, completing supported operations synchronously.
 fn linux_io_submit(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const IOCB_BYTES: usize = 64;
-    const MAX_REQUESTS: usize = 32;
     let state = proc::linux_aio_state(pid, args[0]).ok_or(CompatErrno::Invalid)?;
     let count = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
-    if count > MAX_REQUESTS || count != 0 && args[2] == 0 {
+    if count != 0 && args[2] == 0 {
         return Err(CompatErrno::Invalid);
     }
     let mut submitted = 0usize;
     while submitted < count {
+        let offset = submitted.checked_mul(8).ok_or(CompatErrno::Fault)?;
         let pointer_address = args[2]
-            .checked_add((submitted * 8) as u64)
+            .checked_add(offset as u64)
             .ok_or(CompatErrno::Fault)?;
         let mut pointer = [0u8; 8];
         if proc::read(pid, pointer_address, &mut pointer).is_err() {
