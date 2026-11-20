@@ -247,16 +247,18 @@ def scan_inventory(
 
 def inventory_record(finding: str) -> dict[str, str]:
     """Convert a diagnostic into a stable baseline record."""
-    match = re.match(r"^(?P<path>[^:]+):\d+: (?P<rules>[^:]+): .*: (?P<text>.*)$", finding)
-    if not match:
+    parts = finding.split(": ", 3)
+    if len(parts) != 4:
         raise SystemExit(f"hardcode-gate: malformed inventory finding: {finding}")
+    location, rules, _, text = parts
+    path = location.rsplit(":", 1)[0]
     identity = "\0".join(
-        (match.group("path"), match.group("rules"), match.group("text").strip())
+        (path, rules, text.strip())
     )
     return {
         "fingerprint": hashlib.sha256(identity.encode("utf-8")).hexdigest(),
-        "path": match.group("path"),
-        "rules": match.group("rules"),
+        "path": path,
+        "rules": rules,
     }
 
 
@@ -359,6 +361,13 @@ diff --git a/boot-manager/src/lib.rs b/boot-manager/src/lib.rs
     assert any("BAD_CAPACITY_SHAPE" in item for item in found)
     assert any("boot-manager/src/lib.rs" in item for item in found)
     assert not any(item.endswith("MAX_PROTOCOL: usize = 64;") for item in found)
+    first = inventory_record(
+        "kernel/src/example.rs:1: HC-G1: fixed capacity: const MAX_FIRST: usize = 4;"
+    )
+    second = inventory_record(
+        "kernel/src/example.rs:2: HC-G1: fixed capacity: const MAX_SECOND: usize = 4;"
+    )
+    assert first["fingerprint"] != second["fingerprint"]
     snapshot = inventory_snapshot(found)
     assert snapshot["total"] == len(found)
     assert "entries" in snapshot

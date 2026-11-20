@@ -199,6 +199,49 @@ def classify(path: str, rules: str, source: str) -> tuple[str, str]:
             "explicit-safety-policy",
             "absent-device sentinel or diagnostic-only display; control paths reject zero/unknown ids",
         )
+    if path == "kernel/src/binder.rs" and name == "MAX_BINDER_THREADS":
+        return (
+            "runtime-resource-capacity",
+            "per-process Binder looper registry; the Vec already admits each registration with try_reserve",
+        )
+    if path == "kernel/src/linux_abi.rs" and name in {
+        "MAX_REGISTRATIONS",
+        "MAX_REQUESTS",
+        "MAX_READ",
+        "MAX_RANDOM",
+        "MAX_FUTEX_WAITERS",
+        "MAX_FLOCK_LOCKS",
+        "MAX_LINUX_KEYS",
+        "MAX_GROUPS",
+        "MAX_SYSV_SEM_SETS",
+        "MAX_SYSV_SEMS_PER_SET",
+        "MAX_SYSV_SEM_WAITERS",
+        "MAX_SYSV_SEM_UNDOS",
+        "MAX_SYSV_SHARED_ATTACHMENTS",
+    }:
+        return (
+            "runtime-resource-capacity",
+            "Linux compatibility collection or operation capacity; migrate the consumer to handle, memory, or Workload admission",
+        )
+    if path == "kernel/src/linux_abi.rs" and name in {
+        "MAX_IOVECS",
+        "MAX_WAITV",
+        "MAX_SYSV_SEM_OPS",
+    }:
+        if name == "MAX_IOVECS" and "1024" in source:
+            return (
+                "protocol-abi",
+                "Linux UAPI IOV_MAX=1024 for message vectors; preserve the published compatibility value",
+            )
+        return (
+            "explicit-safety-policy",
+            "bounded vector or operation batch; excess work must fail explicitly without silently truncating results",
+        )
+    if path == "kernel/src/linux_abi.rs" and name == "MAX_RAW_KEY":
+        return (
+            "protocol-abi",
+            "fscrypt UAPI master-key payload width; preserve the documented 64-byte maximum",
+        )
     if name in {
         "MAX_BARS",
         "MAX_TEXT_OFFSET",
