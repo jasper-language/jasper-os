@@ -58,6 +58,8 @@
 - System V shared memory 的每段 32 attachment 上限已删除；映射完成后的 attachment
   记录使用 `try_reserve(1)`，失败会 unmap 并返回 `ENOSPC`，段生命周期与权限检查
   不变。
+- USI 请求幂等账本删除每进程 16 槽固定数组；completed 项仍按最老顺序复用，
+  pending 项需要增长时使用 `try_reserve(1)`，分配失败返回 `Exhausted`。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -77,7 +79,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=290, runtime-resource-capacity=49, unclassified=0, added=0
+findings=289, runtime-resource-capacity=48, unclassified=0, added=0
 ```
 
 ## 尚未完成
