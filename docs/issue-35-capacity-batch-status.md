@@ -1,6 +1,6 @@
 # Issue #35 配置容量与 Linux 批次审计
 
-更新时间：2026-11-18。
+更新时间：2026-11-20。
 
 状态：**配置上限与四个兼容批次语义已裁决；poll 超限 errno 和每进程 epoll
 实例固定上限已修复；其余高规模运行证据仍待补。**
@@ -72,6 +72,17 @@ pipe endpoint 记录的每进程 32 上限已移除。每个 pipe2 仍需由运�
 分配两个描述符，并保持 READ/WRITE Rights 和失败原子安装。真实 Linux ELF 同时
 创建 40 对 pipe，共 80 个端点；每对完成单字节写回读，再全部关闭并继续其余
 兼容测试。资源回基线。证据见 `evidence/issue35-pipe-capacity-20261119/`。
+
+### Linux 顺序读取总长度
+
+`read`、`pread64` 和 `readv` 原先各自包含 1 MiB 单次总长度上限，超过时返回
+`EINVAL`。该值不是 Linux ABI；现已移除，实际可读量由调用方长度、文件/终端可用
+数据、进程 IO、pin 和用户内存预算共同裁决。ashmem 临时缓冲、iovec 表、pin 表和
+复制范围表均改用可失败堆准入，分配失败返回 `ENOMEM`。
+
+当前已证明 x86_64 `no_std` 构建和 hardcode inventory `added=0`；尚未取得未修改
+Linux 程序单次读取超过 1 MiB 的 UEFI 执行证据，因此该项只记为生产上限移除，
+不能替代兼容层产品验收。
 
 ## 验证
 

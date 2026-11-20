@@ -24,6 +24,10 @@
 - fscrypt 全局 keyring 不再固定 4 个 key、4 个用户 claim。key 条目和每 key 用户
   列表改为 `try_reserve` 准入的可失败堆增长；全部用户撤销时清零 master key 并
   删除条目，保留原有权限和 `ENOKEY` 失败语义。
+- Linux `read`、`pread64` 和 `readv` 的 1 MiB 运行期默认上限已移除。ashmem 临时
+  缓冲改为 `try_reserve_exact` 后零初始化；向量、pin 与复制范围表的元数据也使用
+  可失败堆准入；实际读取继续由调用方长度、文件/终端可用数据、进程 IO 和 pin
+  预算裁决。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -43,7 +47,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=308, runtime-resource-capacity=67, unclassified=0, added=0
+findings=305, runtime-resource-capacity=66, unclassified=0, added=0
 ```
 
 ## 尚未完成
