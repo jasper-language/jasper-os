@@ -73,6 +73,7 @@ extern crate alloc;
 
 pub mod abi;
 pub mod abi_contract;
+pub mod address_sync;
 pub mod arch2;
 pub mod abi_version;
 #[cfg(any(test, feature = "acpi-dynamic"))]

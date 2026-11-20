@@ -59,13 +59,17 @@ Issue #42 的所有外部内核经验只作为问题域来源：
 - 对象跨表 transfer 在目标安装或源移除失败时回滚；
 - 关闭的订阅 Handle 返回结构化 `event.closed`，等待登记不再 panic；
 - EventSource 广播有 generation、边界、终态和资源回收证据；
+- `kernel-core::address_sync` 以 MemoryObject backing/generation 为条件身份，
+  复用 Registration/WaitSet，完成受 capability 约束的 check/register/park
+  状态机；它尚不是新 ABI，也未接线到原生 CPL3/MemoryObject 临界区；
 - root-exec 在真实 OVMF/CPL3 中恢复通过，包括 40 个并发 eventfd 和
   timerfd/signalfd/pipe 批量压力。
 
 证据见 `docs/ISSUE-42-IPC-DELIVERY-ATOMICITY-status.md`、
 `docs/ISSUE-42-OBJECT-TRANSFER-status.md`、
 `docs/ISSUE-42-SUBSCRIPTION-RESYNC-status.md` 和
-`docs/ISSUE-42-COMPAT-ROOT-EXEC-status.md`。
+`docs/ISSUE-42-COMPAT-ROOT-EXEC-status.md`；地址同步切片见
+`docs/ISSUE-42-NATIVE-ADDRESS-SYNC-status.md`。
 
 ## 尚未关闭
 
