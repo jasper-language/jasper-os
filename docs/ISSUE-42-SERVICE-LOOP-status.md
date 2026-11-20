@@ -43,7 +43,7 @@ JASPER_CORES=4-11 JASPER_QEMU_TIMEOUT=360 bash scripts/accept.sh
 结果：
 
 ```text
-evidence/accept-20261121-001612
+evidence/accept-20261121-003252
 QEMU exit = 37（仅计时类退出）
 M4.4 = PASS
 ```

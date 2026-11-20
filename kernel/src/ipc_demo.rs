@@ -452,6 +452,7 @@ fn service_loop_death_restart() {
             vec![queued_handle.raw()],
         );
         let send_done = ring::reap_kernel(client_ring_id, 4);
+        let live_with_queued_handle = kobj::stats().0;
         let queued = send.as_ref().ok().is_some_and(|req| {
             send_done.contains(&(*req, 6))
                 && ipc::queued(service, service_ep) == Some(1)
@@ -470,6 +471,7 @@ fn service_loop_death_restart() {
             .is_some_and(|quota| quota.ipc_bytes > 0);
         let service_exited = proc::exit_idle(service, 0);
         kobj::run_cleanup(usize::MAX);
+        let handle_released = live_with_queued_handle == kobj::stats().0 + 2;
 
         let post = ring::submit_send_for(
             client,
@@ -580,6 +582,7 @@ fn service_loop_death_restart() {
             && pending_terminal
             && pending_peer_closed
             && post_peer_closed
+            && handle_released
             && drain
             && old_endpoint_gone
             && repeated_reap
@@ -592,12 +595,13 @@ fn service_loop_death_restart() {
             && resources;
         check(passed, "service-loop death/restart matrix failed");
         kprintln!(
-            "[JSR-IPC] service_loop round={} phase={} queued={} service_exited={} queue_drain={} handle_released=true recv_terminal={} peer_closed={} old_endpoint_gone={} old_handle_rejected={} fresh_generation={} fresh_mapped={} fresh_pair={} fresh_exited={} repeated_reap={} resources={}",
+            "[JSR-IPC] service_loop round={} phase={} queued={} service_exited={} queue_drain={} handle_released={} recv_terminal={} peer_closed={} old_endpoint_gone={} old_handle_rejected={} fresh_generation={} fresh_mapped={} fresh_pair={} fresh_exited={} repeated_reap={} resources={}",
             round + 1,
             if round == 0 { "warmup" } else { "measured" },
             queued,
             service_exited,
             drain,
+            handle_released,
             pending_terminal,
             pending_peer_closed && post_peer_closed,
             old_endpoint_gone,
