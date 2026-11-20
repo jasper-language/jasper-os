@@ -64,6 +64,8 @@
   解锁时直接移走 waiter 集合后在锁外逐个唤醒，不在中断路径分配临时向量。
 - Linux realtime signal record 队列删除固定 256 槽；入队时寻找空槽或
   `try_reserve(1)` 增长，分配失败仍返回 `EAGAIN`，已有记录不被覆盖。
+- System V semaphore waiter 删除固定 64 槽；注册前使用 `try_reserve(1)`，失败返回
+  `ENOSPC`，每信号 positive/zero waiter 计数仍与记录生命周期同步。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -83,7 +85,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=287, runtime-resource-capacity=30, unclassified=0, added=0
+findings=286, runtime-resource-capacity=29, unclassified=0, added=0
 ```
 
 ## 尚未完成
