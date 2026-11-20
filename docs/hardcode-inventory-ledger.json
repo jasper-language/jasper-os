@@ -1,5 +1,5 @@
 {
-  "baseline_total": 234,
+  "baseline_total": 233,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -12,7 +12,7 @@
   "counts": {
     "explicit-safety-policy": 137,
     "platform-adapter": 28,
-    "protocol-abi": 39,
+    "protocol-abi": 38,
     "test-demo-fixture": 11
   },
   "entries": [
@@ -55,16 +55,6 @@
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
       "source": "pub const MAX_FILTER_DEPTH: usize = 8;"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "0780e3e8be088cf63d0cce2fd2fd40df175faa6c577d9f3557e721293141ada2",
-      "line": 28,
-      "path": "compat-graphics/src/service.rs",
-      "reason": "path owns a wire, loader, package, graphics, or lifecycle ABI; consumer review remains required",
-      "rules": "HC-G1",
-      "source": "pub const MAX_IMPORTS: usize = 32;"
     },
     {
       "category": "explicit-safety-policy",
@@ -1670,7 +1660,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "36f6aa541078460f1b6f26835fb1824378036b4d19aef0555272587f014af751",
-      "line": 798,
+      "line": 799,
       "path": "kernel/src/lifecycle_health.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
@@ -1680,7 +1670,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "4dcd8af41c414ca64c473727d3b48b16bbbfcf5630ef3dcff23cc482e9a8078d",
-      "line": 968,
+      "line": 969,
       "path": "kernel/src/lifecycle_health.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
@@ -1690,7 +1680,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "a1a54674879fa4fc250cc3a1bd19735addc786068a16d85008644209a96a1c8b",
-      "line": 851,
+      "line": 852,
       "path": "kernel/src/lifecycle_health.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
@@ -1700,7 +1690,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "bd8f1a6aa1ef1f5693f91af914b7541dda8ca7242ba60678448bf5588ffad3c2",
-      "line": 850,
+      "line": 851,
       "path": "kernel/src/lifecycle_health.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
@@ -1770,7 +1760,7 @@
       "category": "protocol-abi",
       "count": 1,
       "fingerprint": "b60d795393e6efde352a53baec1d3e14454a6e302eda16fd92c6e6669f122037",
-      "line": 12425,
+      "line": 12430,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier is a Linux UAPI width or semantic boundary; preserve the documented Linux value",
       "rules": "HC-G1",
@@ -1810,7 +1800,7 @@
       "category": "protocol-abi",
       "count": 1,
       "fingerprint": "f297c2cc0d3cb033d755db9e2646b46869f00b179de2d61f1f348e04d52b618d",
-      "line": 17177,
+      "line": 17182,
       "path": "kernel/src/linux_abi.rs",
       "reason": "fscrypt UAPI master-key payload width; preserve the documented 64-byte maximum",
       "rules": "HC-G1",
@@ -1820,7 +1810,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "da92953655d894ad3af9722542b637272e549cb75738a1d9f7dd54b3a6df2068",
-      "line": 5865,
+      "line": 5870,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G6",
@@ -2171,7 +2161,7 @@
   "weighted_counts": {
     "explicit-safety-policy": 140,
     "platform-adapter": 44,
-    "protocol-abi": 39,
+    "protocol-abi": 38,
     "test-demo-fixture": 11
   }
 }

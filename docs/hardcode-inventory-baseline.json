@@ -26,12 +26,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "0780e3e8be088cf63d0cce2fd2fd40df175faa6c577d9f3557e721293141ada2",
-      "path": "compat-graphics/src/service.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "09b04a6531fd72854c727efe19a3e18aedbd2cafde8d4d279e46acbc4fa4a8cf",
       "path": "kernel-core/src/pci.rs",
       "rules": "HC-G1"
@@ -1311,5 +1305,5 @@
     "user",
     "xtask"
   ],
-  "total": 234
+  "total": 233
 }

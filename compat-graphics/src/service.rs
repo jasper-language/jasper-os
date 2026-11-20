@@ -25,8 +25,6 @@ use crate::wsi::{
     WsiError,
 };
 
-pub const MAX_IMPORTS: usize = 32;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GraphicsLimit {
     pub max_buffer_bytes: u64,
@@ -215,13 +213,15 @@ pub struct GraphicsService<
     const G: usize,
     const K: usize,
     const Y: usize,
+    const B: usize,
+    const M: usize,
 > {
     caps: DeviceCapabilities,
     queue: GpuQueue<G, K>,
     available_rights: u32,
     limits: GraphicsLimit,
-    buffers: [Option<ImportedBuffer>; MAX_IMPORTS],
-    images: [Option<ImportedImage>; MAX_IMPORTS],
+    buffers: [Option<ImportedBuffer>; B],
+    images: [Option<ImportedImage>; M],
     work: [Option<Work>; G],
     fences: [Option<Fence>; Y],
     semaphores: [Option<Semaphore>; Y],
@@ -240,7 +240,9 @@ impl<
         const G: usize,
         const K: usize,
         const Y: usize,
-    > GraphicsService<W, S, I, G, K, Y>
+        const B: usize,
+        const M: usize,
+    > GraphicsService<W, S, I, G, K, Y, B, M>
 {
     pub fn new(
         caps: DeviceCapabilities,
@@ -261,8 +263,8 @@ impl<
             queue,
             available_rights,
             limits,
-            buffers: [None; MAX_IMPORTS],
-            images: [None; MAX_IMPORTS],
+            buffers: [None; B],
+            images: [None; M],
             work: [None; G],
             fences: [None; Y],
             semaphores: [None; Y],
@@ -1035,6 +1037,7 @@ fn map_capability_error(
 mod tests {
     use super::*;
     use alloc::vec;
+    use alloc::vec::Vec;
     use kernel_core::memory_capability::{
         BackingIdentity, MemoryCapabilityTable, MemoryKind, MemoryRights,
     };
@@ -1056,7 +1059,7 @@ mod tests {
         .unwrap()
     }
 
-    fn test_service() -> GraphicsService<2, 2, 32, 32, 32, 32> {
+    fn test_service() -> GraphicsService<2, 2, 32, 32, 32, 32, 32, 32> {
         GraphicsService::new(
             capabilities(),
             GpuIdentity {
@@ -1500,7 +1503,68 @@ mod tests {
         .unwrap();
         queue.submit(1, SUBMIT, 1).unwrap();
         assert_eq!(queue.submit(1, SUBMIT, 1), Err(GpuError::QueueFull));
-        assert_eq!(MAX_IMPORTS, 32);
+    }
+
+    #[test]
+    fn imported_resource_capacities_are_caller_selected() {
+        let mut table = MemoryCapabilityTable::<64>::new();
+        let mut service = GraphicsService::<2, 2, 32, 32, 32, 32, 64, 64>::new(
+            capabilities(),
+            GpuIdentity {
+                object: 11,
+                generation: 1,
+            },
+            SUBMIT | CANCEL | CONTROL | MAP_DEVICE,
+            None,
+            GraphicsLimit {
+                max_buffer_bytes: 4096,
+                total_buffer_bytes: 64 * 4096,
+                max_image_bytes: 4096,
+                total_image_bytes: 64 * 4096,
+            },
+        )
+        .unwrap();
+        let mut imports = Vec::new();
+        for index in 0..33u64 {
+            let start = 0x10_000 + index * 0x10_000;
+            table
+                .grant(
+                    start,
+                    1,
+                    MemoryRights::READ.union(MemoryRights::WRITE),
+                    MemoryKind::Shared,
+                    BackingIdentity::new(100 + index, 1).unwrap(),
+                )
+                .unwrap();
+            let token = table
+                .check(
+                    start,
+                    4096,
+                    MemoryRights::READ.union(MemoryRights::WRITE),
+                    None,
+                )
+                .unwrap();
+            imports.push(
+                service
+                    .import_buffer(
+                        &table,
+                        token,
+                        BufferImport {
+                            backing_start: start,
+                            size: 4096,
+                            alignment: 4096,
+                            access: GraphicsMemoryAccess::ReadWrite,
+                            opaque_device_range: 0x10_000_000 + index * 0x1000,
+                        },
+                    )
+                    .unwrap(),
+            );
+        }
+        assert_eq!(service.imported_buffer_bytes(), 33 * 4096);
+        for import in imports {
+            service.revoke_import(import).unwrap();
+        }
+        assert_eq!(service.imported_buffer_bytes(), 0);
     }
 
     #[test]
@@ -1601,7 +1665,7 @@ mod tests {
 
     #[test]
     fn caller_selects_sync_object_capacity() {
-        let mut service = GraphicsService::<2, 2, 32, 32, 32, 1>::new(
+        let mut service = GraphicsService::<2, 2, 32, 32, 32, 1, 32, 32>::new(
             capabilities(),
             GpuIdentity {
                 object: 11,
