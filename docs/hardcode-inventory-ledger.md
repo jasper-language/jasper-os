@@ -2,7 +2,7 @@
 
 更新时间：2026-11-20。
 
-状态：**全部 232 个基线命中已聚合为 213 个唯一指纹，并按消费者、规范或明确
+状态：**全部 229 个基线命中已聚合为 210 个唯一指纹，并按消费者、规范或明确
 安全策略完成首轮分类；`unclassified=0`。**
 
 ## 为什么不是 347 个 Bug
@@ -11,8 +11,8 @@
 协议字段宽度、安全解析上限、真实运行时预算、测试夹具或已确认缺陷。分类账要求
 每个基线指纹具有唯一类别和非空理由，但不会把启发式类别自动升级为“已修复”。
 
-分类由“路径 + 规则 + 完整规范化源码行”的 SHA-256 指纹绑定。当前 232 个命中聚合
-为 213 个唯一指纹；相同源码行出现多次时保留 `count`。此前指纹解析在源码的类型
+分类由“路径 + 规则 + 完整规范化源码行”的 SHA-256 指纹绑定。当前 229 个命中聚合
+为 210 个唯一指纹；相同源码行出现多次时保留 `count`。此前指纹解析在源码的类型
 冒号处截断，曾把不同标识符但相同尾部类型的常量错误合并；修复后独立候选全部
 重新分类，`unclassified=0`。
 
@@ -20,7 +20,7 @@
 
 | 类别 | 唯一指纹 | 基线命中 | 含义 |
 | --- | ---: | ---: | --- |
-| `explicit-safety-policy` | 136 | 139 | 有界工作、解析/等待上限、fail-closed 或诊断哨兵、明确策略默认 |
+| `explicit-safety-policy` | 133 | 136 | 有界工作、解析/等待上限、fail-closed 或诊断哨兵、明确策略默认 |
 | `runtime-resource-capacity` | 0 | 0 | 运行期集合/容量，应由资源预算和准入决定 |
 | `platform-adapter` | 28 | 44 | QEMU/Pixel 等架构特定选择，需保留显式 Profile 边界 |
 | `protocol-abi` | 38 | 38 | Wire、FDT/PCI、Linux UAPI、磁盘格式、地址宽度或内部位域契约 |
@@ -41,6 +41,10 @@
 `kernel-core::elf` 删除了固定的 16 个 PT_LOAD 段实现上限。段元数据按程序头实际
 数量执行可失败分配，并按页地址排序后检查相邻区间；33 个乱序段、默认无分配构建和
 内核完整检查均有回归证据。
+
+ACPI DMAR 删除了固定的 8 个 hardware unit、32 个 device scope 与 8 级 bridge
+path 实现上限。三级拓扑都按固件表长度执行可失败分配；10 units、40 scopes 和
+12 级 path 的宿主回归及内核构建均通过。
 
 `compat-loader` 删除 17 个实现包络：program-header/PT_LOAD 数、重定位数、
 Android packed-relocation 字节、动态库名数量与长度、TLS/生命周期/COPY 大小、
@@ -99,7 +103,7 @@ python3 scripts/check-hardcode-inventory-ledger.py --check \
 - 不允许额外指纹或缺少指纹；
 - 路径、规则、出现次数与 baseline 一致；
 - 类别属于固定集合，理由非空；
-- 声明的唯一指纹计数、基线命中权重和逐项条目一致，权重总和必须等于 232；
+- 声明的唯一指纹计数、基线命中权重和逐项条目一致，权重总和必须等于 229；
 - 当前源码扫描与 baseline 没有漂移。
 
 修改生产代码清除条目后，应先用 `--write-inventory-baseline` 更新基线，再重新生成
@@ -109,7 +113,7 @@ python3 scripts/check-hardcode-inventory-ledger.py --check \
 
 1. `runtime-resource-capacity` 已清零；后续仍以真实消费者压力补拒绝、回收和
    多实例证据；
-2. 将 136 个 `explicit-safety-policy` 指纹逐项绑定到规范、策略或负例证据；
+2. 将 133 个 `explicit-safety-policy` 指纹逐项绑定到规范、策略或负例证据；
 3. 把 28 个 `platform-adapter` 收敛到经验证的平台 Profile；
 4. 审核 38 个协议条目和 11 个夹具，确认冻结边界不会泄漏到生产；
 5. 只有调用链、负例和资源回收证据完整后才允许清除基线条目。

@@ -176,12 +176,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "26e7ecd8669ce267bfc6f3de8cf6db8ce08f1a9bd67bda4b8e3ba997526f647c",
-      "path": "kernel-core/src/acpi.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "280f8c8e0f5ab6f64a405e6aa0000202517b7f45b8bec16d086a613e89cb7444",
       "path": "kernel/src/subscription.rs",
       "rules": "HC-G8"
@@ -430,12 +424,6 @@
       "count": 1,
       "fingerprint": "5a9bf342c9b6062d6881ec10d78dd166fb314dab6a432deb255052dca3dc41fa",
       "path": "compat-core/src/seccomp.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "5bc45f51589d585d1600d4f3c553b00962e4beac2574b140cdd8734b319ef7ae",
-      "path": "kernel-core/src/acpi.rs",
       "rules": "HC-G1"
     },
     {
@@ -1076,12 +1064,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "d93ee57f374516498c8955d62a6a2dc62c9fbca0306cd923221d0fea620c5da9",
-      "path": "kernel-core/src/acpi.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "da5ce7c398c47043ba405f574aad6713e5873666860d41c7aec9793c3ce38f07",
       "path": "kernel/src/pci.rs",
       "rules": "HC-G7"
@@ -1299,5 +1281,5 @@
     "user",
     "xtask"
   ],
-  "total": 232
+  "total": 229
 }

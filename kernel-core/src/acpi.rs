@@ -399,13 +399,6 @@ pub fn parse_mcfg(m: &dyn PhysRead, rsdp: u64) -> Result<Mcfg, AcpiError> {
     Ok(out)
 }
 
-/// DMAR 中记录的 hardware unit 上限。超过上限只计数，绝不把截断表当成完整表。
-pub const MAX_DMAR_UNITS: usize = 8;
-/// 每个 hardware unit 保留的 device scope 上限。
-pub const MAX_DMAR_SCOPES: usize = 32;
-/// 一条 PCI device scope 保留的 bridge path 深度上限。
-pub const MAX_DMAR_PATH: usize = 8;
-
 /// DMAR device scope 类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DmarScopeKind {
@@ -418,36 +411,34 @@ pub enum DmarScopeKind {
 }
 
 /// 一条 DMAR device scope。`path` 是桥下逐级 `(device, function)`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DmarScope {
     pub kind: DmarScopeKind,
     pub enumeration_id: u8,
     pub start_bus: u8,
-    path: [(u8, u8); MAX_DMAR_PATH],
-    path_len: usize,
+    path: Vec<(u8, u8)>,
 }
 
 impl DmarScope {
     pub fn path(&self) -> &[(u8, u8)] {
-        &self.path[..self.path_len]
+        &self.path
     }
 }
 
 /// 一个 DMAR hardware unit（DRHD）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DmarUnit {
     pub segment: u16,
     pub register_base: u64,
     /// Register set size in 4 KiB pages, as encoded by DMAR.
     pub register_pages: u8,
     pub include_all: bool,
-    scopes: [DmarScope; MAX_DMAR_SCOPES],
-    scope_count: usize,
+    scopes: Vec<DmarScope>,
 }
 
 impl DmarUnit {
     pub fn scopes(&self) -> &[DmarScope] {
-        &self.scopes[..self.scope_count]
+        &self.scopes
     }
 
     /// Whether this DRHD owns a PCI requester. `include_all` is an explicit
@@ -467,17 +458,17 @@ impl DmarUnit {
             ) {
                 return false;
             }
-            if scope.path_len == 0 {
+            if scope.path.is_empty() {
                 return false;
             }
-            let last = scope.path[scope.path_len - 1];
+            let last = scope.path[scope.path.len() - 1];
             // A multi-hop bridge path cannot be resolved from the final bus
             // number and endpoint alone: intermediate secondary/subordinate
             // buses are not encoded in the path. Treating the last path entry
             // as a direct match would assign a device to the wrong IOMMU unit.
             // Multi-hop scopes therefore remain fail-closed until PCI bridge
             // topology is supplied to this pure parser.
-            scope.path_len == 1 && scope.start_bus == bus && last == (device, function)
+            scope.path.len() == 1 && scope.start_bus == bus && last == (device, function)
         })
     }
 }
@@ -501,21 +492,20 @@ impl DmarUnitSelection {
 }
 
 /// DMAR 解析结果。`intr_remap` 是固件声明，不是本内核已验证的 IR 状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dmar {
     pub host_address_width: u8,
     pub intr_remap: bool,
     pub x2apic_opt_out: bool,
     pub x2apic_mode: bool,
-    units: [DmarUnit; MAX_DMAR_UNITS],
-    unit_count: usize,
-    /// Hardware units or scopes that did not fit in the fixed result.
+    units: Vec<DmarUnit>,
+    /// Entries rejected by an explicit semantic rule and not used for routing.
     pub dropped: usize,
 }
 
 impl Dmar {
     pub fn units(&self) -> &[DmarUnit] {
-        &self.units[..self.unit_count]
+        &self.units
     }
 
     /// Select a unit only when exactly one DRHD owns the requester.
@@ -571,28 +561,12 @@ pub fn parse_dmar(m: &dyn PhysRead, rsdp: u64) -> Result<Dmar, AcpiError> {
     if !(1..=64).contains(&host_address_width) {
         return Err(AcpiError::BadLength);
     }
-    let empty_scope = DmarScope {
-        kind: DmarScopeKind::Reserved(0),
-        enumeration_id: 0,
-        start_bus: 0,
-        path: [(0, 0); MAX_DMAR_PATH],
-        path_len: 0,
-    };
-    let empty_unit = DmarUnit {
-        segment: 0,
-        register_base: 0,
-        register_pages: 0,
-        include_all: false,
-        scopes: [empty_scope; MAX_DMAR_SCOPES],
-        scope_count: 0,
-    };
     let mut out = Dmar {
         host_address_width,
         intr_remap: flags & 1 != 0,
         x2apic_opt_out: flags & 2 != 0,
         x2apic_mode: flags & 4 != 0,
-        units: [empty_unit; MAX_DMAR_UNITS],
-        unit_count: 0,
+        units: Vec::new(),
         dropped: 0,
     };
     let mut off = DMAR_ENTRIES_OFFSET;
@@ -610,13 +584,15 @@ pub fn parse_dmar(m: &dyn PhysRead, rsdp: u64) -> Result<Dmar, AcpiError> {
             if elen < DMAR_DRHD_MIN_LEN {
                 return Err(AcpiError::BadLength);
             }
-            let mut unit = empty_unit;
-            unit.include_all = read_u8(m, h + 4)? & 1 != 0;
+            let mut unit = DmarUnit {
+                segment: read_u16(m, h + 6)?,
+                register_base: read_u64(m, h + 8)?,
+                register_pages: read_u8(m, h + 5)?.max(1),
+                include_all: read_u8(m, h + 4)? & 1 != 0,
+                scopes: Vec::new(),
+            };
             // A zero size field is the architecturally defined minimum
             // 4 KiB register block and is what QEMU's Q35 DMAR emits.
-            unit.register_pages = read_u8(m, h + 5)?.max(1);
-            unit.segment = read_u16(m, h + 6)?;
-            unit.register_base = read_u64(m, h + 8)?;
             if unit.register_base == 0 || unit.register_base & 0xfff != 0 {
                 return Err(AcpiError::BadLength);
             }
@@ -634,41 +610,38 @@ pub fn parse_dmar(m: &dyn PhysRead, rsdp: u64) -> Result<Dmar, AcpiError> {
                 {
                     return Err(AcpiError::BadLength);
                 }
-                if unit.scope_count < MAX_DMAR_SCOPES {
-                    let level_count = ((slen - DMAR_SCOPE_MIN_LEN) / 2) as usize;
-                    let mut scope = empty_scope;
-                    scope.kind = match entry_type {
+                let level_count = ((slen - DMAR_SCOPE_MIN_LEN) / 2) as usize;
+                let mut scope = DmarScope {
+                    kind: match entry_type {
                         1 => DmarScopeKind::PciEndpoint,
                         2 => DmarScopeKind::PciBridge,
                         3 => DmarScopeKind::IoApic,
                         4 => DmarScopeKind::Hpet,
                         5 => DmarScopeKind::AcpiNamespace,
                         other => DmarScopeKind::Reserved(other),
-                    };
-                    scope.enumeration_id = read_u8(m, s + 4)?;
-                    scope.start_bus = read_u8(m, s + 5)?;
-                    if level_count > MAX_DMAR_PATH {
-                        out.dropped += 1;
-                    } else {
-                        for level in 0..level_count {
-                            let p = s + DMAR_SCOPE_MIN_LEN as u64 + level as u64 * 2;
-                            scope.path[level] = (read_u8(m, p)?, read_u8(m, p + 1)?);
-                        }
-                        scope.path_len = level_count;
-                        unit.scopes[unit.scope_count] = scope;
-                        unit.scope_count += 1;
-                    }
-                } else {
-                    out.dropped += 1;
+                    },
+                    enumeration_id: read_u8(m, s + 4)?,
+                    start_bus: read_u8(m, s + 5)?,
+                    path: Vec::new(),
+                };
+                scope
+                    .path
+                    .try_reserve(level_count)
+                    .map_err(|_| AcpiError::Capacity)?;
+                for level in 0..level_count {
+                    let p = s + DMAR_SCOPE_MIN_LEN as u64 + level as u64 * 2;
+                    scope.path.push((read_u8(m, p)?, read_u8(m, p + 1)?));
                 }
+                unit.scopes
+                    .try_reserve(1)
+                    .map_err(|_| AcpiError::Capacity)?;
+                unit.scopes.push(scope);
                 scope_off += slen;
             }
-            if out.unit_count < MAX_DMAR_UNITS {
-                out.units[out.unit_count] = unit;
-                out.unit_count += 1;
-            } else {
-                out.dropped += 1;
-            }
+            out.units
+                .try_reserve(1)
+                .map_err(|_| AcpiError::Capacity)?;
+            out.units.push(unit);
         }
         off += u32::from(elen);
     }
@@ -1032,20 +1005,29 @@ mod tests {
         m
     }
 
-    fn drhd_with_scope(include_all: bool, path: &[(u8, u8)]) -> Vec<u8> {
+    fn drhd_with_scopes(include_all: bool, paths: &[Vec<(u8, u8)>]) -> Vec<u8> {
         let mut unit = vec![0u8; 16];
-        let len = (16 + 6 + path.len() * 2) as u16;
-        unit[..2].copy_from_slice(&0u16.to_le_bytes());
-        unit[2..4].copy_from_slice(&len.to_le_bytes());
         unit[4] = u8::from(include_all);
         unit[5] = 0; // minimum 4 KiB block
         unit[8..16].copy_from_slice(&0xFED9_0000u64.to_le_bytes());
-        unit.extend_from_slice(&[1, (6 + path.len() * 2) as u8, 0, 0, 0, 0]);
-        for &(device, function) in path {
-            unit.push(device);
-            unit.push(function);
+        for (index, path) in paths.iter().enumerate() {
+            let length = (6 + path.len() * 2) as u16;
+            unit.push(1);
+            unit.extend_from_slice(&length.to_le_bytes());
+            unit.extend_from_slice(&[0, index as u8, 0]);
+            for &(device, function) in path {
+                unit.push(device);
+                unit.push(function);
+            }
         }
+        let total = unit.len() as u16;
+        unit[..2].copy_from_slice(&0u16.to_le_bytes());
+        unit[2..4].copy_from_slice(&total.to_le_bytes());
         unit
+    }
+
+    fn drhd_with_scope(include_all: bool, path: &[(u8, u8)]) -> Vec<u8> {
+        drhd_with_scopes(include_all, &[path.to_vec()])
     }
 
     #[test]
@@ -1072,6 +1054,34 @@ mod tests {
             dmar.unit_for_unique(0, 0, 3, 0),
             Err(DmarUnitSelection::Missing)
         );
+    }
+
+    #[test]
+    fn dmar_inventory_follows_firmware_lengths_without_fixed_capacities() {
+        let mut entries = Vec::new();
+        for index in 0..10u8 {
+            let mut unit = drhd_with_scope(false, &[(index, 0)]);
+            unit[8..16].copy_from_slice(&(0xFED9_0000u64 + index as u64 * 0x1000).to_le_bytes());
+            entries.extend(unit);
+        }
+        let parsed = parse_dmar(&image_with_dmar(entries), 0x100).unwrap();
+        assert_eq!(parsed.units().len(), 10);
+        assert_eq!(parsed.dropped, 0);
+
+        let paths: Vec<_> = (0..40u8).map(|index| vec![(index, 0)]).collect();
+        let parsed =
+            parse_dmar(&image_with_dmar(drhd_with_scopes(false, &paths)), 0x100).unwrap();
+        assert_eq!(parsed.units().len(), 1);
+        assert_eq!(parsed.units()[0].scopes().len(), 40);
+        assert_eq!(parsed.dropped, 0);
+
+        let deep_path: Vec<_> = (0..12u8).map(|device| (device, 0)).collect();
+        let parsed = parse_dmar(
+            &image_with_dmar(drhd_with_scopes(false, &[deep_path.clone()])),
+            0x100,
+        )
+        .unwrap();
+        assert_eq!(parsed.units()[0].scopes()[0].path(), deep_path);
     }
 
     #[test]

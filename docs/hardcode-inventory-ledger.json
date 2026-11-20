@@ -1,5 +1,5 @@
 {
-  "baseline_total": 232,
+  "baseline_total": 229,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,7 +10,7 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 136,
+    "explicit-safety-policy": 133,
     "platform-adapter": 28,
     "protocol-abi": 38,
     "test-demo-fixture": 11
@@ -349,42 +349,12 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "26e7ecd8669ce267bfc6f3de8cf6db8ce08f1a9bd67bda4b8e3ba997526f647c",
-      "line": 407,
-      "path": "kernel-core/src/acpi.rs",
-      "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
-      "rules": "HC-G1",
-      "source": "pub const MAX_DMAR_PATH: usize = 8;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "5bc45f51589d585d1600d4f3c553b00962e4beac2574b140cdd8734b319ef7ae",
-      "line": 403,
-      "path": "kernel-core/src/acpi.rs",
-      "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
-      "rules": "HC-G1",
-      "source": "pub const MAX_DMAR_UNITS: usize = 8;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
       "fingerprint": "aa2855caf44b98cce086778ab50ce6eeb5a0a8a88f703681396c0cf45e7a8d5d",
       "line": 28,
       "path": "kernel-core/src/acpi.rs",
       "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
       "rules": "HC-G1",
       "source": "pub const MAX_TABLE_LEN: u32 = 1 << 20;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "d93ee57f374516498c8955d62a6a2dc62c9fbca0306cd923221d0fea620c5da9",
-      "line": 405,
-      "path": "kernel-core/src/acpi.rs",
-      "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
-      "rules": "HC-G1",
-      "source": "pub const MAX_DMAR_SCOPES: usize = 32;"
     },
     {
       "category": "protocol-abi",
@@ -2149,7 +2119,7 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 139,
+    "explicit-safety-policy": 136,
     "platform-adapter": 44,
     "protocol-abi": 38,
     "test-demo-fixture": 11
