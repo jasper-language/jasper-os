@@ -278,6 +278,16 @@ def classify(path: str, rules: str, source: str) -> tuple[str, str]:
             "explicit-safety-policy",
             "advertised SysV IPC compatibility quota reported through IPC_INFO; excess creation/undo registration is rejected rather than silently truncated",
         )
+    if path == "kernel/src/subscription.rs" and name in {
+        "MAX_SUBSCRIPTIONS",
+        "QUEUE_SLOTS",
+        "PROCESS_SUBSCRIPTIONS",
+        "PROCESS_QUEUE_SLOTS",
+    }:
+        return (
+            "explicit-safety-policy",
+            "bounded subscription delivery policy: queue overflow becomes one authoritative Resync and per-process count/slot admission rejects excess subscriptions atomically",
+        )
     if path == "kernel-core/src/spawn_abi.rs" and name == "MIN_CPU_LIMIT":
         return (
             "explicit-safety-policy",

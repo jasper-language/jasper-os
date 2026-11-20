@@ -67,8 +67,7 @@
     feature = "ext4-view",
     feature = "persistent-install",
     feature = "runtime-registries",
-    feature = "driver-host-journal",
-    feature = "subscription-dynamic"
+    feature = "driver-host-journal"
 ))]
 extern crate alloc;
 

@@ -5,11 +5,14 @@ use alloc::{boxed::Box,vec::Vec};
 use kernel_core::{object::{HandleId,ObjectType,Rights},objtable::ObjId,
  subscription::{Snapshot,Queue,Policy,Delivery}};
 use crate::{kobj::{self,KObject,Table},proc::{self,ProcError}};
+pub const QUEUE_SLOTS:usize=16;
+const MAX_SUBSCRIPTIONS:u64=64;
 pub(crate) const PROCESS_SUBSCRIPTIONS:u64=32;
+pub(crate) const PROCESS_QUEUE_SLOTS:u64=QUEUE_SLOTS as u64*PROCESS_SUBSCRIPTIONS;
 
 pub struct Source { snapshot:Snapshot, subscribers:Vec<ObjId>, closed:bool, publisher_owned:bool, policies:u8 }
 pub struct Subscription {
- source:ObjId, queue:Queue, closed:bool, linked:bool, waiter:Option<(ObjId,u64)>,
+ source:ObjId, queue:Queue<QUEUE_SLOTS>, closed:bool, linked:bool, waiter:Option<(ObjId,u64)>,
  // Independent charge account survives process exit; no Process ownership edge.
  _charge:crate::mm::memory_quota::Charge,
 }
@@ -33,10 +36,11 @@ pub(crate) fn subscribe_in(t:&mut Table,pid:ObjId,handle:HandleId,policy:Policy)
    Ok(KObject::EventSource(s)) if !s.closed=>{
     let bit=match policy {Policy::Events=>1,Policy::State=>2,Policy::Count=>4};
     if s.policies & bit==0 {return Err(Error::Policy);}
+    if s.subscribers.len()>=MAX_SUBSCRIPTIONS as usize {return Err(Error::Quota);}
     s.subscribers.try_reserve(1).map_err(|_|Error::Allocation)?;s.snapshot
    },_=>return Err(Error::Closed),
   };
-  let charge=proc::subscription_charge_in(t,pid).ok_or(Error::Quota)?;
+  let charge=proc::subscription_charge_in(t,pid,QUEUE_SLOTS as u64).ok_or(Error::Quota)?;
   let sub=Box::try_new(Subscription {source:id,queue:Queue::new(snapshot,policy),closed:false,linked:false,waiter:None,_charge:charge}).map_err(|_|Error::Allocation)?;
   t.acquire_internal(id).map_err(|_|Error::Invalid)?;
   let result=proc::grant_new_in(t,pid,KObject::Subscription(sub),ObjectType::Subscription,Rights::READ.union(Rights::WAIT));
@@ -56,19 +60,18 @@ pub(crate) fn subscribe_in(t:&mut Table,pid:ObjId,handle:HandleId,policy:Policy)
 pub(crate) fn publish_value_in(t:&mut Table,id:ObjId,value:u64,snapshot_value:u64)->Result<(),Error> {
  let (mut snapshot,subscribers)=match t.get(id) {
   Ok(KObject::EventSource(s)) if !s.closed=>{
-   let mut ids=Vec::new();
-   ids.try_reserve_exact(s.subscribers.len()).map_err(|_|Error::Allocation)?;
-   ids.extend_from_slice(&s.subscribers);
+   let mut ids=[None;MAX_SUBSCRIPTIONS as usize];
+   for (slot,id) in ids.iter_mut().zip(&s.subscribers) {*slot=Some(*id);}
    (s.snapshot,ids)
   },_=>return Err(Error::Closed),
  };
  let event=snapshot.publish(snapshot_value).map_err(|_|Error::Exhausted)?;
- for subid in subscribers.iter().copied() {
+ for subid in subscribers.into_iter().flatten() {
   if let Ok(KObject::Subscription(sub))=t.get(subid) {
    if sub.source==id && !sub.closed && !sub.queue.accepts(event.version) {return Err(Error::Invalid);}
   }
  }
- for subid in subscribers.iter().copied() {
+ for subid in subscribers.into_iter().flatten() {
   if let Ok(KObject::Subscription(sub))=t.get_mut(subid) {
    if sub.source==id && !sub.closed {
     if sub.queue.publish(Snapshot {version:event.version,value}).is_err() {sub.queue.resync_to(event);}
@@ -79,7 +82,7 @@ pub(crate) fn publish_value_in(t:&mut Table,id:ObjId,value:u64,snapshot_value:u6
   Ok(KObject::EventSource(source)) if !source.closed=>source.snapshot=event,
   _=>return Err(Error::Closed),
  }
- for subid in subscribers {notify_in(t,subid);}
+ for subid in subscribers.into_iter().flatten() {notify_in(t,subid);}
  Ok(())
 }
 pub(crate) fn publish_in(t:&mut Table,id:ObjId,value:u64)->Result<(),Error> {publish_value_in(t,id,value,value)}
@@ -165,24 +168,12 @@ pub(crate) fn check_wait_in(t:&mut Table,sub:ObjId)->Result<(),i64> {
  }
 }
 pub(crate) fn deliver_in(t:&mut Table,target:&WaitTarget)->Attempt {
- let (deliveries,closed,source)={
-  let sub=match t.get(target.sub) {Ok(KObject::Subscription(s))=>s,_=>return Attempt::Done(err(SYSTEM_HANDLE_ERROR_INVALID))};
-  let mut deliveries=Vec::new();
-  if deliveries.try_reserve_exact(target.capacity).is_err() {return Attempt::Done(err(SYSTEM_MEMORY_ERROR_OUT_OF_MEMORY));}
-  for _ in 0..target.capacity {
-   let Some(event)=sub.queue.peek() else {break};
-   let resync=matches!(event,Delivery::Resync(_));
-   deliveries.push(event);
-   if resync {break;}
-  }
-  (deliveries,sub.closed,sub.source)
- };
- let mut bytes=[0;MAX_BATCH*RECORD_BYTES];
- let count=deliveries.len();
- for (count,event) in deliveries.into_iter().enumerate() {bytes[count*RECORD_BYTES..(count+1)*RECORD_BYTES].copy_from_slice(&kernel_core::subscription_abi::encode(resync_snapshot_in(t,source,event)));}
+ let (mut queue,closed,source)=match t.get(target.sub) {Ok(KObject::Subscription(s))=>(s.queue.clone(),s.closed,s.source),_=>return Attempt::Done(err(SYSTEM_HANDLE_ERROR_INVALID))};
+ let mut bytes=[0;MAX_BATCH*RECORD_BYTES];let mut count=0;
+ while count<target.capacity {let Some(event)=queue.take() else {break};bytes[count*RECORD_BYTES..(count+1)*RECORD_BYTES].copy_from_slice(&kernel_core::subscription_abi::encode(resync_snapshot_in(t,source,event)));count+=1;}
  if count>0 {
   if !target.buffer.write_at(0,&bytes[..count*RECORD_BYTES]) {return Attempt::Done(err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS));}
-  if let Ok(KObject::Subscription(s))=t.get_mut(target.sub) {for _ in 0..count {let _=s.queue.take();}}
+  if let Ok(KObject::Subscription(s))=t.get_mut(target.sub) {s.queue=queue;}
   return Attempt::Done(count as i64);
  }
  let closed=closed || !matches!(t.get(source),Ok(KObject::EventSource(s)) if !s.closed);
@@ -205,13 +196,9 @@ fn notify_in(t:&mut Table,id:ObjId) {
  if let Some((ring,req))=waiter {crate::ring::poll_subscription_in(t,ring,req);}
 }
 fn notify_source_in(t:&mut Table,id:ObjId) {
- let mut index=0usize;
- loop {
-  let next=match t.get(id) {Ok(KObject::EventSource(s))=>s.subscribers.get(index).copied(),_=>None};
-  let Some(id)=next else {break};
-  index+=1;
-  notify_in(t,id);
- }
+ let mut ids=[None;MAX_SUBSCRIPTIONS as usize];
+ if let Ok(KObject::EventSource(s))=t.get(id) {for (slot,id) in ids.iter_mut().zip(&s.subscribers) {*slot=Some(*id);}}
+ for id in ids.into_iter().flatten() {notify_in(t,id);}
 }
 
 fn report_error(e:Error)->i64 {

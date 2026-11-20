@@ -164,6 +164,12 @@
     },
     {
       "count": 1,
+      "fingerprint": "1fab4168ad16d1ae91704a94d0c1e3aec9f96bfb6b84dc88a7e1a669ec540335",
+      "path": "kernel/src/subscription.rs",
+      "rules": "HC-G1"
+    },
+    {
+      "count": 1,
       "fingerprint": "1ffd0ae2fbd5449937752134d510ad9d54c642af1f6b3b2311c3b44a99ac0f08",
       "path": "kernel/src/linux_abi.rs",
       "rules": "HC-G1"
@@ -209,6 +215,12 @@
       "fingerprint": "26e7ecd8669ce267bfc6f3de8cf6db8ce08f1a9bd67bda4b8e3ba997526f647c",
       "path": "kernel-core/src/acpi.rs",
       "rules": "HC-G1"
+    },
+    {
+      "count": 1,
+      "fingerprint": "280f8c8e0f5ab6f64a405e6aa0000202517b7f45b8bec16d086a613e89cb7444",
+      "path": "kernel/src/subscription.rs",
+      "rules": "HC-G8"
     },
     {
       "count": 1,
@@ -1539,5 +1551,5 @@
     "user",
     "xtask"
   ],
-  "total": 276
+  "total": 278
 }

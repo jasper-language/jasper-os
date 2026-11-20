@@ -1,5 +1,5 @@
 {
-  "baseline_total": 276,
+  "baseline_total": 278,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,7 +10,7 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 171,
+    "explicit-safety-policy": 173,
     "platform-adapter": 28,
     "protocol-abi": 43,
     "test-demo-fixture": 11
@@ -2339,6 +2339,26 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
+      "fingerprint": "1fab4168ad16d1ae91704a94d0c1e3aec9f96bfb6b84dc88a7e1a669ec540335",
+      "line": 9,
+      "path": "kernel/src/subscription.rs",
+      "reason": "bounded subscription delivery policy: queue overflow becomes one authoritative Resync and per-process count/slot admission rejects excess subscriptions atomically",
+      "rules": "HC-G1",
+      "source": "const MAX_SUBSCRIPTIONS:u64=64;"
+    },
+    {
+      "category": "explicit-safety-policy",
+      "count": 1,
+      "fingerprint": "280f8c8e0f5ab6f64a405e6aa0000202517b7f45b8bec16d086a613e89cb7444",
+      "line": 8,
+      "path": "kernel/src/subscription.rs",
+      "reason": "bounded subscription delivery policy: queue overflow becomes one authoritative Resync and per-process count/slot admission rejects excess subscriptions atomically",
+      "rules": "HC-G8",
+      "source": "pub const QUEUE_SLOTS:usize=16;"
+    },
+    {
+      "category": "explicit-safety-policy",
+      "count": 1,
       "fingerprint": "17c894b4492c3ce98ab7be8944b29cc2a67562fca856f7ba9ed093b9e42444ab",
       "line": 162,
       "path": "lifecycle-boot/src/lib.rs",
@@ -2549,7 +2569,7 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 178,
+    "explicit-safety-policy": 180,
     "platform-adapter": 44,
     "protocol-abi": 43,
     "test-demo-fixture": 11
