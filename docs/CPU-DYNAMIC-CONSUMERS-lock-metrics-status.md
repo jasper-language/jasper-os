@@ -13,6 +13,9 @@
   CPU 0。
 - `IrqSpinLock` 的 acquisition 诊断使用该计数器；CPU 下标超出 bootstrap 区时不再
   越界访问或别名 CPU 0。
+- scheduler 的 `timer_progress` 从 bootstrap-only `MAX_CPUS` 数组迁移为
+  bootstrap 区加 AP 启动前预留的 heap tail；CPU 129 的计时准入和退出统计不再
+  越界，预留失败会在 secondary CPU 启动前失败关闭。
 - CPU 129 及以后不再越界访问、停机或别名 CPU 0 的计数；`LockStats.acquired`
   汇总 bootstrap 计数与 overflow 计数。
 - 正常 bootstrap 范围内的锁热路径仍使用本 CPU 独立原子计数，不引入额外共享
@@ -29,6 +32,16 @@ cargo check -p jasper-kernel --target x86_64-unknown-none
 PASS
 
 cargo check -p jasper-kernel --target x86_64-unknown-none --no-default-features
+PASS
+
+cargo check -p jasper-kernel --target aarch64-unknown-none
+PASS
+
+cargo check -p jasper-kernel --target riscv64gc-unknown-none-elf
+PASS
+
+cargo check -p kernel-core --target loongarch64-unknown-none-softfloat \
+  --features cpu-dynamic
 PASS
 
 cargo test -p kernel-core sync --lib
@@ -48,5 +61,8 @@ findings=278; added=0; cleared=0
   表达最终 CPU 统计容量，不冒充大拓扑运行验收。
 - 亲和 ABI、剩余架构/path platform adapters、真实 129/256/1024-CPU、稀疏 NUMA、
   discovery failure 和 hotplug race 矩阵仍属于后续 CPU dynamic 阶段。
+- LoongArch 完整 kernel build 仍被既有 `kernel/build.rs` “内嵌用户程序尚不支持
+  loongarch64”阻断；本轮只验证 CPU dynamic 的 kernel-core 目标构建，不冒充
+  LoongArch kernel/QEMU 验收。
 - 其余每核 state 必须继续按同一 admitted runtime inventory 审计，不能用新的大
   魔数替代 128，也不能把 bootstrap-only 存储冒充最终容量。

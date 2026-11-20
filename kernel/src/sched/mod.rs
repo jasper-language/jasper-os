@@ -154,6 +154,7 @@ static EXTRA_TICK_LEASES: CpuTail<
     kernel_core::ticket::TicketLock<kernel_core::tick_lease::TickLease>,
 > = CpuTail::new();
 static EXTRA_CPU_INBOXES: CpuTail<kernel_core::ticket::TicketLock<CpuInbox>> = CpuTail::new();
+static EXTRA_TIMER_PROGRESS: CpuTail<TimerProgressCell> = CpuTail::new();
 #[cfg(feature = "krn2-observe")]
 static EXTRA_SYNC_WORK: CpuTail<[core::sync::atomic::AtomicU32; 4]> = CpuTail::new();
 
@@ -194,6 +195,7 @@ pub fn prepare_cpu_slots(cpus: usize) -> Result<(), SchedulerCpuStorageError> {
     EXTRA_CPU_INBOXES.prepare(cpus, |_| {
         kernel_core::ticket::TicketLock::new(CpuInbox::new())
     })?;
+    EXTRA_TIMER_PROGRESS.prepare(cpus, |_| TimerProgressCell::new())?;
     #[cfg(feature = "krn2-observe")]
     EXTRA_SYNC_WORK.prepare(cpus, |_| {
         [
@@ -1042,8 +1044,31 @@ struct TimerProgressCell {
     deferred: AtomicU32,
     short: AtomicU32,
 }
+impl TimerProgressCell {
+    const fn new() -> Self {
+        Self {
+            last_exit: kernel_core::sync::Atomic64::new(0),
+            cost: kernel_core::sync::Atomic64::new(0),
+            deferred: AtomicU32::new(0),
+            short: AtomicU32::new(0),
+        }
+    }
+}
 static TIMER_PROGRESS: [TimerProgressCell; kernel_core::smp::MAX_CPUS] =
-    [const { TimerProgressCell { last_exit: kernel_core::sync::Atomic64::new(0), cost: kernel_core::sync::Atomic64::new(0), deferred: AtomicU32::new(0), short: AtomicU32::new(0) } }; kernel_core::smp::MAX_CPUS];
+    [const { TimerProgressCell::new() }; kernel_core::smp::MAX_CPUS];
+
+fn timer_progress_cell(cpu: usize) -> &'static TimerProgressCell {
+    TIMER_PROGRESS
+        .get(cpu)
+        .or_else(|| EXTRA_TIMER_PROGRESS.get(cpu))
+        .unwrap_or_else(|| {
+            crate::console::emergency_print(format_args!(
+                "[JSR-SCHED] missing timer progress CPU={}\n",
+                cpu
+            ));
+            crate::arch::halt_forever()
+        })
+}
 
 /// 完整定时器事务数、引导处理器推迟的时钟事件数、高精度事件推迟数、记录到的最大开销（时钟计数，未封顶）。
 static TIMER_FULL: kernel_core::sync::Atomic64 = kernel_core::sync::Atomic64::new(0);
@@ -1053,7 +1078,7 @@ static TIMER_DEFERRED_HIGHRES: kernel_core::sync::Atomic64 = kernel_core::sync::
 static TIMER_MAX_COST: kernel_core::sync::Atomic64 = kernel_core::sync::Atomic64::new(0);
 
 fn timer_progress_load(c: usize) -> kernel_core::timer_progress::Progress {
-    let cell = &TIMER_PROGRESS[c];
+    let cell = timer_progress_cell(c);
     kernel_core::timer_progress::Progress {
         last_exit: cell.last_exit.load(Ordering::Relaxed),
         cost: cell.cost.load(Ordering::Relaxed),
@@ -1065,7 +1090,7 @@ fn timer_progress_load(c: usize) -> kernel_core::timer_progress::Progress {
 fn timer_progress_update<R>(c: usize, f: impl FnOnce(&mut kernel_core::timer_progress::Progress) -> R) -> R {
     let mut p = timer_progress_load(c);
     let r = f(&mut p);
-    let cell = &TIMER_PROGRESS[c];
+    let cell = timer_progress_cell(c);
     cell.last_exit.store(p.last_exit, Ordering::Relaxed);
     cell.cost.store(p.cost, Ordering::Relaxed);
     cell.deferred.store(p.deferred, Ordering::Relaxed);
