@@ -62,6 +62,9 @@ Issue #42 的所有外部内核经验只作为问题域来源：
 
 - IPC 多 Handle 交付具备 all-or-none 与槽位释放后的原子重试；
 - 对象跨表 transfer 在目标安装或源移除失败时回滚；
+- 25 机制族中的 M03 已通过真实进程、Channel 和 Ring 的服务退出/重启矩阵：
+  退出会 drain 队列消息与携带 Handle、归还在途字节额度，在飞 recv 只得到
+  一个 `peer_closed`，旧 Handle generation 不能解析到新端点；
 - 关闭的订阅 Handle 返回结构化 `event.closed`，等待登记不再 panic；
 - EventSource 广播有 generation、边界、终态和资源回收证据；
 - `kernel-core::address_sync` 以 MemoryObject backing/generation 为条件身份，
@@ -75,6 +78,7 @@ Issue #42 的所有外部内核经验只作为问题域来源：
 
 证据见 `docs/ISSUE-42-IPC-DELIVERY-ATOMICITY-status.md`、
 `docs/ISSUE-42-OBJECT-TRANSFER-status.md`、
+`docs/ISSUE-42-SERVICE-LOOP-status.md`、
 `docs/ISSUE-42-SUBSCRIPTION-RESYNC-status.md` 和
 `docs/ISSUE-42-COMPAT-ROOT-EXEC-status.md`；地址同步和 Pager 切片见
 `docs/ISSUE-42-NATIVE-ADDRESS-SYNC-status.md` 与

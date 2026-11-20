@@ -968,6 +968,8 @@ check_m44() {   # IPC Channel：用户程序（单进程语义 + 跨进程往返
      && has 'delayed_backend hidden_and_pinned=true visible_and_returned_after_quiesce=true' \
      && has 'leaf_in_queue_released_on_receiver_exit=true sender_handle_moved=true' \
      && has 'receiver_table_full result_table_full=true message_kept=true released_slot=true complete_delivery=true' \
+     && has '^\[JSR-IPC\] service_loop round=1 phase=warmup queued=true service_exited=true queue_drain=true handle_released=true recv_terminal=true peer_closed=true old_endpoint_gone=true old_handle_rejected=true fresh_generation=true fresh_mapped=true fresh_pair=true fresh_exited=true repeated_reap=true resources=true' \
+     && has '^\[JSR-IPC\] service_loop round=2 phase=measured queued=true service_exited=true queue_drain=true handle_released=true recv_terminal=true peer_closed=true old_endpoint_gone=true old_handle_rejected=true fresh_generation=true fresh_mapped=true fresh_pair=true fresh_exited=true repeated_reap=true resources=true' \
      && [ "${accepted:-0}" -gt 0 ] && [ "${rejected:-0}" -gt 0 ] && [ "${charged:-0}" -gt 0 ] \
      && has '^\[JSR-IPC\] objects_live=([0-9]+)/\1 pending=0 pinned=\(0, 0\) reclaimed=true checks=[0-9]+ failed=0'; then
     record M4.4 PASS "send/recv 经 ring；两阶段 send；原子交付（缓冲区/句柄表不足消息保留）；取消竞争；关闭语义；跨进程句柄往返；页帧固定；回到基线"

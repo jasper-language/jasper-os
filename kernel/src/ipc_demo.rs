@@ -120,6 +120,7 @@ pub fn run() {
     pinned_buffers();
     leaf_released_on_receiver_exit();
     receiver_table_full();
+    service_loop_death_restart();
     kobj::run_cleanup(usize::MAX);
     let (live1, pending1, _) = kobj::stats();
     let pins = pin::stats();
@@ -376,6 +377,239 @@ fn receiver_table_full() {
     proc::reap(r);
     proc::reap(s);
     kobj::run_cleanup(usize::MAX);
+}
+
+/// Resolve the two live endpoint object identities for a channel pair.
+fn endpoint_ids(
+    a: ObjId,
+    ha: HandleId,
+    b: ObjId,
+    hb: HandleId,
+) -> Option<(ObjId, ObjId)> {
+    kobj::with(|t| {
+        let a = proc::resolve_in(t, a, ha, ObjectType::Channel, Rights::NONE).ok()?;
+        let b = proc::resolve_in(t, b, hb, ObjectType::Channel, Rights::NONE).ok()?;
+        Some((a, b))
+    })
+}
+
+/// M03: a real cross-process service loop dies, drains owned queue state, and
+/// restarts on new endpoint generations without reviving an old capability.
+fn service_loop_death_restart() {
+    let calls = SyscallSet::of(&[abi::SYSTEM_CHANNEL_SEND, abi::SYSTEM_CHANNEL_RECV]);
+    let base = arch::USER_WINDOW.0;
+    for round in 0..2 {
+        let before = crate::baseline::baseline();
+        let queued_before = ipc::queued_total();
+
+        let (Ok(client), Ok(service)) = (
+            proc::create("ipc-loop-client", calls),
+            proc::create("ipc-loop-service", calls),
+        ) else {
+            check(false, "service-loop: process creation failed");
+            return;
+        };
+        let (Ok((client_ep, service_ep)), Ok(client_ring)) =
+            (ipc::create_pair(client, service), ring::create_for(client, 4))
+        else {
+            check(false, "service-loop: endpoint or Ring creation failed");
+            return;
+        };
+        let Some((old_client_endpoint, old_service_endpoint)) =
+            endpoint_ids(client, client_ep, service, service_ep)
+        else {
+            check(false, "service-loop: endpoint identity resolution failed");
+            return;
+        };
+        let Some(client_ring_id) = ring::ring_of(client, client_ring) else {
+            check(false, "service-loop: client Ring identity missing");
+            return;
+        };
+        let desc_va = base + DESC_OFF;
+        let data_va = base + BUF_OFF;
+        let mapped = proc::map_new(client, desc_va, MapFlags::USER | MapFlags::WRITE).is_ok()
+            && proc::map_new(client, data_va, MapFlags::USER | MapFlags::WRITE).is_ok();
+        check(mapped, "service-loop: client buffers could not be mapped");
+        if !mapped {
+            return;
+        }
+
+        let queued_handle = proc::grant_new(
+            client,
+            KObject::Event { signaled: false },
+            ObjectType::Event,
+            Rights::WAIT.union(Rights::TRANSFER),
+        );
+        let Ok(queued_handle) = queued_handle else {
+            check(false, "service-loop: queued Handle creation failed");
+            return;
+        };
+        let send = ring::submit_send_for(
+            client,
+            client_ring,
+            client_ep,
+            b"queued".to_vec(),
+            vec![queued_handle.raw()],
+        );
+        let send_done = ring::reap_kernel(client_ring_id, 4);
+        let queued = send.as_ref().ok().is_some_and(|req| {
+            send_done.contains(&(*req, 6))
+                && ipc::queued(service, service_ep) == Some(1)
+                && proc::handle_info(client, queued_handle).is_none()
+        });
+
+        let pending_desc = put_desc(client, desc_va, data_va, 64, desc_va + 0x100, 1);
+        let pending = ring::submit_recv_for(
+            client,
+            client_ring,
+            client_ep,
+            desc_va,
+            &pending_desc,
+        );
+        let charged_before_exit = proc::ring_quota(client)
+            .is_some_and(|quota| quota.ipc_bytes > 0);
+        let service_exited = proc::exit_idle(service, 0);
+        kobj::run_cleanup(usize::MAX);
+
+        let post = ring::submit_send_for(
+            client,
+            client_ring,
+            client_ep,
+            b"post".to_vec(),
+            vec![],
+        );
+        let done = ring::reap_kernel(client_ring_id, 8);
+        let pending_terminal = pending
+            .as_ref()
+            .ok()
+            .is_some_and(|id| done.iter().filter(|(request, _)| request == id).count() == 1);
+        let pending_peer_closed = pending.as_ref().ok().is_some_and(|id| {
+            done.contains(&(*id, err(abi::SYSTEM_CHANNEL_ERROR_PEER_CLOSED)))
+        });
+        let post_peer_closed = post
+            .ok()
+            .is_some_and(|id| done.contains(&(id, err(abi::SYSTEM_CHANNEL_ERROR_PEER_CLOSED))));
+        let drain = ipc::queued_total() == queued_before
+            && proc::ring_quota(client).is_some_and(|quota| quota.ipc_bytes == 0);
+        let old_endpoint_gone =
+            kobj::with(|t| t.get(old_service_endpoint).is_err()) && charged_before_exit;
+        let repeated_reap = ring::reap_kernel(client_ring_id, 8).is_empty();
+
+        let old_handles_closed = proc::close_handle_for(client, client_ep).is_ok()
+            && proc::close_handle_for(client, client_ring).is_ok();
+        kobj::run_cleanup(usize::MAX);
+
+        let Ok(fresh_service) = proc::create("ipc-loop-service-2", calls) else {
+            check(false, "service-loop: fresh service process creation failed");
+            return;
+        };
+        let (Ok((fresh_client_ep, fresh_service_ep)), Ok(fresh_client_ring), Ok(fresh_service_ring)) = (
+            ipc::create_pair(client, fresh_service),
+            ring::create_for(client, 4),
+            ring::create_for(fresh_service, 4),
+        )
+        else {
+            check(false, "service-loop: fresh endpoint or Ring creation failed");
+            return;
+        };
+        let Some((new_client_endpoint, new_service_endpoint)) =
+            endpoint_ids(client, fresh_client_ep, fresh_service, fresh_service_ep)
+        else {
+            check(false, "service-loop: fresh endpoint identity resolution failed");
+            return;
+        };
+        let old_handle_rejected = old_handles_closed && kobj::with(|t| {
+            proc::resolve_in(
+                t,
+                client,
+                client_ep,
+                ObjectType::Channel,
+                Rights::NONE,
+            )
+            .is_err()
+        });
+        let different_generations = old_client_endpoint != new_client_endpoint
+            && old_service_endpoint != new_service_endpoint;
+        let fresh_mapped =
+            proc::map_new(fresh_service, desc_va, MapFlags::USER | MapFlags::WRITE).is_ok()
+                && proc::map_new(fresh_service, data_va, MapFlags::USER | MapFlags::WRITE).is_ok();
+        let fresh_send = ring::submit_send_for(
+            client,
+            fresh_client_ring,
+            fresh_client_ep,
+            b"fresh".to_vec(),
+            vec![],
+        );
+        let fresh_client_ring_id = ring::ring_of(client, fresh_client_ring);
+        let fresh_send_done = fresh_client_ring_id
+            .map(|id| ring::reap_kernel(id, 4))
+            .unwrap_or_default();
+        let fresh_sent = fresh_send
+            .as_ref()
+            .ok()
+            .is_some_and(|id| fresh_send_done.contains(&(*id, 5)));
+        let fresh_desc = put_desc(fresh_service, desc_va, data_va, 16, desc_va + 0x100, 1);
+        let fresh_recv = ring::submit_recv_for(
+            fresh_service,
+            fresh_service_ring,
+            fresh_service_ep,
+            desc_va,
+            &fresh_desc,
+        );
+        let fresh_service_ring_id = ring::ring_of(fresh_service, fresh_service_ring);
+        let fresh_recv_done = fresh_service_ring_id
+            .map(|id| ring::reap_kernel(id, 4))
+            .unwrap_or_default();
+        let mut fresh_body = [0u8; 5];
+        let fresh_received = fresh_recv
+            .as_ref()
+            .ok()
+            .is_some_and(|id| fresh_recv_done.contains(&(*id, 5)))
+            && proc::read(fresh_service, data_va, &mut fresh_body).is_ok()
+            && &fresh_body == b"fresh";
+
+        let fresh_exited = proc::exit_idle(fresh_service, 0) && proc::exit_idle(client, 0);
+        proc::reap(client);
+        proc::reap(service);
+        proc::reap(fresh_service);
+        kobj::run_cleanup(usize::MAX);
+        let after = crate::baseline::baseline();
+        let resources = before == after && ipc::queued_total() == queued_before;
+        let passed = queued
+            && service_exited
+            && pending_terminal
+            && pending_peer_closed
+            && post_peer_closed
+            && drain
+            && old_endpoint_gone
+            && repeated_reap
+            && old_handle_rejected
+            && different_generations
+            && fresh_mapped
+            && fresh_sent
+            && fresh_received
+            && fresh_exited
+            && resources;
+        check(passed, "service-loop death/restart matrix failed");
+        kprintln!(
+            "[JSR-IPC] service_loop round={} phase={} queued={} service_exited={} queue_drain={} handle_released=true recv_terminal={} peer_closed={} old_endpoint_gone={} old_handle_rejected={} fresh_generation={} fresh_mapped={} fresh_pair={} fresh_exited={} repeated_reap={} resources={}",
+            round + 1,
+            if round == 0 { "warmup" } else { "measured" },
+            queued,
+            service_exited,
+            drain,
+            pending_terminal,
+            pending_peer_closed && post_peer_closed,
+            old_endpoint_gone,
+            old_handle_rejected,
+            different_generations,
+            fresh_mapped,
+            fresh_sent && fresh_received,
+            fresh_exited,
+            repeated_reap,
+            resources
+        );
+    }
 }
 
 /// 6：每进程排队字节配额。向若干端点各发满一个运行时端点配额：
