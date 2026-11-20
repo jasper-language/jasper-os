@@ -1250,12 +1250,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "db4a2697e23fd8acec117f7a27f1a0ca665091516f9f821e3f295884c9d4685a",
-      "path": "kernel-core/src/fs.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "dc90084693c8ea89a00e0f2b302487b795c608f343271b932be96a8f680c9ee1",
       "path": "lifecycle-model/src/manifest_cbor.rs",
       "rules": "HC-G1"
@@ -1503,5 +1497,5 @@
     "user",
     "xtask"
   ],
-  "total": 320
+  "total": 319
 }

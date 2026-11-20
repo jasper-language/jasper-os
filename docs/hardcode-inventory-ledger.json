@@ -1,5 +1,5 @@
 {
-  "baseline_total": 320,
+  "baseline_total": 319,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -13,7 +13,7 @@
     "explicit-safety-policy": 125,
     "platform-adapter": 28,
     "protocol-abi": 38,
-    "runtime-resource-capacity": 50,
+    "runtime-resource-capacity": 49,
     "test-demo-fixture": 6
   },
   "entries": [
@@ -946,16 +946,6 @@
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
       "source": "pub const MAX_NAME_BYTES: usize = 64;"
-    },
-    {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "db4a2697e23fd8acec117f7a27f1a0ca665091516f9f821e3f295884c9d4685a",
-      "line": 2146,
-      "path": "kernel-core/src/fs.rs",
-      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
-      "rules": "HC-G1",
-      "source": "pub const MAX_JOURNAL_NODES: usize = 4096;"
     },
     {
       "category": "explicit-safety-policy",
@@ -2493,7 +2483,7 @@
     "explicit-safety-policy": 141,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 87,
+    "runtime-resource-capacity": 86,
     "test-demo-fixture": 7
   }
 }

@@ -2143,7 +2143,6 @@ pub mod journal {
     pub const CHECKPOINT_HEADER_BYTES: usize = 64;
     pub const NODE_RECORD_BYTES: usize = 160;
     pub const RECORD_HEADER_BYTES: usize = 48;
-    pub const MAX_JOURNAL_NODES: usize = 4096;
     pub const STORAGE_UNIT_BYTES: usize = 4096;
     pub const SECTORS_PER_STORAGE_UNIT: u64 =
         STORAGE_UNIT_BYTES as u64 / crate::block::SECTOR_BYTES;
@@ -2379,7 +2378,7 @@ pub mod journal {
         fs: &FsContract<N, H>,
     ) -> Result<usize, JournalError> {
         let count = fs.nodes.iter().filter(|node| node.is_some()).count();
-        if count == 0 || count > MAX_JOURNAL_NODES {
+        if count == 0 {
             return Err(JournalError::InvalidCheckpoint);
         }
         CHECKPOINT_HEADER_BYTES
@@ -2466,7 +2465,7 @@ pub mod journal {
         }
         let next_object_id = get_u64(bytes, 40);
         let count = get_u32(bytes, 48) as usize;
-        if count == 0 || count > N || count > MAX_JOURNAL_NODES {
+        if count == 0 || count > N {
             return Err(JournalError::InvalidCheckpoint);
         }
         let required_len = CHECKPOINT_HEADER_BYTES
