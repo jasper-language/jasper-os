@@ -10,10 +10,10 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 156,
+    "explicit-safety-policy": 163,
     "platform-adapter": 28,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 29,
+    "runtime-resource-capacity": 22,
     "test-demo-fixture": 9
   },
   "entries": [
@@ -698,12 +698,12 @@
       "source": "const DEFAULTS: BootCapacity = BootCapacity { objects: 1024, tasks: 64, rt: 8 };"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "1e3f364d76be6e056c0f44d52a8c9291f35a2945351af0152b0c702c68dc5a6f",
       "line": 328,
       "path": "kernel-core/src/config.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
+      "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G1",
       "source": "pub const MAX_OBJECTS: usize = 65536;"
     },
@@ -718,62 +718,62 @@
       "source": "pub const MAX_RT: usize = 64;"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "5f2112d60bbefcebc339389b4a81c034b389cd09d37cbfe1aa8e20c50ebbe389",
       "line": 321,
       "path": "kernel-core/src/config.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
+      "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G1",
       "source": "pub const MAX_TASKS: usize = 256;"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "608c126d6974544fbe52ee2fb8a9d19e87dd2b79a96f54bf4cd1aa4c7ab6100f",
       "line": 317,
       "path": "kernel-core/src/config.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
+      "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G1",
       "source": "pub const MIN_TASKS: usize = 8;"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "764a58cfb555a741b9040970775241ed0b3ff3a17a4aa626dd3eb6436c373ccf",
       "line": 324,
       "path": "kernel-core/src/config.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
+      "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G1",
       "source": "pub const MAX_TASKS: usize = 1024;"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "a0ec60a239d63360284c2b4f68cb6191fb2e28ea42e1db1054a1de4a264619a4",
       "line": 315,
       "path": "kernel-core/src/config.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
+      "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G1",
       "source": "pub const MAX_TIMER_HZ: u32 = 1000;"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "a3d9e372a36506e6123527e4b78589b4d933be72faa81526e02c8bf1eec9ddd6",
       "line": 313,
       "path": "kernel-core/src/config.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
+      "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G1",
       "source": "pub const MIN_TIMER_HZ: u32 = 50;"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "b845b33ad8799d691d603a20f2ef7a6870e3d447fb7e43489d6b65df4eaf6871",
       "line": 326,
       "path": "kernel-core/src/config.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
+      "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G1",
       "source": "pub const MIN_OBJECTS: usize = 64;"
     },
@@ -2650,10 +2650,10 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 163,
+    "explicit-safety-policy": 170,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 29,
+    "runtime-resource-capacity": 22,
     "test-demo-fixture": 9
   }
 }

@@ -110,6 +110,11 @@ def classify(path: str, rules: str, source: str) -> tuple[str, str]:
     """
     name = identifier(source)
     lowered = path.lower()
+    if lowered == "kernel-core/src/config.rs":
+        return (
+            "explicit-safety-policy",
+            "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
+        )
     if path == "kernel-core/src/fdt.rs" and any(
         marker in source
         for marker in (
@@ -455,11 +460,6 @@ def classify(path: str, rules: str, source: str) -> tuple[str, str]:
         return (
             "protocol-abi",
             "path owns a wire, loader, package, graphics, or lifecycle ABI; consumer review remains required",
-        )
-    if lowered == "kernel-core/src/config.rs":
-        return (
-            "explicit-safety-policy",
-            "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
         )
     return (
         "unclassified",
