@@ -6,7 +6,7 @@ Status: **software contract slice passed; DC-2 remains open.**
 
 ## Implemented
 
-`kernel-core/sys/linux_device_uapi.rs` defines a versioned `/dev` endpoint
+`kernel-core/src/linux_device_uapi.rs` defines a versioned `/dev` endpoint
 contract backed by one existing `DriverHostBroker` pass:
 
 - a versioned `DeviceNodeId` and `UapiVersion`;
