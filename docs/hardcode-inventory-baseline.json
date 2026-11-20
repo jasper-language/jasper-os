@@ -259,12 +259,6 @@
       "rules": "HC-G8"
     },
     {
-      "count": 3,
-      "fingerprint": "2b3ab2eaf18c6c7b03c5ae70660148c5525ac7f11cbb705c4bfe521606bae2ad",
-      "path": "kernel/src/linux_abi.rs",
-      "rules": "HC-G1"
-    },
-    {
       "count": 1,
       "fingerprint": "2c0a8a1ed2934f59412fb6f0c1008efe12830d4baf0baa72dfc2e987fff42c89",
       "path": "kernel-core/src/fs.rs",
@@ -1719,5 +1713,5 @@
     "user",
     "xtask"
   ],
-  "total": 308
+  "total": 305
 }

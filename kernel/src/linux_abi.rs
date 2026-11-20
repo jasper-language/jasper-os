@@ -3995,13 +3995,9 @@ fn read_console_input(pid: ObjId, len: usize) -> Result<([u8; 4096], usize), Com
 ///
 /// 标准输入来自有界原生终端会话；文件读取在全部用户页校验通过后才提交游标。
 fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const MAX_READ: usize = 1024 * 1024;
     const TERMINAL_READ: usize = 4096;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let len = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    if len > MAX_READ {
-        return Err(CompatErrno::Invalid);
-    }
     if let Some(entry) = proc::linux_fd(pid, fd) {
         if linux_cache_file_id(entry.handle).is_some() {
             if !entry.rights.contains(kernel_core::object::Rights::READ) {
@@ -4065,7 +4061,11 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             if len == 0 {
                 return Ok(0);
             }
-            let mut bytes = alloc::vec![0u8; len];
+            let mut bytes = alloc::vec::Vec::new();
+            bytes
+                .try_reserve_exact(len)
+                .map_err(|_| CompatErrno::NoMemory)?;
+            bytes.resize(len, 0);
             let read = proc::linux_ashmem_read_from(pid, entry.handle, offset, &mut bytes)
                 .map_err(ashmem_compat_error)?;
             if read != 0 {
@@ -4132,12 +4132,8 @@ fn linux_read(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 ///
 /// 从显式文件偏移读取真实虚拟文件字节；非法 fd、越界长度或用户页错误均失败关闭。
 fn linux_pread64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const MAX_READ: usize = 1024 * 1024;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let len = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    if len > MAX_READ {
-        return Err(CompatErrno::Invalid);
-    }
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if entry.handle == LINUX_PROC_MAPS_HANDLE {
         if !entry.rights.contains(kernel_core::object::Rights::READ) {
@@ -4157,7 +4153,11 @@ fn linux_pread64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         if !entry.rights.contains(kernel_core::object::Rights::READ) {
             return Err(CompatErrno::BadFd);
         }
-        let mut bytes = alloc::vec![0u8; len];
+        let mut bytes = alloc::vec::Vec::new();
+        bytes
+            .try_reserve_exact(len)
+            .map_err(|_| CompatErrno::NoMemory)?;
+        bytes.resize(len, 0);
         let read = proc::linux_ashmem_read_from(pid, entry.handle, args[3], &mut bytes)
             .map_err(ashmem_compat_error)?;
         let io = admit_process_io(pid, read as u64, 1)?;
@@ -4456,7 +4456,6 @@ fn linux_process_vm_io(
 /// 有界读取虚拟文件到多个用户区间；先固定全部目标页，失败时不写入且不推进游标。
 fn linux_readv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const MAX_IOVECS: usize = 16;
-    const MAX_READ: usize = 1024 * 1024;
     const IOVEC_BYTES: usize = 16;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
@@ -4469,7 +4468,10 @@ fn linux_readv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }) {
         return linux_vectored_file_io(pid, args, false, false, false);
     }
-    let mut vectors = alloc::vec::Vec::with_capacity(count);
+    let mut vectors = alloc::vec::Vec::new();
+    vectors
+        .try_reserve_exact(count)
+        .map_err(|_| CompatErrno::NoMemory)?;
     let mut total = 0usize;
     for index in 0..count {
         let address = args[1]
@@ -4483,9 +4485,6 @@ fn linux_readv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         base.checked_add(u64::try_from(len).map_err(|_| CompatErrno::Invalid)?)
             .ok_or(CompatErrno::Fault)?;
         total = total.checked_add(len).ok_or(CompatErrno::Invalid)?;
-        if total > MAX_READ {
-            return Err(CompatErrno::Invalid);
-        }
         vectors.push((base, len));
     }
     if fd == 0 {
@@ -4493,7 +4492,10 @@ fn linux_readv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         if total == 0 {
             return Ok(0);
         }
-        let mut pinned = alloc::vec::Vec::with_capacity(vectors.len());
+        let mut pinned = alloc::vec::Vec::new();
+        pinned
+            .try_reserve_exact(vectors.len())
+            .map_err(|_| CompatErrno::NoMemory)?;
         for (base, len) in &vectors {
             let range = crate::kobj::with(|table| {
                 proc::pin_user_in(table, pid, *base, *len, true)
@@ -4530,7 +4532,10 @@ fn linux_readv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let io = admit_process_io(pid, available as u64, 1)?;
     let mut source_offset = offset;
     let mut remaining = available;
-    let mut ranges = alloc::vec::Vec::with_capacity(vectors.len());
+    let mut ranges = alloc::vec::Vec::new();
+    ranges
+        .try_reserve_exact(vectors.len())
+        .map_err(|_| CompatErrno::NoMemory)?;
     for (base, len) in vectors {
         let take = remaining.min(len);
         if take != 0 {
