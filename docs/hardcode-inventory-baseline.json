@@ -962,12 +962,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "c1d9b4b03bccb1eb632addff1aef2b70649897772b22e7647dea20ae0b36d367",
-      "path": "kernel/src/arch/x86_64/pit.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "c2e26df14441f1d2cd94b57337af01f2ed8d1c931693d4eb1434d5934382bea3",
       "path": "user/irqprobe/build.rs",
       "rules": "HC-G7"
@@ -1293,5 +1287,5 @@
     "user",
     "xtask"
   ],
-  "total": 232
+  "total": 231
 }

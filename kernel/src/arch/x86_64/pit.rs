@@ -7,6 +7,8 @@ use super::port::outb;
 
 /// PIT 输入时钟频率（Hz）。
 const PIT_BASE_FREQ: u32 = 1_193_182;
+/// 16 位通道计数器可表示的最大计数；延迟分段由该硬件事实推导。
+const PIT_MAX_COUNT: u32 = u16::MAX as u32;
 /// 通道 0 数据端口。
 const PIT_CHANNEL0: u16 = 0x40;
 /// 模式/命令端口。
@@ -27,8 +29,8 @@ pub fn init(hz: u32) {
 const PIT_CHANNEL2: u16 = 0x42;
 /// 通道 2 门控与输出状态端口（位 0 = 门控，位 1 = 扬声器，位 5 = 通道 2 输出）。
 const PIT_GATE: u16 = 0x61;
-/// 单次计数的最大微秒数（16 位计数器在 1.193 MHz 下约 54.9 ms，留余量）。
-const MAX_CHUNK_US: u32 = 50_000;
+/// 单个完整 16 位计数周期对应的最长微秒数。
+const MAX_CHUNK_US: u32 = (PIT_MAX_COUNT as u64 * 1_000_000 / PIT_BASE_FREQ as u64) as u32; // JASPER-HARDCODE-REVIEW: issue=35 source=PIT-8254-HARDWARE reason=derived-from-sixteen-bit-counter-and-input-clock
 
 /// 忙等至少 `us` 微秒（通道 2 单次计数、轮询输出位；不需要中断，可在关中断时使用）。
 ///
@@ -37,7 +39,8 @@ pub fn delay_us(us: u32) {
     let mut left = us;
     while left > 0 {
         let chunk = left.min(MAX_CHUNK_US);
-        let count = ((PIT_BASE_FREQ as u64 * chunk as u64) / 1_000_000).clamp(1, 0xFFFF) as u16;
+        let count = ((PIT_BASE_FREQ as u64 * chunk as u64) / 1_000_000)
+            .clamp(1, u64::from(PIT_MAX_COUNT)) as u16;
         // SAFETY：标准 PIT 编程：0xB0 = 通道 2、先低后高字节、模式 0（计满输出变高）、二进制；
         // 端口 0x61 只改门控与扬声器位（扬声器保持关闭）。
         unsafe {

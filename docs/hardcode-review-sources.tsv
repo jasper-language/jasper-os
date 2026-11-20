@@ -5,6 +5,7 @@ aarch64-el2-retain-probe	22	build	EL2-vector-residency-verification-feature
 authz-delegation-depth-policy	39	policy	Issue-39-bounded-delegation-depth
 Intel-SDM-Vol3-Vector-Fields	33	spec	Intel-SDM-Volume-3-APIC-vector-fields
 PCI-SIG-MSI-X	33	spec	PCI-Local-Bus-Specification-MSI-X
+PIT-8254-HARDWARE	35	spec	Intel-8254-Programmable-Interval-Timer-16-bit-counters
 actual-smp-report	33	runtime	SMP-StartReport-online-failed-dropped
 admitted-smp-report	33	runtime	SMP-admitted-topology
 boot-handshake	33	spec	architecture-boot-handshake

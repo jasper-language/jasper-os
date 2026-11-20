@@ -1,5 +1,5 @@
 {
-  "baseline_total": 232,
+  "baseline_total": 231,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,7 +10,7 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 131,
+    "explicit-safety-policy": 130,
     "platform-adapter": 28,
     "protocol-abi": 42,
     "test-demo-fixture": 11
@@ -800,7 +800,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "8df24e784e8231cc0fa231891767b2678e1c4db7dc9f09619e196b13db4f33f3",
-      "line": 20,
+      "line": 21,
       "path": "kernel-core/src/net4_service.rs",
       "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
@@ -1070,7 +1070,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "83c7ee0d0e1dee9a8f151af0aeee571e982fa2aa09647c37ac7aac99aad8c4b0",
-      "line": 35,
+      "line": 36,
       "path": "kernel-core/src/virtio_gpu.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
@@ -1479,18 +1479,8 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "c1d9b4b03bccb1eb632addff1aef2b70649897772b22e7647dea20ae0b36d367",
-      "line": 31,
-      "path": "kernel/src/arch/x86_64/pit.rs",
-      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
-      "rules": "HC-G1",
-      "source": "const MAX_CHUNK_US: u32 = 50_000;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
       "fingerprint": "366fcc7fe445a50e7977df560ac5b3c6d0b05c43240b846d7a3f243bc5ad2ccb",
-      "line": 39,
+      "line": 41,
       "path": "kernel/src/arch/x86_64/pit.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G2,HC-G6",
@@ -2139,7 +2129,7 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 134,
+    "explicit-safety-policy": 133,
     "platform-adapter": 44,
     "protocol-abi": 43,
     "test-demo-fixture": 11
