@@ -3,6 +3,7 @@
 更新时间：2026-11-20。
 
 状态：**software contracts and inventory only; no real compatibility driver domain**。
+当前 12 项为 5 partial、3 software-contract、2 missing、2 blocked-hardware。
 
 ## 台账
 
@@ -24,6 +25,12 @@
 `scripts/check-issue43-driver-ledger.py` 校验 ID、状态、分层和证据路径，CI
 同时运行 self-test 与全表检查。
 
+D12 另由 `verification/issue43-pixel6a-support-matrix.tsv` 与
+`scripts/check-issue43-support-matrix.py` 固化逐组件 source/license/firmware/
+redistribution/security/EOL 字段。未核实事实不得标为 `approved`，再分发许可也
+必须有仓库内证据。该矩阵当前仍只覆盖关键类别，不能替代 323 个 vendor 模块和
+26 个 HAL 的逐项审核。
+
 ## 当前事实
 
 - Pixel 6a 的设备、GKI、323 个 vendor 模块、26 个 vendor HAL 库和关键设备节点
@@ -32,7 +39,9 @@
   复用 Driver Host pass、统一授权、generation、death 和 quiescence；
 - 尚无真实 Linux/Android 驱动域、真实 Binder/HAL 执行、真实 ioctl 设备链、
   物理 IOMMU/reset 或启动 UFS 路径；
+- D12 的失败关闭治理矩阵已冻结，但完整模块来源、许可证、firmware 哈希、
+  security/EOL 和再分发证据仍缺失；
 - 因而 DC-2、DC-4、LC-4 驱动部分和 Issue #43 均不能标记 done。
 
-台账中的 `blocked-hardware` 与 `missing` 是结果，不是暂时跳过；只有相应真实
-执行证据出现后才能迁移状态。
+台账中的 `blocked-hardware`、`software-contract` 与 `missing` 是结果，不是
+暂时跳过；只有相应真实执行证据出现后才能迁移状态。
