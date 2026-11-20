@@ -7,7 +7,7 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
-kernel-core = { path = "../kernel-core", features = ["acpi-dynamic", "network-dynamic", "terminal-dynamic", "display-dynamic", "hwvirt-vcpu-dynamic", "runtime-registries", "gpu-dynamic", "irq-dynamic", "cpu-dynamic"] }
+kernel-core = { path = "../kernel-core", features = ["acpi-dynamic", "network-dynamic", "terminal-dynamic", "display-dynamic", "hwvirt-vcpu-dynamic", "runtime-registries", "gpu-dynamic", "irq-dynamic", "cpu-dynamic", "subscription-dynamic"] }
 jasper-lifecycle-boot = { path = "../lifecycle-boot" }
 jasper-lifecycle-model = { path = "../lifecycle-model" }
 # Compatibility crates are optional services. Native Jasper profiles must link

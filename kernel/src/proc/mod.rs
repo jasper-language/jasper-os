@@ -11178,13 +11178,12 @@ fn destroy_process(p: Box<Process>) {
 pub(crate) fn subscription_charge_in(
     t: &mut kobj::Table,
     pid: ObjId,
-    slots: u64,
 ) -> Option<crate::mm::memory_quota::Charge> {
     receiver(t, pid).ok()?.subscription_account.reserve(
         1,
-        slots,
+        0,
         crate::subscription::PROCESS_SUBSCRIPTIONS,
-        crate::subscription::PROCESS_QUEUE_SLOTS,
+        u64::MAX,
     )
 }
 

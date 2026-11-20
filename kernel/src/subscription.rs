@@ -5,13 +5,11 @@ use alloc::{boxed::Box,vec::Vec};
 use kernel_core::{object::{HandleId,ObjectType,Rights},objtable::ObjId,
  subscription::{Snapshot,Queue,Policy,Delivery}};
 use crate::{kobj::{self,KObject,Table},proc::{self,ProcError}};
-pub const QUEUE_SLOTS:usize=16;
 pub(crate) const PROCESS_SUBSCRIPTIONS:u64=32;
-pub(crate) const PROCESS_QUEUE_SLOTS:u64=512;
 
 pub struct Source { snapshot:Snapshot, subscribers:Vec<ObjId>, closed:bool, publisher_owned:bool, policies:u8 }
 pub struct Subscription {
- source:ObjId, queue:Queue<QUEUE_SLOTS>, closed:bool, linked:bool, waiter:Option<(ObjId,u64)>,
+ source:ObjId, queue:Queue, closed:bool, linked:bool, waiter:Option<(ObjId,u64)>,
  // Independent charge account survives process exit; no Process ownership edge.
  _charge:crate::mm::memory_quota::Charge,
 }
@@ -38,7 +36,7 @@ pub(crate) fn subscribe_in(t:&mut Table,pid:ObjId,handle:HandleId,policy:Policy)
     s.subscribers.try_reserve(1).map_err(|_|Error::Allocation)?;s.snapshot
    },_=>return Err(Error::Closed),
   };
-  let charge=proc::subscription_charge_in(t,pid,QUEUE_SLOTS as u64).ok_or(Error::Quota)?;
+  let charge=proc::subscription_charge_in(t,pid).ok_or(Error::Quota)?;
   let sub=Box::try_new(Subscription {source:id,queue:Queue::new(snapshot,policy),closed:false,linked:false,waiter:None,_charge:charge}).map_err(|_|Error::Allocation)?;
   t.acquire_internal(id).map_err(|_|Error::Invalid)?;
   let result=proc::grant_new_in(t,pid,KObject::Subscription(sub),ObjectType::Subscription,Rights::READ.union(Rights::WAIT));
@@ -167,12 +165,24 @@ pub(crate) fn check_wait_in(t:&mut Table,sub:ObjId)->Result<(),i64> {
  }
 }
 pub(crate) fn deliver_in(t:&mut Table,target:&WaitTarget)->Attempt {
- let (mut queue,closed,source)=match t.get(target.sub) {Ok(KObject::Subscription(s))=>(s.queue.clone(),s.closed,s.source),_=>return Attempt::Done(err(SYSTEM_HANDLE_ERROR_INVALID))};
- let mut bytes=[0;MAX_BATCH*RECORD_BYTES];let mut count=0;
- while count<target.capacity {let Some(event)=queue.take() else {break};bytes[count*RECORD_BYTES..(count+1)*RECORD_BYTES].copy_from_slice(&kernel_core::subscription_abi::encode(resync_snapshot_in(t,source,event)));count+=1;}
+ let (deliveries,closed,source)={
+  let sub=match t.get(target.sub) {Ok(KObject::Subscription(s))=>s,_=>return Attempt::Done(err(SYSTEM_HANDLE_ERROR_INVALID))};
+  let mut deliveries=Vec::new();
+  if deliveries.try_reserve_exact(target.capacity).is_err() {return Attempt::Done(err(SYSTEM_MEMORY_ERROR_OUT_OF_MEMORY));}
+  for _ in 0..target.capacity {
+   let Some(event)=sub.queue.peek() else {break};
+   let resync=matches!(event,Delivery::Resync(_));
+   deliveries.push(event);
+   if resync {break;}
+  }
+  (deliveries,sub.closed,sub.source)
+ };
+ let mut bytes=[0;MAX_BATCH*RECORD_BYTES];
+ let count=deliveries.len();
+ for (count,event) in deliveries.into_iter().enumerate() {bytes[count*RECORD_BYTES..(count+1)*RECORD_BYTES].copy_from_slice(&kernel_core::subscription_abi::encode(resync_snapshot_in(t,source,event)));}
  if count>0 {
   if !target.buffer.write_at(0,&bytes[..count*RECORD_BYTES]) {return Attempt::Done(err(SYSTEM_MEMORY_ERROR_INVALID_ADDRESS));}
-  if let Ok(KObject::Subscription(s))=t.get_mut(target.sub) {s.queue=queue;}
+  if let Ok(KObject::Subscription(s))=t.get_mut(target.sub) {for _ in 0..count {let _=s.queue.take();}}
   return Attempt::Done(count as i64);
  }
  let closed=closed || !matches!(t.get(source),Ok(KObject::EventSource(s)) if !s.closed);

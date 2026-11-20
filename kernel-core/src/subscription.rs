@@ -1,5 +1,7 @@
-//! Bounded subscription queue. The caller serializes snapshot/enrollment/publication.
+//! Heap-admitted subscription queue. The caller serializes snapshot/enrollment/publication.
 //! This module neither locks nor wakes tasks and owns no kernel object references.
+#[cfg(feature = "subscription-dynamic")]
+use alloc::collections::VecDeque;
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub struct Snapshot { pub version:u64, pub value:u64 }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
@@ -17,54 +19,54 @@ impl Snapshot {
         *self=Self {version,value};Ok(*self)
     }
 }
-#[derive(Clone)]
-pub struct Queue<const N:usize> {
-    entries:[Option<Event>;N],head:usize,len:usize,latest:Snapshot,
-    resync:bool,policy:Policy,
+#[cfg(feature = "subscription-dynamic")]
+pub struct Queue {
+    entries:VecDeque<Event>,latest:Snapshot,resync:bool,policy:Policy,
 }
-impl<const N:usize> Queue<N> {
+#[cfg(feature = "subscription-dynamic")]
+impl Queue {
     pub const fn new(snapshot:Snapshot,policy:Policy)->Self {
-        Self {entries:[None;N],head:0,len:0,latest:snapshot,resync:false,policy}
+        Self {entries:VecDeque::new(),latest:snapshot,resync:false,policy}
     }
-    fn require_resync(&mut self) { self.entries.fill(None);self.head=0;self.len=0;self.resync=true; }
+    fn require_resync(&mut self) { self.entries.clear();self.resync=true; }
     pub fn accepts(&self,version:u64)->bool {self.latest.version.checked_add(1)==Some(version)}
     pub fn resync_to(&mut self,snapshot:Snapshot) {self.latest=snapshot;self.require_resync();}
     pub fn publish(&mut self,snapshot:Snapshot)->Result<(),Error> {
         if !self.accepts(snapshot.version) {return Err(Error::Sequence);}
         self.latest=snapshot;
         if self.resync {return Ok(());}
-        if N==0 {self.require_resync();return Ok(());}
-        if self.len>0 && self.policy!=Policy::Events {
-            let index=(self.head+self.len-1)%N;
-            let old=self.entries[index].unwrap();
+        if !self.entries.is_empty() && self.policy!=Policy::Events {
+            let old=*self.entries.back().expect("non-empty subscription queue");
             let value=if self.policy==Policy::State {Some(snapshot.value)} else {old.value.checked_add(snapshot.value)};
             match value {
-                Some(value)=>self.entries[index]=Some(Event {first:old.first,last:snapshot.version,value}),
+                Some(value)=>*self.entries.back_mut().expect("non-empty subscription queue")=Event {first:old.first,last:snapshot.version,value},
                 None=>self.require_resync(),
             }
-        } else if self.len==N { self.require_resync(); }
-        else {
-            self.entries[(self.head+self.len)%N]=Some(Event {first:snapshot.version,last:snapshot.version,value:snapshot.value});
-            self.len+=1;
+        } else if self.entries.try_reserve(1).is_err() {
+            self.require_resync();
+        } else {
+            self.entries.push_back(Event {first:snapshot.version,last:snapshot.version,value:snapshot.value});
         }
         Ok(())
+    }
+    pub fn peek(&self)->Option<Delivery> {
+        if self.resync {return Some(Delivery::Resync(self.latest));}
+        self.entries.front().copied().map(Delivery::Event)
     }
     /// One caller can repeatedly take up to its batch limit in one locked transaction.
     pub fn take(&mut self)->Option<Delivery> {
         if self.resync {self.resync=false;return Some(Delivery::Resync(self.latest));}
-        if self.len==0 {return None;}
-        let event=self.entries[self.head].take().unwrap();
-        self.head=(self.head+1)%N;self.len-=1;Some(Delivery::Event(event))
+        self.entries.pop_front().map(Delivery::Event)
     }
-    pub const fn queued(&self)->usize {self.len}
+    pub fn queued(&self)->usize {self.entries.len()}
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "subscription-dynamic"))]
 mod tests {
  use super::*;
  #[test]
  fn divergence_is_recovered_as_one_resync_snapshot() {
-  let mut queue=Queue::<2>::new(Snapshot {version:1,value:10},Policy::Events);
+  let mut queue=Queue::new(Snapshot {version:1,value:10},Policy::Events);
   assert!(queue.accepts(2));assert!(!queue.accepts(3));
   queue.publish(Snapshot {version:2,value:20}).unwrap();
   queue.resync_to(Snapshot {version:9,value:90});

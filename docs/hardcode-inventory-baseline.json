@@ -212,12 +212,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "280f8c8e0f5ab6f64a405e6aa0000202517b7f45b8bec16d086a613e89cb7444",
-      "path": "kernel/src/subscription.rs",
-      "rules": "HC-G8"
-    },
-    {
-      "count": 1,
       "fingerprint": "2c0a8a1ed2934f59412fb6f0c1008efe12830d4baf0baa72dfc2e987fff42c89",
       "path": "kernel-core/src/fs.rs",
       "rules": "HC-G1"
@@ -659,12 +653,6 @@
       "fingerprint": "6a22e63e2cac653a9d292827cd43534383bc1363d0d550dfe796e74e1251ca4a",
       "path": "kernel/src/arch/aarch64/boot.rs",
       "rules": "HC-G3"
-    },
-    {
-      "count": 1,
-      "fingerprint": "6ad191054f941ff840b6b993d1e3dff31ec37c317875627ca43fa2e8b00d7c72",
-      "path": "kernel/src/subscription.rs",
-      "rules": "HC-G8"
     },
     {
       "count": 3,
@@ -1551,5 +1539,5 @@
     "user",
     "xtask"
   ],
-  "total": 278
+  "total": 276
 }

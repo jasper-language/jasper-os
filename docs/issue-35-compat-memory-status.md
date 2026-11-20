@@ -79,6 +79,9 @@
   表删除固定 16 槽；登记先完成可失败预留，再发布新槽，并优先复用已退出线程或
   进程留下的空槽。进程信号唤醒和 Landlock 同步线程快照改用动态索引集合，不再
   截断大线程组。
+- 原生 Subscription 队列删除每订阅 16 条及每进程 512 slot 的隐藏默认值。队列
+  使用 `VecDeque::try_reserve` 增长；分配失败转为一次权威 Resync，交付路径先
+  `peek` 组装、用户缓冲写成功后再提交 `take`，不再克隆可增长队列。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -98,7 +101,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=278, runtime-resource-capacity=13, unclassified=0, added=0
+findings=276, runtime-resource-capacity=0, unclassified=0, added=0
 ```
 
 ## 尚未完成

@@ -242,10 +242,7 @@ def classify(path: str, rules: str, source: str) -> tuple[str, str]:
         "MAX_FLOCK_LOCKS",
         "MAX_LINUX_KEYS",
         "MAX_GROUPS",
-        "MAX_SYSV_SEM_SETS",
-        "MAX_SYSV_SEMS_PER_SET",
         "MAX_SYSV_SEM_WAITERS",
-        "MAX_SYSV_SEM_UNDOS",
         "MAX_SYSV_SHARED_ATTACHMENTS",
     }:
         return (
@@ -274,11 +271,41 @@ def classify(path: str, rules: str, source: str) -> tuple[str, str]:
     if path == "kernel/src/linux_abi.rs" and name in {
         "MAX_SYSV_MESSAGE_QUEUES",
         "MAX_SYSV_SEM_SETS",
+        "MAX_SYSV_SEMS_PER_SET",
         "MAX_SYSV_SEM_UNDOS",
     }:
         return (
             "explicit-safety-policy",
             "advertised SysV IPC compatibility quota reported through IPC_INFO; excess creation/undo registration is rejected rather than silently truncated",
+        )
+    if path == "kernel-core/src/spawn_abi.rs" and name == "MIN_CPU_LIMIT":
+        return (
+            "explicit-safety-policy",
+            "published lower-bound policy for CPU admission; sub-tick limits are rejected rather than allowing starvation",
+        )
+    if path == "kernel/src/proc/mod.rs" and name in {
+        "MAX_PROCESS_FRAMES",
+        "MAX_VM_GUEST_FRAMES",
+        "MAX_MAP_PAGES",
+    }:
+        return (
+            "explicit-safety-policy",
+            "compile-time alias of the validated active KernelConfig memory budget; it introduces no independent runtime capacity",
+        )
+    if path == "user/irqprobe/src/main.rs" and name == "RING_CAPACITY":
+        return (
+            "test-demo-fixture",
+            "IRQ probe completion queue selected by the deterministic acceptance fixture",
+        )
+    if path == "user/isohost/src/main.rs" and name == "MAX_CHILDREN":
+        return (
+            "test-demo-fixture",
+            "acceptance host mirrors the kernel task-derived child quota and does not own process admission",
+        )
+    if path == "user/rt/src/sys.rs" and name in {"STACK_SLOTS", "MODULE_SLOTS"}:
+        return (
+            "protocol-abi",
+            "fixed user-runtime virtual layout range; changing it changes the published process memory map",
         )
     if name in {
         "MAX_BARS",

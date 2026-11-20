@@ -21,6 +21,11 @@ ext4-view = { version = "1.0.0", default-features = false, optional = true }
 ext4_rs = { path = "../third_party/ext4_rs", optional = true }
 wireguard-sans-io = { version = "=1.0.0", default-features = false }
 
+[[test]]
+name = "subscription"
+path = "tests/subscription.rs"
+required-features = ["subscription-dynamic"]
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
@@ -66,6 +71,9 @@ gpu-dynamic = []
 # Native Profile resolution, module assembly and module lifecycle use heap-backed
 # metadata in the kernel. User ABI crates keep the allocation-free default surface.
 runtime-registries = []
+# Subscription queues grow from the kernel heap instead of a hidden per-queue
+# slot count. User ABI crates keep the allocation-free type surface.
+subscription-dynamic = []
 # Compatibility mechanism adapters retain a bounded fixed-capacity provenance
 # table for host-testable state machines. The production kernel uses the
 # heap-backed table admitted through runtime-registries.
