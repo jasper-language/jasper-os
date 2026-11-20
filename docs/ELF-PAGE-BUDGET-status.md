@@ -29,8 +29,11 @@ cargo check -p jasper-kernel --target x86_64-unknown-none
 PASS
 
 hardcode inventory
-findings=310; runtime-resource-capacity=42; added=0
+findings=310; added=0
 ```
+
+该历史提交使用旧指纹算法；后续发现源码类型冒号导致常量标识符碰撞，已修正并
+重新分类全部存量。当前总数和分类以 `docs/hardcode-inventory-ledger.md` 为准。
 
 这些宿主测试证明布局拒绝和预算传递，不替代真实 UEFI Linux ELF 装载回归；完整
 三架构验收仍由公开 CI 及后续 QEMU acceptance 提供。

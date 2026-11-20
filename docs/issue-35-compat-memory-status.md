@@ -43,7 +43,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=308, runtime-resource-capacity=41, added=0
+findings=308, runtime-resource-capacity=67, unclassified=0, added=0
 ```
 
 ## 尚未完成
