@@ -85,6 +85,8 @@
 - Vulkan WSI swapchain 不再把最多 4 张图像写成隐藏上限；`SurfaceCaps.max_images`
   是公开能力字段，`acquired` 集合在创建 Surface 前按该值可失败预留。8-image
   定向测试验证全部图像可依次获取，耗尽后明确返回 `ImageBusy`。
+- 删除无消费者的 `compat-core::native::MAX_EPOLL_EVENTS=16` 遗留常量；真实
+  epoll_wait 输出容量已由调用方 `maxevents` 与分配准入决定。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -104,7 +106,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=277, runtime-resource-capacity=0, unclassified=0, added=0
+findings=276, runtime-resource-capacity=0, unclassified=0, added=0
 ```
 
 ## 尚未完成

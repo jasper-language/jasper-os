@@ -752,12 +752,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "7b0885ec938e9ea76f83b54cdd38ee3dbf5a12857c15c1237562e64be1bfc1e7",
-      "path": "compat-core/src/native.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "7b47f14aab6aa0692890501174a2b7ba3c2201344b42626c40700f95bf57204d",
       "path": "compat-core/src/executable.rs",
       "rules": "HC-G1"
@@ -1545,5 +1539,5 @@
     "user",
     "xtask"
   ],
-  "total": 277
+  "total": 276
 }

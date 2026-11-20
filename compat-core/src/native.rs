@@ -24,10 +24,6 @@ use kernel_core::object::Rights;
 use kernel_core::task_index::Token;
 use kernel_core::wait::{Event, Waitable};
 
-/// Maximum number of event records returned by one compatibility wait.
-///
-/// 单次 epoll 等待最多写回的记录数。
-pub const MAX_EPOLL_EVENTS: usize = 16;
 /// Maximum number of futex waiters on one native synchronization word.
 ///
 /// 单个 futex 同步字可登记的最大等待者数。
