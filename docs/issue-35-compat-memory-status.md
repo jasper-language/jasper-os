@@ -28,6 +28,9 @@
   缓冲改为 `try_reserve_exact` 后零初始化；向量、pin 与复制范围表的元数据也使用
   可失败堆准入；实际读取继续由调用方长度、文件/终端可用数据、进程 IO 和 pin
   预算裁决。
+- `getrandom` 的 1 MiB 单次总长度上限已移除；输出缓冲由调用方长度和
+  `try_reserve_exact` 的堆准入决定，分配失败返回 `ENOMEM`，不改变合法 flags 和
+  随机源回退语义。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -47,7 +50,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=305, runtime-resource-capacity=66, unclassified=0, added=0
+findings=304, runtime-resource-capacity=65, unclassified=0, added=0
 ```
 
 ## 尚未完成

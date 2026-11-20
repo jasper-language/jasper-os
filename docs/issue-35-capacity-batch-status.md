@@ -84,6 +84,10 @@ pipe endpoint 记录的每进程 32 上限已移除。每个 pipe2 仍需由运�
 Linux 程序单次读取超过 1 MiB 的 UEFI 执行证据，因此该项只记为生产上限移除，
 不能替代兼容层产品验收。
 
+`getrandom` 同样的 1 MiB 单次总长度上限已移除。输出缓冲改为调用方长度下的
+`try_reserve_exact` 准入，RDRAND、virtio-rng 回退和 flags 语义不变；大请求仍未取得
+UEFI 用户态压力证据。
+
 ## 验证
 
 ```text
