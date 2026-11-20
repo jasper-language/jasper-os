@@ -15,7 +15,7 @@ use jasper_compat_loader::{
 };
 use kernel_core::objtable::ObjId;
 
-use crate::compat_elf::{JasperExecutionBackend, JasperLoaderMemory};
+use crate::compat_elf::{image_page_budget, JasperExecutionBackend, JasperLoaderMemory};
 use crate::mm::frame::free_frames;
 use crate::proc::{self, ProcState};
 use crate::syscall::{table as abi, SyscallSet};
@@ -165,7 +165,12 @@ pub fn run() {
         }
     };
     check(plan.interpreter.is_none(), "static_image");
-    let image = match ImageLayout::new(&plan, 0, kernel_core::frame::FRAME_SIZE) {
+    let image = match ImageLayout::new(
+        &plan,
+        0,
+        kernel_core::frame::FRAME_SIZE,
+        image_page_budget(pid),
+    ) {
         Ok(image) => image,
         Err(_) => {
             check(false, "layout");

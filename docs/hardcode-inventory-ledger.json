@@ -1,5 +1,5 @@
 {
-  "baseline_total": 312,
+  "baseline_total": 310,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -13,7 +13,7 @@
     "explicit-safety-policy": 125,
     "platform-adapter": 28,
     "protocol-abi": 38,
-    "runtime-resource-capacity": 44,
+    "runtime-resource-capacity": 42,
     "test-demo-fixture": 6
   },
   "entries": [
@@ -278,30 +278,10 @@
       "source": "const MAX_PROGRAM_HEADERS: usize = 128;"
     },
     {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "0c4746e9d4bb51fa642723994883c278802bc83a8c2814a40754e9a1d7cc33e2",
-      "line": 14,
-      "path": "compat-loader/src/memory.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
-      "rules": "HC-G1",
-      "source": "const MAX_IMAGE_PAGES: usize = 262_144;"
-    },
-    {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "166629e42fbdaf56d0c51f3f133b84967dc0994a78b0dfcc92a8d18d7c36b551",
-      "line": 13,
-      "path": "compat-loader/src/memory.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
-      "rules": "HC-G1",
-      "source": "const MAX_PAGE_SIZE: u64 = 64 * 1024;"
-    },
-    {
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "dd0bee1c8af7f598ddc7f5d7f1c43b9a90d8493c94df56279e0f1fa4f1d28f24",
-      "line": 15,
+      "line": 13,
       "path": "compat-loader/src/memory.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
@@ -2433,7 +2413,7 @@
     "explicit-safety-policy": 141,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 79,
+    "runtime-resource-capacity": 77,
     "test-demo-fixture": 7
   }
 }

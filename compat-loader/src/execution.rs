@@ -800,6 +800,7 @@ pub fn plan_dynamic_program(
     executable_base: u64,
     interpreter_base: u64,
     page_size: u64,
+    page_budget: usize,
 ) -> Result<DynamicProgramPlan, LoaderError> {
     if executable_plan.interpreter.is_none()
         || !executable_plan.position_independent
@@ -810,8 +811,14 @@ pub fn plan_dynamic_program(
     }
     let executable_bias = super::select_load_bias(executable_plan, executable_base, page_size)?;
     let interpreter_bias = super::select_load_bias(interpreter_plan, interpreter_base, page_size)?;
-    let executable = ImageLayout::new(executable_plan, executable_bias, page_size)?;
-    let interpreter = ImageLayout::new(interpreter_plan, interpreter_bias, page_size)?;
+    let executable =
+        ImageLayout::new(executable_plan, executable_bias, page_size, page_budget)?;
+    let interpreter = ImageLayout::new(
+        interpreter_plan,
+        interpreter_bias,
+        page_size,
+        page_budget.saturating_sub(executable.pages.len()),
+    )?;
     if executable.overlaps(&interpreter) {
         return Err(LoaderError::OverlappingImages);
     }
@@ -871,7 +878,7 @@ mod tests {
             relocations: Vec::new(),
             max_align: 0x1000,
         };
-        ImageLayout::new(&plan, 0, 0x1000).unwrap()
+        ImageLayout::new(&plan, 0, 0x1000, usize::MAX).unwrap()
     }
 
     fn module(
@@ -1249,7 +1256,7 @@ mod tests {
     fn interpreter_base_must_match_the_program_interpreter() {
         let main_bytes = fs::read("/bin/true").unwrap();
         let main_plan = crate::parse(&main_bytes).unwrap();
-        let main_image = ImageLayout::new(&main_plan, 0x400000, 4096).unwrap();
+        let main_image = ImageLayout::new(&main_plan, 0x400000, 4096, usize::MAX).unwrap();
         let arg0 = b"/bin/true".as_slice();
         let argv = [arg0];
         assert_eq!(
@@ -1298,6 +1305,7 @@ mod tests {
             0x1000_0040_0000,
             0x1000_2000_0000,
             4096,
+            usize::MAX,
         )
         .unwrap();
         assert!(!plan.executable.overlaps(&plan.interpreter));
@@ -1330,6 +1338,7 @@ mod tests {
                 0x1000_0040_0000,
                 0x1000_0040_0000,
                 4096,
+                usize::MAX,
             ),
             Err(LoaderError::OverlappingImages)
         );
@@ -1343,6 +1352,7 @@ mod tests {
                 0x1000_0040_0000,
                 0x1000_2000_0000,
                 4096,
+                usize::MAX,
             ),
             Err(LoaderError::BadInterpreter)
         );
@@ -1356,6 +1366,7 @@ mod tests {
                 0x1000_0040_0000,
                 0x1000_2000_0000,
                 4096,
+                usize::MAX,
             ),
             Err(LoaderError::BadInterpreter)
         );
@@ -1365,11 +1376,11 @@ mod tests {
     fn real_bin_true_and_ld_linux_produce_interpreter_entry_frame() {
         let main_bytes = fs::read("/bin/true").unwrap();
         let main_plan = crate::parse(&main_bytes).unwrap();
-        let main_image = ImageLayout::new(&main_plan, 0x400000, 4096).unwrap();
+        let main_image = ImageLayout::new(&main_plan, 0x400000, 4096, usize::MAX).unwrap();
         let interpreter_bytes = fs::read("/lib64/ld-linux-x86-64.so.2").unwrap();
         let interpreter_plan = crate::parse(&interpreter_bytes).unwrap();
         let interpreter_image =
-            ImageLayout::new(&interpreter_plan, 0x7000_0000_0000, 4096).unwrap();
+            ImageLayout::new(&interpreter_plan, 0x7000_0000_0000, 4096, usize::MAX).unwrap();
         let modules = vec![RuntimeModule {
             module_id: 1,
             image: main_image.clone(),

@@ -80,12 +80,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "0c4746e9d4bb51fa642723994883c278802bc83a8c2814a40754e9a1d7cc33e2",
-      "path": "compat-loader/src/memory.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "0c71fac5073f975368e677f678cca3e47fa4082ee54a49defd9aec3f848a350e",
       "path": "jaso/src/platform.rs",
       "rules": "HC-G1"
@@ -142,12 +136,6 @@
       "count": 1,
       "fingerprint": "1562f97b588ab42e1ec366faf866a95330c895c26c7b2bbe904b59afe7c77358",
       "path": "kernel/src/proc/mod.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "166629e42fbdaf56d0c51f3f133b84967dc0994a78b0dfcc92a8d18d7c36b551",
-      "path": "compat-loader/src/memory.rs",
       "rules": "HC-G1"
     },
     {
@@ -1467,5 +1455,5 @@
     "user",
     "xtask"
   ],
-  "total": 312
+  "total": 310
 }

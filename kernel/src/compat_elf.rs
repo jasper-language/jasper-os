@@ -19,6 +19,22 @@ use kernel_core::smp::CpuSet;
 use crate::proc;
 use crate::task::TaskId;
 
+/// Returns the caller-approved page capacity still available to this process.
+///
+/// Image planning uses the same process quota and physical-frame inventory as
+/// the mapping backend, so layout metadata is admitted before it is allocated.
+pub fn image_page_budget(process: ObjId) -> usize {
+    let owned = proc::memory_limits(process)
+        .map(|limits| limits.0)
+        .unwrap_or(0);
+    let mapped = proc::memory_quota(process)
+        .map(|usage| usage.mapped)
+        .unwrap_or(u64::MAX);
+    let process_remaining = owned.saturating_sub(mapped);
+    let system_remaining = crate::mm::frame::free_frames() as u64;
+    usize::try_from(process_remaining.min(system_remaining)).unwrap_or(usize::MAX)
+}
+
 #[derive(Clone)]
 struct WriteSnapshot {
     address: u64,

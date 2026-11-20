@@ -859,7 +859,8 @@ mod tests {
     fn relocation_write_failure_rolls_back_the_whole_patch_set() {
         let bytes = fs::read("/bin/true").unwrap();
         let plan = parse(&bytes).unwrap();
-        let layout = ImageLayout::new(&plan, 0x3000_0000_0000, 4096).unwrap();
+        let layout =
+            ImageLayout::new(&plan, 0x3000_0000_0000, 4096, usize::MAX).unwrap();
         let writable = layout
             .segments
             .iter()
@@ -913,8 +914,9 @@ mod tests {
             .unwrap_or_else(|| panic!("no real relocation fixture among {candidates:?}"));
         let libc_bytes = fs::read("/lib/x86_64-linux-gnu/libc.so.6").expect("libc fixture");
         let libc_plan = parse(&libc_bytes).unwrap();
-        let main_layout = ImageLayout::new(&main_plan, 0x400000, 4096).unwrap();
-        let libc_layout = ImageLayout::new(&libc_plan, 0x7000_0000_0000, 4096).unwrap();
+        let main_layout = ImageLayout::new(&main_plan, 0x400000, 4096, usize::MAX).unwrap();
+        let libc_layout =
+            ImageLayout::new(&libc_plan, 0x7000_0000_0000, 4096, usize::MAX).unwrap();
         assert!(!main_layout.overlaps(&libc_layout));
 
         let mut memory = TestMemory::default();

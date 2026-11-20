@@ -17,7 +17,7 @@ use kernel_core::objtable::ObjId;
 use kernel_core::security::ApplicationIdentity;
 use sha2::{Digest as _, Sha256};
 
-use crate::compat_elf::{JasperExecutionBackend, JasperLoaderMemory};
+use crate::compat_elf::{image_page_budget, JasperExecutionBackend, JasperLoaderMemory};
 use crate::mm::frame::free_frames;
 use crate::proc::{self, ProcState};
 use crate::{arch, kobj, kprintln, sched};
@@ -901,6 +901,7 @@ fn run_program_with_interpreter(
         EXECUTABLE_BASE,
         INTERPRETER_BASE,
         kernel_core::frame::FRAME_SIZE,
+        image_page_budget(pid),
     ) {
         Ok(plan) => plan,
         Err(_) => {
@@ -1074,7 +1075,12 @@ pub(crate) fn run_root_static_program(
     } else {
         0
     };
-    let image = match ImageLayout::new(&plan, load_bias, kernel_core::frame::FRAME_SIZE) {
+    let image = match ImageLayout::new(
+        &plan,
+        load_bias,
+        kernel_core::frame::FRAME_SIZE,
+        image_page_budget(pid),
+    ) {
         Ok(image) => image,
         Err(_) => return failed(),
     };
@@ -1176,6 +1182,7 @@ fn prepare_exec_image(
         EXECUTABLE_BASE,
         INTERPRETER_BASE,
         kernel_core::frame::FRAME_SIZE,
+        image_page_budget(pid),
     )
     .map_err(|_| "dynamic_layout")?;
     let mut memory = JasperLoaderMemory::new(pid);
@@ -1218,8 +1225,13 @@ fn prepare_exec_static_image(
     } else {
         0
     };
-    let image = ImageLayout::new(&plan, load_bias, kernel_core::frame::FRAME_SIZE)
-        .map_err(|_| "static_layout")?;
+    let image = ImageLayout::new(
+        &plan,
+        load_bias,
+        kernel_core::frame::FRAME_SIZE,
+        image_page_budget(pid),
+    )
+    .map_err(|_| "static_layout")?;
     let stack = stack_input_for_program(ProgramStackInput {
         plan: &plan,
         image: &image,

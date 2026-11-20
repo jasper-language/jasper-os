@@ -10,8 +10,6 @@ use alloc::vec::Vec;
 
 use super::{LoadPlan, LoadSegment, LoaderError, VirtualRange};
 
-const MAX_PAGE_SIZE: u64 = 64 * 1024;
-const MAX_IMAGE_PAGES: usize = 262_144;
 const MAX_USER_ADDRESS: u64 = 1 << 47;
 
 /// 一页的最终访问权限。
@@ -184,6 +182,8 @@ pub struct ImageLayout {
     pub image_end: u64,
     /// 构造本布局使用的页大小。/ Page size used to construct this layout.
     pub page_size: u64,
+    /// 调用方为本映像批准的最大页数。/ Maximum pages admitted by the caller for this image.
+    pub page_budget: usize,
     /// 重定位后的入口地址。/ Entry address after relocation.
     pub entry: u64,
     /// PT_LOAD 运行布局。/ Runtime PT_LOAD layout.
@@ -204,7 +204,12 @@ impl ImageLayout {
     /// 按给定 load bias 构造映像；ET_EXEC 必须使用零 bias。
     ///
     /// Builds an image at the supplied load bias. ET_EXEC images must use a zero bias.
-    pub fn new(plan: &LoadPlan, load_bias: u64, page_size: u64) -> Result<Self, LoaderError> {
+    pub fn new(
+        plan: &LoadPlan,
+        load_bias: u64,
+        page_size: u64,
+        page_budget: usize,
+    ) -> Result<Self, LoaderError> {
         validate_page_size(page_size)?;
         let required_alignment = required_load_alignment(plan, page_size)?;
         if !load_bias.is_multiple_of(required_alignment) {
@@ -259,7 +264,7 @@ impl ImageLayout {
             return Err(LoaderError::ImageTooLarge);
         }
 
-        let pages = build_pages(&segments, page_size)?;
+        let pages = build_pages(&segments, page_size, page_budget)?;
         let entry = plan
             .entry
             .checked_add(load_bias)
@@ -291,6 +296,7 @@ impl ImageLayout {
             image_start,
             image_end,
             page_size,
+            page_budget,
             entry,
             segments,
             pages,
@@ -511,7 +517,11 @@ pub fn initialize_tls_block<M: LoaderMemory>(
     })
 }
 
-fn build_pages(segments: &[MappedSegment], page_size: u64) -> Result<Vec<MappedPage>, LoaderError> {
+fn build_pages(
+    segments: &[MappedSegment],
+    page_size: u64,
+    page_budget: usize,
+) -> Result<Vec<MappedPage>, LoaderError> {
     let mut pages = BTreeMap::<u64, MappedPage>::new();
     for segment in segments {
         let segment_end = segment.end().ok_or(LoaderError::BadSegment)?;
@@ -522,7 +532,7 @@ fn build_pages(segments: &[MappedSegment], page_size: u64) -> Result<Vec<MappedP
         let last_page = align_up(segment_end, page_size).ok_or(LoaderError::ImageTooLarge)?;
         let mut page_address = first_page;
         while page_address < last_page {
-            if !pages.contains_key(&page_address) && pages.len() == MAX_IMAGE_PAGES {
+            if !pages.contains_key(&page_address) && pages.len() == page_budget {
                 return Err(LoaderError::ImageTooLarge);
             }
             let page_end = page_address
@@ -587,7 +597,7 @@ fn relocate_range(range: VirtualRange, load_bias: u64) -> RuntimeRange {
 }
 
 fn validate_page_size(page_size: u64) -> Result<(), LoaderError> {
-    if page_size == 0 || !page_size.is_power_of_two() || page_size > MAX_PAGE_SIZE {
+    if page_size == 0 || !page_size.is_power_of_two() || page_size > MAX_USER_ADDRESS {
         return Err(LoaderError::BadPageSize);
     }
     Ok(())
@@ -614,9 +624,11 @@ pub(crate) fn validate_layout(
         || !layout.image_start.is_multiple_of(layout.page_size)
         || layout.image_end <= layout.image_start
         || layout.image_end > MAX_USER_ADDRESS
-        || layout.image_end - layout.image_start > MAX_IMAGE_PAGES as u64 * layout.page_size
     {
         return Err(LoaderError::BadSegment);
+    }
+    if layout.pages.len() > layout.page_budget {
+        return Err(LoaderError::ImageTooLarge);
     }
     let mut previous_end = layout.image_start;
     for page in &layout.pages {
@@ -670,8 +682,6 @@ fn align_up(value: u64, align: u64) -> Option<u64> {
         .checked_add(align - 1)
         .map(|value| align_down(value, align))
 }
-
-const _: () = assert!(MAX_IMAGE_PAGES > 0);
 
 #[cfg(test)]
 mod tests {
@@ -846,7 +856,7 @@ mod tests {
         let plan = parse(&bytes).unwrap();
         let bias = select_load_bias(&plan, 0x2a_0000_1001, 4096).unwrap();
         assert_eq!(bias, 0x2a_0000_2000);
-        let layout = ImageLayout::new(&plan, bias, 4096).unwrap();
+        let layout = ImageLayout::new(&plan, bias, 4096, usize::MAX).unwrap();
         assert!(!layout.pages.is_empty());
         let mut addresses = layout
             .pages
@@ -893,7 +903,8 @@ mod tests {
     fn real_libc_tls_template_initializes_a_thread_block() {
         let bytes = fs::read("/lib/x86_64-linux-gnu/libc.so.6").expect("libc fixture");
         let plan = parse(&bytes).unwrap();
-        let layout = ImageLayout::new(&plan, 0x6000_0000_0000, 4096).unwrap();
+        let layout =
+            ImageLayout::new(&plan, 0x6000_0000_0000, 4096, usize::MAX).unwrap();
         let tls = layout.tls.expect("libc PT_TLS");
         let mut memory = TestMemory::default();
         map_image(&mut memory, &bytes, &layout).unwrap();
@@ -919,7 +930,8 @@ mod tests {
     fn real_relro_becomes_read_only_after_relocation_phase() {
         let bytes = fs::read("/bin/true").unwrap();
         let plan = parse(&bytes).unwrap();
-        let layout = ImageLayout::new(&plan, 0x3000_0000_0000, 4096).unwrap();
+        let layout =
+            ImageLayout::new(&plan, 0x3000_0000_0000, 4096, usize::MAX).unwrap();
         let mut memory = TestMemory::default();
         map_image(&mut memory, &bytes, &layout).unwrap();
         let relro = layout.relro.unwrap();
@@ -966,7 +978,7 @@ mod tests {
             }],
             1,
         );
-        let layout = ImageLayout::new(&plan, 0, 4096).unwrap();
+        let layout = ImageLayout::new(&plan, 0, 4096, usize::MAX).unwrap();
         assert_eq!(layout.pages.len(), 1);
         assert_eq!(
             layout.pages[0].file_ranges,
@@ -1016,7 +1028,7 @@ mod tests {
             ],
             1,
         );
-        let layout = ImageLayout::new(&plan, 0, 4096).unwrap();
+        let layout = ImageLayout::new(&plan, 0, 4096, usize::MAX).unwrap();
         assert_eq!(layout.pages.len(), 1);
         assert_eq!(
             layout.pages[0].file_ranges,
@@ -1073,7 +1085,7 @@ mod tests {
             1,
         );
         assert_eq!(
-            ImageLayout::new(&writable_executable, 0, 4096),
+            ImageLayout::new(&writable_executable, 0, 4096, usize::MAX),
             Err(LoaderError::BadSegment)
         );
 
@@ -1085,8 +1097,63 @@ mod tests {
             64 * 1024
         );
         assert_eq!(
-            ImageLayout::new(&writable_executable, 0x2000, 4096),
+            ImageLayout::new(&writable_executable, 0x2000, 4096, usize::MAX),
             Err(LoaderError::BadLoadBias)
+        );
+    }
+
+    #[test]
+    fn caller_page_budget_bounds_layout_and_mutated_plans() {
+        let plan = synthetic_plan(
+            vec![LoadSegment {
+                file_offset: 0,
+                virtual_address: 0x1000,
+                file_bytes: 0,
+                memory_bytes: 3 * 4096,
+                align: 4096,
+                readable: true,
+                writable: false,
+                executable: false,
+            }],
+            4096,
+        );
+
+        assert_eq!(
+            ImageLayout::new(&plan, 0, 4096, 2),
+            Err(LoaderError::ImageTooLarge)
+        );
+        let layout = ImageLayout::new(&plan, 0, 4096, 3).unwrap();
+        assert_eq!(layout.pages.len(), 3);
+
+        let mut mutated = layout;
+        mutated.page_budget = 2;
+        assert_eq!(
+            map_image(&mut TestMemory::default(), &[], &mutated),
+            Err(LoaderError::ImageTooLarge)
+        );
+    }
+
+    #[test]
+    fn page_size_is_selected_by_the_caller_without_a_loader_default() {
+        let plan = synthetic_plan(
+            vec![LoadSegment {
+                file_offset: 0,
+                virtual_address: 0x1000,
+                file_bytes: 0,
+                memory_bytes: 0x1000,
+                align: 0x1000,
+                readable: true,
+                writable: false,
+                executable: false,
+            }],
+            0x1000,
+        );
+        let layout = ImageLayout::new(&plan, 0, 128 * 1024, 1).unwrap();
+        assert_eq!(layout.page_size, 128 * 1024);
+        assert_eq!(layout.pages.len(), 1);
+        assert_eq!(
+            ImageLayout::new(&plan, 0, 1 << 48, 1),
+            Err(LoaderError::BadPageSize)
         );
     }
 
@@ -1094,7 +1161,8 @@ mod tests {
     fn mapping_failure_rolls_back_prior_pages_and_mutated_layout_is_rejected() {
         let bytes = fs::read("/bin/true").unwrap();
         let plan = parse(&bytes).unwrap();
-        let layout = ImageLayout::new(&plan, 0x3000_0000_0000, 4096).unwrap();
+        let layout =
+            ImageLayout::new(&plan, 0x3000_0000_0000, 4096, usize::MAX).unwrap();
         assert!(layout.pages.len() > 1);
         let mut memory = TestMemory {
             fail_map_address: Some(layout.pages[1].address),
