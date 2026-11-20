@@ -45,14 +45,9 @@ pub use relocation::{
     SymbolResolver, SymbolTable,
 };
 
-const MAX_PROGRAM_HEADERS: usize = 128;
-const MAX_LOAD_SEGMENTS: usize = 64;
-const MAX_RELOCATIONS: usize = 1_000_000;
-const MAX_ANDROID_RELOCATION_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_DYNAMIC_NAMES: usize = 256;
-const MAX_DYNAMIC_NAME_BYTES: usize = 4096;
-const MAX_TLS_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_LIFECYCLE_BYTES: u64 = 1024 * 1024;
+// x86_64 canonical user space ends below 2^47. This is a platform-address
+// fact, not an implementation capacity. A future loader profile must replace
+// it only with the target architecture's validated address-width contract.
 const MAX_USER_ADDRESS: u64 = 1 << 47;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -281,11 +276,10 @@ pub fn parse(bytes: &[u8]) -> Result<LoadPlan, LoaderError> {
     if header.e_type != ET_EXEC && header.e_type != ET_DYN {
         return Err(LoaderError::UnsupportedFormat);
     }
-    if elf.program_headers.len() > MAX_PROGRAM_HEADERS {
-        return Err(LoaderError::TooManySegments);
-    }
-
     let mut segments = Vec::new();
+    segments
+        .try_reserve(elf.program_headers.len())
+        .map_err(|_| LoaderError::ImageTooLarge)?;
     let mut interp = None;
     let mut tls = None;
     let mut relro = None;
@@ -335,12 +329,9 @@ pub fn parse(bytes: &[u8]) -> Result<LoadPlan, LoaderError> {
             if program.p_filesz == 0 || !valid_dynamic_name(path) {
                 return Err(LoaderError::BadInterpreter);
             }
-            interp = Some(path.to_string());
+            interp = Some(owned_dynamic_name(path)?);
         } else if program.p_type == PT_TLS {
             tls_headers += 1;
-            if program.p_memsz > MAX_TLS_BYTES {
-                return Err(LoaderError::ImageTooLarge);
-            }
             tls = Some(TlsSegment {
                 file_offset: program.p_offset,
                 virtual_address: program.p_vaddr,
@@ -361,9 +352,6 @@ pub fn parse(bytes: &[u8]) -> Result<LoadPlan, LoaderError> {
     }
     if interpreter_headers > 1 || tls_headers > 1 || relro_headers > 1 {
         return Err(LoaderError::BadSegment);
-    }
-    if segments.len() > MAX_LOAD_SEGMENTS {
-        return Err(LoaderError::TooManySegments);
     }
     validate_segments(&mut segments)?;
     if let Some(tls) = tls {
@@ -391,9 +379,6 @@ pub fn parse(bytes: &[u8]) -> Result<LoadPlan, LoaderError> {
     collect_relocations(&elf, elf.dynrelas.iter(), &segments, &mut relocations)?;
     collect_android_relocations(&elf, bytes, &segments, &mut relocations)?;
     collect_relocations(&elf, elf.pltrelocs.iter(), &segments, &mut relocations)?;
-    if relocations.len() > MAX_RELOCATIONS {
-        return Err(LoaderError::TooManyRelocations);
-    }
 
     let needed = collect_dynamic_names(elf.libraries.iter().copied())?;
     let rpaths = collect_dynamic_names(elf.rpaths.iter().copied())?;
@@ -554,9 +539,9 @@ fn push_relocation(
                 symbol.st_type() == 10,
             )
         };
-    if output.len() == MAX_RELOCATIONS {
-        return Err(LoaderError::TooManyRelocations);
-    }
+    output
+        .try_reserve(1)
+        .map_err(|_| LoaderError::ImageTooLarge)?;
     output.push(Relocation {
         offset,
         addend,
@@ -631,9 +616,6 @@ fn virtual_range_bytes<'a>(
     range: VirtualRange,
     segments: &[LoadSegment],
 ) -> Result<&'a [u8], LoaderError> {
-    if range.bytes > MAX_ANDROID_RELOCATION_BYTES {
-        return Err(LoaderError::ImageTooLarge);
-    }
     let end = range
         .address
         .checked_add(range.bytes)
@@ -683,9 +665,9 @@ fn decode_android_relocations(
     let relocation_count = read_sleb128(data, &mut cursor)?;
     let relocation_count =
         usize::try_from(relocation_count).map_err(|_| LoaderError::BadRelocation)?;
-    if relocation_count > MAX_RELOCATIONS {
-        return Err(LoaderError::TooManyRelocations);
-    }
+    output
+        .try_reserve(relocation_count)
+        .map_err(|_| LoaderError::ImageTooLarge)?;
     let mut offset = read_sleb128(data, &mut cursor)?;
     let mut info = 0u64;
     let mut addend = 0i64;
@@ -925,7 +907,7 @@ fn collect_lifecycle(
     ] {
         match (*range, size) {
             (Some(mut value), Some(size)) => {
-                if size == 0 || size > MAX_LIFECYCLE_BYTES || size % size_of::<u64>() as u64 != 0 {
+                if size == 0 || size % size_of::<u64>() as u64 != 0 {
                     return Err(LoaderError::BadLifecycle);
                 }
                 value.bytes = size;
@@ -971,23 +953,31 @@ fn collect_dynamic_names<'a>(
         if !valid_dynamic_name(name) {
             return Err(LoaderError::BadSegment);
         }
-        output.push(name.to_string());
-        if output.len() > MAX_DYNAMIC_NAMES {
-            return Err(LoaderError::TooManyDynamicNames);
-        }
+        output
+            .try_reserve(1)
+            .map_err(|_| LoaderError::ImageTooLarge)?;
+        output.push(owned_dynamic_name(name)?);
     }
     Ok(output)
 }
 
 fn valid_dynamic_name(name: &str) -> bool {
-    !name.is_empty() && name.len() <= MAX_DYNAMIC_NAME_BYTES && !name.contains('\0')
+    !name.is_empty() && !name.contains('\0')
 }
 
-const _: () = assert!(MAX_RELOCATIONS * size_of::<Relocation>() > 0);
+fn owned_dynamic_name(name: &str) -> Result<String, LoaderError> {
+    let mut owned = String::new();
+    owned
+        .try_reserve_exact(name.len())
+        .map_err(|_| LoaderError::ImageTooLarge)?;
+    owned.push_str(name);
+    Ok(owned)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use std::fs;
 
     fn encode_sleb128(mut value: i64, output: &mut Vec<u8>) {
@@ -1148,6 +1138,17 @@ mod tests {
                 RelocationKind::JumpSlot | RelocationKind::GlobDat
             ) && relocation.symbol.as_deref() == Some("malloc")
         }));
+    }
+
+    #[test]
+    fn dynamic_names_use_their_real_table_instead_of_fixed_envelopes() {
+        let long = "d".repeat(5_000);
+        let names = vec![long.as_str(); 300];
+        let collected = collect_dynamic_names(names.iter().copied()).unwrap();
+        assert_eq!(collected.len(), names.len());
+        assert!(collected.iter().all(|name| name.len() == 5_000));
+        assert!(!valid_dynamic_name(""));
+        assert!(!valid_dynamic_name("lib\0.so"));
     }
 
     #[test]

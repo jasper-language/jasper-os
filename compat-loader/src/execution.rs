@@ -4,16 +4,12 @@
 //! This module never executes untrusted ELF bytes itself. It validates a complete entry plan and
 //! transfers control only through an explicitly supplied execution backend.
 
-use alloc::vec;
 use alloc::vec::Vec;
+#[cfg(test)]
+use alloc::vec;
 
 use super::{plan_lifecycle_order, ImageLayout, LifecycleCallbacks, LoadPlan, LoaderError};
 
-const MAX_MODULES: usize = 256;
-const MAX_ENTRY_CALLS: usize = 65_536;
-const MAX_STACK_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_STACK_ITEMS: usize = 4096;
-const MAX_AUXV_ENTRIES: usize = 128;
 const MAX_USER_ADDRESS: u64 = 1 << 47;
 
 const AT_NULL: u64 = 0;
@@ -143,11 +139,7 @@ impl ExecutionPlan {
         root: usize,
         interpreter: Option<&ImageLayout>,
     ) -> Result<Self, LoaderError> {
-        if modules.is_empty()
-            || modules.len() > MAX_MODULES
-            || root >= modules.len()
-            || modules[root].module_id == 0
-        {
+        if modules.is_empty() || root >= modules.len() || modules[root].module_id == 0 {
             return Err(LoaderError::BadExecution);
         }
         for (index, module) in modules.iter().enumerate() {
@@ -171,9 +163,6 @@ impl ExecutionPlan {
         let mut fini_calls = Vec::new();
         for module_index in order.finalizers {
             append_finalizers(&mut fini_calls, &modules[module_index])?;
-        }
-        if init_calls.len() > MAX_ENTRY_CALLS || fini_calls.len() > MAX_ENTRY_CALLS {
-            return Err(LoaderError::BadExecution);
         }
         let program_entry = modules[root].image.entry;
         if !executable_entry(&modules[root].image, program_entry) {
@@ -259,9 +248,12 @@ fn append_call(
     address: u64,
     kind: EntryCallKind,
 ) -> Result<(), LoaderError> {
-    if output.len() == MAX_ENTRY_CALLS || !executable_entry(&module.image, address) {
+    if !executable_entry(&module.image, address) {
         return Err(LoaderError::BadExecution);
     }
+    output
+        .try_reserve(1)
+        .map_err(|_| LoaderError::ImageTooLarge)?;
     output.push(EntryCall {
         module_id: module.module_id,
         address,
@@ -394,9 +386,6 @@ pub fn build_initial_stack(input: InitialStackInput<'_>) -> Result<InitialStackP
         || (input.interpreter_base != 0
             && (!valid_user_address(input.interpreter_base)
                 || !input.interpreter_base.is_multiple_of(input.page_size)))
-        || input.argv.len() > MAX_STACK_ITEMS
-        || input.envp.len() > MAX_STACK_ITEMS
-        || input.auxv.len() > MAX_AUXV_ENTRIES
     {
         return Err(LoaderError::BadStack);
     }
@@ -429,11 +418,15 @@ pub fn build_initial_stack(input: InitialStackInput<'_>) -> Result<InitialStackP
         high.extend_from_slice(random);
         offset
     });
-    if high.len() as u64 > MAX_STACK_BYTES {
-        return Err(LoaderError::BadStack);
-    }
-
-    let mut auxv = Vec::with_capacity(input.auxv.len() + 9);
+    let mut auxv = Vec::new();
+    auxv.try_reserve(
+        input
+            .auxv
+            .len()
+            .checked_add(9)
+            .ok_or(LoaderError::BadStack)?,
+    )
+    .map_err(|_| LoaderError::ImageTooLarge)?;
     if let Some(program_headers) = input.program_headers {
         let bytes = u64::from(input.program_header_entry_size)
             .checked_mul(u64::from(input.program_header_count))
@@ -525,10 +518,15 @@ pub fn build_initial_stack(input: InitialStackInput<'_>) -> Result<InitialStackP
         .stack_top
         .checked_sub(stack_pointer)
         .ok_or(LoaderError::BadStack)?;
-    if total == 0 || total > MAX_STACK_BYTES {
+    if total == 0 {
         return Err(LoaderError::BadStack);
     }
-    let mut bytes = vec![0u8; usize::try_from(total).map_err(|_| LoaderError::BadStack)?];
+    let byte_count = usize::try_from(total).map_err(|_| LoaderError::BadStack)?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(byte_count)
+        .map_err(|_| LoaderError::ImageTooLarge)?;
+    bytes.resize(byte_count, 0);
     let high_destination =
         usize::try_from(high_start - stack_pointer).map_err(|_| LoaderError::BadStack)?;
     bytes[high_destination..high_destination + high.len()].copy_from_slice(&high);
@@ -988,6 +986,45 @@ mod tests {
                 (1, 0x10_0200, EntryCallKind::Fini),
             ]
         );
+    }
+
+    #[test]
+    fn execution_plan_accepts_more_than_the_former_module_envelope() {
+        let modules = (0..257)
+            .map(|index| {
+                let base = 0x1000_0000 + index * 0x1000;
+                module(index as u64 + 1, base, Vec::new(), LifecycleCallbacks::default())
+            })
+            .collect::<Vec<_>>();
+        let plan = ExecutionPlan::new(&modules, 0, None).unwrap();
+        assert_eq!(plan.program_entry(), modules[0].image.entry);
+    }
+
+    #[test]
+    fn initial_stack_accepts_auxv_beyond_the_former_fixed_count() {
+        let arg = b"program".as_slice();
+        let argv = [arg];
+        let auxv = (0..129)
+            .map(|index| AuxvEntry {
+                key: 0x1000 + index,
+                value: index,
+            })
+            .collect::<Vec<_>>();
+        let stack = build_initial_stack(InitialStackInput {
+            stack_top: 0x7fff_0000_0000,
+            argv: &argv,
+            envp: &[],
+            page_size: 4096,
+            program_headers: None,
+            program_header_entry_size: 0,
+            program_header_count: 0,
+            program_entry: 0x401000,
+            interpreter_base: 0,
+            auxv: &auxv,
+            random: None,
+        })
+        .unwrap();
+        assert!(stack.contains(stack.auxv_pointer(), (auxv.len() as u64 + 1) * 16));
     }
 
     #[test]

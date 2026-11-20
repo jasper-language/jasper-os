@@ -93,6 +93,13 @@
 - `compat-core::Futex` 删除 8 waiter 的隐藏默认值；`Futex<N, W>` 现在要求每个
   消费者同时显式声明 word 与 waiter 容量。现有调用方已显式选择预算，避免新增
   consumer 静默继承未审计的运行期上限。
+- `compat-loader` 删除 17 个固定实现包络，覆盖 ELF program header/PT_LOAD、
+  动态重定位与符号、Android packed relocation、动态库名、TLS、生命周期、COPY、
+  模块/入口、初始栈和 auxv。真实表大小、映像范围、地址宽度和可失败分配成为
+  准入依据；x86_64 47 位 canonical 用户地址继续作为显式平台事实保留。
+- 定向回归允许 300 个最长 5000 字节的动态名称、257 个执行模块、129 个 auxv
+  和 65537 个 lifecycle 模块，覆盖此前 256/4096/128/65536 等旧包络；
+  `jasper-compat-loader` 40 项测试全部通过。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -112,7 +119,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=272, runtime-resource-capacity=0, unclassified=0, added=0
+findings=255, runtime-resource-capacity=0, unclassified=0, added=0
 ```
 
 ## 尚未完成

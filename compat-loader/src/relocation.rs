@@ -16,11 +16,7 @@ use goblin::elf::Elf;
 use super::memory::{validate_layout, with_transaction, LoaderMemory, RuntimeRange};
 use super::{ImageLayout, LoadPlan, LoaderError, Relocation, RelocationKind, SymbolBinding};
 
-const MAX_SYMBOLS: usize = 500_000;
-const MAX_COPY_BYTES: u64 = 1024 * 1024;
-const MAX_LIFECYCLE_BYTES: usize = 1024 * 1024;
 const MAX_USER_ADDRESS: u64 = 1 << 47;
-const MAX_LIFECYCLE_MODULES: usize = 65_536;
 
 /// 已解析符号在目标进程中的值。
 ///
@@ -98,9 +94,9 @@ impl SymbolTable {
             return Err(LoaderError::BadRelocation);
         }
         let elf = Elf::parse(bytes).map_err(|_| LoaderError::Parse)?;
-        if self.definitions.len() + elf.dynsyms.len() > MAX_SYMBOLS {
-            return Err(LoaderError::ImageTooLarge);
-        }
+        self.definitions
+            .try_reserve(elf.dynsyms.len())
+            .map_err(|_| LoaderError::ImageTooLarge)?;
         for symbol in elf.dynsyms.iter() {
             if symbol.st_shndx == SHN_COMMON as usize {
                 return Err(LoaderError::BadRelocation);
@@ -279,9 +275,6 @@ pub struct LifecycleOrder {
 /// Produces a stable topological order where dependencies initialize first and finalize last.
 /// `requires[module]` lists the modules required by `module`; cycles and out-of-range edges fail.
 pub fn plan_lifecycle_order(requires: &[Vec<usize>]) -> Result<LifecycleOrder, LoaderError> {
-    if requires.len() > MAX_LIFECYCLE_MODULES {
-        return Err(LoaderError::ImageTooLarge);
-    }
     let mut dependents = vec![Vec::new(); requires.len()];
     let mut indegree = vec![0usize; requires.len()];
     for (module, dependencies) in requires.iter().enumerate() {
@@ -347,10 +340,7 @@ pub fn prepare_relocations<M: LoaderMemory, R: SymbolResolver>(
             .checked_add(layout.load_bias)
             .ok_or(LoaderError::BadRelocation)?;
         let target_bytes = relocation_target_bytes(relocation);
-        if target_bytes == 0
-            || target_bytes > MAX_COPY_BYTES
-            || !writable_range(layout, target, target_bytes)
-        {
+        if target_bytes == 0 || !writable_range(layout, target, target_bytes) {
             return Err(LoaderError::BadRelocation);
         }
         match relocation.kind {
@@ -360,7 +350,13 @@ pub fn prepare_relocations<M: LoaderMemory, R: SymbolResolver>(
                 if symbol.is_ifunc {
                     return Err(LoaderError::IfuncUnsupported);
                 }
-                let mut bytes = alloc::vec![0u8; target_bytes as usize];
+                let byte_count =
+                    usize::try_from(target_bytes).map_err(|_| LoaderError::BadRelocation)?;
+                let mut bytes = Vec::new();
+                bytes
+                    .try_reserve_exact(byte_count)
+                    .map_err(|_| LoaderError::ImageTooLarge)?;
+                bytes.resize(byte_count, 0);
                 memory.read(symbol.address, &mut bytes)?;
                 patches.push(MemoryPatch {
                     address: target,
@@ -566,12 +562,16 @@ fn read_pointer_array<M: LoaderMemory>(
     range: RuntimeRange,
 ) -> Result<Vec<u64>, LoaderError> {
     if !range.bytes.is_multiple_of(size_of::<u64>() as u64)
-        || range.bytes > MAX_LIFECYCLE_BYTES as u64
         || !layout.contains(range.address, range.bytes)
     {
         return Err(LoaderError::BadLifecycle);
     }
-    let mut bytes = alloc::vec![0u8; range.bytes as usize];
+    let byte_count = usize::try_from(range.bytes).map_err(|_| LoaderError::BadLifecycle)?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(byte_count)
+        .map_err(|_| LoaderError::ImageTooLarge)?;
+    bytes.resize(byte_count, 0);
     memory.read(range.address, &mut bytes)?;
     let mut entries = Vec::with_capacity(bytes.len() / size_of::<u64>());
     for chunk in bytes.as_chunks::<8>().0 {
@@ -607,8 +607,6 @@ fn executable_range(layout: &ImageLayout, address: u64, bytes: u64) -> bool {
             segment.permissions.executable && address >= segment.load_address && end <= segment_end
         })
 }
-
-const _: () = assert!(MAX_SYMBOLS > 0);
 
 #[cfg(test)]
 mod tests {
@@ -799,6 +797,14 @@ mod tests {
         };
         assert_eq!(callbacks.initializers(), vec![1, 3, 4]);
         assert_eq!(callbacks.finalizers(), vec![6, 5, 2]);
+    }
+
+    #[test]
+    fn lifecycle_order_accepts_more_than_the_former_module_envelope() {
+        let requires = vec![Vec::new(); 65_537];
+        let order = plan_lifecycle_order(&requires).unwrap();
+        assert_eq!(order.initializers.len(), requires.len());
+        assert_eq!(order.finalizers.len(), requires.len());
     }
 
     #[test]
