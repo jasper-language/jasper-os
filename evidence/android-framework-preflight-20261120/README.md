@@ -29,20 +29,23 @@ Static Activity launch prerequisites:
 - the image also contains `framework-res.apk`, the runtime APEX, permission
   configuration and the boot-critical Android user-space services listed above.
 
-The corrected check also found real namespace/identity blockers:
+The next audit pass corrected two false static blockers:
 
-- `/linkerconfig/ld.config.txt` is absent, so Bionic cannot apply the Android
-  Framework/APEX linker namespace map;
-- `/system/etc/passwd` exists only as a zero-byte file;
-- VINTF manifest, SELinux policy, init definitions and `/system/apex` are
-  present.
+- `/linkerconfig/ld.config.txt` is intentionally absent from the system image.
+  `init.rc` creates `/linkerconfig/bootstrap`, writes an early config, bind
+  mounts it over `/linkerconfig`, starts `apexd-bootstrap`, and then runs the
+  `update_linker_config` init command;
+- `/system/etc/passwd` is an empty regular file owned by Android UID/GID 1000
+  in this stock AOSP image. Presence and ownership are the static facts;
+  Android user/group services provide runtime identity rather than the image
+  requiring a non-empty passwd database.
 
-Result: `container_ready=false`, `activity_runtime_ready=false`.
+Result: `container_ready=true`, `activity_runtime_ready=false`, `missing=[]`.
 
 This evidence does not claim Activity lifecycle. It establishes that the
-current root fixture has the correct zygote/system_server launch *definition*
-and most Framework files, but still lacks the linker namespace map and
-non-empty Android user database needed for a complete static launch root. The
-next slice must supply those, actually start the chain with matching APEX
-mounts and Binder services, then exercise `onCreate/onStart/onResume`,
-resource/configuration delivery, graphics, input and audio.
+current root fixture has the complete static zygote/system_server launch,
+linker-config generation, Framework, APEX, SELinux, permission and user
+database prerequisites. The next slice must actually start the chain with
+matching APEX mounts and Binder services, then exercise
+`onCreate/onStart/onResume`, resource/configuration delivery, graphics, input
+and audio.

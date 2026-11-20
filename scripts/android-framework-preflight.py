@@ -23,6 +23,11 @@ EXECUTABLES = {
     "installd": "/system/bin/installd",
 }
 ZYGOTE64_RC = "/system/etc/init/hw/init.zygote64.rc"
+INIT_RC_CANDIDATES = (
+    "/system/etc/init/hw/init.rc",
+    "/system/etc/init/init.rc",
+    "/init.rc",
+)
 FRAMEWORK = {
     "framework_jar": "/system/framework/framework.jar",
     "services_jar": "/system/framework/services.jar",
@@ -38,10 +43,10 @@ DIRECTORIES = {
     "init_hw": "/system/etc/init/hw",
 }
 STATIC_FILES = {
-    "linker_config": "/linkerconfig/ld.config.txt",
     "vintf_manifest": "/system/etc/vintf/manifest.xml",
     "passwd": "/system/etc/passwd",
 }
+LINKER_CONFIG = "/linkerconfig/ld.config.txt"
 REQUIRED_APK_ENTRIES = {"AndroidManifest.xml", "resources.arsc"}
 
 
@@ -55,6 +60,8 @@ class Inode:
     mode: int
     size: int
     link_target: str | None
+    uid: int
+    gid: int
 
 
 def run(command: list[str], *, timeout: int = 120) -> bytes:
@@ -82,11 +89,20 @@ def parse_inode(text: str) -> Inode | None:
     if header is None:
         raise PreflightError("debugfs stat output has no inode header")
     link = re.search(r'Fast link dest:\s+"([^"]+)"', text)
+    owner = re.search(
+        r"User:\s+(\d+).*?Group:\s+(\d+)",
+        text,
+        re.DOTALL,
+    )
+    if owner is None:
+        raise PreflightError("debugfs stat output has no owner identity")
     return Inode(
         file_type=header.group(1),
         mode=int(header.group(2), 8),
         size=int(header.group(3)),
         link_target=link.group(1) if link else None,
+        uid=int(owner.group(1)),
+        gid=int(owner.group(2)),
     )
 
 
@@ -116,6 +132,35 @@ def sha256_file(path: Path) -> str:
         while chunk := source.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def linker_bootstrap_state(text: str) -> dict[str, object]:
+    apex = text.find("exec_start apexd-bootstrap")
+    update = text.find("update_linker_config")
+    bootstrap_dir = re.search(r"mkdir\s+/linkerconfig/bootstrap\b", text)
+    bootstrap_write = re.search(
+        r"write\s+/linkerconfig/bootstrap/ld\.config\.txt\b",
+        text,
+    )
+    bootstrap_mount = re.search(
+        r"mount\s+none\s+/linkerconfig/bootstrap\s+/linkerconfig\s+bind\b",
+        text,
+    )
+    ordered = apex >= 0 and update > apex
+    ready = bool(
+        bootstrap_dir
+        and bootstrap_write
+        and bootstrap_mount
+        and ordered
+    )
+    return {
+        "apexd_bootstrap_before_update": ordered,
+        "bootstrap_directory": bool(bootstrap_dir),
+        "bootstrap_mount": bool(bootstrap_mount),
+        "bootstrap_write": bool(bootstrap_write),
+        "generated_at_boot": ready,
+        "update_linker_config": update >= 0,
+    }
 
 
 def inspect_resource_apk(path: Path) -> dict[str, object]:
@@ -172,6 +217,8 @@ def inspect_image(debugfs_bin: Path, image: Path) -> dict[str, object]:
             "type": inode.file_type,
             "mode": oct(inode.mode),
             "size": inode.size,
+            "uid": inode.uid,
+            "gid": inode.gid,
             "executable": executable,
             "link_target": inode.link_target,
         }
@@ -206,23 +253,52 @@ def inspect_image(debugfs_bin: Path, image: Path) -> dict[str, object]:
     static_files: dict[str, dict[str, object]] = {}
     for name, path in STATIC_FILES.items():
         inode = stat_path(debugfs_bin, image, path)
-        present = inode is not None and inode.file_type == "regular" and inode.size != 0
+        present = inode is not None and inode.file_type == "regular"
         details: dict[str, object] = {"path": path, "present": present}
         if present:
+            details["uid"] = inode.uid
+            details["gid"] = inode.gid
+            if name == "passwd":
+                # AOSP's stock system image ships an empty system account
+                # database. Presence and ownership are the static facts;
+                # Android's user/group services provide the runtime identity
+                # model rather than a non-empty passwd file being boot-critical.
+                details["stock_empty_database"] = inode.size == 0
+                present = inode.uid == 1000 and inode.gid == 1000
             with tempfile.TemporaryDirectory(prefix="jasper-android-static-") as temporary:
                 dumped = Path(temporary) / name
                 dump_file(debugfs_bin, image, path, dumped)
                 content = dumped.read_bytes()
                 details["size"] = len(content)
                 details["sha256"] = hashlib.sha256(content).hexdigest()
-                if name == "linker_config":
-                    text = content.decode("utf-8", errors="replace")
-                    has_namespace = "namespace.default" in text
-                    details["has_default_namespace"] = has_namespace
-                    present = has_namespace
         if not present:
             missing.append(name)
         static_files[name] = details
+
+    linker_text = ""
+    linker_init_path = None
+    with tempfile.TemporaryDirectory(prefix="jasper-android-init-") as temporary:
+        for index, path in enumerate(INIT_RC_CANDIDATES):
+            inode = stat_path(debugfs_bin, image, path)
+            if inode is None or inode.file_type != "regular" or inode.size == 0:
+                continue
+            dumped = Path(temporary) / f"init-{index}.rc"
+            dump_file(debugfs_bin, image, path, dumped)
+            linker_text = dumped.read_text(encoding="utf-8", errors="replace")
+            linker_init_path = path
+            break
+    linker_bootstrap = linker_bootstrap_state(linker_text)
+    linker_bootstrap["init_rc"] = linker_init_path
+    static_config = stat_path(debugfs_bin, image, LINKER_CONFIG)
+    static_config_present = (
+        static_config is not None
+        and static_config.file_type == "regular"
+        and static_config.size != 0
+    )
+    linker_bootstrap["static_config_path"] = LINKER_CONFIG
+    linker_bootstrap["static_config_present"] = static_config_present
+    if not linker_bootstrap["generated_at_boot"]:
+        missing.append("linker_config_generation")
 
     zygote_rc = stat_path(debugfs_bin, image, ZYGOTE64_RC)
     zygote_text = ""
@@ -251,7 +327,7 @@ def inspect_image(debugfs_bin: Path, image: Path) -> dict[str, object]:
 
     container_ready = not missing
     return {
-        "schema": "jasper.android.framework-preflight/1",
+        "schema": "jasper.android.framework-preflight/2",
         "image": str(image),
         "image_bytes": image.stat().st_size,
         "container_ready": container_ready,
@@ -266,6 +342,7 @@ def inspect_image(debugfs_bin: Path, image: Path) -> dict[str, object]:
         "framework": framework,
         "directories": directories,
         "static_files": static_files,
+        "linker_bootstrap": linker_bootstrap,
         "launch": launch,
     }
 
@@ -276,7 +353,7 @@ def self_test() -> None:
         "User: 1000 Group: 1000 Project: 0 Size: 14416\n"
     )
     inode = parse_inode(sample)
-    assert inode == Inode("regular", 0o755, 14416, None)
+    assert inode == Inode("regular", 0o755, 14416, None, 1000, 1000)
     link = parse_inode(
         "Inode: 481 Type: symlink Mode: 0777 Flags: 0\n"
         "User: 1000 Group: 1000 Project: 0 Size: 38\n"
@@ -301,6 +378,16 @@ def self_test() -> None:
         r"service\s+zygote\s+/system/bin/app_process64\b.*--zygote\b",
         "service zygote /system/bin/app_process64 -Xzygote /system/bin --zygote",
     )
+    assert linker_bootstrap_state(
+        "mkdir /linkerconfig/bootstrap 0755\n"
+        "write /linkerconfig/bootstrap/ld.config.txt #\n"
+        "mount none /linkerconfig/bootstrap /linkerconfig bind rec\n"
+        "exec_start apexd-bootstrap\n"
+        "update_linker_config\n"
+    )["generated_at_boot"]
+    assert not linker_bootstrap_state(
+        "mkdir /linkerconfig/bootstrap 0755\nupdate_linker_config\n"
+    )["generated_at_boot"]
     print("android-framework-preflight: self-test PASS")
 
 

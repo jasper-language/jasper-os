@@ -5,7 +5,7 @@
     "Activity onCreate/onStart/onResume, resources/configuration, graphics, input and audio remain separate runtime gates."
   ],
   "activity_runtime_ready": false,
-  "container_ready": false,
+  "container_ready": true,
   "directories": {
     "init_hw": {
       "path": "/system/etc/init/hw",
@@ -35,30 +35,36 @@
   "executables": {
     "app_process64": {
       "executable": true,
+      "gid": 1000,
       "link_target": null,
       "mode": "0o755",
       "path": "/system/bin/app_process64",
       "present": true,
       "size": 14416,
-      "type": "regular"
+      "type": "regular",
+      "uid": 1000
     },
     "installd": {
       "executable": true,
+      "gid": 1000,
       "link_target": null,
       "mode": "0o755",
       "path": "/system/bin/installd",
       "present": true,
       "size": 480232,
-      "type": "regular"
+      "type": "regular",
+      "uid": 1000
     },
     "servicemanager": {
       "executable": true,
+      "gid": 1000,
       "link_target": null,
       "mode": "0o755",
       "path": "/system/bin/servicemanager",
       "present": true,
       "size": 75256,
-      "type": "regular"
+      "type": "regular",
+      "uid": 1000
     }
   },
   "framework": {
@@ -102,25 +108,36 @@
       "starts_system_server": true
     }
   },
-  "missing": [
-    "linker_config",
-    "passwd"
-  ],
-  "schema": "jasper.android.framework-preflight/1",
+  "linker_bootstrap": {
+    "apexd_bootstrap_before_update": true,
+    "bootstrap_directory": true,
+    "bootstrap_mount": true,
+    "bootstrap_write": true,
+    "generated_at_boot": true,
+    "init_rc": "/system/etc/init/hw/init.rc",
+    "static_config_path": "/linkerconfig/ld.config.txt",
+    "static_config_present": false,
+    "update_linker_config": true
+  },
+  "missing": [],
+  "schema": "jasper.android.framework-preflight/2",
   "static_files": {
-    "linker_config": {
-      "path": "/linkerconfig/ld.config.txt",
-      "present": false
-    },
     "passwd": {
+      "gid": 1000,
       "path": "/system/etc/passwd",
-      "present": false
+      "present": true,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0,
+      "stock_empty_database": true,
+      "uid": 1000
     },
     "vintf_manifest": {
+      "gid": 1000,
       "path": "/system/etc/vintf/manifest.xml",
       "present": true,
       "sha256": "37458b489e76a15e25aa7e38cdfd363be433b917484643e74e28d01c0f6dd341",
-      "size": 1715
+      "size": 1715,
+      "uid": 1000
     }
   }
 }

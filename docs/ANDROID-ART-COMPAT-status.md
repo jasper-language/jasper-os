@@ -73,17 +73,27 @@ APK 专用证据：
 该根镜像的 `init.zygote64.rc` 使用
 `app_process64 -Xzygote /system/bin --zygote --start-system-server` 启动 zygote
 并拉起 system_server；现代 Android 不需要独立的 `zygote64`/`system_server`
-二进制。修正该误判后，检查又发现 `/linkerconfig/ld.config.txt` 缺失且
-`/system/etc/passwd` 为零字节，因此静态前置仍为 `container_ready=false`，
-且尚未实际启动 zygote/system_server，所以 `activity_runtime_ready=false`。报告见
+二进制。
+
+第二次按实际 AOSP 启动链复核后，又纠正了两个静态误判：
+
+- `/linkerconfig/ld.config.txt` 本来就不在 system 镜像中；`init.rc` 会创建
+  bootstrap 目录、写入早期配置、bind-mount 到 `/linkerconfig`，启动
+  `apexd-bootstrap` 后执行 `update_linker_config`；
+- 原厂 `/system/etc/passwd` 是 UID/GID 1000 拥有的空文件，Android 运行时身份由
+  user/group 服务提供，不能用“非空 passwd”作为启动门。
+
+当前静态前置为 `container_ready=true`、`activity_runtime_ready=false`、
+`missing=[]`。尚未实际启动 zygote/system_server，所以仍不能宣称 Framework 或
+Activity 生命周期完成。报告见
 `evidence/android-framework-preflight-20261120/report.json`。
 
 ## Activity/Framework 生命周期边界
 
 APK 中的 DEX 能由 unmodified ART 执行，不等于 Android Activity 已可启动。当前
-固定夹具已有 zygote/system_server 的 init 启动定义、`installd`、`services.jar`、
-`am.jar` 和 framework resources，但缺少 linker namespace map 和有效用户数据库，
-还没有证明运行中的 ActivityManager Binder service，也没有实际挂载完整的
+固定夹具已有 zygote/system_server 的 init 启动定义、运行时 linker-config 生成链、
+`installd`、`services.jar`、`am.jar` 和 framework resources，但还没有证明运行中的
+ActivityManager Binder service，也没有实际挂载完整的
 `/system`、`/apex` Framework namespace 和服务图。
 
 `app_process64` 自身依赖 `libandroid_runtime.so`、`libbinder.so`、
