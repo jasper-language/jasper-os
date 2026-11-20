@@ -51,6 +51,8 @@
   实际复制量由双方向量长度、进程 IO 预算和可失败 `try_reserve_exact` 共同裁决。
 - `move_pages` 删除 1024 页固定批次上限；页地址、状态和可选节点数组使用
   `checked_mul`、`try_reserve_exact` 与用户复制边界准入。
+- Unix-domain `SCM_RIGHTS` 删除 32 个描述符批次上限；在捕获每个 fd transfer 前
+  使用 `try_reserve(1)`，失败返回 `ENOMEM`，接收侧仍受目标 FdTable 和进程预算约束。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -70,7 +72,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=293, runtime-resource-capacity=54, unclassified=0, added=0
+findings=292, runtime-resource-capacity=53, unclassified=0, added=0
 ```
 
 ## 尚未完成
