@@ -55,7 +55,6 @@ const MAX_PROCESS_SIGNAL_SETS: usize = 16;
 const MAX_POSIX_TIMERS: usize = 32;
 const MAX_INTERVAL_TIMER_SETS: usize = 16;
 const MAX_SYSV_MESSAGE_QUEUES: usize = 16;
-const MAX_SYSV_MESSAGES_PER_QUEUE: usize = 64;
 const SYSV_MSGMAX: usize = 8192;
 const SYSV_MSGMNB: usize = 16384;
 const MAX_SYSV_SEM_SETS: usize = 16;
@@ -9384,9 +9383,11 @@ fn linux_msgsnd(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             if length > queue.qbytes {
                 return Err(CompatErrno::MessageSize);
             }
-            if queue.messages.len() < MAX_SYSV_MESSAGES_PER_QUEUE
-                && queue.cbytes.saturating_add(length) <= queue.qbytes
-            {
+            if queue.cbytes.saturating_add(length) <= queue.qbytes {
+                queue
+                    .messages
+                    .try_reserve(1)
+                    .map_err(|_| CompatErrno::NoMemory)?;
                 let message_id = queue.next_message_id;
                 queue.next_message_id =
                     message_id.checked_add(1).ok_or(CompatErrno::NoSpace)?;

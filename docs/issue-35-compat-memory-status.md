@@ -66,6 +66,9 @@
   `try_reserve(1)` 增长，分配失败仍返回 `EAGAIN`，已有记录不被覆盖。
 - System V semaphore waiter 删除固定 64 槽；注册前使用 `try_reserve(1)`，失败返回
   `ENOSPC`，每信号 positive/zero waiter 计数仍与记录生命周期同步。
+- System V message queue 删除每队列 64 条消息的隐藏上限；队列容量只由公开
+  `qbytes` 字节配额和堆准入决定。入队前使用 `try_reserve(1)`，消息大小、字节配额、
+  `IPC_NOWAIT` 与阻塞唤醒语义保持不变。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -85,7 +88,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=286, runtime-resource-capacity=21, unclassified=0, added=0
+findings=285, runtime-resource-capacity=20, unclassified=0, added=0
 ```
 
 ## 尚未完成
