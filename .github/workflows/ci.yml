@@ -85,6 +85,10 @@ jobs:
         run: |
           python3 scripts/check-issue42-mechanism-ledger.py --self-test
           python3 scripts/check-issue42-mechanism-ledger.py
+      - name: Issue #43 驱动兼容域退出门 / compatibility driver-domain ledger
+        run: |
+          python3 scripts/check-issue43-driver-ledger.py --self-test
+          python3 scripts/check-issue43-driver-ledger.py
       - name: Issue #36/#37 GPU 与 UI ABI 边界 / GPU-UI boundary
         run: |
           python3 scripts/check-gpu-abi-boundary.py --self-test
