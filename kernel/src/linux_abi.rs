@@ -7351,15 +7351,18 @@ fn linux_getrandom(args: [u64; 6]) -> Result<u64, CompatErrno> {
     const GRND_NONBLOCK: u64 = 1;
     const GRND_RANDOM: u64 = 2;
     const GRND_INSECURE: u64 = 4;
-    const MAX_RANDOM: usize = 1024 * 1024;
     let length = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
-    if length > MAX_RANDOM || args[2] & !(GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE) != 0 {
+    if args[2] & !(GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE) != 0 {
         return Err(CompatErrno::Invalid);
     }
     if length == 0 {
         return Ok(0);
     }
-    let mut output = alloc::vec![0u8; length];
+    let mut output = alloc::vec::Vec::new();
+    output
+        .try_reserve_exact(length)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    output.resize(length, 0);
     let mut offset = 0usize;
     while offset < output.len() {
         let hardware = if cfg!(feature = "compat-rng-force") {

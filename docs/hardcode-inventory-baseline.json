@@ -1064,12 +1064,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "a1f6fe0450e553800b9b0b989b5e6fe29f693e9d1a0bbe772d641b778537f7b9",
-      "path": "kernel/src/linux_abi.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "a219e5316c7a8ba85d51220906782c0ead5687c13504d3b4f1f578062500fa85",
       "path": "user/irqprobe/src/main.rs",
       "rules": "HC-G8"
@@ -1713,5 +1707,5 @@
     "user",
     "xtask"
   ],
-  "total": 305
+  "total": 304
 }
