@@ -11859,21 +11859,37 @@ fn linux_migrate_pages(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 }
 
 fn linux_move_pages(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const MAX_PAGES: usize = 1024;
     const MPOL_MF_MOVE: u64 = 2;
     const MPOL_MF_MOVE_ALL: u64 = 4;
     let count = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
-    if count == 0 || count > MAX_PAGES || args[5] & !(MPOL_MF_MOVE | MPOL_MF_MOVE_ALL) != 0 {
+    if count == 0 || args[5] & !(MPOL_MF_MOVE | MPOL_MF_MOVE_ALL) != 0 {
         return Err(CompatErrno::Invalid);
     }
+    let pages_bytes = count.checked_mul(8).ok_or(CompatErrno::Invalid)?;
+    let nodes_bytes = count.checked_mul(4).ok_or(CompatErrno::Invalid)?;
     let target = linux_mempolicy_target(pid, args[0])?;
-    let mut pages_raw = alloc::vec![0u8; count * 8];
-    let mut statuses = alloc::vec![0i32; count];
-    copy_from_user(&mut pages_raw, args[2], count * 8).map_err(|_| CompatErrno::Fault)?;
-    let mut nodes = alloc::vec![0i32; count];
+    let mut pages_raw = alloc::vec::Vec::new();
+    pages_raw
+        .try_reserve_exact(pages_bytes)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    pages_raw.resize(pages_bytes, 0);
+    let mut statuses = alloc::vec::Vec::new();
+    statuses
+        .try_reserve_exact(count)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    statuses.resize(count, 0);
+    copy_from_user(&mut pages_raw, args[2], pages_bytes).map_err(|_| CompatErrno::Fault)?;
+    let mut nodes = alloc::vec::Vec::new();
+    nodes
+        .try_reserve_exact(count)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    nodes.resize(count, 0);
     if args[3] != 0 {
-        let mut raw = alloc::vec![0u8; count * 4];
-        copy_from_user(&mut raw, args[3], count * 4).map_err(|_| CompatErrno::Fault)?;
+        let mut raw = alloc::vec::Vec::new();
+        raw.try_reserve_exact(nodes_bytes)
+            .map_err(|_| CompatErrno::NoMemory)?;
+        raw.resize(nodes_bytes, 0);
+        copy_from_user(&mut raw, args[3], nodes_bytes).map_err(|_| CompatErrno::Fault)?;
         for (index, node) in nodes.iter_mut().enumerate() {
             *node = i32::from_le_bytes(raw[index * 4..index * 4 + 4].try_into().unwrap());
         }
