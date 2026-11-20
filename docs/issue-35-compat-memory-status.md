@@ -21,6 +21,9 @@
 - ELF 页计划器不再保留私有 1 GiB 页数上限或 64 KiB 页大小默认上限；
   `ImageLayout` 和动态程序规划显式接收调用方页预算，内核按进程剩余内存额度与
   当前可用物理帧的较小值准入。
+- fscrypt 全局 keyring 不再固定 4 个 key、4 个用户 claim。key 条目和每 key 用户
+  列表改为 `try_reserve` 准入的可失败堆增长；全部用户撤销时清零 master key 并
+  删除条目，保留原有权限和 `ENOKEY` 失败语义。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -40,7 +43,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=310, runtime-resource-capacity=42, added=0
+findings=308, runtime-resource-capacity=41, added=0
 ```
 
 ## 尚未完成
