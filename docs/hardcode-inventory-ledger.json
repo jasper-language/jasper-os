@@ -10,10 +10,10 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 139,
+    "explicit-safety-policy": 140,
     "platform-adapter": 28,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 50,
+    "runtime-resource-capacity": 49,
     "test-demo-fixture": 9
   },
   "entries": [
@@ -2058,12 +2058,12 @@
       "source": "const MAX_SYSV_SEM_UNDOS: usize = 64;"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "5e1964903cacf96b08e4e754de99ca1ec2f08a4f2acf7fe03e9fd4874beb4cda",
       "line": 2205,
       "path": "kernel/src/linux_abi.rs",
-      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
+      "reason": "bounded robust-list traversal and cycle detection during faulted process exit; allocation cannot be required on this path",
       "rules": "HC-G1",
       "source": "const MAX_NODES: usize = 64;"
     },
@@ -2690,10 +2690,10 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 144,
+    "explicit-safety-policy": 145,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 52,
+    "runtime-resource-capacity": 51,
     "test-demo-fixture": 9
   }
 }

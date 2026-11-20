@@ -209,6 +209,11 @@ def classify(path: str, rules: str, source: str) -> tuple[str, str]:
             "runtime-resource-capacity",
             "per-process Binder looper registry; the Vec already admits each registration with try_reserve",
         )
+    if path == "kernel/src/linux_abi.rs" and name == "MAX_NODES":
+        return (
+            "explicit-safety-policy",
+            "bounded robust-list traversal and cycle detection during faulted process exit; allocation cannot be required on this path",
+        )
     if path == "kernel/src/linux_abi.rs" and name in {
         "MAX_REGISTRATIONS",
         "MAX_REQUESTS",
