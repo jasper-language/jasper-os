@@ -14,7 +14,6 @@ use crate::native_install::{Actor, OwnerScope, Subject};
 use crate::security::{IdentityClass, SecurityContext};
 
 pub const MAX_MODULE_NAME_BYTES: usize = 48;
-pub const MAX_MODULE_DEPENDENCIES: usize = 16;
 
 /// Opaque display/identity name. It is not a path and grants no authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -379,17 +378,17 @@ impl ModuleError {
 }
 
 #[derive(Clone, Copy)]
-struct ModuleRecord {
+struct ModuleRecord<const DEPENDENCIES: usize> {
     key: ModuleKey,
     name: ModuleName,
     version: ModuleVersion,
     owner: OwnerScope,
     state: ModuleState,
-    dependencies: [Option<ModuleDependency>; MAX_MODULE_DEPENDENCIES],
+    dependencies: [Option<ModuleDependency>; DEPENDENCIES],
     dependency_count: u8,
 }
 
-impl ModuleRecord {
+impl<const DEPENDENCIES: usize> ModuleRecord<DEPENDENCIES> {
     fn dependencies(&self) -> &[Option<ModuleDependency>] {
         &self.dependencies[..self.dependency_count as usize]
     }
@@ -398,12 +397,12 @@ impl ModuleRecord {
 /// Fixed-capacity native module registry. Every fallible operation computes a
 /// complete next state first, so rejection never leaves a partial transition.
 #[derive(Clone, Copy)]
-pub struct NativeModuleRegistry<const N: usize> {
-    slots: [Option<ModuleRecord>; N],
+pub struct NativeModuleRegistry<const N: usize, const DEPENDENCIES: usize> {
+    slots: [Option<ModuleRecord<DEPENDENCIES>>; N],
     generations: [u32; N],
 }
 
-impl<const N: usize> NativeModuleRegistry<N> {
+impl<const N: usize, const DEPENDENCIES: usize> NativeModuleRegistry<N, DEPENDENCIES> {
     pub const fn new() -> Self {
         Self {
             slots: [None; N],
@@ -417,7 +416,7 @@ impl<const N: usize> NativeModuleRegistry<N> {
         authority: &A,
         spec: ModuleSpec<'_>,
     ) -> Result<ModuleKey, ModuleError> {
-        validate_spec(spec)?;
+        validate_spec(spec, DEPENDENCIES)?;
         if self
             .slots
             .iter()
@@ -448,7 +447,7 @@ impl<const N: usize> NativeModuleRegistry<N> {
         ) {
             return Err(ModuleError::NotAuthorized);
         }
-        let mut dependencies = [None; MAX_MODULE_DEPENDENCIES];
+        let mut dependencies = [None; DEPENDENCIES];
         for (target, dependency) in dependencies
             .iter_mut()
             .zip(spec.dependencies.iter().copied())
@@ -692,20 +691,22 @@ impl<const N: usize> NativeModuleRegistry<N> {
     }
 }
 
-impl<const N: usize> Default for NativeModuleRegistry<N> {
+impl<const N: usize, const DEPENDENCIES: usize> Default
+    for NativeModuleRegistry<N, DEPENDENCIES>
+{
     fn default() -> Self {
         Self::new()
     }
 }
 
-fn validate_spec(spec: ModuleSpec<'_>) -> Result<(), ModuleError> {
+fn validate_spec(spec: ModuleSpec<'_>, dependency_capacity: usize) -> Result<(), ModuleError> {
     if !spec.version.is_valid() {
         return Err(ModuleError::InvalidVersion);
     }
     if !spec.owner.is_valid() {
         return Err(ModuleError::InvalidScope);
     }
-    if spec.dependencies.len() > MAX_MODULE_DEPENDENCIES {
+    if spec.dependencies.len() > dependency_capacity {
         return Err(ModuleError::InvalidDependency);
     }
     for (index, dependency) in spec.dependencies.iter().copied().enumerate() {
@@ -743,6 +744,8 @@ mod tests {
     const USER: Actor<'static> = Actor::new(&[Subject::User(7)]);
     const OTHER_USER: Actor<'static> = Actor::new(&[Subject::User(8)]);
     const USER_SCOPE: OwnerScope = OwnerScope::User(7);
+    const TEST_DEPENDENCIES: usize = 16;
+    type TestRegistry<const N: usize> = NativeModuleRegistry<N, TEST_DEPENDENCIES>;
     const AUTHORITY: ScopeModuleAuthority = ScopeModuleAuthority;
     static EFFECT_ACTIVE: AtomicBool = AtomicBool::new(false);
     static FAIL_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -837,7 +840,7 @@ mod tests {
 
     #[test]
     fn install_start_stop_uninstall_follow_dependency_order() {
-        let mut registry = NativeModuleRegistry::<4>::new();
+        let mut registry = TestRegistry::<4>::new();
         let base = registry
             .install(USER, &AUTHORITY, spec("jasper.base", version(1, 2, 0), &[]))
             .unwrap();
@@ -881,7 +884,7 @@ mod tests {
 
     #[test]
     fn rejected_install_and_cross_scope_queries_are_failure_atomic() {
-        let mut registry = NativeModuleRegistry::<2>::new();
+        let mut registry = TestRegistry::<2>::new();
         let key = registry
             .install(USER, &AUTHORITY, spec("jasper.base", version(1, 0, 0), &[]))
             .unwrap();
@@ -910,7 +913,7 @@ mod tests {
 
     #[test]
     fn versions_capacity_and_invalid_dependencies_fail_without_mutation() {
-        let mut registry = NativeModuleRegistry::<1>::new();
+        let mut registry = TestRegistry::<1>::new();
         let old = registry
             .install(USER, &AUTHORITY, spec("jasper.base", version(1, 0, 0), &[]))
             .unwrap();
@@ -929,7 +932,7 @@ mod tests {
         );
         assert_eq!(registry.len(), 1);
 
-        let mut registry = NativeModuleRegistry::<2>::new();
+        let mut registry = TestRegistry::<2>::new();
         let duplicate = [dependencies[0], dependencies[0]];
         assert_eq!(
             registry.install(
@@ -943,8 +946,32 @@ mod tests {
     }
 
     #[test]
+    fn dependency_capacity_is_a_caller_budget() {
+        let mut registry = NativeModuleRegistry::<2, 1>::new();
+        let dependencies = [
+            ModuleDependency {
+                name: name("jasper.base"),
+                minimum: version(1, 0, 0),
+            },
+            ModuleDependency {
+                name: name("jasper.codec"),
+                minimum: version(1, 0, 0),
+            },
+        ];
+        assert_eq!(
+            registry.install(
+                USER,
+                &AUTHORITY,
+                spec("jasper.app", version(1, 0, 0), &dependencies)
+            ),
+            Err(ModuleError::InvalidDependency)
+        );
+        assert!(registry.is_empty());
+    }
+
+    #[test]
     fn uninstall_reuse_never_revives_an_old_generation() {
-        let mut registry = NativeModuleRegistry::<1>::new();
+        let mut registry = TestRegistry::<1>::new();
         let old = registry
             .install(USER, &AUTHORITY, spec("jasper.base", version(1, 0, 0), &[]))
             .unwrap();
@@ -965,7 +992,7 @@ mod tests {
 
     #[test]
     fn stopped_dependent_does_not_block_base_stop_but_still_blocks_uninstall() {
-        let mut registry = NativeModuleRegistry::<2>::new();
+        let mut registry = TestRegistry::<2>::new();
         let base = registry
             .install(USER, &AUTHORITY, spec("jasper.base", version(1, 0, 0), &[]))
             .unwrap();
@@ -994,7 +1021,7 @@ mod tests {
     #[test]
     fn binding_lifecycle_commits_only_after_real_activate_and_deactivate() {
         EFFECT_ACTIVE.store(false, Ordering::Release);
-        let mut registry = NativeModuleRegistry::<1>::new();
+        let mut registry = TestRegistry::<1>::new();
         let mut lifecycle = BindingModuleLifecycle::new(&LIFECYCLE_BINDINGS);
         let key = registry
             .install(USER, &AUTHORITY, spec("jasper.test", version(1, 0, 0), &[]))
@@ -1022,7 +1049,7 @@ mod tests {
     #[test]
     fn binding_failures_and_permanent_services_do_not_commit_state() {
         FAIL_ACTIVE.store(false, Ordering::Release);
-        let mut registry = NativeModuleRegistry::<2>::new();
+        let mut registry = TestRegistry::<2>::new();
         let mut lifecycle = BindingModuleLifecycle::new(&LIFECYCLE_BINDINGS);
         let failing = registry
             .install(USER, &AUTHORITY, spec("jasper.fail", version(1, 0, 0), &[]))
@@ -1095,7 +1122,7 @@ mod tests {
 
     #[test]
     fn lifecycle_publishes_after_activation_and_withdraws_before_deactivation() {
-        let mut registry = NativeModuleRegistry::<1>::new();
+        let mut registry = TestRegistry::<1>::new();
         let key = registry
             .install(USER, &AUTHORITY, spec("jasper.live", version(1, 0, 0), &[]))
             .unwrap();

@@ -14,10 +14,14 @@ use kernel_core::job::{Job, JobError, JobPriority, JobQueue, JobStats};
 
 use crate::sched::{KMutex, KMutexGuard};
 
-static QUEUE: KMutex<JobQueue> = KMutex::new(JobQueue::new());
+const JOB_SERVICE_RECORDS: usize = 8; // JASPER-HARDCODE-REVIEW: issue=35 source=job-service-policy reason=explicit-caller-budget
+const JOB_SERVICE_DEPENDENCIES: usize = 4; // JASPER-HARDCODE-REVIEW: issue=35 source=job-service-policy reason=explicit-caller-budget
+type ServiceJobQueue = JobQueue<JOB_SERVICE_RECORDS, JOB_SERVICE_DEPENDENCIES>;
+
+static QUEUE: KMutex<ServiceJobQueue> = KMutex::new(JobQueue::new());
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
-fn queue() -> KMutexGuard<'static, JobQueue> {
+fn queue() -> KMutexGuard<'static, ServiceJobQueue> {
     QUEUE.lock().unwrap_or_else(|_| panic!("job queue KMutex wait graph rejected"))
 }
 
@@ -83,7 +87,7 @@ pub fn cancel(id: u32) -> Result<kernel_core::job::JobState, JobError> {
 }
 
 /// 按 ID 取作业快照。
-pub fn get(id: u32) -> Option<Job> {
+pub fn get(id: u32) -> Option<Job<JOB_SERVICE_DEPENDENCIES>> {
     queue().get(id).copied()
 }
 

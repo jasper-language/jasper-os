@@ -6,17 +6,12 @@
 //! 因此可以在宿主上把全部边界情况跑一遍。
 //!
 //! # 边界
-//! * 不使用堆分配（本 crate 会被极小的用户态程序链接），全部是定长数组；
+//! * 不使用堆分配（本 crate 会被极小的用户态程序链接），容量由调用方显式选择；
 //! * 只回答"下一个该跑谁"，真正的创建与取消由内核的作业服务完成；
 //! * 队列表满、依赖成环、重复提交、依赖未完成而试图开始，一律拒绝并给出原因。
 //!
 //! # 探索阶段说明
 //! 演示阶段的字段与语义会继续调整；已经实现的行为是真实的，但不构成冻结契约。
-
-/// 队列容量。
-pub const MAX_JOBS: usize = 8;
-/// 单个作业的最大依赖数。
-pub const MAX_DEPS: usize = 4;
 
 /// 作业状态。
 /// Job state.
@@ -105,10 +100,10 @@ impl JobError {
     }
 }
 
-/// 一条作业记录。
-/// One job record.
+/// 一条作业记录；依赖存储容量由队列调用方选择。
+/// One job record; dependency storage is selected by the queue owner.
 #[derive(Debug, Clone, Copy)]
-pub struct Job {
+pub struct Job<const DEPS: usize> {
     /// 作业 ID（调用方分配，队列内唯一）。
     pub id: u32,
     /// 状态。
@@ -116,7 +111,7 @@ pub struct Job {
     /// 优先级。
     pub priority: JobPriority,
     /// 依赖的作业 ID（全部完成才可运行）。
-    pub deps: [u32; MAX_DEPS],
+    pub deps: [u32; DEPS],
     /// 依赖条数。
     pub dep_count: usize,
     /// 退出码（仅 Completed / Failed 有意义）。
@@ -145,24 +140,27 @@ pub struct JobStats {
     pub cancelled: usize,
 }
 
-/// 定长作业队列。
-/// Fixed-capacity job queue.
+/// Caller-sized job queue. `JOBS` is the record budget and `DEPS` is the
+/// per-job dependency budget; no hidden production capacities are embedded.
 #[derive(Debug, Clone, Copy)]
-pub struct JobQueue {
-    jobs: [Option<Job>; MAX_JOBS],
+pub struct JobQueue<const JOBS: usize, const DEPS: usize> {
+    jobs: [Option<Job<DEPS>>; JOBS],
     sequence: u32,
 }
 
-impl JobQueue {
+impl<const JOBS: usize, const DEPS: usize> JobQueue<JOBS, DEPS> {
     /// 空队列。
     pub const fn new() -> Self {
-        Self { jobs: [None; MAX_JOBS], sequence: 0 }
+        Self {
+            jobs: [None; JOBS],
+            sequence: 0,
+        }
     }
 
     /// 提交一个作业。依赖必须已经存在且不构成环。
     /// English: submit a job; dependencies must exist and stay acyclic.
     pub fn submit(&mut self, id: u32, priority: JobPriority, deps: &[u32]) -> Result<(), JobError> {
-        if deps.len() > MAX_DEPS {
+        if deps.len() > DEPS {
             return Err(JobError::Full);
         }
         if self.find(id).is_some() {
@@ -179,7 +177,7 @@ impl JobQueue {
         let Some(slot) = self.free_slot() else {
             return Err(JobError::Full);
         };
-        let mut table = [0u32; MAX_DEPS];
+        let mut table = [0u32; DEPS];
         table[..deps.len()].copy_from_slice(deps);
         self.jobs[slot] = Some(Job {
             id,
@@ -198,7 +196,7 @@ impl JobQueue {
     /// 选择一个可运行作业：优先级高者优先，同级先提交者优先。
     /// English: pick the highest-priority runnable job, FIFO within a priority.
     pub fn pick(&self) -> Option<u32> {
-        let mut best: Option<&Job> = None;
+        let mut best: Option<&Job<DEPS>> = None;
         for job in self.jobs.iter().flatten() {
             if job.state != JobState::Runnable {
                 continue;
@@ -251,7 +249,7 @@ impl JobQueue {
 
     /// 重新计算"依赖已满足"的等待作业。
     fn refresh(&mut self) {
-        for index in 0..MAX_JOBS {
+        for index in 0..JOBS {
             let Some(job) = self.jobs[index] else { continue };
             if job.state != JobState::Submitted {
                 continue;
@@ -269,7 +267,7 @@ impl JobQueue {
     }
 
     /// 按 ID 取作业。
-    pub fn get(&self, id: u32) -> Option<&Job> {
+    pub fn get(&self, id: u32) -> Option<&Job<DEPS>> {
         self.find(id)
     }
 
@@ -290,11 +288,11 @@ impl JobQueue {
         stats
     }
 
-    fn find(&self, id: u32) -> Option<&Job> {
+    fn find(&self, id: u32) -> Option<&Job<DEPS>> {
         self.jobs.iter().flatten().find(|job| job.id == id)
     }
 
-    fn job_mut(&mut self, id: u32) -> Option<&mut Job> {
+    fn job_mut(&mut self, id: u32) -> Option<&mut Job<DEPS>> {
         self.jobs.iter_mut().flatten().find(|job| job.id == id)
     }
 

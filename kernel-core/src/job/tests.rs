@@ -3,7 +3,11 @@
 
 use super::*;
 
-fn queue_with(ids: &[(u32, JobPriority, &[u32])]) -> JobQueue {
+const TEST_JOBS: usize = 8;
+const TEST_DEPS: usize = 4;
+type TestQueue = JobQueue<TEST_JOBS, TEST_DEPS>;
+
+fn queue_with(ids: &[(u32, JobPriority, &[u32])]) -> TestQueue {
     let mut queue = JobQueue::new();
     for (id, priority, deps) in ids {
         queue.submit(*id, *priority, deps).expect("提交应成功");
@@ -75,8 +79,8 @@ fn submit_rejects_duplicates_unknown_deps_and_self_deps() {
 
 #[test]
 fn queue_full_is_reported() {
-    let mut queue = JobQueue::new();
-    for index in 0..MAX_JOBS {
+    let mut queue: TestQueue = JobQueue::new();
+    for index in 0..TEST_JOBS {
         queue.submit(index as u32 + 1, JobPriority::Normal, &[]).unwrap();
     }
     assert_eq!(queue.submit(99, JobPriority::Normal, &[]), Err(JobError::Full));
@@ -84,10 +88,27 @@ fn queue_full_is_reported() {
 
 #[test]
 fn too_many_dependencies_are_rejected() {
-    let mut queue = JobQueue::new();
+    let mut queue: TestQueue = JobQueue::new();
     queue.submit(1, JobPriority::Normal, &[]).unwrap();
-    let deps = [1u32; MAX_DEPS + 1];
+    let deps = [1u32; TEST_DEPS + 1];
     assert_eq!(queue.submit(2, JobPriority::Normal, &deps), Err(JobError::Full));
+}
+
+#[test]
+fn caller_capacity_budgets_are_independent() {
+    let mut jobs = JobQueue::<1, 1>::new();
+    jobs.submit(1, JobPriority::Normal, &[]).unwrap();
+    assert_eq!(
+        jobs.submit(2, JobPriority::Normal, &[]),
+        Err(JobError::Full)
+    );
+
+    let mut dependencies = JobQueue::<2, 1>::new();
+    dependencies.submit(1, JobPriority::Normal, &[]).unwrap();
+    assert_eq!(
+        dependencies.submit(2, JobPriority::Normal, &[1, 1]),
+        Err(JobError::Full)
+    );
 }
 
 #[test]

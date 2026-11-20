@@ -194,12 +194,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "1e6129c5f837ab1cda3509f068e5cd5aeae8be110f802d6cf6c33293a5bb1b89",
-      "path": "kernel-core/src/job.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "1e718c0c6ad461bc76095f8de4c1c781ad47e5668ed5682d1c7f5d961f7d8b55",
       "path": "kernel-core/src/persistent_install.rs",
       "rules": "HC-G8"
@@ -518,20 +512,8 @@
     },
     {
       "count": 1,
-      "fingerprint": "542f9b4c3db63c6dd4d4d8d92aeeff4fa359674287c6145563c232d8983d44d2",
-      "path": "kernel-core/src/net3.rs",
-      "rules": "HC-G8"
-    },
-    {
-      "count": 1,
       "fingerprint": "56cf6f26b606aadd759018dfb734bebca9c092da801f928144d44ae7de7dc3fe",
       "path": "kernel/src/sched/pex4_probe.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "57a16c165028e30feeb4edbd4af6febaa792e9913eb374ce56913b4d0264e6ae",
-      "path": "kernel-core/src/job.rs",
       "rules": "HC-G1"
     },
     {
@@ -1256,12 +1238,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "d2ab795dc66a09ffec25044db95c5b17238d102318e103f68dde034bc20bf8ce",
-      "path": "kernel-core/src/native_module_lifecycle.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "d73f4ef53379b8e83bfcfd3e74630f50f4a59b0fcbb0bcca121458edce9c06ba",
       "path": "user/irqprobe/src/main.rs",
       "rules": "HC-G8"
@@ -1551,5 +1527,5 @@
     "user",
     "xtask"
   ],
-  "total": 329
+  "total": 325
 }

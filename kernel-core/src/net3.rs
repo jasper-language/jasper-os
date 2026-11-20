@@ -1,11 +1,9 @@
 //! Bounded network management, retry and observability contracts.
 //!
-//! 职责：维护网络接口生命周期、有界指数退避、丢包分类和固定容量状态快照。
+//! 职责：维护网络接口生命周期、有界指数退避、丢包分类和调用方定容状态快照。
 //! 边界：不解析报文、不执行 TCP 状态机，也不替代生产安全策略。
 //! Responsibility: lifecycle, bounded retry, loss accounting and inspection.
 //! Packet parsing, TCP state and production security policy remain elsewhere.
-
-pub const OBSERVATION_CAPACITY: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinkState {
@@ -232,18 +230,18 @@ pub struct StatusSnapshot {
     pub lifecycle_events: u64,
 }
 
-pub struct ObservationLog {
-    entries: [Option<StatusSnapshot>; OBSERVATION_CAPACITY],
+pub struct ObservationLog<const CAPACITY: usize> {
+    entries: [Option<StatusSnapshot>; CAPACITY],
     head: usize,
     len: usize,
     next_sequence: u64,
     dropped: u64,
 }
 
-impl ObservationLog {
+impl<const CAPACITY: usize> ObservationLog<CAPACITY> {
     pub const fn new() -> Self {
         Self {
-            entries: [None; OBSERVATION_CAPACITY],
+            entries: [None; CAPACITY],
             head: 0,
             len: 0,
             next_sequence: 1,
@@ -268,13 +266,13 @@ impl ObservationLog {
             self.dropped = self.dropped.saturating_add(1);
             return false;
         };
-        if self.next_sequence == 0 || self.len == OBSERVATION_CAPACITY {
+        if self.next_sequence == 0 || self.len == CAPACITY {
             self.dropped = self.dropped.saturating_add(1);
             return false;
         }
         snapshot.sequence = self.next_sequence;
         self.next_sequence = next_sequence;
-        let slot = (self.head + self.len) % OBSERVATION_CAPACITY;
+        let slot = (self.head + self.len) % CAPACITY;
         self.entries[slot] = Some(snapshot);
         self.len += 1;
         true
@@ -285,7 +283,7 @@ impl ObservationLog {
             return None;
         }
         let snapshot = self.entries[self.head].take();
-        self.head = (self.head + 1) % OBSERVATION_CAPACITY;
+        self.head = (self.head + 1) % CAPACITY;
         self.len -= 1;
         snapshot
     }
@@ -297,22 +295,22 @@ impl ObservationLog {
     }
 }
 
-impl Default for ObservationLog {
+impl<const CAPACITY: usize> Default for ObservationLog<CAPACITY> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-pub struct NetworkManager {
+pub struct NetworkManager<const OBSERVATIONS: usize> {
     generation: u32,
     state: LinkState,
     backoff: Backoff,
     loss: LossCounters,
-    observations: ObservationLog,
+    observations: ObservationLog<OBSERVATIONS>,
     lifecycle_events: u64,
 }
 
-impl NetworkManager {
+impl<const OBSERVATIONS: usize> NetworkManager<OBSERVATIONS> {
     pub fn new(policy: BackoffPolicy) -> Result<Self, Net3Error> {
         Ok(Self {
             generation: 0,
@@ -336,11 +334,11 @@ impl NetworkManager {
         self.loss
     }
 
-    pub const fn observations(&self) -> &ObservationLog {
+    pub const fn observations(&self) -> &ObservationLog<OBSERVATIONS> {
         &self.observations
     }
 
-    pub fn observations_mut(&mut self) -> &mut ObservationLog {
+    pub fn observations_mut(&mut self) -> &mut ObservationLog<OBSERVATIONS> {
         &mut self.observations
     }
 
@@ -463,6 +461,9 @@ impl NetworkManager {
 mod tests {
     use super::*;
 
+    const TEST_OBSERVATIONS: usize = 16;
+    type TestManager = NetworkManager<TEST_OBSERVATIONS>;
+
     fn policy() -> BackoffPolicy {
         BackoffPolicy {
             max_attempts: 3,
@@ -474,7 +475,7 @@ mod tests {
 
     #[test]
     fn lifecycle_is_explicit_and_stale_generation_is_rejected() {
-        let mut manager = NetworkManager::new(policy()).unwrap();
+        let mut manager: TestManager = NetworkManager::new(policy()).unwrap();
         assert_eq!(manager.state(), LinkState::Down);
         let generation = manager.start().unwrap();
         assert_eq!(manager.state(), LinkState::Probing);
@@ -523,7 +524,7 @@ mod tests {
 
     #[test]
     fn effective_loss_is_classified_and_traffic_mismatch_is_atomic() {
-        let mut manager = NetworkManager::new(policy()).unwrap();
+        let mut manager: TestManager = NetworkManager::new(policy()).unwrap();
         manager.account_traffic(20, 12, 3, 2, 1).unwrap();
         let snapshot = manager.snapshot().loss;
         assert_eq!(snapshot.offered(), 20);
@@ -543,26 +544,35 @@ mod tests {
 
     #[test]
     fn observability_is_bounded_and_reports_dropped_snapshots() {
-        let mut manager = NetworkManager::new(policy()).unwrap();
-        for _ in 0..OBSERVATION_CAPACITY {
+        let mut manager: TestManager = NetworkManager::new(policy()).unwrap();
+        for _ in 0..TEST_OBSERVATIONS {
             assert!(manager.observe());
         }
         assert!(!manager.observe());
-        assert_eq!(manager.observations().len(), OBSERVATION_CAPACITY);
+        assert_eq!(manager.observations().len(), TEST_OBSERVATIONS);
         assert_eq!(manager.observations().dropped(), 1);
         let first = manager.observations_mut().pop().unwrap();
         assert_eq!(first.sequence, 1);
         assert_eq!(first.state, LinkState::Down);
 
-        let mut saturated = ObservationLog::new();
+        let mut saturated: ObservationLog<TEST_OBSERVATIONS> = ObservationLog::new();
         saturated.next_sequence = u64::MAX;
         assert!(!saturated.publish(first));
         assert_eq!(saturated.dropped(), 1);
     }
 
     #[test]
+    fn observation_capacity_is_a_caller_budget() {
+        let mut manager: NetworkManager<1> = NetworkManager::new(policy()).unwrap();
+        assert!(manager.observe());
+        assert!(!manager.observe());
+        assert_eq!(manager.observations().len(), 1);
+        assert_eq!(manager.observations().dropped(), 1);
+    }
+
+    #[test]
     fn retry_failure_degrades_then_fails_and_fatal_probe_fails_immediately() {
-        let mut manager = NetworkManager::new(policy()).unwrap();
+        let mut manager: TestManager = NetworkManager::new(policy()).unwrap();
         let generation = manager.start().unwrap();
         assert!(matches!(
             manager.probe_failed(generation, 0, 0, false).unwrap(),

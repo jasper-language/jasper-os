@@ -147,7 +147,7 @@ pub(crate) fn verify(pid: kernel_core::objtable::ObjId) -> bool {
         target,
     );
     let lifecycle_ok = SecuredModuleAuthority::new(context, &MODULE_PEP).is_some_and(|authority| {
-        let mut registry = NativeModuleRegistry::<1>::new();
+        let mut registry = NativeModuleRegistry::<1, 0>::new();
         let Some(name) = ModuleName::new("verify.module") else {
             return false;
         };

@@ -8,6 +8,8 @@ use kernel_core::net3::{
 
 use crate::kprintln;
 
+const NET3_OBSERVATION_SLOTS: usize = 16; // JASPER-HARDCODE-REVIEW: issue=35 source=net3-observer-policy reason=explicit-caller-budget
+
 static FAILED: AtomicU32 = AtomicU32::new(0);
 
 pub fn failed() -> u32 {
@@ -29,7 +31,7 @@ pub fn run() {
         max_delay: 50,
         multiplier: 2,
     };
-    let mut manager = match NetworkManager::new(policy) {
+    let mut manager: NetworkManager<NET3_OBSERVATION_SLOTS> = match NetworkManager::new(policy) {
         Ok(manager) => manager,
         Err(_) => {
             check(false, "configuration");
