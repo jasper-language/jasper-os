@@ -55,6 +55,9 @@
   使用 `try_reserve(1)`，失败返回 `ENOMEM`，接收侧仍受目标 FdTable 和进程预算约束。
 - Legacy AIO `io_submit` 删除 32 请求批次数上限；调用方列表按偏移和用户长度解析，
   已有 context `max_events` 在有界完成队列耗尽时返回部分提交数。
+- System V shared memory 的每段 32 attachment 上限已删除；映射完成后的 attachment
+  记录使用 `try_reserve(1)`，失败会 unmap 并返回 `ENOSPC`，段生命周期与权限检查
+  不变。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -74,7 +77,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=291, runtime-resource-capacity=51, unclassified=0, added=0
+findings=290, runtime-resource-capacity=50, unclassified=0, added=0
 ```
 
 ## 尚未完成
