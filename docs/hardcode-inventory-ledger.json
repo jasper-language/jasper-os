@@ -1,5 +1,5 @@
 {
-  "baseline_total": 325,
+  "baseline_total": 324,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -13,7 +13,7 @@
     "explicit-safety-policy": 125,
     "platform-adapter": 28,
     "protocol-abi": 38,
-    "runtime-resource-capacity": 54,
+    "runtime-resource-capacity": 53,
     "test-demo-fixture": 6
   },
   "entries": [
@@ -991,21 +991,11 @@
       "category": "protocol-abi",
       "count": 1,
       "fingerprint": "9218de16b1a4f7d209dcd00d5ef6c3b7dab8b809f2ff4212d2bd217992328cab",
-      "line": 13,
+      "line": 12,
       "path": "kernel-core/src/hwvirt_vcpu.rs",
       "reason": "PCI configuration limit, architecture address width, wire handle count, or internal bit field",
       "rules": "HC-G1",
       "source": "pub const MAX_GPA: u64 = 1 << 48;"
-    },
-    {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "ffe7b14d4bdcec1fb16b3d97c5bba8be19d95f0f564a1c6b0fe3040eca8cc9b1",
-      "line": 12,
-      "path": "kernel-core/src/hwvirt_vcpu.rs",
-      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
-      "rules": "HC-G1",
-      "source": "pub const MAX_GUEST_MAPPINGS: usize = 64;"
     },
     {
       "category": "protocol-abi",
@@ -2533,7 +2523,7 @@
     "explicit-safety-policy": 141,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 92,
+    "runtime-resource-capacity": 91,
     "test-demo-fixture": 7
   }
 }

@@ -1499,12 +1499,6 @@
       "fingerprint": "fe233a588e56bb3f627c11ee09c2ddc66920f95426e529c9987ee14530545fd4",
       "path": "compat-loader/src/lib.rs",
       "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "ffe7b14d4bdcec1fb16b3d97c5bba8be19d95f0f564a1c6b0fe3040eca8cc9b1",
-      "path": "kernel-core/src/hwvirt_vcpu.rs",
-      "rules": "HC-G1"
     }
   ],
   "schema": 1,
@@ -1527,5 +1521,5 @@
     "user",
     "xtask"
   ],
-  "total": 325
+  "total": 324
 }

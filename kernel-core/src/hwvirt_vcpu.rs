@@ -9,7 +9,6 @@ use crate::hwvirt::Backend;
 #[cfg(any(test, feature = "hwvirt-vcpu-dynamic"))]
 use alloc::vec::Vec;
 
-pub const MAX_GUEST_MAPPINGS: usize = 64;
 pub const MAX_GPA: u64 = 1 << 48;
 
 /// Saved architectural state. Backend-specific fields may use `extended`.
