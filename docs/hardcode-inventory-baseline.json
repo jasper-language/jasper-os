@@ -1184,12 +1184,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "be80ee958e2edc7aa5a8f30e9775269cb5d666bfed417db68e2cf4ea05487c65",
-      "path": "kernel/src/linux_abi.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "bf520ebc8476eee9b3ccca1af82b540ab86a22539ae3aac0c07cc87d9794cb1b",
       "path": "compat-core/src/executable.rs",
       "rules": "HC-G1"
@@ -1629,5 +1623,5 @@
     "user",
     "xtask"
   ],
-  "total": 291
+  "total": 290
 }

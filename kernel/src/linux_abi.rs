@@ -66,7 +66,6 @@ const MAX_SYSV_SEM_WAITERS: usize = 64;
 const MAX_SYSV_SEM_UNDOS: usize = 64;
 const SYSV_SEMVMX: i32 = 32767;
 const MAX_SYSV_SHARED_SEGMENTS: usize = 16;
-const MAX_SYSV_SHARED_ATTACHMENTS: usize = 32;
 static NEXT_LINUX_TID: AtomicU32 = AtomicU32::new(0x10_0000);
 static NEXT_POSIX_TIMER_ID: AtomicU64 = AtomicU64::new(0x7000_0000_0000_0001);
 
@@ -10574,15 +10573,8 @@ fn linux_shmat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         ) {
             return Err(CompatErrno::Access);
         }
-        (
-            segment.object.clone(),
-            segment.size,
-            segment.attachments.len(),
-        )
+        (segment.object.clone(), segment.size)
     };
-    if segment.2 >= MAX_SYSV_SHARED_ATTACHMENTS {
-        return Err(CompatErrno::NoSpace);
-    }
     let length = segment
         .1
         .checked_add(PAGE - 1)
@@ -10639,12 +10631,11 @@ fn linux_shmat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::Removed);
     };
     let segment = &mut state.sysv_shared_segments[index];
-    if segment.attachments.len() >= MAX_SYSV_SHARED_ATTACHMENTS
-        || segment
-            .attachments
-            .try_reserve(1)
-            .map_err(|_| CompatErrno::NoSpace)
-            .is_err()
+    if segment
+        .attachments
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoSpace)
+        .is_err()
     {
         drop(state);
         let _ = linux_munmap(pid, [address, length, 0, 0, 0, 0]);
