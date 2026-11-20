@@ -44,6 +44,9 @@
   queue、node、handle、thread、wake target 和退出通知快照全部在变更前使用可失败
   堆准入；分配失败在会改变事务/队列之前返回 `ENOMEM`，清理路径仍保持代际与
   dead-node tombstone 语义。
+- Linux graphics `GraphicsService<..., Y>` 的 fence、binary semaphore 和 timeline
+  容量改由调用方显式选择；`Y=1` 负例验证第二对象 `Capacity` 拒绝，销毁后槽位可
+  重新使用。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -63,7 +66,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=296, runtime-resource-capacity=57, unclassified=0, added=0
+findings=295, runtime-resource-capacity=56, unclassified=0, added=0
 ```
 
 ## 尚未完成
