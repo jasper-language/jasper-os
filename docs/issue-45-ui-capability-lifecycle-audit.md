@@ -2,8 +2,9 @@
 
 更新时间：2026-11-19。
 
-状态：**架构审计与统一 Schema 设计草案。本文不新增 syscall，不改变现有 ABI、DAG
-节点或验收状态，也不宣称 Mobile/Pad/Desktop 策略引擎已经实现。**
+状态：**架构审计已完成，版本化契约与 Scene/Surface 迁移状态机已实现；不新增
+syscall，不改变现有 ABI，不宣称 Mobile/Pad/Desktop 策略服务或真实 UI 生命周期
+验收已经完成。**
 
 ## 裁决边界
 
@@ -80,8 +81,9 @@ transaction_id
 
 ## 实施顺序
 
-1. **A：审计与 Schema 收口**：补齐事件/状态/错误、唯一所有者和能力/策略 epoch
-   的版本化定义，并增加编码负例；本文只完成现状审计。
+1. **A：审计与 Schema 收口**：`kernel-core::ui_policy` 已提供版本化能力、Profile、
+   生命周期快照、编码负例和 Surface 迁移事务；真实用户态 Policy Service、多应用
+   生命周期和动态设备事件闭环仍未完成。
 2. **B：Mobile 单主前台**：在真实 CPL3 UI Service 上用双应用验证焦点互斥、输入
    路由、可见/暂停分离、后台允许/拒绝、关闭与崩溃清理。
 3. **C：Pad/Desktop 与动态切换**：验证多 Scene、多窗口、Surface generation、

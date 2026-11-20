@@ -29,6 +29,9 @@ use jasper_ui_engine::{
     SimpleTextEngine,
 };
 use kernel_core::display_input::{DisplayInputError, KeyInput, SurfaceSpec};
+pub use kernel_core::ui_policy::{
+    UiDeviceCapabilities, UiPolicyError, UiPolicySnapshot, InteractionProfile, ProfileDecision,
+};
 #[cfg(feature = "native-transport")]
 use kernel_core::ui_protocol::{decode_ui_frame, encode_ui_frame, UiFrame, UiFrameHeader};
 use kernel_core::ui_service::{UI_ERROR_ENGINE_UNAVAILABLE, UI_SERVICE_PROTOCOL_VERSION};
@@ -328,6 +331,7 @@ pub struct UiHost<E: EngineHost> {
     engine: E,
     surface: SurfaceBinding,
     scene_version: u64,
+    policy: Option<UiPolicySnapshot>,
 }
 
 impl<E: EngineHost> UiHost<E> {
@@ -340,7 +344,23 @@ impl<E: EngineHost> UiHost<E> {
             engine,
             surface: SurfaceBinding::new(surface, surface_generation)?,
             scene_version: 0,
+            policy: None,
         })
+    }
+
+    /// Bind the immutable policy snapshot that admits this host Surface. This
+    /// validates the contract epoch/surface binding without changing the
+    /// service's existing authorization or display-session authority.
+    pub fn bind_policy(&mut self, policy: UiPolicySnapshot) -> Result<(), HostError> {
+        if policy.surface != self.surface.surface {
+            return Err(HostError::InvalidSurface);
+        }
+        self.policy = Some(policy);
+        Ok(())
+    }
+
+    pub const fn policy(&self) -> Option<UiPolicySnapshot> {
+        self.policy
     }
 
     pub fn protocol_version(&self) -> u16 {
@@ -497,6 +517,43 @@ mod tests {
         assert_eq!(host.set_scene(b"scene"), Err(HostError::EngineUnavailable));
         let mut frame = CpuFrame::new(SURFACE, 1, 1, 1, vec![0; 48]).unwrap();
         assert_eq!(host.render(&mut frame), Err(HostError::EngineUnavailable));
+    }
+
+    #[test]
+    fn host_binds_one_immutable_policy_surface() {
+        let mut host = UiHost::new(UnavailableEngine, SURFACE, 1).unwrap();
+        let policy = UiPolicySnapshot::new(
+            1,
+            2,
+            3,
+            kernel_core::ui_policy::UiPolicyScope {
+                user: 1,
+                tenant: 1,
+                session: 1,
+                display_seat: 1,
+                input_seat: 1,
+            },
+            UiDeviceCapabilities {
+                display: true,
+                keyboard: true,
+                pointer: false,
+                touch: false,
+                split_layouts: false,
+                multi_window: false,
+                background_grants: false,
+            },
+            InteractionProfile::SinglePrimary,
+            kernel_core::ui_policy::UiBackgroundPolicy::DenyOrdinary,
+            SURFACE,
+        )
+        .unwrap();
+        assert_eq!(host.bind_policy(policy), Ok(()));
+        assert_eq!(host.policy(), Some(policy));
+        let mut wrong = policy;
+        wrong.surface.width = 5;
+        wrong.surface.stride = 5;
+        assert_eq!(host.bind_policy(wrong), Err(HostError::InvalidSurface));
+        assert_eq!(host.policy(), Some(policy));
     }
 
     #[derive(Default)]

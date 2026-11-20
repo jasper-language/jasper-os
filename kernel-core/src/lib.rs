@@ -197,6 +197,7 @@ pub mod trace;
 pub mod trap;
 pub mod ui_protocol;
 pub mod ui_service;
+pub mod ui_policy;
 pub mod usi;
 #[cfg(any(test, feature = "runtime-registries"))]
 pub mod usi_request;
