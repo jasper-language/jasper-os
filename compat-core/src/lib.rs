@@ -15,6 +15,7 @@ pub mod pipe;
 pub mod process;
 pub mod seccomp;
 pub mod syscall;
+pub mod uapi;
 pub mod utsname;
 
 pub use executable::{

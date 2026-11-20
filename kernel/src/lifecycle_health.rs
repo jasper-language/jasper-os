@@ -721,6 +721,7 @@ fn execute_root_linux_probe(root: &Ext4Reader, enforce_resources: bool) -> Resul
         compat_core::syscall::LinuxSyscall::TimerFdCreate,
         compat_core::syscall::LinuxSyscall::Signalfd4,
         compat_core::syscall::LinuxSyscall::Pipe2,
+        compat_core::syscall::LinuxSyscall::Fcntl,
         compat_core::syscall::LinuxSyscall::IoUringSetup,
         compat_core::syscall::LinuxSyscall::IoUringEnter,
         compat_core::syscall::LinuxSyscall::IoUringRegister,

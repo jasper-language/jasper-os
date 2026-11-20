@@ -528,6 +528,11 @@ unsafe fn ring_write_u32(base: *mut u8, offset: usize, value: u32) {
 }
 
 #[cfg(target_arch = "x86_64")]
+fn param_u32(params: &[u8; 120], offset: usize) -> usize {
+    u32::from_le_bytes(params[offset..offset + 4].try_into().unwrap()) as usize
+}
+
+#[cfg(target_arch = "x86_64")]
 unsafe fn test_io_uring() -> bool {
     let mut params = [0u8; 120];
     let ring_fd = syscall6(
@@ -567,20 +572,24 @@ unsafe fn test_io_uring() -> bool {
     }
     let ring = ring as *mut u8;
     let sqes = sqes as *mut u8;
+    let sq_array = param_u32(&params, 64);
+    let cq_head = param_u32(&params, 80);
+    let cq_tail = param_u32(&params, 84);
+    let cqes = param_u32(&params, 100);
     core::ptr::write_bytes(sqes, 0, 64);
     core::slice::from_raw_parts_mut(sqes.add(32), 8).copy_from_slice(&0x55aa_u64.to_le_bytes());
-    ring_write_u32(ring, 0x80, 0);
+    ring_write_u32(ring, sq_array, 0);
     ring_write_u32(ring, 0x04, 1);
     let submitted = syscall6(SYS_IO_URING_ENTER, ring_fd as u64, 1, 0, 0, 0, 0);
-    let completed = ring_read_u32(ring, 0x100) == 0
-        && ring_read_u32(ring, 0x104) == 1
+    let completed = ring_read_u32(ring, cq_head) == 0
+        && ring_read_u32(ring, cq_tail) == 1
         && u64::from_le_bytes(
-            core::slice::from_raw_parts(ring.add(0x1000), 8)
+            core::slice::from_raw_parts(ring.add(cqes), 8)
                 .try_into()
                 .unwrap(),
         ) == 0x55aa
         && i32::from_le_bytes(
-            core::slice::from_raw_parts(ring.add(0x1008), 4)
+            core::slice::from_raw_parts(ring.add(cqes + 8), 4)
                 .try_into()
                 .unwrap(),
         ) == 0;

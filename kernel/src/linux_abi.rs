@@ -3648,11 +3648,8 @@ fn linux_uname(args: [u64; 6]) -> Result<u64, CompatErrno> {
 }
 
 fn linux_write(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const MAX_WRITE: usize = 1024 * 1024;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
-    let len = usize::try_from(args[2])
-        .map_err(|_| CompatErrno::Invalid)?
-        .min(MAX_WRITE); // JASPER-HARDCODE-REVIEW: issue=35 source=linux-batch-partial-policy reason=return-bounded-write-prefix
+    let len = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
     if let Some(entry) = proc::linux_fd(pid, fd) {
         if linux_cache_file_id(entry.handle).is_some() {
             if !entry.rights.contains(kernel_core::object::Rights::WRITE) {
@@ -3691,7 +3688,11 @@ fn linux_write(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             if len == 0 {
                 return Ok(0);
             }
-            let mut bytes = alloc::vec![0u8; len];
+            let mut bytes = alloc::vec::Vec::new();
+            bytes
+                .try_reserve_exact(len)
+                .map_err(|_| CompatErrno::NoMemory)?;
+            bytes.resize(len, 0);
             copy_from_user(&mut bytes, args[1], len).map_err(|_| CompatErrno::Fault)?;
             let written =
                 proc::linux_ashmem_write_from(pid, entry.handle, offset, &bytes)
@@ -3710,7 +3711,11 @@ fn linux_write(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Ok(0);
     }
     let io = admit_process_io(pid, len as u64, 1)?;
-    let mut bytes = alloc::vec![0u8; len];
+    let mut bytes = alloc::vec::Vec::new();
+    bytes
+        .try_reserve_exact(len)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    bytes.resize(len, 0);
     copy_from_user(&mut bytes, args[1], len).map_err(|_| CompatErrno::Fault)?;
     console::write_bytes(&bytes);
     io.commit();
@@ -3740,11 +3745,10 @@ fn linux_getcwd(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 ///
 /// 写入受权限保护的 Linux 控制台 fd；iovec 数量、总长度和每个用户区间都有界检查。
 fn linux_writev(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const MAX_IOVECS: usize = 16;
     const IOVEC_BYTES: usize = 16;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    if count > MAX_IOVECS {
+    if count > compat_core::uapi::LINUX_UIO_MAXIOV {
         return Err(CompatErrno::Invalid);
     }
     if proc::linux_fd(pid, fd).is_some_and(|entry| {
@@ -4273,11 +4277,8 @@ fn linux_proc_stat_read(
 
 /// Implements bounded `pwrite64(2)` for a memfd regular file.
 fn linux_pwrite64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const MAX_WRITE: usize = 1024 * 1024;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
-    let len = usize::try_from(args[2])
-        .map_err(|_| CompatErrno::Invalid)?
-        .min(MAX_WRITE); // JASPER-HARDCODE-REVIEW: issue=35 source=linux-batch-partial-policy reason=return-bounded-pwrite-prefix
+    let len = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if entry.kind != compat_core::fd::CompatKind::Device
         || proc::linux_ashmem_is_regular(pid, entry.handle) != Some(true)
@@ -4288,7 +4289,11 @@ fn linux_pwrite64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if len == 0 {
         return Ok(0);
     }
-    let mut bytes = alloc::vec![0u8; len];
+    let mut bytes = alloc::vec::Vec::new();
+    bytes
+        .try_reserve_exact(len)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    bytes.resize(len, 0);
     copy_from_user(&mut bytes, args[1], len).map_err(|_| CompatErrno::Fault)?;
     let written = proc::linux_ashmem_write_from(pid, entry.handle, args[3], &bytes)
         .map_err(ashmem_compat_error)?;
@@ -4305,14 +4310,12 @@ fn linux_vectored_file_io(
     positioned: bool,
     version_two: bool,
 ) -> Result<u64, CompatErrno> {
-    const MAX_IOVECS: usize = 16;
-    const MAX_BYTES: usize = 1024 * 1024;
     const IOVEC_BYTES: usize = 16;
     const RWF_SUPPORTED: u64 = 0x1 | 0x2 | 0x4 | 0x8;
 
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    if count > MAX_IOVECS {
+    if count > compat_core::uapi::LINUX_UIO_MAXIOV {
         return Err(CompatErrno::Invalid);
     }
     let flags = if version_two { args[4] } else { 0 };
@@ -4333,7 +4336,10 @@ fn linux_vectored_file_io(
     if !entry.rights.contains(required) {
         return Err(CompatErrno::BadFd);
     }
-    let mut vectors = alloc::vec::Vec::with_capacity(count);
+    let mut vectors = alloc::vec::Vec::new();
+    vectors
+        .try_reserve_exact(count)
+        .map_err(|_| CompatErrno::NoMemory)?;
     let mut total = 0usize;
     for index in 0..count {
         let address = args[1]
@@ -4347,7 +4353,7 @@ fn linux_vectored_file_io(
         base.checked_add(u64::try_from(len).map_err(|_| CompatErrno::Invalid)?)
             .ok_or(CompatErrno::Fault)?;
         total = total.checked_add(len).ok_or(CompatErrno::Invalid)?;
-        if total > MAX_BYTES {
+        if total > i64::MAX as usize {
             return Err(CompatErrno::Invalid);
         }
         vectors.push((base, len));
@@ -4368,7 +4374,11 @@ fn linux_vectored_file_io(
         return Ok(0);
     }
     if write {
-        let mut bytes = alloc::vec![0u8; total];
+        let mut bytes = alloc::vec::Vec::new();
+        bytes
+            .try_reserve_exact(total)
+            .map_err(|_| CompatErrno::NoMemory)?;
+        bytes.resize(total, 0);
         let mut input_offset = 0usize;
         for (base, len) in vectors {
             copy_from_user(&mut bytes[input_offset..input_offset + len], base, len)
@@ -4388,13 +4398,20 @@ fn linux_vectored_file_io(
         return Ok(written as u64);
     }
 
-    let mut bytes = alloc::vec![0u8; total];
+    let mut bytes = alloc::vec::Vec::new();
+    bytes
+        .try_reserve_exact(total)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    bytes.resize(total, 0);
     let read = proc::linux_ashmem_read_from(pid, entry.handle, offset, &mut bytes)
         .map_err(ashmem_compat_error)?;
     let io = admit_process_io(pid, read as u64, 1)?;
     let mut input_offset = 0usize;
     let mut remaining = read;
-    let mut ranges = alloc::vec::Vec::with_capacity(vectors.len());
+    let mut ranges = alloc::vec::Vec::new();
+    ranges
+        .try_reserve_exact(vectors.len())
+        .map_err(|_| CompatErrno::NoMemory)?;
     for (base, len) in vectors {
         let take = remaining.min(len);
         if take != 0 {
@@ -4492,11 +4509,10 @@ fn linux_process_vm_io(
 ///
 /// 有界读取虚拟文件到多个用户区间；先固定全部目标页，失败时不写入且不推进游标。
 fn linux_readv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const MAX_IOVECS: usize = 16;
     const IOVEC_BYTES: usize = 16;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    if count > MAX_IOVECS {
+    if count > compat_core::uapi::LINUX_UIO_MAXIOV {
         return Err(CompatErrno::Invalid);
     }
     if proc::linux_fd(pid, fd).is_some_and(|entry| {
@@ -4731,9 +4747,10 @@ fn linux_sysinfo(destination: u64) -> Result<u64, CompatErrno> {
 fn linux_sched_getaffinity(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let size = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
     let required = crate::smp::cpu_count()
-        .checked_add(7)
+        .checked_add(63)
         .ok_or(CompatErrno::Invalid)?
-        / 8;
+        / 64
+        * core::mem::size_of::<usize>();
     if required == 0 || size < required {
         return Err(CompatErrno::Invalid);
     }
@@ -4762,7 +4779,11 @@ fn linux_sched_getaffinity(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrn
 fn linux_sched_setaffinity(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let size = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
     let cpus = crate::smp::cpu_count();
-    let required = cpus.checked_add(7).ok_or(CompatErrno::Invalid)? / 8;
+    let required = cpus
+        .checked_add(63)
+        .ok_or(CompatErrno::Invalid)?
+        / 64
+        * core::mem::size_of::<usize>();
     if required == 0 || size < required {
         return Err(CompatErrno::Invalid);
     }
@@ -5069,10 +5090,6 @@ fn linux_user_range_valid(start: u64, end: u64) -> bool {
 /// 未知非私有标志和与已有映射冲突的 `MAP_FIXED`。失败会撤销本次全部页。
 fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
-    // Bionic's linker reserves a large address-space arena before it maps
-    // individual DSOs with MAP_FIXED.  Keep the reservation bounded while
-    // accepting the 70+ MiB range used by Android 14.
-    const MAX_MAP_BYTES: u64 = 16 * 1024 * 1024 * 1024;
     const MAP_SHARED: u64 = 0x01;
     const MAP_PRIVATE: u64 = 0x02;
     const MAP_FIXED: u64 = 0x10;
@@ -5086,7 +5103,7 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const PROT_EXEC: u64 = 0x4;
 
     let bytes = args[1];
-    if bytes == 0 || bytes > MAX_MAP_BYTES || args[2] & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
+    if bytes == 0 || args[2] & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
         return Err(CompatErrno::Invalid);
     }
     let sharing = args[3] & (MAP_SHARED | MAP_PRIVATE);
@@ -5443,14 +5460,12 @@ fn install_linux_file_page(
 /// so each destination page can be rebuilt transactionally.
 fn linux_remap_file_pages(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
-    const MAX_REMAP_BYTES: u64 = 64 * 1024 * 1024;
     let start = args[0];
     let size = args[1];
     let flags = args[4];
     let file_page = args[3];
     if start % PAGE != 0
         || size == 0
-        || size > MAX_REMAP_BYTES
         || flags != 0
         || start < crate::arch::USER_WINDOW.0
     {
@@ -6066,7 +6081,6 @@ fn linux_madvise(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 
 /// Applies an iovec batch of memory advice through a same-process pidfd.
 fn linux_process_madvise(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const IOV_MAX: usize = 64;
     const MADV_COLD: u64 = 20;
     const MADV_PAGEOUT: u64 = 21;
     const MADV_COLLAPSE: u64 = 25;
@@ -6074,7 +6088,7 @@ fn linux_process_madvise(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno>
         return Err(CompatErrno::Invalid);
     }
     let count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    if count == 0 || count > IOV_MAX {
+    if count == 0 || count > compat_core::uapi::LINUX_UIO_MAXIOV {
         return Err(CompatErrno::Invalid);
     }
     let pidfd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
@@ -6205,13 +6219,12 @@ fn linux_membarrier(args: [u64; 6]) -> Result<u64, CompatErrno> {
 /// Validates one page-aligned resident-memory range.
 fn linux_lock_range(pid: ObjId, args: [u64; 6]) -> Result<(), CompatErrno> {
     const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
-    const MAX_LOCK_BYTES: u64 = 64 * 1024 * 1024;
     let address = args[0];
     let length = args[1];
     if length == 0 {
         return Ok(());
     }
-    if address % PAGE != 0 || length > MAX_LOCK_BYTES {
+    if address % PAGE != 0 {
         return Err(CompatErrno::Invalid);
     }
     let rounded = length.checked_add(PAGE - 1).ok_or(CompatErrno::Invalid)? & !(PAGE - 1);
@@ -6321,8 +6334,8 @@ fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<(u64, u64), CompatErrno> {
     drop(path);
     #[cfg(feature = "vulkan-metal2vulkan-verify")]
     trace_path("execve", &resolved);
-    let argv = linux_string_vector(args[1], 64, 64 * 1024)?;
-    let envp = linux_string_vector(args[2], 64, 64 * 1024)?;
+    let argv = linux_string_vector(args[1])?;
+    let envp = linux_string_vector(args[2])?;
     let node = crate::linux_vfs::lookup_node(&resolved)
         .unwrap_or(crate::linux_vfs::Node::Executable(0));
     if !landlock_path_allows(
@@ -6388,36 +6401,38 @@ fn linux_execveat(pid: ObjId, args: [u64; 6]) -> Result<(u64, u64), CompatErrno>
 
 /// Reads a bounded NULL-terminated vector of NUL-terminated user strings.
 /// 读取有界的 NULL 结尾用户字符串向量。
-fn linux_string_vector(
-    address: u64,
-    max_entries: usize,
-    max_bytes: usize,
-) -> Result<alloc::vec::Vec<alloc::vec::Vec<u8>>, CompatErrno> {
+fn linux_string_vector(address: u64) -> Result<alloc::vec::Vec<alloc::vec::Vec<u8>>, CompatErrno> {
     if address == 0 {
         return Ok(alloc::vec::Vec::new());
     }
     let mut output = alloc::vec::Vec::new();
-    let mut total = 0usize;
-    for index in 0..max_entries {
+    for index in 0usize.. {
         let slot = address
-            .checked_add((index * 8) as u64)
+            .checked_add(
+                u64::try_from(index)
+                    .ok()
+                    .and_then(|index| index.checked_mul(8))
+                    .ok_or(CompatErrno::Fault)?,
+            )
             .ok_or(CompatErrno::Fault)?;
+        let slot_end = slot.checked_add(8).ok_or(CompatErrno::Fault)?;
+        if !linux_user_range_valid(slot, slot_end) {
+            return Err(CompatErrno::Fault);
+        }
         let mut raw = [0u8; 8];
         copy_from_user(&mut raw, slot, 8).map_err(|_| CompatErrno::Fault)?;
         let string_address = u64::from_le_bytes(raw);
         if string_address == 0 {
             return Ok(output);
         }
-        let string = linux_c_string(string_address, 4096)?;
-        total = total
-            .checked_add(string.len() + 1)
-            .ok_or(CompatErrno::Invalid)?;
-        if total > max_bytes {
-            return Err(CompatErrno::Invalid);
-        }
+        let string =
+            linux_c_string(string_address, compat_core::uapi::LINUX_MAX_ARG_STRLEN)?;
+        output
+            .try_reserve(1)
+            .map_err(|_| CompatErrno::NoMemory)?;
         output.push(string);
     }
-    Err(CompatErrno::Invalid)
+    unreachable!("the bounded user address space terminates the vector loop")
 }
 
 /// Implements the glibc `fork()` clone subset with a private copied address space.
@@ -7176,12 +7191,11 @@ fn linux_futex_requeue(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 
 /// Implements vectorized `futex_waitv(2)`.
 fn linux_futex_waitv(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const MAX_WAITV: usize = 16;
     if args[2] != 0 {
         return Err(CompatErrno::Invalid);
     }
     let count = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
-    if count == 0 || count > MAX_WAITV || args[0] == 0 {
+    if count == 0 || count > compat_core::uapi::LINUX_FUTEX_WAITV_MAX || args[0] == 0 {
         return Err(CompatErrno::Invalid);
     }
     let waiters = read_futex2_waiters(pid, args[0], count)?;
@@ -11224,7 +11238,6 @@ fn linux_lsm_set_self_attr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrn
     const LSM_FLAG_SINGLE: u32 = 1;
     const JASPER_LSM_ID: u64 = 0x4a53_0001;
     const RECORD_FIXED: usize = 32;
-    const MAX_CONTEXT: usize = 4096;
 
     let attribute = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
     let flags = u32::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
@@ -11238,10 +11251,11 @@ fn linux_lsm_set_self_attr(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrn
     if available < RECORD_FIXED {
         return Err(CompatErrno::Invalid);
     }
-    if available > MAX_CONTEXT {
-        return Err(CompatErrno::ArgumentTooLong);
-    }
-    let mut record = alloc::vec![0u8; available];
+    let mut record = alloc::vec::Vec::new();
+    record
+        .try_reserve_exact(available)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    record.resize(available, 0);
     copy_from_user(&mut record, args[1], available).map_err(|_| CompatErrno::Fault)?;
     let id = u64::from_le_bytes(record[0..8].try_into().unwrap());
     let record_flags = u64::from_le_bytes(record[8..16].try_into().unwrap());
@@ -13358,7 +13372,6 @@ fn linux_inotify_read(
     len: usize,
 ) -> Result<u64, CompatErrno> {
     const EVENT_HEADER: usize = 16;
-    const MAX_NAME: usize = 256;
     if len < EVENT_HEADER {
         return Err(CompatErrno::Invalid);
     }
@@ -13717,7 +13730,6 @@ fn linux_truncate(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 fn linux_fallocate(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const FALLOC_FL_KEEP_SIZE: u64 = 0x01;
     const FALLOC_FL_PUNCH_HOLE: u64 = 0x02;
-    const MAX_BYTES: u64 = 16 * 1024 * 1024;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let mode = args[1];
     let offset = args[2];
@@ -13732,7 +13744,6 @@ fn linux_fallocate(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     let end = offset
         .checked_add(length)
-        .filter(|end| *end <= MAX_BYTES)
         .ok_or(CompatErrno::Invalid)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if entry.kind == compat_core::fd::CompatKind::Directory {
@@ -14150,9 +14161,8 @@ fn read_message_iovecs(
     count: usize,
     maximum: usize,
 ) -> Result<alloc::vec::Vec<(u64, usize)>, CompatErrno> {
-    const MAX_IOVECS: usize = 1024;
     const IOVEC_BYTES: usize = 16;
-    if count > MAX_IOVECS {
+    if count > compat_core::uapi::LINUX_UIO_MAXIOV {
         return Err(CompatErrno::Invalid);
     }
     let mut vectors = alloc::vec::Vec::new();
@@ -14192,7 +14202,6 @@ fn capture_scm_control(
     header: &LinuxMessageHeader,
 ) -> Result<ScmControl, CompatErrno> {
     const CMSG_HEADER_BYTES: usize = 16;
-    const MAX_CONTROL_BYTES: usize = 16 * 1024;
     const SOL_SOCKET: i32 = 1;
     const SCM_RIGHTS: i32 = 1;
     const SCM_CREDENTIALS: i32 = 2;
@@ -14202,10 +14211,11 @@ fn capture_scm_control(
             credentials: false,
         });
     }
-    if header.control_len > MAX_CONTROL_BYTES {
-        return Err(CompatErrno::Invalid);
-    }
-    let mut control = alloc::vec![0u8; header.control_len];
+    let mut control = alloc::vec::Vec::new();
+    control
+        .try_reserve_exact(header.control_len)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    control.resize(header.control_len, 0);
     proc::read(pid, header.control, &mut control).map_err(|_| CompatErrno::Fault)?;
     let mut offset = 0usize;
     let mut transfers = alloc::vec::Vec::new();
@@ -14529,11 +14539,12 @@ fn linux_recvmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 fn linux_sendmmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const MMSGHDR_BYTES: u64 = 64;
     const MSG_LEN_OFFSET: u64 = 56;
-    const MAX_MESSAGES: u32 = 16;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     let count = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    if count > MAX_MESSAGES {
+    if usize::try_from(count)
+        .map_or(true, |count| count > compat_core::uapi::LINUX_UIO_MAXIOV)
+    {
         return Err(CompatErrno::Invalid);
     }
     let mut sent = 0u32;
@@ -14563,7 +14574,6 @@ fn linux_sendmmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 fn linux_recvmmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const MMSGHDR_BYTES: u64 = 64;
     const MSG_LEN_OFFSET: u64 = 56;
-    const MAX_MESSAGES: u32 = 16;
     const MSG_DONTWAIT: u64 = 0x40;
     const MSG_WAITFORONE: u64 = 0x10000;
     if args[4] != 0 {
@@ -14572,7 +14582,9 @@ fn linux_recvmmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     let count = u32::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    if count > MAX_MESSAGES {
+    if usize::try_from(count)
+        .map_or(true, |count| count > compat_core::uapi::LINUX_UIO_MAXIOV)
+    {
         return Err(CompatErrno::Invalid);
     }
     let wait_for_one = args[3] & MSG_WAITFORONE != 0;
@@ -15363,7 +15375,12 @@ fn linux_cache_read(
             .find(|file| file.id == id)
             .ok_or(CompatErrno::BadFd)?;
         let available = file.bytes.len().saturating_sub(offset).min(len);
-        file.bytes[offset..offset + available].to_vec()
+        let mut bytes = alloc::vec::Vec::new();
+        bytes
+            .try_reserve_exact(available)
+            .map_err(|_| CompatErrno::NoSpace)?;
+        bytes.extend_from_slice(&file.bytes[offset..offset + available]);
+        bytes
     };
     if !bytes.is_empty() {
         copy_to_user(destination, &bytes, bytes.len()).map_err(|_| CompatErrno::Fault)?;
@@ -15384,7 +15401,11 @@ fn linux_cache_write(
     if len == 0 {
         return Ok(0);
     }
-    let mut bytes = alloc::vec![0u8; len];
+    let mut bytes = alloc::vec::Vec::new();
+    bytes
+        .try_reserve_exact(len)
+        .map_err(|_| CompatErrno::NoSpace)?;
+    bytes.resize(len, 0);
     copy_from_user(&mut bytes, source, len).map_err(|_| CompatErrno::Fault)?;
     let id = linux_cache_file_id(handle).ok_or(CompatErrno::BadFd)?;
     let offset = proc::linux_fd_offset(pid, fd).ok_or(CompatErrno::BadFd)?;
@@ -15397,9 +15418,6 @@ fn linux_cache_write(
             .iter_mut()
             .find(|file| file.id == id)
             .ok_or(CompatErrno::BadFd)?;
-        if end > 16 * 1024 * 1024 {
-            return Err(CompatErrno::NoSpace);
-        }
         file.bytes.try_reserve(end.saturating_sub(file.bytes.len()))
             .map_err(|_| CompatErrno::NoSpace)?;
         file.bytes.resize(end, 0);
@@ -16231,6 +16249,7 @@ fn linux_c_string(address: u64, max: usize) -> Result<alloc::vec::Vec<u8>, Compa
                 Ok(path)
             };
         }
+        path.try_reserve(1).map_err(|_| CompatErrno::NoMemory)?;
         path.push(byte[0]);
     }
     Err(CompatErrno::Invalid)
@@ -16778,17 +16797,18 @@ fn linux_fcntl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 /// 当前标准流不是 TerminalSession；常见 TTY 查询明确返回 `ENOTTY`，其他设备
 /// 控制请求返回 `ENOSYS`，不会把普通控制台描述符伪装成终端。
 fn fsverity_file_bytes(pid: ObjId, fd: u32) -> Result<alloc::vec::Vec<u8>, CompatErrno> {
-    const MAX_VERITY_BYTES: u64 = 64 * 1024 * 1024;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if entry.kind == compat_core::fd::CompatKind::Device
         && proc::linux_ashmem_is_regular(pid, entry.handle) == Some(true)
     {
         let (size, _, _) = proc::linux_ashmem_state(pid, entry.handle)
             .ok_or(CompatErrno::BadFd)?;
-        if size > MAX_VERITY_BYTES {
-            return Err(CompatErrno::NoMemory);
-        }
-        let mut bytes = alloc::vec![0u8; size as usize];
+        let byte_count = usize::try_from(size).map_err(|_| CompatErrno::Overflow)?;
+        let mut bytes = alloc::vec::Vec::new();
+        bytes
+            .try_reserve_exact(byte_count)
+            .map_err(|_| CompatErrno::NoMemory)?;
+        bytes.resize(byte_count, 0);
         let read = proc::linux_ashmem_read_from(pid, entry.handle, 0, &mut bytes)
             .map_err(ashmem_compat_error)?;
         bytes.truncate(read);
@@ -16798,7 +16818,13 @@ fn fsverity_file_bytes(pid: ObjId, fd: u32) -> Result<alloc::vec::Vec<u8>, Compa
         let (handle, _) = proc::linux_file_state(pid, fd).ok_or(CompatErrno::BadFd)?;
         let file = crate::linux_vfs::FileId::from_handle(handle)
             .ok_or(CompatErrno::BadFd)?;
-        return Ok(file.bytes().to_vec());
+        let source = file.bytes();
+        let mut bytes = alloc::vec::Vec::new();
+        bytes
+            .try_reserve_exact(source.len())
+            .map_err(|_| CompatErrno::NoMemory)?;
+        bytes.extend_from_slice(source);
+        return Ok(bytes);
     }
     Err(CompatErrno::NotTty)
 }
@@ -17822,15 +17848,6 @@ fn ashmem_compat_error(error: proc::LinuxAshmemError) -> CompatErrno {
     }
 }
 
-const IO_URING_RING_BYTES: u64 = 3 * 4096;
-const IO_URING_SQ_ARRAY: u64 = 0x80;
-const IO_URING_CQ_HEAD: u64 = 0x100;
-const IO_URING_CQ_TAIL: u64 = 0x104;
-const IO_URING_CQ_MASK: u64 = 0x108;
-const IO_URING_CQ_ENTRIES: u64 = 0x10c;
-const IO_URING_CQES: u64 = 0x1000;
-const IO_URING_SQES: u64 = 0x2000;
-
 fn io_uring_read(
     pid: ObjId,
     handle: u64,
@@ -17864,10 +17881,6 @@ fn linux_io_uring_fixed_file_io(
     len: usize,
     offset: u64,
 ) -> Result<u64, CompatErrno> {
-    const MAX_IO_URING_FILE_BYTES: usize = 1024 * 1024;
-    if len > MAX_IO_URING_FILE_BYTES {
-        return Err(CompatErrno::Invalid);
-    }
     let required = if write {
         kernel_core::object::Rights::WRITE
     } else {
@@ -17890,7 +17903,11 @@ fn linux_io_uring_fixed_file_io(
             if proc::linux_ashmem_is_regular(pid, file.entry.handle) == Some(true) =>
         {
             if write {
-                let mut bytes = alloc::vec![0u8; len];
+                let mut bytes = alloc::vec::Vec::new();
+                bytes
+                    .try_reserve_exact(len)
+                    .map_err(|_| CompatErrno::NoMemory)?;
+                bytes.resize(len, 0);
                 copy_from_user(&mut bytes, address, len).map_err(|_| CompatErrno::Fault)?;
                 let io = admit_process_io(pid, len as u64, 1)?;
                 let written = proc::linux_ashmem_write_from(
@@ -17906,7 +17923,11 @@ fn linux_io_uring_fixed_file_io(
                 }
                 Ok(written as u64)
             } else {
-                let mut bytes = alloc::vec![0u8; len];
+                let mut bytes = alloc::vec::Vec::new();
+                bytes
+                    .try_reserve_exact(len)
+                    .map_err(|_| CompatErrno::NoMemory)?;
+                bytes.resize(len, 0);
                 let read = proc::linux_ashmem_read_from(
                     pid,
                     file.entry.handle,
@@ -17971,7 +17992,6 @@ fn linux_io_uring_setup(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
     const IORING_SETUP_CLAMP: u32 = 1 << 4;
     const IORING_SETUP_SINGLE_ISSUER: u32 = 1 << 12;
     const IORING_FEAT_SINGLE_MMAP: u32 = 1;
-    const MAX_ENTRIES: u32 = 64;
 
     let requested = u32::try_from(args[0]).map_err(|_| CompatErrno::Invalid)?;
     if requested == 0 {
@@ -17986,34 +18006,45 @@ fn linux_io_uring_setup(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
     let rounded = requested
         .checked_next_power_of_two()
         .ok_or(CompatErrno::Invalid)?;
-    let entries = if rounded > MAX_ENTRIES {
+    let entries = if rounded > compat_core::uapi::LINUX_IO_URING_MAX_ENTRIES {
         if flags & IORING_SETUP_CLAMP == 0 {
             return Err(CompatErrno::Invalid);
         }
-        MAX_ENTRIES
+        compat_core::uapi::LINUX_IO_URING_MAX_ENTRIES
     } else {
         rounded
     };
     let cq_entries = entries
         .checked_mul(2)
         .ok_or(CompatErrno::Invalid)?;
+    let geometry = proc::LinuxIoUringGeometry::new(entries, cq_entries)
+        .ok_or(CompatErrno::Invalid)?;
     let fd = proc::linux_create_memfd(pid, false, false).ok_or(CompatErrno::NoSpace)?;
     let result = (|| {
         let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
-        proc::linux_ashmem_set_size(pid, entry.handle, IO_URING_RING_BYTES)
+        proc::linux_ashmem_set_size(pid, entry.handle, geometry.total_bytes())
             .map_err(ashmem_compat_error)?;
-        if !proc::linux_io_uring_register(pid, entry.handle, entries, cq_entries) {
+        if !proc::linux_io_uring_register(pid, entry.handle, geometry) {
             return Err(CompatErrno::NoSpace);
         }
-        let mut ring = alloc::vec![0u8; IO_URING_RING_BYTES as usize];
+        let ring_bytes =
+            usize::try_from(geometry.ring_bytes()).map_err(|_| CompatErrno::NoSpace)?;
+        let mut ring = alloc::vec::Vec::new();
+        ring.try_reserve_exact(ring_bytes)
+            .map_err(|_| CompatErrno::NoMemory)?;
+        ring.resize(ring_bytes, 0);
         let put_u32 = |ring: &mut [u8], offset: usize, value: u32| {
             ring[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         };
         put_u32(&mut ring, 0x08, entries - 1);
         put_u32(&mut ring, 0x0c, entries);
-        put_u32(&mut ring, IO_URING_SQ_ARRAY as usize - 8, 0);
-        put_u32(&mut ring, IO_URING_CQ_MASK as usize, cq_entries - 1);
-        put_u32(&mut ring, IO_URING_CQ_ENTRIES as usize, cq_entries);
+        put_u32(&mut ring, 0x10, 0);
+        put_u32(&mut ring, geometry.cq_mask as usize, cq_entries - 1);
+        put_u32(
+            &mut ring,
+            geometry.cq_entries_offset as usize,
+            cq_entries,
+        );
         io_uring_write(pid, entry.handle, 0, &ring)?;
 
         let mut params = [0u8; PARAMS_BYTES];
@@ -18028,14 +18059,26 @@ fn linux_io_uring_setup(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
         params[52..56].copy_from_slice(&12u32.to_le_bytes());
         params[56..60].copy_from_slice(&16u32.to_le_bytes());
         params[60..64].copy_from_slice(&20u32.to_le_bytes());
-        params[64..68].copy_from_slice(&(IO_URING_SQ_ARRAY as u32).to_le_bytes());
+        params[64..68].copy_from_slice(
+            &u32::try_from(geometry.sq_array)
+                .map_err(|_| CompatErrno::NoSpace)?
+                .to_le_bytes(),
+        );
         // struct io_cqring_offsets
-        params[80..84].copy_from_slice(&(IO_URING_CQ_HEAD as u32).to_le_bytes());
-        params[84..88].copy_from_slice(&(IO_URING_CQ_TAIL as u32).to_le_bytes());
-        params[88..92].copy_from_slice(&(IO_URING_CQ_MASK as u32).to_le_bytes());
-        params[92..96].copy_from_slice(&(IO_URING_CQ_ENTRIES as u32).to_le_bytes());
-        params[96..100].copy_from_slice(&0x110u32.to_le_bytes());
-        params[100..104].copy_from_slice(&(IO_URING_CQES as u32).to_le_bytes());
+        for (destination, offset) in [
+            (80usize, geometry.cq_head),
+            (84, geometry.cq_tail),
+            (88, geometry.cq_mask),
+            (92, geometry.cq_entries_offset),
+            (96, geometry.cq_overflow),
+            (100, geometry.cqes),
+        ] {
+            params[destination..destination + 4].copy_from_slice(
+                &u32::try_from(offset)
+                    .map_err(|_| CompatErrno::NoSpace)?
+                    .to_le_bytes(),
+            );
+        }
         copy_to_user(args[1], &params, PARAMS_BYTES).map_err(|_| CompatErrno::Fault)?;
         Ok(u64::from(fd))
     })();
@@ -18064,8 +18107,10 @@ fn linux_io_uring_enter(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
         return Err(CompatErrno::NoSys);
     }
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
-    let (entries, cq_entries) =
+    let geometry =
         proc::linux_io_uring_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let entries = geometry.entries;
+    let cq_entries = geometry.cq_entries;
     let mask = entries - 1;
     let cq_mask = cq_entries - 1;
     let mut bytes = [0u8; 8];
@@ -18078,7 +18123,7 @@ fn linux_io_uring_enter(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
     }
     let submit = to_submit.min(pending as usize);
     let mut completion = [0u8; 8];
-    io_uring_read(pid, entry.handle, IO_URING_CQ_HEAD, &mut completion)?;
+    io_uring_read(pid, entry.handle, geometry.cq_head, &mut completion)?;
     let cq_head = u32::from_le_bytes(completion[..4].try_into().unwrap());
     let mut cq_tail = u32::from_le_bytes(completion[4..].try_into().unwrap());
     let queued = cq_tail.wrapping_sub(cq_head);
@@ -18100,7 +18145,7 @@ fn linux_io_uring_enter(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
         io_uring_read(
             pid,
             entry.handle,
-            IO_URING_SQ_ARRAY + u64::from(position & mask) * 4,
+            geometry.sq_array + u64::from(position & mask) * 4,
             &mut array,
         )?;
         let sqe_index = u32::from_le_bytes(array);
@@ -18108,7 +18153,7 @@ fn linux_io_uring_enter(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
         io_uring_read(
             pid,
             entry.handle,
-            IO_URING_SQES + u64::from(sqe_index & mask) * 64,
+            geometry.sqes + u64::from(sqe_index & mask) * 64,
             &mut sqe,
         )?;
         let opcode = sqe[0];
@@ -18197,14 +18242,14 @@ fn linux_io_uring_enter(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> 
         io_uring_write(
             pid,
             entry.handle,
-            IO_URING_CQES + u64::from(cq_tail & cq_mask) * 16,
+            geometry.cqes + u64::from(cq_tail & cq_mask) * 16,
             &cqe,
         )?;
         cq_tail = cq_tail.wrapping_add(1);
         io_uring_write(
             pid,
             entry.handle,
-            IO_URING_CQ_TAIL,
+            geometry.cq_tail,
             &cq_tail.to_le_bytes(),
         )?;
     }
@@ -18223,8 +18268,9 @@ fn linux_io_uring_register(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrn
 
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
-    let (entries, _) =
-        proc::linux_io_uring_state(pid, entry.handle).ok_or(CompatErrno::BadFd)?;
+    let entries = proc::linux_io_uring_state(pid, entry.handle)
+        .ok_or(CompatErrno::BadFd)?
+        .entries;
     let opcode = u32::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
     let count = usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
     let read_descriptions =
@@ -18414,14 +18460,13 @@ fn linux_io_getevents(
     pgetevents: bool,
 ) -> Result<u64, CompatErrno> {
     const EVENT_BYTES: usize = 32;
-    const MAX_EVENTS: usize = 32;
     if pgetevents && args[5] != 0 {
         return Err(CompatErrno::NotSupported);
     }
     let state = proc::linux_aio_state(pid, args[0]).ok_or(CompatErrno::Invalid)?;
     let minimum = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
     let maximum = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    if maximum > MAX_EVENTS || minimum > maximum || maximum != 0 && args[3] == 0 {
+    if minimum > maximum || maximum != 0 && args[3] == 0 {
         return Err(CompatErrno::Invalid);
     }
     let deadline = if args[4] == 0 {
@@ -18462,7 +18507,15 @@ fn linux_io_getevents(
     if events.is_empty() {
         return Ok(0);
     }
-    let mut output = alloc::vec![0u8; events.len() * EVENT_BYTES];
+    let output_bytes = events
+        .len()
+        .checked_mul(EVENT_BYTES)
+        .ok_or(CompatErrno::Overflow)?;
+    let mut output = alloc::vec::Vec::new();
+    output
+        .try_reserve_exact(output_bytes)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    output.resize(output_bytes, 0);
     for (index, event) in events.iter().enumerate() {
         let base = index * EVENT_BYTES;
         output[base..base + 8].copy_from_slice(&event.data.to_le_bytes());
@@ -18937,18 +18990,8 @@ fn linux_poll(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const POLLERR: u16 = 0x008;
     const POLLHUP: u16 = 0x010;
     const POLLNVAL: u16 = 0x020;
-    // Bound one scan to 64 pollfd records (512 bytes). This is an explicit
-    // compatibility-service DoS policy, not a Linux kernel ABI fact; exceeding
-    // it reports ENOMEM instead of the invalid-argument error used for a bad
-    // user pointer or count that cannot be represented.
-    // 单次扫描限制为 64 条 pollfd（512 字节）；这是兼容服务显式 DoS 策略，
-    // 不是 Linux 内核 ABI 事实。超限返回 ENOMEM，不把合法大请求误报为 EINVAL。
-    const MAX_POLLFDS: usize = 64; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-poll-scan-policy reason=bounded-user-copy-and-readiness-scan
     let count = usize::try_from(args[1]).map_err(|_| CompatErrno::Invalid)?;
     let timeout = args[2] as u32 as i32;
-    if count > MAX_POLLFDS {
-        return Err(CompatErrno::NoSpace);
-    }
     let deadline = if timeout < 0 {
         None
     } else {

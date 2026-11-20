@@ -27,11 +27,21 @@ removed interfaces.
 - File descriptors: shared open-file descriptions, CLOEXEC, dup/dup2/dup3,
   pidfds, epoll, pipes, sockets, eventfd, timerfd, signalfd, inotify, mq,
   aio, and io_uring.
+- Vectored I/O and batched messaging use Linux `UIO_MAXIOV=1024` rather than
+  the former implementation-specific 16/64 limits; futex2 waitv uses the
+  Linux `FUTEX_WAITV_MAX=128`. The CPL3 fixture executes 17 zero-length
+  iovecs, sends 17 messages, rejects 1025 entries and 1025 iovecs, and uses a
+  4-entry io_uring.
+- io_uring ring/SQEs geometry is derived from requested entries and stored
+  per instance. The native fixture also creates ten simultaneous rings,
+  covering the former eight-instance process limit.
 - VFS and memory: root-backed dynamic ELF execution, file metadata, read-only
   file `MAP_SHARED`, mmap/mremap/munmap/mprotect, mseal, memfd/ashmem, ION,
   dma-buf, `remap_file_pages`, and bounded NUMA policy operations.
 - Signals and time: standard/realtime signals, signal payloads, sigreturn,
   timers, rusage, times, and clock operations.
+- CPU affinity follows Linux's `cpumask_size()` eight-byte word granularity
+  even on a one-CPU machine, so undersized caller masks fail with `EINVAL`.
 - IPC: POSIX mqueue and all System V message, semaphore, and shared-memory
   lifecycle paths, including `KCMP_SYSVSEM`.
 - Security: Landlock, seccomp, keyrings, fs-verity, fscrypt, Jasper MAC
@@ -61,6 +71,9 @@ removed interfaces.
   OpenJDK and ART baselines. Host results are not counted as Jasper passes.
 
 ## Acceptance evidence
+
+- Latest full Linux/Android root UEFI slice:
+  `evidence/issue21-uefi-boot-20261120-204541`
 
 - Full Linux/Android root UEFI:
   `evidence/issue21-uefi-boot-20261115-userfaultfd-v123-clean`

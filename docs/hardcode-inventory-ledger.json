@@ -1,5 +1,5 @@
 {
-  "baseline_total": 255,
+  "baseline_total": 234,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,9 +10,9 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 153,
+    "explicit-safety-policy": 137,
     "platform-adapter": 28,
-    "protocol-abi": 40,
+    "protocol-abi": 39,
     "test-demo-fixture": 11
   },
   "entries": [
@@ -1719,92 +1719,12 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "14f4a5ee5a659a522b14d359ba228480971c3d447ad459eed464299d90c4f2ac",
-      "line": 17974,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
-      "rules": "HC-G1",
-      "source": "const MAX_ENTRIES: u32 = 64;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
       "fingerprint": "1e7b2a413d70770b79f11fd7f94b35b7a7a756a561eda33ca3f6f370cc31c7a9",
       "line": 57,
       "path": "kernel/src/linux_abi.rs",
       "reason": "bounded vector or operation batch; excess work must fail explicitly without silently truncating results",
       "rules": "HC-G1",
       "source": "const MAX_SYSV_SEM_OPS: usize = 32;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "1ffd0ae2fbd5449937752134d510ad9d54c642af1f6b3b2311c3b44a99ac0f08",
-      "line": 13720,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_BYTES: u64 = 16 * 1024 * 1024;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "200e6cf19da584bddad131f9766518ae281af718bc0b69c77f3ea5c8ceb1d2ce",
-      "line": 5446,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_REMAP_BYTES: u64 = 64 * 1024 * 1024;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "2e1c53bbb3edf5272dcfb199e5fde51013852004c105b6000cbc1c75b65dabb7",
-      "line": 18417,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_EVENTS: usize = 32;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "38608f671c6a5ae584ed51b2c2c4079c7c487b3a1cf57660c1a408ae13b052c2",
-      "line": 14195,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_CONTROL_BYTES: usize = 16 * 1024;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "43cc68e4bd2a24f4268f05c9e63a8e5a6119b3ab320218ae6b0779492fcb0d75",
-      "line": 6208,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_LOCK_BYTES: u64 = 64 * 1024 * 1024;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "458a0b064453b3a4a0c27062782bed56f0789bdbce2f49a392a3cd3bbb49052a",
-      "line": 13361,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_NAME: usize = 256;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "5132f2598fc1483495022ed20adc9a8b71e4bb594ab7dc1332f512e38622f75f",
-      "line": 4309,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_BYTES: usize = 1024 * 1024;"
     },
     {
       "category": "explicit-safety-policy",
@@ -1829,38 +1749,8 @@
     {
       "category": "explicit-safety-policy",
       "count": 2,
-      "fingerprint": "6830f6a69b5d9fa29b6233bb3f68e16d82d336fb81581e043bffbc297e3b31f2",
-      "line": 14532,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
-      "rules": "HC-G1",
-      "source": "const MAX_MESSAGES: u32 = 16;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 3,
-      "fingerprint": "6ad8c53a33e9e84b12a14583b3e3de1c1400a0cfdccb227ca7bae48ebdf62e2f",
-      "line": 3743,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "bounded vector or operation batch; excess work must fail explicitly without silently truncating results",
-      "rules": "HC-G1",
-      "source": "const MAX_IOVECS: usize = 16;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 2,
-      "fingerprint": "6bba32dd400e07bf0b0fa347b08b0c57a20367a0a766554b53021747afe114e9",
-      "line": 3651,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
-      "rules": "HC-G1",
-      "source": "const MAX_WRITE: usize = 1024 * 1024;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 2,
       "fingerprint": "71cd896d1c85d10129d4ef0176011edf91a82bab81af5da285a6f4cac9e6be92",
-      "line": 3846,
+      "line": 3850,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
       "rules": "HC-G1",
@@ -1877,74 +1767,14 @@
       "source": "const MAX_SYSV_SHARED_SEGMENTS: usize = 16;"
     },
     {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "7e948ab41ee9a7a3f304324b1c3fbaaf57a00a7bb73967ce99bf95162d24a7c0",
-      "line": 7179,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "bounded vector or operation batch; excess work must fail explicitly without silently truncating results",
-      "rules": "HC-G1",
-      "source": "const MAX_WAITV: usize = 16;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "9e3e48aac5fe5249090656181dcf8a365cad1226a6ed95d17b98c5d3783e4927",
-      "line": 17867,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_IO_URING_FILE_BYTES: usize = 1024 * 1024;"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "ae894c3b656da0a07f4896a46fcd2f7a40a5ef6b30ef96ac6d8091f9207fecb2",
-      "line": 14153,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "Linux UAPI IOV_MAX=1024 for message vectors; preserve the published compatibility value",
-      "rules": "HC-G1",
-      "source": "const MAX_IOVECS: usize = 1024;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "aeda7ece1f762037f4f1861340aa3760af803a597769d46e4c0b3566288d3849",
-      "line": 11227,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
-      "rules": "HC-G1",
-      "source": "const MAX_CONTEXT: usize = 4096;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "afdded2cc625cf3d34508cd02024f8a63f132531a6cc5a3b465fa05f75020823",
-      "line": 5075,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_MAP_BYTES: u64 = 16 * 1024 * 1024 * 1024;"
-    },
-    {
       "category": "protocol-abi",
       "count": 1,
       "fingerprint": "b60d795393e6efde352a53baec1d3e14454a6e302eda16fd92c6e6669f122037",
-      "line": 12416,
+      "line": 12425,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier is a Linux UAPI width or semantic boundary; preserve the documented Linux value",
       "rules": "HC-G1",
       "source": "const MAX_COUNTER: u64 = u64::MAX - 1;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "cdce6e54d608b9f12d4a604455e26c43ff3eb65b94d83ee0470383182cd630ad",
-      "line": 16781,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_VERITY_BYTES: u64 = 64 * 1024 * 1024;"
     },
     {
       "category": "explicit-safety-policy",
@@ -1980,7 +1810,7 @@
       "category": "protocol-abi",
       "count": 1,
       "fingerprint": "f297c2cc0d3cb033d755db9e2646b46869f00b179de2d61f1f348e04d52b618d",
-      "line": 17156,
+      "line": 17177,
       "path": "kernel/src/linux_abi.rs",
       "reason": "fscrypt UAPI master-key payload width; preserve the documented 64-byte maximum",
       "rules": "HC-G1",
@@ -1990,7 +1820,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "da92953655d894ad3af9722542b637272e549cb75738a1d9f7dd54b3a6df2068",
-      "line": 5855,
+      "line": 5865,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G6",
@@ -2010,7 +1840,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "31d89f59164cf0673104a51f1eb83d231dff829277b8f148abca06f067bce301",
-      "line": 7270,
+      "line": 7330,
       "path": "kernel/src/proc/mod.rs",
       "reason": "compile-time alias of the validated active KernelConfig memory budget; it introduces no independent runtime capacity",
       "rules": "HC-G1",
@@ -2020,7 +1850,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "8924df2d3ba1e375c3503b27c11ef90cdb9383f4a50855c5ca845e6946eb3a0e",
-      "line": 7261,
+      "line": 7321,
       "path": "kernel/src/proc/mod.rs",
       "reason": "compile-time alias of the validated active KernelConfig memory budget; it introduces no independent runtime capacity",
       "rules": "HC-G1",
@@ -2030,7 +1860,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "8b4963bc42113bc3597ce0def7515acb7cead8d718b416e7a6584ba4dce5ce4a",
-      "line": 7272,
+      "line": 7332,
       "path": "kernel/src/proc/mod.rs",
       "reason": "compile-time alias of the validated active KernelConfig memory budget; it introduces no independent runtime capacity",
       "rules": "HC-G1",
@@ -2339,9 +2169,9 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 160,
+    "explicit-safety-policy": 140,
     "platform-adapter": 44,
-    "protocol-abi": 40,
+    "protocol-abi": 39,
     "test-demo-fixture": 11
   }
 }

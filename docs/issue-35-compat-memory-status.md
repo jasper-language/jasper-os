@@ -100,6 +100,22 @@
 - 定向回归允许 300 个最长 5000 字节的动态名称、257 个执行模块、129 个 auxv
   和 65537 个 lifecycle 模块，覆盖此前 256/4096/128/65536 等旧包络；
   `jasper-compat-loader` 40 项测试全部通过。
+- Linux 兼容 UAPI 边界集中到 `compat-core::uapi`：一次 iovec/sendmmsg/
+  recvmmsg/process_madvise 上限为 Linux `UIO_MAXIOV=1024`，futex_waitv
+  为 `FUTEX_WAITV_MAX=128`，io_uring 为 `IORING_MAX_ENTRIES=32768`。
+  这些是协议事实，不是 Jasper 运行期配额。
+- Linux `write/pwrite`、buffered cache、`fallocate`、`remap_file_pages`、
+  `mlock`、匿名映射、fs-verity、socket control、legacy AIO、LSM 上下文和
+  `poll` 的私有上限已删除。大请求改由用户范围、进程 IO/内存预算与可失败向量
+  准入，不再静默截断或把合法请求误报为固定容量错误。
+- `io_uring` 不再固定 3 个 ring 页、64 entries 或 8 个进程实例；SQ/CQ/SQE
+  偏移和 ring/SQE backing 大小由 entries 动态计算，SQE mmap 偏移随实例保存。
+  真实 CPL3 fixture 请求 128 entries，并同时创建 10 个 ring 覆盖旧 8-instance
+  上限。
+- root health-probe 的显式 syscall allowlist 补齐 `fcntl`，避免
+  `F_SETPIPE_SZ` 在实现前被误判为越权；`sched_getaffinity` 改用 Linux
+  cpumask 的机器字粒度，单 CPU 环境下也正确要求 8 字节缓冲，而不是按 1 个
+  CPU bit 误收 1 字节。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -112,14 +128,24 @@ cargo check -p jasper-kernel --target x86_64-unknown-none \
 PASS
 
 cargo test -p jasper-compat-loader
-36 passed
+40 passed
 
 cargo check -p jasper-kernel --target x86_64-unknown-none
 PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=255, runtime-resource-capacity=0, unclassified=0, added=0
+findings=234, runtime-resource-capacity=0, unclassified=0, added=0
+```
+
+真实 OVMF/CPL3 root-exec：
+
+```text
+evidence/issue21-uefi-boot-20261120-204541
+qemu_rc=33
+handler resources=true (second run)
+jasper-getppid exit 0 in both runs
+linux-native: epoll/many_pipes/mmap/io_uring=true
 ```
 
 ## 尚未完成

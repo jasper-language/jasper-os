@@ -2,7 +2,7 @@
 
 更新时间：2026-11-20。
 
-状态：**全部 255 个基线命中已聚合为 232 个唯一指纹，并按消费者、规范或明确
+状态：**全部 234 个基线命中已聚合为 215 个唯一指纹，并按消费者、规范或明确
 安全策略完成首轮分类；`unclassified=0`。**
 
 ## 为什么不是 347 个 Bug
@@ -11,8 +11,8 @@
 协议字段宽度、安全解析上限、真实运行时预算、测试夹具或已确认缺陷。分类账要求
 每个基线指纹具有唯一类别和非空理由，但不会把启发式类别自动升级为“已修复”。
 
-分类由“路径 + 规则 + 完整规范化源码行”的 SHA-256 指纹绑定。当前 255 个命中聚合
-为 232 个唯一指纹；相同源码行出现多次时保留 `count`。此前指纹解析在源码的类型
+分类由“路径 + 规则 + 完整规范化源码行”的 SHA-256 指纹绑定。当前 234 个命中聚合
+为 215 个唯一指纹；相同源码行出现多次时保留 `count`。此前指纹解析在源码的类型
 冒号处截断，曾把不同标识符但相同尾部类型的常量错误合并；修复后独立候选全部
 重新分类，`unclassified=0`。
 
@@ -20,10 +20,10 @@
 
 | 类别 | 唯一指纹 | 基线命中 | 含义 |
 | --- | ---: | ---: | --- |
-| `explicit-safety-policy` | 153 | 160 | 有界工作、解析/等待上限、fail-closed 或诊断哨兵、明确策略默认 |
+| `explicit-safety-policy` | 137 | 140 | 有界工作、解析/等待上限、fail-closed 或诊断哨兵、明确策略默认 |
 | `runtime-resource-capacity` | 0 | 0 | 运行期集合/容量，应由资源预算和准入决定 |
 | `platform-adapter` | 28 | 44 | QEMU/Pixel 等架构特定选择，需保留显式 Profile 边界 |
-| `protocol-abi` | 40 | 40 | Wire、FDT/PCI、Linux UAPI、磁盘格式、地址宽度或内部位域契约 |
+| `protocol-abi` | 39 | 39 | Wire、FDT/PCI、Linux UAPI、磁盘格式、地址宽度或内部位域契约 |
 | `confirmed-defect` | 0 | 0 | 当前分类账中尚无新增的已证实未修缺陷 |
 | `test-demo-fixture` | 11 | 11 | 显式 benchmark、probe、capacity 或 PCI 模型夹具 |
 | `unclassified` | 0 | 0 | 所有基线指纹均已有可核查理由 |
@@ -40,6 +40,17 @@ Android packed-relocation 字节、动态库名数量与长度、TLS/生命周�
 模块与 lifecycle 数、入口调用数、初始栈字节/项数和 auxv 项数。段、重定位和
 符号元数据改由实际 ELF 表、布局范围及可失败 `try_reserve` 决定；47 位用户地址
 仍是明确登记的 x86_64 canonical 平台事实。
+
+Linux 兼容适配器进一步把 iovec、`sendmmsg`/`recvmmsg`、`process_madvise`
+统一到 UAPI `UIO_MAXIOV=1024`，把 `futex_waitv` 统一到
+`FUTEX_WAITV_MAX=128`，而不是原先自造的 16/64。`io_uring` 的 SQ/CQ/SQE
+偏移、ring 大小和可失败容量现在由请求 entries 动态生成，支持协议上限 32768，
+并删除每进程 8 ring 的实现上限。
+
+同时删除 `write/pwrite`、buffered cache、`fallocate`、`remap_file_pages`、
+`mlock`、匿名映射、fs-verity、socket control、legacy AIO 输出、LSM 上下文和
+`poll` 的私有字节/条数包络；复制和输出仅由调用方长度、用户地址范围、进程
+预算及可失败内存准入决定。
 
 `kernel/src/arch/x86_64/bm1.rs` 明确是 QEMU-only BM-1 验收 Profile，且对默认
 内核无影响；其 8 MiB trace buffer 与相关固定值按测试夹具登记，不冒充生产运行期
@@ -81,7 +92,7 @@ python3 scripts/check-hardcode-inventory-ledger.py --check \
 - 不允许额外指纹或缺少指纹；
 - 路径、规则、出现次数与 baseline 一致；
 - 类别属于固定集合，理由非空；
-- 声明的唯一指纹计数、基线命中权重和逐项条目一致，权重总和必须等于 255；
+- 声明的唯一指纹计数、基线命中权重和逐项条目一致，权重总和必须等于 234；
 - 当前源码扫描与 baseline 没有漂移。
 
 修改生产代码清除条目后，应先用 `--write-inventory-baseline` 更新基线，再重新生成
@@ -91,7 +102,7 @@ python3 scripts/check-hardcode-inventory-ledger.py --check \
 
 1. `runtime-resource-capacity` 已清零；后续仍以真实消费者压力补拒绝、回收和
    多实例证据；
-2. 将 153 个 `explicit-safety-policy` 指纹逐项绑定到规范、策略或负例证据；
+2. 将 137 个 `explicit-safety-policy` 指纹逐项绑定到规范、策略或负例证据；
 3. 把 28 个 `platform-adapter` 收敛到经验证的平台 Profile；
-4. 审核 40 个协议条目和 11 个夹具，确认冻结边界不会泄漏到生产；
+4. 审核 39 个协议条目和 11 个夹具，确认冻结边界不会泄漏到生产；
 5. 只有调用链、负例和资源回收证据完整后才允许清除基线条目。

@@ -572,9 +572,76 @@ pub(crate) struct LinuxEpollRegistration {
 #[derive(Clone)]
 struct LinuxIoUringHandle {
     handle: u64,
-    entries: u32,
-    cq_entries: u32,
+    geometry: LinuxIoUringGeometry,
     fixed_files: Vec<Option<FdDescription>>,
+}
+
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxIoUringGeometry {
+    pub entries: u32,
+    pub cq_entries: u32,
+    pub sq_array: u64,
+    pub cq_head: u64,
+    pub cq_tail: u64,
+    pub cq_mask: u64,
+    pub cq_entries_offset: u64,
+    pub cq_overflow: u64,
+    pub cqes: u64,
+    pub sqes: u64,
+    ring_bytes: u64,
+    total_bytes: u64,
+}
+
+#[cfg(feature = "linux-abi")]
+impl LinuxIoUringGeometry {
+    pub(crate) fn new(entries: u32, cq_entries: u32) -> Option<Self> {
+        if entries == 0 || !entries.is_power_of_two() || cq_entries < entries {
+            return None;
+        }
+        let entries = u64::from(entries);
+        let cq_entries = u64::from(cq_entries);
+        let sq_array = 64u64;
+        let sq_array_end = sq_array.checked_add(entries.checked_mul(4)?)?;
+        let cq_head = align_u64(sq_array_end, 64)?;
+        let cq_tail = cq_head.checked_add(4)?;
+        let cq_mask = cq_head.checked_add(8)?;
+        let cq_entries_offset = cq_head.checked_add(12)?;
+        let cq_overflow = cq_head.checked_add(16)?;
+        let cqes = align_u64(cq_head.checked_add(32)?, 64)?;
+        let ring_bytes = align_u64(cqes.checked_add(cq_entries.checked_mul(16)?)?, 4096)?;
+        let sqes = ring_bytes;
+        let total_bytes = sqes.checked_add(entries.checked_mul(64)?)?;
+        Some(Self {
+            entries: u32::try_from(entries).ok()?,
+            cq_entries: u32::try_from(cq_entries).ok()?,
+            sq_array,
+            cq_head,
+            cq_tail,
+            cq_mask,
+            cq_entries_offset,
+            cq_overflow,
+            cqes,
+            sqes,
+            ring_bytes,
+            total_bytes,
+        })
+    }
+
+    pub(crate) const fn ring_bytes(self) -> u64 {
+        self.ring_bytes
+    }
+
+    pub(crate) const fn total_bytes(self) -> u64 {
+        self.total_bytes
+    }
+}
+
+#[cfg(feature = "linux-abi")]
+fn align_u64(value: u64, alignment: u64) -> Option<u64> {
+    value
+        .checked_add(alignment.checked_sub(1)?)
+        .map(|value| value & !(alignment - 1))
 }
 
 #[cfg(feature = "linux-abi")]
@@ -3511,17 +3578,11 @@ pub(crate) fn linux_is_epoll(pid: ObjId, handle: u64) -> bool {
 pub(crate) fn linux_io_uring_register(
     pid: ObjId,
     handle: u64,
-    entries: u32,
-    cq_entries: u32,
+    geometry: LinuxIoUringGeometry,
 ) -> bool {
     with_proc(pid, |process| {
         let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
-        if linux.iourings.len() >= 8
-            || linux
-                .iourings
-                .iter()
-                .any(|ring| ring.handle == handle)
-        {
+        if linux.iourings.iter().any(|ring| ring.handle == handle) {
             return Err(ProcError::NoTaskSlot);
         }
         linux
@@ -3530,8 +3591,7 @@ pub(crate) fn linux_io_uring_register(
             .map_err(|_| ProcError::NoTaskSlot)?;
         linux.iourings.push(LinuxIoUringHandle {
             handle,
-            entries,
-            cq_entries,
+            geometry,
             fixed_files: Vec::new(),
         });
         Ok(())
@@ -3541,7 +3601,7 @@ pub(crate) fn linux_io_uring_register(
 
 /// Returns the fixed queue geometry of one io_uring instance.
 #[cfg(feature = "linux-abi")]
-pub(crate) fn linux_io_uring_state(pid: ObjId, handle: u64) -> Option<(u32, u32)> {
+pub(crate) fn linux_io_uring_state(pid: ObjId, handle: u64) -> Option<LinuxIoUringGeometry> {
     crate::kobj::with(|table| match table.get(pid) {
         Ok(KObject::Process(process)) => process
             .linux
@@ -3549,7 +3609,7 @@ pub(crate) fn linux_io_uring_state(pid: ObjId, handle: u64) -> Option<(u32, u32)
             .iourings
             .iter()
             .find(|ring| ring.handle == handle)
-            .map(|ring| (ring.entries, ring.cq_entries)),
+            .map(|ring| ring.geometry),
         _ => None,
     })
 }
@@ -3578,7 +3638,7 @@ pub(crate) fn linux_io_uring_replace_fixed_files(
                 .iter_mut()
                 .find(|ring| ring.handle == handle)
                 .ok_or(ProcError::NoTaskSlot)?;
-            if files.len() > ring.entries as usize {
+            if files.len() > ring.geometry.entries as usize {
                 return Err(ProcError::NoTaskSlot);
             }
             core::mem::replace(&mut ring.fixed_files, files)
@@ -3679,10 +3739,10 @@ pub(crate) fn linux_io_uring_mmap_offset(
     handle: u64,
     requested: u64,
 ) -> Option<u64> {
-    let _ = linux_io_uring_state(pid, handle)?;
+    let geometry = linux_io_uring_state(pid, handle)?;
     match requested {
         0x0000_0000 | 0x0800_0000 => Some(0),
-        0x1000_0000 => Some(0x2000),
+        0x1000_0000 => Some(geometry.sqes),
         _ => None,
     }
 }

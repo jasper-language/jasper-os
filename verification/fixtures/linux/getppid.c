@@ -949,8 +949,12 @@ int main(void) {
         return 7;
     }
     struct iovec too_many[17] = {0};
+    struct iovec above_uio_max[1025] = {0};
+    if (readv(fd, too_many, 17) != 0) {
+        return 8;
+    }
     errno = 0;
-    if (readv(fd, too_many, 17) != -1 || errno != EINVAL) {
+    if (readv(fd, above_uio_max, 1025) != -1 || errno != EINVAL) {
         return 8;
     }
     if (lseek(fd, -4, SEEK_END) != end - 4 ||
@@ -1281,11 +1285,23 @@ int main(void) {
         memcmp(blocking_bytes, "send", 4) != 0) {
         return 105;
     }
-    if (shutdown(socket_fds[0], SHUT_WR) != 0 ||
-        read(socket_fds[1], blocking_bytes, 1) != 0 ||
-        write(socket_fds[1], "z", 1) != 1 ||
-        read(socket_fds[0], blocking_bytes, 1) != 1 ||
+    int shutdown_result = shutdown(socket_fds[0], SHUT_WR);
+    ssize_t peer_eof_result = read(socket_fds[1], blocking_bytes, 1);
+    int peer_eof_errno = errno;
+    ssize_t reverse_write_result = write(socket_fds[1], "z", 1);
+    int reverse_write_errno = errno;
+    ssize_t reverse_read_result = read(socket_fds[0], blocking_bytes, 1);
+    int reverse_read_errno = errno;
+    if (shutdown_result != 0 ||
+        peer_eof_result != 0 ||
+        reverse_write_result != 1 ||
+        reverse_read_result != 1 ||
         blocking_bytes[0] != 'z') {
+        printf("unix-shutdown-fail shutdown=%d eof=%zd/%d write=%zd/%d "
+               "read=%zd/%d byte=%d\n",
+               shutdown_result, peer_eof_result, peer_eof_errno,
+               reverse_write_result, reverse_write_errno,
+               reverse_read_result, reverse_read_errno, blocking_bytes[0]);
         return 106;
     }
     if (close(socket_fds[1]) != 0 ||
@@ -2615,11 +2631,27 @@ jasper_android_tests:
         return 262;
     }
     struct io_uring_params uring_params = {0};
-    int uring_fd = syscall(SYS_io_uring_setup, 8, &uring_params);
-    if (uring_fd < 0 || uring_params.sq_entries != 8 ||
-        uring_params.cq_entries != 16 ||
+    int uring_fd = syscall(SYS_io_uring_setup, 128, &uring_params);
+    if (uring_fd < 0 || uring_params.sq_entries != 128 ||
+        uring_params.cq_entries != 256 ||
         (uring_params.features & IORING_FEAT_SINGLE_MMAP) == 0) {
         return 268;
+    }
+    int uring_extra[9] = {-1, -1, -1, -1, -1, -1, -1, -1, -1};
+    for (int index = 0; index < 9; index++) {
+        struct io_uring_params extra_params = {0};
+        uring_extra[index] =
+            syscall(SYS_io_uring_setup, 8, &extra_params);
+        if (uring_extra[index] < 0 || extra_params.sq_entries != 8) {
+            printf("io-uring-instance-cap index=%d fd=%d errno=%d\n",
+                   index, uring_extra[index], errno);
+            return 268;
+        }
+    }
+    for (int index = 0; index < 9; index++) {
+        if (close(uring_extra[index]) != 0) {
+            return 268;
+        }
     }
     size_t uring_sq_size =
         uring_params.sq_off.array +
@@ -5124,7 +5156,9 @@ jasper_android_binder:
         return 474;
     }
     errno = 0;
-    if (syscall(SYS_sendmmsg, mmsg_sockets[0], mmsg_send, 17, 0) != -1 ||
+    struct mmsghdr mmsg_many[17] = {0};
+    if (syscall(SYS_sendmmsg, mmsg_sockets[0], mmsg_many, 17, 0) != 17 ||
+        syscall(SYS_sendmmsg, mmsg_sockets[0], mmsg_many, 1025, 0) != -1 ||
         errno != EINVAL ||
         close(mmsg_sockets[0]) != 0 ||
         close(mmsg_sockets[1]) != 0) {
