@@ -65,6 +65,7 @@
     feature = "gpu-dynamic",
     feature = "cpu-dynamic",
     feature = "elf-dynamic",
+    feature = "mac-dynamic",
     feature = "ext4-view",
     feature = "persistent-install",
     feature = "runtime-registries",
@@ -136,6 +137,7 @@ pub mod wake_mailbox;
 pub mod fdt;
 pub mod frame;
 pub mod fs;
+#[cfg(any(test, feature = "mac-dynamic"))]
 pub mod fs_prod;
 pub mod fault;
 pub mod fault_pager;

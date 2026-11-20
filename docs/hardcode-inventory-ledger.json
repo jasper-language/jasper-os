@@ -1,5 +1,5 @@
 {
-  "baseline_total": 228,
+  "baseline_total": 227,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,7 +10,7 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 132,
+    "explicit-safety-policy": 131,
     "platform-adapter": 28,
     "protocol-abi": 38,
     "test-demo-fixture": 11
@@ -755,16 +755,6 @@
       "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "pub const MAX_RANK: u8 = 31;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "581d681798f381e920d7ce2c1281ce7dbea43dfdd30aff98c4b14142d0698370",
-      "line": 18,
-      "path": "kernel-core/src/mac.rs",
-      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_POLICY_RULES: usize = 32;"
     },
     {
       "category": "explicit-safety-policy",
@@ -1710,7 +1700,7 @@
       "category": "protocol-abi",
       "count": 1,
       "fingerprint": "b60d795393e6efde352a53baec1d3e14454a6e302eda16fd92c6e6669f122037",
-      "line": 12430,
+      "line": 12434,
       "path": "kernel/src/linux_abi.rs",
       "reason": "identifier is a Linux UAPI width or semantic boundary; preserve the documented Linux value",
       "rules": "HC-G1",
@@ -1750,7 +1740,7 @@
       "category": "protocol-abi",
       "count": 1,
       "fingerprint": "f297c2cc0d3cb033d755db9e2646b46869f00b179de2d61f1f348e04d52b618d",
-      "line": 17182,
+      "line": 17188,
       "path": "kernel/src/linux_abi.rs",
       "reason": "fscrypt UAPI master-key payload width; preserve the documented 64-byte maximum",
       "rules": "HC-G1",
@@ -1780,7 +1770,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "31d89f59164cf0673104a51f1eb83d231dff829277b8f148abca06f067bce301",
-      "line": 7330,
+      "line": 7320,
       "path": "kernel/src/proc/mod.rs",
       "reason": "compile-time alias of the validated active KernelConfig memory budget; it introduces no independent runtime capacity",
       "rules": "HC-G1",
@@ -1790,7 +1780,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "8924df2d3ba1e375c3503b27c11ef90cdb9383f4a50855c5ca845e6946eb3a0e",
-      "line": 7321,
+      "line": 7311,
       "path": "kernel/src/proc/mod.rs",
       "reason": "compile-time alias of the validated active KernelConfig memory budget; it introduces no independent runtime capacity",
       "rules": "HC-G1",
@@ -1800,7 +1790,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "8b4963bc42113bc3597ce0def7515acb7cead8d718b416e7a6584ba4dce5ce4a",
-      "line": 7332,
+      "line": 7322,
       "path": "kernel/src/proc/mod.rs",
       "reason": "compile-time alias of the validated active KernelConfig memory budget; it introduces no independent runtime capacity",
       "rules": "HC-G1",
@@ -2109,7 +2099,7 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 135,
+    "explicit-safety-policy": 134,
     "platform-adapter": 44,
     "protocol-abi": 38,
     "test-demo-fixture": 11

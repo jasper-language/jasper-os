@@ -79,6 +79,9 @@ cpu-dynamic = []
 # Native ELF program-header inventories follow the image itself and require the
 # caller's allocator for capacity-checked segment metadata.
 elf-dynamic = []
+# Mandatory-access-control policy rules and filesystem gate metadata follow the
+# verified package and caller allocator instead of a fixed rule array.
+mac-dynamic = []
 # Persistent installation requires the kernel heap for bounded transactional
 # state snapshots; core profiles that do not use it remain allocation-free.
 persistent-install = []

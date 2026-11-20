@@ -12,10 +12,12 @@
 //! malformed packages and exhausted audit storage all fail closed.
 
 use crate::meta::Effects;
-use crate::security::{IdentityClass, ObjectIdentity, SecurityDomain};
+use crate::security::{IdentityClass, SecurityDomain};
+#[cfg(any(test, feature = "mac-dynamic"))]
+use crate::security::ObjectIdentity;
 
 pub const MAC_LABEL_VERSION: u16 = 1;
-pub const MAX_POLICY_RULES: usize = 32;
+#[cfg(any(test, feature = "mac-dynamic"))]
 pub const MAX_AUDIT_EVENTS: usize = 256; // JASPER-HARDCODE-REVIEW: issue=39 source=mac-audit-backpressure-policy reason=audit-full-denies-effect-and-counts-overflow
 pub const POLICY_AUTHORITY_JASPER: u64 = 0x4a53_524d_4143_0001;
 pub const OBJECT_CLASS_ALL: u16 = (1u16 << 10) - 1;
@@ -296,18 +298,22 @@ pub const fn class_bit(class: IdentityClass) -> u16 {
     1u16 << (class as u32 - 1)
 }
 
+#[cfg(any(test, feature = "mac-dynamic"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PolicySource {
     pub authority_id: u64,
     pub version: u32,
 }
 
+#[cfg(any(test, feature = "mac-dynamic"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PolicyDigest(pub [u8; 32]);
 
+#[cfg(any(test, feature = "mac-dynamic"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PolicySignature(pub [u8; 64]);
 
+#[cfg(any(test, feature = "mac-dynamic"))]
 pub trait PolicySignatureVerifier {
     fn verify(
         &self,
@@ -317,73 +323,61 @@ pub trait PolicySignatureVerifier {
     ) -> bool;
 }
 
-/// Fixed-capacity package. The digest covers the source, rule count and every
+/// Package. The digest covers the source, rule count and every
 /// canonical rule field; signatures are checked by the supplied verifier.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(test, feature = "mac-dynamic"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MacPolicyPackage {
     pub source: PolicySource,
     pub digest: PolicyDigest,
     pub signature: PolicySignature,
-    len: u8,
-    rules: [MacRule; MAX_POLICY_RULES],
+    rules: alloc::vec::Vec<MacRule>,
 }
 
+#[cfg(any(test, feature = "mac-dynamic"))]
 impl MacPolicyPackage {
-    const EMPTY_RULE: MacRule = MacRule {
-        source: SecurityDomain::SYSTEM,
-        target: SecurityDomain::SYSTEM,
-        effects: 0,
-        object_classes: 0,
-    };
-
     pub const fn empty(source: PolicySource) -> Self {
         Self {
             source,
             digest: PolicyDigest([0; 32]),
             signature: PolicySignature([0; 64]),
-            len: 0,
-            rules: [Self::EMPTY_RULE; MAX_POLICY_RULES],
+            rules: alloc::vec::Vec::new(),
         }
     }
 
     pub fn push(&mut self, rule: MacRule) -> Result<(), MacDenial> {
-        if !rule.is_valid() || self.len as usize >= MAX_POLICY_RULES {
+        if !rule.is_valid() {
             return Err(MacDenial::InvalidPolicy);
         }
-        self.rules[self.len as usize] = rule;
-        self.len += 1;
+        self.rules
+            .try_reserve(1)
+            .map_err(|_| MacDenial::Capacity)?;
+        self.rules.push(rule);
         Ok(())
     }
 
-    pub const fn len(self) -> usize {
-        self.len as usize
+    pub fn len(&self) -> usize {
+        self.rules.len()
     }
 
-    pub fn rule(self, index: usize) -> Option<MacRule> {
-        if index < self.len() {
-            Some(self.rules[index])
-        } else {
-            None
-        }
+    pub fn rule(&self, index: usize) -> Option<MacRule> {
+        self.rules.get(index).copied()
     }
 
     /// Deterministic content digest. This is an integrity input to a real
     /// signature verifier, not a claim that a non-cryptographic hash is a
     /// signature by itself.
-    pub fn content_digest(self) -> PolicyDigest {
+    pub fn content_digest(&self) -> PolicyDigest {
         let mut out = [0u8; 32];
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
         hash = mix(hash, self.source.authority_id);
         hash = mix(hash, self.source.version as u64);
-        hash = mix(hash, self.len as u64);
-        let mut index = 0usize;
-        while index < self.len() {
-            let rule = self.rules[index];
+        hash = mix(hash, self.len() as u64);
+        for rule in self.rules.iter().copied() {
             hash = mix(hash, rule.source.0 as u64);
             hash = mix(hash, rule.target.0 as u64);
             hash = mix(hash, rule.effects as u64);
             hash = mix(hash, rule.object_classes as u64);
-            index += 1;
         }
         let mut word = 0usize;
         while word < out.len() / 8 {
@@ -398,43 +392,27 @@ impl MacPolicyPackage {
         self.digest = self.content_digest();
     }
 
-    fn canonical_valid(self) -> bool {
-        if self.len as usize > MAX_POLICY_RULES {
-            return false;
-        }
-        let mut index = 0usize;
-        while index < self.len() {
-            if !self.rules[index].is_valid() {
-                return false;
-            }
-            index += 1;
-        }
-        index = self.len() as usize;
-        while index < MAX_POLICY_RULES {
-            if self.rules[index] != Self::EMPTY_RULE {
-                return false;
-            }
-            index += 1;
-        }
-        self.digest == self.content_digest()
+    fn canonical_valid(&self) -> bool {
+        self.rules.iter().all(|rule| rule.is_valid())
+            && self.digest == self.content_digest()
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(test, feature = "mac-dynamic"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MacPolicy {
     pub source: PolicySource,
     pub epoch: u64,
-    len: u8,
-    rules: [MacRule; MAX_POLICY_RULES],
+    rules: alloc::vec::Vec<MacRule>,
 }
 
+#[cfg(any(test, feature = "mac-dynamic"))]
 impl MacPolicy {
     pub const fn deny_all(source: PolicySource, epoch: u64) -> Self {
         Self {
             source,
             epoch,
-            len: 0,
-            rules: [MacPolicyPackage::EMPTY_RULE; MAX_POLICY_RULES],
+            rules: alloc::vec::Vec::new(),
         }
     }
 
@@ -452,25 +430,20 @@ impl MacPolicy {
         Ok(Self {
             source,
             epoch: 0,
-            len: package.len,
             rules: package.rules,
         })
     }
 
-    pub const fn len(self) -> usize {
-        self.len as usize
+    pub fn len(&self) -> usize {
+        self.rules.len()
     }
 
-    pub fn rule(self, index: usize) -> Option<MacRule> {
-        if index < self.len() {
-            Some(self.rules[index])
-        } else {
-            None
-        }
+    pub fn rule(&self, index: usize) -> Option<MacRule> {
+        self.rules.get(index).copied()
     }
 
     pub fn evaluate(
-        self,
+        &self,
         subject: SubjectLabel,
         object: MacLabel,
         effect: MacEffect,
@@ -489,10 +462,7 @@ impl MacPolicy {
         let object_secrecy = object.secrecy().ok_or(MacDenial::InvalidObjectLabel)?;
         let object_integrity = object.integrity().ok_or(MacDenial::InvalidObjectLabel)?;
         let mut matched = false;
-        let mut index = 0usize;
-        while index < self.len() {
-            let rule = self.rules[index];
-            index += 1;
+        for rule in self.rules.iter().copied() {
             if !rule.permits(
                 subject.label.domain,
                 object.domain,
@@ -534,11 +504,13 @@ impl MacPolicy {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(test, feature = "mac-dynamic"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PolicySlot {
     current: MacPolicy,
 }
 
+#[cfg(any(test, feature = "mac-dynamic"))]
 impl PolicySlot {
     pub const fn deny_all(source: PolicySource) -> Self {
         Self {
@@ -551,7 +523,11 @@ impl PolicySlot {
     }
 
     pub fn current(&self) -> MacPolicy {
-        self.current
+        self.current.clone()
+    }
+
+    fn current_ref(&self) -> &MacPolicy {
+        &self.current
     }
 
     /// Atomically install a compiled package. A ruleset can advance only by a
@@ -576,11 +552,12 @@ impl PolicySlot {
             epoch: next_epoch,
             ..candidate
         };
-        self.current = installed;
+        self.current = installed.clone();
         Ok(installed)
     }
 }
 
+#[cfg(any(test, feature = "mac-dynamic"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MacDenial {
     NoPolicy,
@@ -596,8 +573,10 @@ pub enum MacDenial {
     IntegrityDenied,
     ClassDenied,
     AuditFull,
+    Capacity,
 }
 
+#[cfg(any(test, feature = "mac-dynamic"))]
 impl MacDenial {
     pub const fn name(self) -> &'static str {
         match self {
@@ -614,10 +593,12 @@ impl MacDenial {
             Self::IntegrityDenied => "system.mac.error.integrity",
             Self::ClassDenied => "system.mac.error.class",
             Self::AuditFull => "system.mac.error.audit_full",
+            Self::Capacity => "system.mac.error.capacity",
         }
     }
 }
 
+#[cfg(any(test, feature = "mac-dynamic"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MacDecision {
     pub sequence: u64,
@@ -632,15 +613,18 @@ pub struct MacDecision {
     pub digest: u64,
 }
 
+#[cfg(any(test, feature = "mac-dynamic"))]
 #[derive(Clone, Copy)]
 struct DecisionSlot {
     decision: Option<MacDecision>,
 }
 
+#[cfg(any(test, feature = "mac-dynamic"))]
 impl DecisionSlot {
     const EMPTY: Self = Self { decision: None };
 }
 
+#[cfg(any(test, feature = "mac-dynamic"))]
 pub struct MacEngine {
     policy: PolicySlot,
     decisions: [DecisionSlot; MAX_AUDIT_EVENTS],
@@ -651,6 +635,7 @@ pub struct MacEngine {
     digest: u64,
 }
 
+#[cfg(any(test, feature = "mac-dynamic"))]
 impl MacEngine {
     pub const fn new(policy: PolicySlot) -> Self {
         Self {
@@ -690,7 +675,7 @@ impl MacEngine {
             self.overflow_attempts = self.overflow_attempts.saturating_add(1);
             return Err(MacDenial::AuditFull);
         }
-        let decision = self.policy.current().evaluate(subject, object, effect);
+        let decision = self.policy.current_ref().evaluate(subject, object, effect);
         let mut record = MacDecision {
             sequence: self.next_sequence,
             epoch: self.policy.epoch(),
@@ -744,11 +729,13 @@ impl MacEngine {
     }
 }
 
+#[cfg(any(test, feature = "mac-dynamic"))]
 const fn mix(mut digest: u64, word: u64) -> u64 {
     digest ^= word;
     digest.wrapping_mul(0x100_0000_01b3)
 }
 
+#[cfg(any(test, feature = "mac-dynamic"))]
 fn decision_digest(mut digest: u64, decision: MacDecision) -> u64 {
     digest = mix(digest, decision.sequence);
     digest = mix(digest, decision.epoch);
@@ -881,6 +868,35 @@ mod tests {
         assert!(engine
             .authorize(subject_id(), subject(), object_id(), object(), MacEffect::Write)
             .is_ok());
+    }
+
+    #[test]
+    fn verified_policy_rules_grow_past_the_previous_fixed_capacity() {
+        let source = PolicySource {
+            authority_id: POLICY_AUTHORITY_JASPER,
+            version: 9,
+        };
+        let mut package = MacPolicyPackage::empty(source);
+        for _ in 0..64 {
+            package
+                .push(MacRule::new(
+                    SecurityDomain::USER,
+                    SecurityDomain::USER,
+                    &[MacEffect::Read],
+                    &[IdentityClass::Memory],
+                ))
+                .unwrap();
+        }
+        package.seal_digest();
+        package.signature = PolicySignature([0x33; 64]);
+        let policy = MacPolicy::compile_verified(package, source, &TestVerifier).unwrap();
+        assert_eq!(policy.len(), 64);
+        assert_eq!(policy.rule(63), Some(MacRule::new(
+            SecurityDomain::USER,
+            SecurityDomain::USER,
+            &[MacEffect::Read],
+            &[IdentityClass::Memory],
+        )));
     }
 
     #[test]
