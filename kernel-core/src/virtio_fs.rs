@@ -9,9 +9,6 @@ pub const FUSE_IN_HEADER_BYTES: usize = 40;
 pub const FUSE_OUT_HEADER_BYTES: usize = 16;
 pub const MAX_REQUEST_BYTES: usize = 4096;
 pub const MAX_RESPONSE_BYTES: usize = 4096;
-pub const PENDING_CAPACITY: usize = 8;
-pub const HANDLE_CAPACITY: usize = 8;
-pub const FILE_CAPACITY: usize = 256;
 
 pub const ROOT_NODE: u64 = 1;
 pub const FILE_NODE: u64 = 2;
@@ -102,22 +99,24 @@ struct PendingRequest {
     opcode: u32,
 }
 
-pub struct VirtioFsBackend {
-    content: [u8; FILE_CAPACITY],
+pub struct VirtioFsBackend<const PENDING: usize, const HANDLES: usize, const FILE_BYTES: usize> {
+    content: [u8; FILE_BYTES],
     content_len: usize,
     generation: u32,
     next_handle: u64,
-    handles: [Option<u64>; HANDLE_CAPACITY],
-    pending: [Option<PendingRequest>; PENDING_CAPACITY],
+    handles: [Option<u64>; HANDLES],
+    pending: [Option<PendingRequest>; PENDING],
     requests: u64,
     rejected: u64,
     cancelled: u64,
     unsupported: u64,
 }
 
-impl VirtioFsBackend {
+impl<const PENDING: usize, const HANDLES: usize, const FILE_BYTES: usize>
+    VirtioFsBackend<PENDING, HANDLES, FILE_BYTES>
+{
     pub fn new() -> Self {
-        let mut content = [0u8; FILE_CAPACITY];
+        let mut content = [0u8; FILE_BYTES];
         let initial = b"Jasper virtio-fs";
         content[..initial.len()].copy_from_slice(initial);
         Self {
@@ -125,8 +124,8 @@ impl VirtioFsBackend {
             content_len: initial.len(),
             generation: 1,
             next_handle: 0,
-            handles: [None; HANDLE_CAPACITY],
-            pending: [None; PENDING_CAPACITY],
+            handles: [None; HANDLES],
+            pending: [None; PENDING],
             requests: 0,
             rejected: 0,
             cancelled: 0,
@@ -451,7 +450,7 @@ impl VirtioFsBackend {
         if payload.len() != size
             || offset
                 .checked_add(size)
-                .is_none_or(|end| end > FILE_CAPACITY)
+                .is_none_or(|end| end > FILE_BYTES)
         {
             return Err((EINVAL, true));
         }
@@ -501,7 +500,9 @@ impl VirtioFsBackend {
     }
 }
 
-impl Default for VirtioFsBackend {
+impl<const PENDING: usize, const HANDLES: usize, const FILE_BYTES: usize> Default
+    for VirtioFsBackend<PENDING, HANDLES, FILE_BYTES>
+{
     fn default() -> Self {
         Self::new()
     }
@@ -565,6 +566,11 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
+    const TEST_PENDING: usize = 8;
+    const TEST_HANDLES: usize = 8;
+    const TEST_FILE_BYTES: usize = 256;
+    type TestBackend = VirtioFsBackend<TEST_PENDING, TEST_HANDLES, TEST_FILE_BYTES>;
+
     fn request(opcode: u32, unique: u64, node: u64, payload: &[u8]) -> Vec<u8> {
         let mut raw = vec![0u8; FUSE_IN_HEADER_BYTES + payload.len()];
         let length = raw.len() as u32;
@@ -576,7 +582,7 @@ mod tests {
         raw
     }
 
-    fn open_file(backend: &mut VirtioFsBackend) -> u64 {
+    fn open_file(backend: &mut TestBackend) -> u64 {
         let request = request(OP_OPEN, 4, FILE_NODE, &[0; 8]);
         let mut response = [0u8; MAX_RESPONSE_BYTES];
         let length = backend.handle_request(&request, &mut response).unwrap();
@@ -587,7 +593,7 @@ mod tests {
 
     #[test]
     fn init_lookup_open_read_write_and_release_roundtrip() {
-        let mut backend = VirtioFsBackend::new();
+        let mut backend: TestBackend = VirtioFsBackend::new();
         let mut response = [0u8; MAX_RESPONSE_BYTES];
 
         let init = request(
@@ -647,7 +653,7 @@ mod tests {
 
     #[test]
     fn malformed_unknown_and_oversized_requests_fail_without_content_change() {
-        let mut backend = VirtioFsBackend::new();
+        let mut backend: TestBackend = VirtioFsBackend::new();
         let before = backend.content().to_vec();
         let mut response = [0u8; MAX_RESPONSE_BYTES];
 
@@ -691,7 +697,7 @@ mod tests {
 
     #[test]
     fn interrupt_cancels_pending_and_duplicate_is_refused() {
-        let mut backend = VirtioFsBackend::new();
+        let mut backend: TestBackend = VirtioFsBackend::new();
         let header = RequestHeader {
             len: FUSE_IN_HEADER_BYTES as u32,
             opcode: OP_GETATTR,
@@ -722,8 +728,8 @@ mod tests {
 
     #[test]
     fn bounded_pending_table_reset_and_invalid_handle_are_atomic() {
-        let mut backend = VirtioFsBackend::new();
-        for unique in 1..=PENDING_CAPACITY as u64 {
+        let mut backend: TestBackend = VirtioFsBackend::new();
+        for unique in 1..=TEST_PENDING as u64 {
             backend
                 .admit(RequestHeader {
                     len: FUSE_IN_HEADER_BYTES as u32,
@@ -750,7 +756,7 @@ mod tests {
         assert_eq!(backend.admit(full), Err(FsFrontendError::QueueFull));
         assert!(backend.cancel(1));
         backend.admit(full).unwrap();
-        for unique in 2..=PENDING_CAPACITY as u64 {
+        for unique in 2..=TEST_PENDING as u64 {
             assert!(backend.cancel(unique));
         }
 
@@ -771,5 +777,34 @@ mod tests {
             FUSE_OUT_HEADER_BYTES
         );
         assert_eq!(get_u32(&response, 4), EACCES as u32);
+    }
+
+    #[test]
+    fn caller_capacity_budgets_reject_without_mutation() {
+        let mut backend = VirtioFsBackend::<1, 1, 32>::new();
+        let mut response = [0u8; MAX_RESPONSE_BYTES];
+
+        let open = request(OP_OPEN, 1, FILE_NODE, &[0; 8]);
+        backend.handle_request(&open, &mut response).unwrap();
+        assert_eq!(get_u32(&response, 4), 0);
+        assert_eq!(backend.handle_count(), 1);
+        backend.handle_request(&open, &mut response).unwrap();
+        assert_eq!(get_u32(&response, 4), ENOBUFS as u32);
+        assert_eq!(backend.handle_count(), 1);
+
+        let first = RequestHeader {
+            len: FUSE_IN_HEADER_BYTES as u32,
+            opcode: OP_GETATTR,
+            unique: 10,
+            nodeid: FILE_NODE,
+            uid: 0,
+            gid: 0,
+            pid: 1,
+            total_extlen: 0,
+        };
+        backend.admit(first).unwrap();
+        let second = RequestHeader { unique: 11, ..first };
+        assert_eq!(backend.admit(second), Err(FsFrontendError::QueueFull));
+        assert_eq!(backend.pending_count(), 1);
     }
 }

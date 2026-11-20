@@ -28,6 +28,12 @@ use core::sync::atomic::{fence, Ordering};
 
 static LINUX_SETUP: &[u8] = include_bytes!(env!("JSR_LINUX_GUEST_HEADER"));
 static LINUX_KERNEL: &[u8] = include_bytes!(env!("JSR_LINUX_GUEST_KERNEL"));
+
+const LINUX_GUEST_FS_PENDING: usize = 8; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-guest-fs-profile reason=explicit-device-capacity
+const LINUX_GUEST_FS_HANDLES: usize = 8; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-guest-fs-profile reason=explicit-device-capacity
+const LINUX_GUEST_FS_FILE_BYTES: usize = 256; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-guest-fs-profile reason=explicit-device-capacity
+type GuestVirtioFs =
+    VirtioFsBackend<LINUX_GUEST_FS_PENDING, LINUX_GUEST_FS_HANDLES, LINUX_GUEST_FS_FILE_BYTES>;
 static LINUX_INITRAMFS: &[u8] = include_bytes!(env!("JSR_LINUX_GUEST_INITRAMFS"));
 
 // The minimal kernel + initramfs boots in 64 MiB. Keep this below Jasper's
@@ -71,7 +77,7 @@ struct VirtioGuestBus {
     net_backend: VirtioNetBackend,
     net_lease: Option<Hwv5Lease>,
     fs: VirtioMmio,
-    fs_backend: VirtioFsBackend,
+    fs_backend: GuestVirtioFs,
     fs_lease: Option<Hwv5Lease>,
     gpu: VirtioMmio,
     gpu_backend: VirtioGpuBackend,

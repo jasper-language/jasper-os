@@ -1,5 +1,5 @@
 {
-  "baseline_total": 323,
+  "baseline_total": 320,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -13,7 +13,7 @@
     "explicit-safety-policy": 125,
     "platform-adapter": 28,
     "protocol-abi": 38,
-    "runtime-resource-capacity": 52,
+    "runtime-resource-capacity": 50,
     "test-demo-fixture": 6
   },
   "entries": [
@@ -1338,26 +1338,6 @@
       "source": "pub const MAX_REQUEST_BYTES: usize = 4096;"
     },
     {
-      "category": "runtime-resource-capacity",
-      "count": 2,
-      "fingerprint": "580a97b631f707f4c18926eebf1b0f0b440912c699538c55c6c9c4465edb9cc3",
-      "line": 12,
-      "path": "kernel-core/src/virtio_fs.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
-      "rules": "HC-G8",
-      "source": "pub const PENDING_CAPACITY: usize = 8;"
-    },
-    {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "c23e45e2575708206d6ab96811edd6d3779bda18cc89a048bfa06ddbb76cae4e",
-      "line": 14,
-      "path": "kernel-core/src/virtio_fs.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
-      "rules": "HC-G8",
-      "source": "pub const FILE_CAPACITY: usize = 256;"
-    },
-    {
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "6887f254dee41cb99c02567a8d63e701ee0ba1ab4b766a5501a776b7997ca73f",
@@ -2513,7 +2493,7 @@
     "explicit-safety-policy": 141,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 90,
+    "runtime-resource-capacity": 87,
     "test-demo-fixture": 7
   }
 }

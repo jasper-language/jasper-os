@@ -529,12 +529,6 @@
       "rules": "HC-G7"
     },
     {
-      "count": 2,
-      "fingerprint": "580a97b631f707f4c18926eebf1b0f0b440912c699538c55c6c9c4465edb9cc3",
-      "path": "kernel-core/src/virtio_fs.rs",
-      "rules": "HC-G8"
-    },
-    {
       "count": 3,
       "fingerprint": "58e2cf99a835340c25a8d57ad4c597d763e97e9c1f2c5998ba4ed2908d802965",
       "path": "kernel/src/lifecycle_health.rs",
@@ -1166,12 +1160,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "c23e45e2575708206d6ab96811edd6d3779bda18cc89a048bfa06ddbb76cae4e",
-      "path": "kernel-core/src/virtio_fs.rs",
-      "rules": "HC-G8"
-    },
-    {
-      "count": 1,
       "fingerprint": "c2e26df14441f1d2cd94b57337af01f2ed8d1c931693d4eb1434d5934382bea3",
       "path": "user/irqprobe/build.rs",
       "rules": "HC-G7"
@@ -1515,5 +1503,5 @@
     "user",
     "xtask"
   ],
-  "total": 323
+  "total": 320
 }
