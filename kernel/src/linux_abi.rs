@@ -14184,7 +14184,6 @@ fn capture_scm_control(
 ) -> Result<ScmControl, CompatErrno> {
     const CMSG_HEADER_BYTES: usize = 16;
     const MAX_CONTROL_BYTES: usize = 16 * 1024;
-    const MAX_SCM_FDS: usize = 32;
     const SOL_SOCKET: i32 = 1;
     const SCM_RIGHTS: i32 = 1;
     const SCM_CREDENTIALS: i32 = 2;
@@ -14226,13 +14225,13 @@ fn capture_scm_control(
                     return Err(CompatErrno::Invalid);
                 }
                 for raw_fd in control[start..start + payload].chunks_exact(4) {
-                    if transfers.len() >= MAX_SCM_FDS {
-                        return Err(CompatErrno::Invalid);
-                    }
                     let fd = i32::from_le_bytes(raw_fd.try_into().unwrap());
                     if fd < 0 {
                         return Err(CompatErrno::BadFd);
                     }
+                    transfers
+                        .try_reserve(1)
+                        .map_err(|_| CompatErrno::NoMemory)?;
                     let transfer = proc::linux_capture_fd_transfer(pid, fd as u32).map_err(
                         |error| match error {
                             proc::LinuxFdTransferError::Invalid => CompatErrno::BadFd,
