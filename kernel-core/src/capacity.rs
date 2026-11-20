@@ -245,7 +245,7 @@ fn check(field: &'static str, value: usize, min: usize, max: usize) -> Result<()
 /// budget, then object slots consume the remaining budget. Validation still
 /// runs afterwards and fails closed if even the safety minima do not fit.
 pub fn derive(policy: BootCapacity, cost: MemoryCost) -> BootCapacity {
-    let rt = policy.rt.min(bounds::MAX_RT);
+    let rt = policy.rt.min(bounds::MAX_RT); // JASPER-HARDCODE-REVIEW: issue=35 source=capacity-policy-bounds reason=policy-ceiling-validated-by-KernelConfig-before-admission
     let min_tasks = bounds::MIN_TASKS.max(rt.saturating_add(1));
     let rt_bytes = rt.saturating_mul(cost.per_rt);
     let budget = cost.mem_limit.saturating_sub(rt_bytes);
@@ -264,7 +264,7 @@ pub fn derive(policy: BootCapacity, cost: MemoryCost) -> BootCapacity {
         remaining / cost.per_object
     };
     let objects = policy.objects
-        .min(bounds::MAX_OBJECTS)
+        .min(bounds::MAX_OBJECTS) // JASPER-HARDCODE-REVIEW: issue=35 source=capacity-policy-bounds reason=policy-ceiling-validated-by-KernelConfig-before-admission
         .min(objects_by_memory)
         .max(bounds::MIN_OBJECTS);
     BootCapacity { objects, tasks, rt }

@@ -38,7 +38,7 @@ const MAX_CHUNK_US: u32 = (PIT_MAX_COUNT as u64 * 1_000_000 / PIT_BASE_FREQ as u
 pub fn delay_us(us: u32) {
     let mut left = us;
     while left > 0 {
-        let chunk = left.min(MAX_CHUNK_US);
+        let chunk = left.min(MAX_CHUNK_US); // JASPER-HARDCODE-REVIEW: issue=35 source=PIT-8254-HARDWARE reason=single-hardware-count-period-not-runtime-work-capacity
         let count = ((PIT_BASE_FREQ as u64 * chunk as u64) / 1_000_000)
             .clamp(1, u64::from(PIT_MAX_COUNT)) as u16;
         // SAFETY：标准 PIT 编程：0xB0 = 通道 2、先低后高字节、模式 0（计满输出变高）、二进制；

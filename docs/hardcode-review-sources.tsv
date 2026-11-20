@@ -10,6 +10,7 @@ actual-smp-report	33	runtime	SMP-StartReport-online-failed-dropped
 admitted-smp-report	33	runtime	SMP-admitted-topology
 boot-handshake	33	spec	architecture-boot-handshake
 bootstrap-cpu-inventory	35	policy	Issue-35-multi-topology-preheap-inventory
+capacity-policy-bounds	35	policy	KernelConfig-validated-capacity-policy
 build-only-physical-runtime-plan	33	build	verification-feature-platform-plan
 diagnostic-usi-v1-contract	21	spec	diagnostic-USI-v1-wire-contract
 diagnostic-source-panic-ring	35	policy	panic-and-boot-failure-no-allocation-emergency-ring
@@ -19,12 +20,15 @@ channel-abi-v1	33	spec	Jasper-Channel-v1-fixed-message-handle-array
 network-object-v1	33	spec	NET-v1-fixed-endpoint-name-field
 mac-audit-backpressure-policy	39	policy	MAC-audit-full-denies-authorization-without-silent-loss
 irq-policy	33	policy	explicit-IRQ-safety-policy
+isolation-wire-v1	35	spec	isolated-service-versioned-wire-frame
 linux-poll-scan-policy	35	policy	Issue-35-bounded-Linux-poll-scan
 linux-batch-partial-policy	35	policy	Issue-35-bounded-Linux-batches-return-partial-progress
+linux-mmap-batch-budget	35	runtime	KernelConfig-memory-max-map-pages
 linux-pipe-uapi-v1	35	spec	Linux-pipe2-compat-default-capacity-not-runtime-maximum
 native-install-verification-stack	21	policy	LC-2-native-install-QEMU-acceptance-stack-policy
 persistent-install-format-v4	35	spec	persistent-install-FORMAT_VERSION-4-blob-slot-map
 physical-runtime-plan	33	build	verification-feature-platform-plan
+console-write-v1	35	spec	system.console.write-versioned-single-call-frame
 pixel-el2-observation-window	21	test	boot-carrier-EL2-host-observability-probe
 pixel-verification-platform	35	build	physical-device-verification-feature-only
 program-caps-note-v1	33	spec	program-capabilities-note-v1

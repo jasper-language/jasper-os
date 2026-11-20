@@ -343,7 +343,7 @@ impl Session {
         let Some(m) = &self.module else { return refuse(BoxError::NotLoaded) };
         // SAFETY：隔离运行的导出按约定遵守 BytesFn；签名不符只会损害本隔离进程。
         let Some(f) = (unsafe { m.function::<BytesFn>(export) }) else { return refuse(BoxError::NoExport) };
-        let mut out = vec![0u8; (out_cap as usize).min(wire::MAX_CHUNK)];
+        let mut out = vec![0u8; (out_cap as usize).min(wire::MAX_CHUNK)]; // JASPER-HARDCODE-REVIEW: issue=35 source=isolation-wire-v1 reason=response-array-width-from-versioned-wire-frame
         // SAFETY：输入与输出缓冲区在调用期间有效，长度如实给出。
         let ret = unsafe { (f.get())(input.as_ptr(), input.len(), out.as_mut_ptr(), out.len()) };
         if ret < 0 {

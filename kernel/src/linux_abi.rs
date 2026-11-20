@@ -5867,7 +5867,7 @@ fn linux_mprotect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let pages = args[1] / PAGE;
     let mut done = 0;
     while done < pages {
-        let chunk = (pages - done).min(proc::MAX_MAP_PAGES);
+        let chunk = (pages - done).min(proc::MAX_MAP_PAGES); // JASPER-HARDCODE-REVIEW: issue=35 source=linux-mmap-batch-budget reason=batch-from-validated-KernelConfig-max-map-pages
         proc::protect_linux_range_access(
             pid,
             args[0] + done * PAGE,

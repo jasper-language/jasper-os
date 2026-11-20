@@ -16,7 +16,7 @@ const WRITE_MAX: usize = 4096;
 /// 把一段 UTF-8 文本写到控制台（超过单次上限时分段，分段点落在字符边界上）。
 pub fn write_str(mut s: &str) -> Result<()> {
     while !s.is_empty() {
-        let mut n = s.len().min(WRITE_MAX);
+        let mut n = s.len().min(WRITE_MAX); // JASPER-HARDCODE-REVIEW: issue=35 source=console-write-v1 reason=split-caller-text-at-versioned-single-call-frame-limit
         while !s.is_char_boundary(n) {
             n -= 1;
         }

@@ -1,5 +1,5 @@
 {
-  "baseline_total": 231,
+  "baseline_total": 225,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,7 +10,7 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 130,
+    "explicit-safety-policy": 124,
     "platform-adapter": 28,
     "protocol-abi": 42,
     "test-demo-fixture": 11
@@ -425,26 +425,6 @@
       "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
       "rules": "HC-G7",
       "source": "rights: requested.unwrap_or(Rights::NONE),"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "0bbc5383ec5b6e29d61707af469b616aa5cb4192bc525a88ee693d4fbe1098e9",
-      "line": 248,
-      "path": "kernel-core/src/capacity.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G6",
-      "source": "let rt = policy.rt.min(bounds::MAX_RT);"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "98dc6163352ce43f4aa1f6dc7d4a915b724867309803924ae08348abae2de260",
-      "line": 267,
-      "path": "kernel-core/src/capacity.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G6",
-      "source": ".min(bounds::MAX_OBJECTS)"
     },
     {
       "category": "test-demo-fixture",
@@ -1477,16 +1457,6 @@
       "source": "Err(_) if request.len() >= 16 => {"
     },
     {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "366fcc7fe445a50e7977df560ac5b3c6d0b05c43240b846d7a3f243bc5ad2ccb",
-      "line": 41,
-      "path": "kernel/src/arch/x86_64/pit.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G2,HC-G6",
-      "source": "let chunk = left.min(MAX_CHUNK_US);"
-    },
-    {
       "category": "protocol-abi",
       "count": 1,
       "fingerprint": "836de41f2cf1e48ad94a8e0a9985bf4e1135e22a851b042d90e549b7a583702f",
@@ -1775,16 +1745,6 @@
       "reason": "fscrypt UAPI master-key payload width; preserve the documented 64-byte maximum",
       "rules": "HC-G1",
       "source": "const MAX_RAW_KEY: usize = 64;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "da92953655d894ad3af9722542b637272e549cb75738a1d9f7dd54b3a6df2068",
-      "line": 5870,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G6",
-      "source": "let chunk = (pages - done).min(proc::MAX_MAP_PAGES);"
     },
     {
       "category": "explicit-safety-policy",
@@ -2079,32 +2039,12 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "5db71a927ab52d1e51eb30cf0de0400a17648468c3c7462d4c81f006e4a2a917",
-      "line": 19,
-      "path": "user/rt/src/io.rs",
-      "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
-      "rules": "HC-G2",
-      "source": "let mut n = s.len().min(WRITE_MAX);"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
       "fingerprint": "fc353fdfff50227881948528ca28d8ef6e62043e8bbab57fc4349a2b33f01c33",
       "line": 52,
       "path": "user/rt/src/isolate.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
       "source": "pub const MAX_MODULE_BYTES: usize = 4 * 1024 * 1024;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "f9c8355fc40a9749b4223f3d614f9f02c382e82d7876245a43da4c327edf2600",
-      "line": 346,
-      "path": "user/rt/src/isolate.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G6",
-      "source": "let mut out = vec![0u8; (out_cap as usize).min(wire::MAX_CHUNK)];"
     },
     {
       "category": "protocol-abi",
@@ -2129,7 +2069,7 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 133,
+    "explicit-safety-policy": 127,
     "platform-adapter": 44,
     "protocol-abi": 43,
     "test-demo-fixture": 11
