@@ -27,6 +27,7 @@ physical-runtime-plan	33	build	verification-feature-platform-plan
 pixel-el2-observation-window	21	test	boot-carrier-EL2-host-observability-probe
 pixel-verification-platform	35	build	physical-device-verification-feature-only
 program-caps-note-v1	33	spec	program-capabilities-note-v1
+sandbox-launch-abi-v1	35	spec	Sandbox-launch-v1-fixed-device-data-arrays
 release-threshold-policy-v1	21	policy	release-release-policy.toml-2-of-3
 released-request-runtime-state	33	runtime	IRQ-released-request-state
 runtime-stage-state	33	runtime	lifecycle-stage-state

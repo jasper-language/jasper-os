@@ -17,8 +17,8 @@ pub const MAGIC: u32 = u32::from_le_bytes(*b"JSL1");
 pub const VERSION: u16 = 1;
 pub const CREATE_BYTES: usize = 1184;
 pub const INFO_BYTES: usize = 144;
-pub const MAX_DEVICE_GRANTS: usize = 16;
-pub const MAX_DATA_SCOPES: usize = 16;
+pub const MAX_DEVICE_GRANTS: usize = 16; // JASPER-HARDCODE-REVIEW: issue=35 source=sandbox-launch-abi-v1 reason=fixed-record-field-array
+pub const MAX_DATA_SCOPES: usize = 16; // JASPER-HARDCODE-REVIEW: issue=35 source=sandbox-launch-abi-v1 reason=fixed-record-field-array
 
 const HEADER_BYTES: usize = 160;
 const GRANT_BYTES: usize = 32;

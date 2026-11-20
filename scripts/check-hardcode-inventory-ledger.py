@@ -134,6 +134,14 @@ def classify(path: str, rules: str, source: str) -> tuple[str, str]:
             "protocol-abi",
             "fixed v4 on-disk blob slot map; resize requires a format migration and crash recovery test",
         )
+    if path == "kernel-core/src/sandbox_launch_abi.rs" and name in {
+        "MAX_DEVICE_GRANTS",
+        "MAX_DATA_SCOPES",
+    }:
+        return (
+            "protocol-abi",
+            "fixed Sandbox launch v1 record fields; changing either count changes CREATE_BYTES and offsets",
+        )
     if path == "kernel/src/kmain.rs" and "pixel6a-smp-probe" in source:
         return (
             "platform-adapter",

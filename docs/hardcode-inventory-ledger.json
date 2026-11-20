@@ -1,5 +1,5 @@
 {
-  "baseline_total": 315,
+  "baseline_total": 313,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -13,7 +13,7 @@
     "explicit-safety-policy": 125,
     "platform-adapter": 28,
     "protocol-abi": 38,
-    "runtime-resource-capacity": 46,
+    "runtime-resource-capacity": 45,
     "test-demo-fixture": 6
   },
   "entries": [
@@ -1116,16 +1116,6 @@
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
       "source": "pub const MAX_VIEW_PATH: usize = 64;"
-    },
-    {
-      "category": "runtime-resource-capacity",
-      "count": 2,
-      "fingerprint": "6304a24e67afbf596747e1296a40e94a1e9be437aa0cb46ef9c04bd59a247b98",
-      "line": 20,
-      "path": "kernel-core/src/sandbox_launch_abi.rs",
-      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
-      "rules": "HC-G1",
-      "source": "pub const MAX_DEVICE_GRANTS: usize = 16;"
     },
     {
       "category": "explicit-safety-policy",
@@ -2453,7 +2443,7 @@
     "explicit-safety-policy": 141,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 82,
+    "runtime-resource-capacity": 80,
     "test-demo-fixture": 7
   }
 }

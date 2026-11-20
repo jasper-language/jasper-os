@@ -571,12 +571,6 @@
       "rules": "HC-G7"
     },
     {
-      "count": 2,
-      "fingerprint": "6304a24e67afbf596747e1296a40e94a1e9be437aa0cb46ef9c04bd59a247b98",
-      "path": "kernel-core/src/sandbox_launch_abi.rs",
-      "rules": "HC-G1"
-    },
-    {
       "count": 1,
       "fingerprint": "633d4b3e1dd9609927e0abcb039cc71c886f6f599c87f8dde63c8cf7787feb65",
       "path": "kernel/src/arch/loongarch64/smp.rs",
@@ -1479,5 +1473,5 @@
     "user",
     "xtask"
   ],
-  "total": 315
+  "total": 313
 }
