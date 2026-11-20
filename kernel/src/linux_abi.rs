@@ -61,7 +61,6 @@ const SYSV_MSGMNB: usize = 16384;
 const MAX_SYSV_SEM_SETS: usize = 16;
 const MAX_SYSV_SEMS_PER_SET: usize = 16;
 const MAX_SYSV_SEM_OPS: usize = 32;
-const MAX_SYSV_SEM_WAITERS: usize = 64;
 const MAX_SYSV_SEM_UNDOS: usize = 64;
 const SYSV_SEMVMX: i32 = 32767;
 const MAX_SYSV_SHARED_SEGMENTS: usize = 16;
@@ -365,7 +364,7 @@ struct CompatState {
     sysv_message_queues: alloc::vec::Vec<SysVMessageQueue>,
     next_sysv_message_queue_id: i32,
     sysv_semaphore_sets: alloc::vec::Vec<SysVSemaphoreSet>,
-    sysv_semaphore_waiters: [Option<SysVSemaphoreWaiter>; MAX_SYSV_SEM_WAITERS],
+    sysv_semaphore_waiters: alloc::vec::Vec<Option<SysVSemaphoreWaiter>>,
     sysv_semaphore_undos: alloc::vec::Vec<SysVSemaphoreUndo>,
     next_sysv_semaphore_id: i32,
     sysv_shared_segments: alloc::vec::Vec<SysVSharedMemory>,
@@ -395,7 +394,7 @@ impl CompatState {
             sysv_message_queues: alloc::vec::Vec::new(),
             next_sysv_message_queue_id: 1,
             sysv_semaphore_sets: alloc::vec::Vec::new(),
-            sysv_semaphore_waiters: [None; MAX_SYSV_SEM_WAITERS],
+            sysv_semaphore_waiters: alloc::vec::Vec::new(),
             sysv_semaphore_undos: alloc::vec::Vec::new(),
             next_sysv_semaphore_id: 1,
             sysv_shared_segments: alloc::vec::Vec::new(),
@@ -9858,12 +9857,18 @@ fn register_sysv_semaphore_waiter(
         return true;
     }
     remove_sysv_semaphore_waiter(state, process, task, semid);
-    let Some(slot) = state
+    let slot = if let Some(slot) = state
         .sysv_semaphore_waiters
         .iter()
         .position(Option::is_none)
-    else {
-        return false;
+    {
+        slot
+    } else {
+        if state.sysv_semaphore_waiters.try_reserve(1).is_err() {
+            return false;
+        }
+        state.sysv_semaphore_waiters.push(None);
+        state.sysv_semaphore_waiters.len() - 1
     };
     state.sysv_semaphore_waiters[slot] = Some(SysVSemaphoreWaiter {
         process,
