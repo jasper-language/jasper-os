@@ -408,8 +408,6 @@ where
     }
 }
 
-const MAX_VFS_HANDLES: usize = 64;
-
 struct VfsHandle {
     path: String,
     writable: bool,
@@ -418,8 +416,10 @@ struct VfsHandle {
 /// Small path-addressed VFS facade over the journaled ext4 writer.
 ///
 /// Handles are process-local stand-ins for the future FS-0 Handle/Rights
-/// mapping. They are bounded, generation-checked, and release deterministically
-/// on close. Open files with writes are committed and flushed by `write`.
+/// mapping. The heap-backed table has no private VFS count limit; the process
+/// Handle/IO budget owns admission. Handle identities are checked and release
+/// deterministically on close. Open files with writes are committed and flushed
+/// by `write`.
 pub struct Ext4Vfs<S> {
     writer: Ext4Writer<S>,
     handles: BTreeMap<u64, VfsHandle>,
@@ -515,9 +515,6 @@ where
     }
 
     fn allocate_handle(&mut self, path: &str, writable: bool) -> Result<u64, Ext4WriteError> {
-        if self.handles.len() >= MAX_VFS_HANDLES {
-            return Err(Ext4WriteError::TooManyHandles);
-        }
         let handle = self.next_handle;
         self.next_handle = self
             .next_handle
@@ -1019,6 +1016,15 @@ mod tests {
         vfs.rename("/vfs.txt", "/renamed-vfs.txt").unwrap();
         assert_eq!(vfs.read(handle, 4096).unwrap(), b"through VFS handles\n");
         vfs.close(handle).unwrap();
+        assert_eq!(vfs.live_handles(), 0);
+
+        let handles: Vec<_> = (0..128)
+            .map(|_| vfs.open("/seed.txt", false).unwrap())
+            .collect();
+        assert_eq!(vfs.live_handles(), handles.len());
+        for handle in handles {
+            vfs.close(handle).unwrap();
+        }
         assert_eq!(vfs.live_handles(), 0);
 
         std::fs::write(&image_path, vfs.image()).unwrap();
