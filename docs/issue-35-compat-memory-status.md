@@ -31,6 +31,9 @@
 - `getrandom` 的 1 MiB 单次总长度上限已移除；输出缓冲由调用方长度和
   `try_reserve_exact` 的堆准入决定，分配失败返回 `ENOMEM`，不改变合法 flags 和
   随机源回退语义。
+- root verification VFS 的 96 个 library slot 固定数组改为直接使用
+  `ANDROID_FILE_PATHS.len()`；槽位数量由实际登记源集合决定，并增加编译期断言保证
+  索引仍可无损编码进现有 `FileId::AndroidFile(u8)`。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -50,7 +53,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=304, runtime-resource-capacity=65, unclassified=0, added=0
+findings=303, runtime-resource-capacity=64, unclassified=0, added=0
 ```
 
 ## 尚未完成
