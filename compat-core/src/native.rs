@@ -24,11 +24,6 @@ use kernel_core::object::Rights;
 use kernel_core::task_index::Token;
 use kernel_core::wait::{Event, Waitable};
 
-/// Maximum number of futex waiters on one native synchronization word.
-///
-/// 单个 futex 同步字可登记的最大等待者数。
-pub const MAX_FUTEX_WAITERS: usize = 8;
-
 /// Stable reference to one compatibility resource generation.
 ///
 /// 指向兼容资源特定世代的稳定标识；槽位复用后旧标识永久失效。
@@ -729,11 +724,12 @@ pub struct FutexWake {
     pub owner_priority: Option<u8>,
 }
 
-/// Bounded futex-compatible wait and priority-inheritance adapter.
+/// Futex-compatible wait and priority-inheritance adapter with caller-selected
+/// synchronization-word and waiter capacities.
 ///
 /// 有界 futex 兼容等待与优先级继承适配器；等待登记、截止期与终态消费复用
 /// Jasper event-wait 和 inherited-mutex 状态机。
-pub struct Futex<const N: usize, const W: usize = MAX_FUTEX_WAITERS> {
+pub struct Futex<const N: usize, const W: usize> {
     words: [Option<FutexWord<W>>; N],
     generations: [u32; N],
 }

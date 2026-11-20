@@ -1,5 +1,5 @@
 {
-  "baseline_total": 273,
+  "baseline_total": 272,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -12,7 +12,7 @@
   "counts": {
     "explicit-safety-policy": 168,
     "platform-adapter": 28,
-    "protocol-abi": 43,
+    "protocol-abi": 42,
     "test-demo-fixture": 11
   },
   "entries": [
@@ -35,16 +35,6 @@
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
       "source": "pub const MAX_LOGICAL_PATH: usize = 256;"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "5a1d9fd843cd7555e522cae18d3071a52377958529d42a0c78201952fb4f50eb",
-      "line": 30,
-      "path": "compat-core/src/native.rs",
-      "reason": "path owns a wire, loader, package, graphics, or lifecycle ABI; consumer review remains required",
-      "rules": "HC-G1",
-      "source": "pub const MAX_FUTEX_WAITERS: usize = 8;"
     },
     {
       "category": "explicit-safety-policy",
@@ -2521,7 +2511,7 @@
   "weighted_counts": {
     "explicit-safety-policy": 175,
     "platform-adapter": 44,
-    "protocol-abi": 43,
+    "protocol-abi": 42,
     "test-demo-fixture": 11
   }
 }

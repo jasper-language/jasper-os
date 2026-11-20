@@ -506,12 +506,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "5a1d9fd843cd7555e522cae18d3071a52377958529d42a0c78201952fb4f50eb",
-      "path": "compat-core/src/native.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "5a9bf342c9b6062d6881ec10d78dd166fb314dab6a432deb255052dca3dc41fa",
       "path": "compat-core/src/seccomp.rs",
       "rules": "HC-G1"
@@ -1521,5 +1515,5 @@
     "user",
     "xtask"
   ],
-  "total": 273
+  "total": 272
 }
