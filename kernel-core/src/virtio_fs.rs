@@ -783,10 +783,22 @@ mod tests {
         let open = request(OP_OPEN, 1, FILE_NODE, &[0; 8]);
         backend.handle_request(&open, &mut response).unwrap();
         assert_eq!(get_u32(&response, 4), 0);
+        let handle = get_u64(&response, 16);
         assert_eq!(backend.handle_count(), 1);
         backend.handle_request(&open, &mut response).unwrap();
         assert_eq!(get_u32(&response, 4), ENOBUFS as u32);
         assert_eq!(backend.handle_count(), 1);
+
+        let before = backend.content().to_vec();
+        let mut write_payload = vec![0u8; 42];
+        put_u64(&mut write_payload, 0, handle);
+        put_u64(&mut write_payload, 8, 31);
+        put_u32(&mut write_payload, 16, 2);
+        write_payload[40..].copy_from_slice(b"xx");
+        let write = request(OP_WRITE, 2, FILE_NODE, &write_payload);
+        backend.handle_request(&write, &mut response).unwrap();
+        assert_eq!(get_u32(&response, 4), EINVAL as u32);
+        assert_eq!(backend.content(), before);
 
         let first = RequestHeader {
             len: FUSE_IN_HEADER_BYTES as u32,
