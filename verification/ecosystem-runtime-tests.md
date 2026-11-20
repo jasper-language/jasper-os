@@ -126,7 +126,11 @@ and APEX payload. Its `dalvikvm64 -showversion` baseline printed
 `AndroidAutoBuildAPK-v18.apk` is now validated by AOSP `aapt2` and executed
 from a real Jasper UEFI System-root image through Bionic, Linux ABI and
 unmodified ART. The measured APK run exited 0 with `syscalls=23154` and
-`resources=true`. Android Activity/Framework lifecycle remains pending.
+`resources=true`. Android Activity/Framework lifecycle remains pending. The
+real Android 34 framework-root preflight finds app_process64, servicemanager,
+installd, framework.jar, services.jar, am.jar and a structurally valid
+framework-res.apk/resources.arsc, but the image has no zygote64 or
+system_server, so Activity startup cannot be claimed.
 
 ## Remaining Jasper work
 

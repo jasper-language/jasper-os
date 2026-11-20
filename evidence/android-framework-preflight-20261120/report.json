@@ -1,0 +1,94 @@
+{
+  "activity_runtime_limitations": [
+    "This preflight does not start zygote, system_server, ActivityManager or an Activity.",
+    "A complete root also needs matching APEX mounts, SELinux policy, Binder services and framework configuration.",
+    "Activity onCreate/onStart/onResume, resources/configuration, graphics, input and audio remain separate runtime gates."
+  ],
+  "activity_runtime_ready": false,
+  "container_ready": false,
+  "directories": {
+    "permissions": {
+      "path": "/system/etc/permissions",
+      "present": true
+    },
+    "runtime_apex": {
+      "path": "/apex/com.android.runtime",
+      "present": true
+    }
+  },
+  "executables": {
+    "app_process64": {
+      "executable": true,
+      "link_target": null,
+      "mode": "0o755",
+      "path": "/system/bin/app_process64",
+      "present": true,
+      "size": 14416,
+      "type": "regular"
+    },
+    "installd": {
+      "executable": true,
+      "link_target": null,
+      "mode": "0o755",
+      "path": "/system/bin/installd",
+      "present": true,
+      "size": 480232,
+      "type": "regular"
+    },
+    "servicemanager": {
+      "executable": true,
+      "link_target": null,
+      "mode": "0o755",
+      "path": "/system/bin/servicemanager",
+      "present": true,
+      "size": 75256,
+      "type": "regular"
+    },
+    "system_server": {
+      "path": "/system/bin/system_server",
+      "present": false
+    },
+    "zygote64": {
+      "path": "/system/bin/zygote64",
+      "present": false
+    }
+  },
+  "framework": {
+    "am_jar": {
+      "path": "/system/framework/am.jar",
+      "present": true,
+      "sha256": "546bf1cea735f44f2d894f27865ec706e8ff4b2f540a6e5f527daf7b512c465c",
+      "size": 569438
+    },
+    "framework_jar": {
+      "path": "/system/framework/framework.jar",
+      "present": true,
+      "sha256": "40c4a607712b93c7f0ae79e5f5e4cc6db90f9d3b7ca3c043c214c72b3af3b91e",
+      "size": 40011934
+    },
+    "framework_resources": {
+      "entries": 7880,
+      "path": "/system/framework/framework-res.apk",
+      "present": true,
+      "resource_entries": 7862,
+      "resources_arsc_bytes": 16421724,
+      "resources_arsc_header_bytes": 12,
+      "resources_arsc_total_bytes": 16421724,
+      "sha256": "ef4b4f6b4f2ad94c340576c36a0be775ca57df5156ebfd2a09228bd7f4569aa3",
+      "size": 34370676
+    },
+    "services_jar": {
+      "path": "/system/framework/services.jar",
+      "present": true,
+      "sha256": "261a8c9b5d90109fde4561b9444c34ed60406985e5a5f01db1d286fdb4b68481",
+      "size": 20621436
+    }
+  },
+  "image": "/home/auth/.cache/jasper-abi-runtime-test/android-system-image/android-34-default-x86_64/x86_64/framework-root-v1.img",
+  "image_bytes": 8589934592,
+  "missing": [
+    "zygote64",
+    "system_server"
+  ],
+  "schema": "jasper.android.framework-preflight/1"
+}
