@@ -271,6 +271,15 @@ def classify(path: str, rules: str, source: str) -> tuple[str, str]:
             "protocol-abi",
             "fscrypt UAPI master-key payload width; preserve the documented 64-byte maximum",
         )
+    if path == "kernel/src/linux_abi.rs" and name in {
+        "MAX_SYSV_MESSAGE_QUEUES",
+        "MAX_SYSV_SEM_SETS",
+        "MAX_SYSV_SEM_UNDOS",
+    }:
+        return (
+            "explicit-safety-policy",
+            "advertised SysV IPC compatibility quota reported through IPC_INFO; excess creation/undo registration is rejected rather than silently truncated",
+        )
     if name in {
         "MAX_BARS",
         "MAX_TEXT_OFFSET",

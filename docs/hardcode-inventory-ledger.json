@@ -10,10 +10,10 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 163,
+    "explicit-safety-policy": 164,
     "platform-adapter": 28,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 22,
+    "runtime-resource-capacity": 21,
     "test-demo-fixture": 9
   },
   "entries": [
@@ -2248,12 +2248,12 @@
       "source": "const MAX_SYSV_SEM_SETS: usize = 16;"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "e88ea9e19b783c9b7138309565e91b4309327bcbdfa7de85cda0f5898e81db59",
       "line": 57,
       "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
+      "reason": "advertised SysV IPC compatibility quota reported through IPC_INFO; excess creation/undo registration is rejected rather than silently truncated",
       "rules": "HC-G1",
       "source": "const MAX_SYSV_MESSAGE_QUEUES: usize = 16;"
     },
@@ -2650,10 +2650,10 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 170,
+    "explicit-safety-policy": 171,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 22,
+    "runtime-resource-capacity": 21,
     "test-demo-fixture": 9
   }
 }
