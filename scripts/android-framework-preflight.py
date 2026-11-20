@@ -19,11 +19,10 @@ from pathlib import Path
 
 EXECUTABLES = {
     "app_process64": "/system/bin/app_process64",
-    "zygote64": "/system/bin/zygote64",
-    "system_server": "/system/bin/system_server",
     "servicemanager": "/system/bin/servicemanager",
     "installd": "/system/bin/installd",
 }
+ZYGOTE64_RC = "/system/etc/init/hw/init.zygote64.rc"
 FRAMEWORK = {
     "framework_jar": "/system/framework/framework.jar",
     "services_jar": "/system/framework/services.jar",
@@ -195,6 +194,31 @@ def inspect_image(debugfs_bin: Path, image: Path) -> dict[str, object]:
             missing.append(name)
         directories[name] = {"path": path, "present": present}
 
+    zygote_rc = stat_path(debugfs_bin, image, ZYGOTE64_RC)
+    zygote_text = ""
+    if zygote_rc is not None and zygote_rc.file_type == "regular" and zygote_rc.size != 0:
+        with tempfile.TemporaryDirectory(prefix="jasper-android-zygote-") as temporary:
+            dumped = Path(temporary) / "init.zygote64.rc"
+            dump_file(debugfs_bin, image, ZYGOTE64_RC, dumped)
+            zygote_text = dumped.read_text(encoding="utf-8", errors="replace")
+    starts_zygote = re.search(
+        r"service\s+zygote\s+/system/bin/app_process64\b.*--zygote\b",
+        zygote_text,
+    ) is not None
+    starts_system_server = "--start-system-server" in zygote_text
+    if not starts_zygote:
+        missing.append("zygote64")
+    if not starts_system_server:
+        missing.append("system_server")
+    launch = {
+        "zygote64": {
+            "path": ZYGOTE64_RC,
+            "present": zygote_rc is not None,
+            "starts_app_process64_zygote": starts_zygote,
+            "starts_system_server": starts_system_server,
+        }
+    }
+
     container_ready = not missing
     return {
         "schema": "jasper.android.framework-preflight/1",
@@ -211,6 +235,7 @@ def inspect_image(debugfs_bin: Path, image: Path) -> dict[str, object]:
         "executables": executables,
         "framework": framework,
         "directories": directories,
+        "launch": launch,
     }
 
 
@@ -241,6 +266,10 @@ def self_test() -> None:
         result = inspect_resource_apk(apk)
         assert result["resource_entries"] == 1
         assert result["resources_arsc_header_bytes"] == 12
+    assert re.search(
+        r"service\s+zygote\s+/system/bin/app_process64\b.*--zygote\b",
+        "service zygote /system/bin/app_process64 -Xzygote /system/bin --zygote",
+    )
     print("android-framework-preflight: self-test PASS")
 
 

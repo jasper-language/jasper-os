@@ -20,16 +20,20 @@ Observed framework content:
   `resources.arsc`;
 - `/system/etc/permissions` and `/apex/com.android.runtime` are present.
 
-Missing Activity launch prerequisites:
+Static Activity launch prerequisites:
 
-- `/system/bin/zygote64`;
-- `/system/bin/system_server`.
+- `/system/etc/init/hw/init.zygote64.rc` starts
+  `/system/bin/app_process64 -Xzygote /system/bin --zygote`;
+- the same service passes `--start-system-server`, so modern Android does not
+  require separate `zygote64` or `system_server` executable files;
+- the image also contains `framework-res.apk`, the runtime APEX, permission
+  configuration and the boot-critical Android user-space services listed above.
 
-Result: `container_ready=false`, `activity_runtime_ready=false`.
+Result: `container_ready=true`, `activity_runtime_ready=false`.
 
 This evidence does not claim Activity lifecycle. It establishes that the
-current root fixture cannot start ActivityManager even though the framework
-files and resource table are present. The next slice must admit a complete
-zygote/system_server/APEX/SELinux/Binder namespace and then exercise
-`onCreate/onStart/onResume`, resource/configuration delivery, graphics, input
-and audio.
+current root fixture has the static framework namespace needed to attempt
+zygote/system_server launch. The next slice must actually start that chain with
+matching APEX mounts, SELinux policy, Binder services and framework
+configuration, then exercise `onCreate/onStart/onResume`,
+resource/configuration delivery, graphics, input and audio.

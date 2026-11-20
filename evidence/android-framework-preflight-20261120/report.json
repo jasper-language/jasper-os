@@ -5,7 +5,7 @@
     "Activity onCreate/onStart/onResume, resources/configuration, graphics, input and audio remain separate runtime gates."
   ],
   "activity_runtime_ready": false,
-  "container_ready": false,
+  "container_ready": true,
   "directories": {
     "permissions": {
       "path": "/system/etc/permissions",
@@ -43,14 +43,6 @@
       "present": true,
       "size": 75256,
       "type": "regular"
-    },
-    "system_server": {
-      "path": "/system/bin/system_server",
-      "present": false
-    },
-    "zygote64": {
-      "path": "/system/bin/zygote64",
-      "present": false
     }
   },
   "framework": {
@@ -86,9 +78,14 @@
   },
   "image": "/home/auth/.cache/jasper-abi-runtime-test/android-system-image/android-34-default-x86_64/x86_64/framework-root-v1.img",
   "image_bytes": 8589934592,
-  "missing": [
-    "zygote64",
-    "system_server"
-  ],
+  "launch": {
+    "zygote64": {
+      "path": "/system/etc/init/hw/init.zygote64.rc",
+      "present": true,
+      "starts_app_process64_zygote": true,
+      "starts_system_server": true
+    }
+  },
+  "missing": [],
   "schema": "jasper.android.framework-preflight/1"
 }
