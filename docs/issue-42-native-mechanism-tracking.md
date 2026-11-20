@@ -4,6 +4,11 @@
 
 状态：**架构审计与候选机制矩阵；不批准兼容 ABI，不新增第二对象或权限权威。**
 
+机器可查的 25 机制族台账为 `verification/issue42-mechanism-ledger.tsv`，
+由 `scripts/check-issue42-mechanism-ledger.py` 强制校验完整 ID、状态、分层、
+证据路径和未关闭门。该台账把研究分类与工程验收分开；`partial` 或 `research`
+不会因为存在同名测试而升级为 done。
+
 ## 裁决
 
 Issue #42 的所有外部内核经验只作为问题域来源：

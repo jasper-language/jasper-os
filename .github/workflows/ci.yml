@@ -81,6 +81,10 @@ jobs:
         run: |
           python3 scripts/check-linux-syscall-disposition.py --self-test
           python3 scripts/check-linux-syscall-disposition.py
+      - name: Issue #42 25 类机制审计台账 / mechanism-family ledger
+        run: |
+          python3 scripts/check-issue42-mechanism-ledger.py --self-test
+          python3 scripts/check-issue42-mechanism-ledger.py
       - name: Issue #36/#37 GPU 与 UI ABI 边界 / GPU-UI boundary
         run: |
           python3 scripts/check-gpu-abi-boundary.py --self-test
