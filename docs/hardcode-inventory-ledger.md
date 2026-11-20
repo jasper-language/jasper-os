@@ -21,15 +21,19 @@
 | 类别 | 唯一指纹 | 基线命中 | 含义 |
 | --- | ---: | ---: | --- |
 | `explicit-safety-policy` | 139 | 144 | 有界工作、解析/等待上限、fail-closed 或诊断哨兵、明确策略默认 |
-| `runtime-resource-capacity` | 52 | 54 | 运行期集合/容量，应由资源预算和准入决定 |
+| `runtime-resource-capacity` | 51 | 53 | 运行期集合/容量，应由资源预算和准入决定 |
 | `platform-adapter` | 28 | 44 | QEMU/Pixel 等架构特定选择，需保留显式 Profile 边界 |
-| `protocol-abi` | 42 | 42 | Wire、FDT/PCI、Linux UAPI、磁盘格式、地址宽度或内部位域契约 |
+| `protocol-abi` | 41 | 41 | Wire、FDT/PCI、Linux UAPI、磁盘格式、地址宽度或内部位域契约 |
 | `confirmed-defect` | 0 | 0 | 当前分类账中尚无新增的已证实未修缺陷 |
-| `test-demo-fixture` | 7 | 7 | 显式 benchmark、probe、capacity 或 PCI 模型夹具 |
+| `test-demo-fixture` | 9 | 9 | 显式 benchmark、probe、capacity 或 PCI 模型夹具 |
 | `unclassified` | 0 | 0 | 所有基线指纹均已有可核查理由 |
 
 `confirmed-defect` 和 `unclassified` 同时为空不代表 Issue #35 全量完成。当前基线
 已全部归类，但运行时容量、安全策略和平台矩阵仍需真实预算、负例和资源回收证据。
+
+`kernel/src/arch/x86_64/bm1.rs` 明确是 QEMU-only BM-1 验收 Profile，且对默认
+内核无影响；其 8 MiB trace buffer 与相关固定值按测试夹具登记，不冒充生产运行期
+容量。
 
 ## 校验
 
@@ -53,7 +57,7 @@ python3 scripts/check-hardcode-inventory-ledger.py --check \
 
 ## 后续清零顺序
 
-1. 先沿运行时消费者处理 52 个 `runtime-resource-capacity`，并补齐调用方预算和
+1. 先沿运行时消费者处理 51 个 `runtime-resource-capacity`，并补齐调用方预算和
    拒绝负例；
 2. 将 139 个 `explicit-safety-policy` 逐项绑定到规范、策略或负例证据；
 3. 把 28 个 `platform-adapter` 收敛到经验证的平台 Profile；
