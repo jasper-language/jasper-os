@@ -15,14 +15,12 @@
 //! * 每个装载段：`filesz ≤ memsz`；文件数据 `[offset, offset+filesz)` 在文件内；地址不溢出；
 //!   `vaddr` 与 `offset` 模页对齐一致（否则无法按页映射）
 //! * 装载段之间虚拟地址不重叠；入口点落在某个可执行段内
-//! * 段数不超过 [`MAX_SEGMENTS`]
+//! * 装载段元数据按程序头实际数量分配；分配失败显式拒绝，不截断
 //!
 //! 「段地址是否位于用户可用的虚拟窗口」属于装载策略，由内核装载器另行检查。
 
 /// 页大小（段对齐检查用）。
 pub const PAGE: u64 = 4096;
-/// 最多接受的装载段数。
-pub const MAX_SEGMENTS: usize = 16;
 
 /// ELF 类别（文件头第 4 字节）：决定地址字段的宽度与各结构的布局。
 /// ELF class: selects the width of address fields and the structure layout.
@@ -187,12 +185,11 @@ impl Segment {
 }
 
 /// 解析结果。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ElfImage<'a> {
     /// 入口地址。
     pub entry: u64,
-    segs: [Option<Segment>; MAX_SEGMENTS],
-    count: usize,
+    segs: alloc::vec::Vec<Segment>,
     /// 程序声明的 ABI 要求；没有 `.note.jasper.abi` 节时为 `None`。
     abi: Option<crate::abi_version::ProgramAbi>,
     /// Raw required-capability note, validated during parse.
@@ -200,14 +197,14 @@ pub struct ElfImage<'a> {
 }
 
 impl<'a> ElfImage<'a> {
-    /// 全部装载段（按程序头顺序）。
+    /// 全部装载段（按页地址升序）。
     pub fn segments(&self) -> impl Iterator<Item = &Segment> {
-        self.segs[..self.count].iter().filter_map(|s| s.as_ref())
+        self.segs.iter()
     }
 
     /// 装载段个数。
     pub fn segment_count(&self) -> usize {
-        self.count
+        self.segs.len()
     }
 
     /// 程序声明的 ABI 要求（未携带 ABI 章时为 `None`；章节格式错误会在解析时被拒）。
@@ -409,7 +406,9 @@ pub fn parse<'a>(image: &'a [u8], machine: u16, class: ElfClass) -> Result<ElfIm
         return Err(ElfError::Truncated);
     }
 
-    let mut out = ElfImage { entry, segs: [None; MAX_SEGMENTS], count: 0, abi: None, caps: None };
+    let mut segs = alloc::vec::Vec::new();
+    segs.try_reserve(phnum)
+        .map_err(|_| ElfError::TooManySegments)?;
     for i in 0..phnum {
         let ph = phoff + i * lay.phent;
         let ty = u32_at(image, ph)?;
@@ -430,9 +429,6 @@ pub fn parse<'a>(image: &'a [u8], machine: u16, class: ElfClass) -> Result<ElfIm
         if filesz > memsz || file_end > image.len() as u64 || vaddr.checked_add(memsz).is_none() || vaddr % PAGE != offset % PAGE {
             return Err(ElfError::BadSegment);
         }
-        if out.count == MAX_SEGMENTS {
-            return Err(ElfError::TooManySegments);
-        }
         let seg = Segment {
             vaddr,
             memsz,
@@ -441,21 +437,33 @@ pub fn parse<'a>(image: &'a [u8], machine: u16, class: ElfClass) -> Result<ElfIm
             flags: SegFlags { read: pflags & 4 != 0, write: pflags & 2 != 0, execute: pflags & 1 != 0 },
         };
         // 按页粒度检查重叠（装载按页映射，同页两段也算冲突）；页区间计算溢出、或越出该类别的地址空间 ⇒ 段非法
-        let (lo, hi) = seg.page_range().ok_or(ElfError::BadSegment)?;
+        let (_, hi) = seg.page_range().ok_or(ElfError::BadSegment)?;
         if lay.limit.is_some_and(|top| hi > top) {
             return Err(ElfError::BadSegment);
         }
-        for other in out.segments() {
-            // 已接受的段都通过了同样的检查，page_range 不会失败
-            let (olo, ohi) = other.page_range().ok_or(ElfError::BadSegment)?;
-            if lo < ohi && olo < hi {
-                return Err(ElfError::Overlap);
-            }
-        }
-        out.segs[out.count] = Some(seg);
-        out.count += 1;
+        segs.push(seg);
     }
-    let entry_ok = out.segments().any(|s| s.flags.execute && entry >= s.vaddr && entry < s.vaddr + s.memsz);
+    // ELF 不要求 PT_LOAD 按地址排序；先按页起点排序再检查相邻区间，避免
+    // 不受信任的程序头数量造成 O(n²) 验证工作量。
+    segs.sort_unstable_by_key(|seg| {
+        seg.page_range()
+            .expect("segment page range was validated before insertion")
+            .0
+    });
+    for pair in segs.windows(2) {
+        let (_, previous_hi) = pair[0]
+            .page_range()
+            .ok_or(ElfError::BadSegment)?;
+        let (next_lo, _) = pair[1]
+            .page_range()
+            .ok_or(ElfError::BadSegment)?;
+        if previous_hi > next_lo {
+            return Err(ElfError::Overlap);
+        }
+    }
+    let entry_ok = segs
+        .iter()
+        .any(|s| s.flags.execute && entry >= s.vaddr && entry < s.vaddr + s.memsz);
     if !entry_ok {
         return Err(ElfError::BadEntry);
     }
@@ -470,7 +478,7 @@ pub fn parse<'a>(image: &'a [u8], machine: u16, class: ElfClass) -> Result<ElfIm
         }
         None => None,
     };
-    Ok(ElfImage { entry, segs: out.segs, count: out.count, abi, caps })
+    Ok(ElfImage { entry, segs, abi, caps })
 }
 
 /// Kani：节名读取对任意字符串表与偏移不 panic；成功时名字在表内、不含 NUL、紧跟一个 NUL。
@@ -620,6 +628,25 @@ mod tests {
         assert!(segs[1].flags.write && !segs[1].flags.execute);
         assert_eq!(segs[1].memsz - segs[1].filesz, 0x3000 - 0x10, "BSS 部分");
         assert_eq!(segs[0].file_bytes(&img).len(), 0x100);
+    }
+
+    #[test]
+    fn segment_inventory_follows_program_headers_without_an_implementation_cap() {
+        let segment_count = 33usize;
+        let mut descriptors = Vec::new();
+        for index in 0..segment_count {
+            // Deliberately leave program headers unsorted; the parser must accept
+            // any header order and validate overlap after ordering by page.
+            let address = CODE + ((index * 7) % segment_count) as u64 * 0x1000;
+            descriptors.push((PT_LOAD, 0x2000, address, 0, 0x20, 5));
+        }
+        let img = build(&descriptors, CODE);
+        let parsed = parse(&img, X86_64, ElfClass::Elf64).unwrap();
+        assert_eq!(parsed.segment_count(), segment_count);
+        assert!(parsed
+            .segments()
+            .map(|segment| segment.vaddr)
+            .is_sorted());
     }
 
     #[test]

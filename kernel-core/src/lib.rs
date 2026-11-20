@@ -64,6 +64,7 @@
     feature = "hwvirt-vcpu-dynamic",
     feature = "gpu-dynamic",
     feature = "cpu-dynamic",
+    feature = "elf-dynamic",
     feature = "ext4-view",
     feature = "persistent-install",
     feature = "runtime-registries",
@@ -101,6 +102,7 @@ pub mod deadline_forest;
 pub mod yield_gate;
 pub mod dma_quiesce;
 pub mod dma_abi;
+#[cfg(any(test, feature = "elf-dynamic"))]
 pub mod elf;
 #[cfg(feature = "ext4-view")]
 pub mod ext4_view;

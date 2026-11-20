@@ -1,5 +1,5 @@
 {
-  "baseline_total": 233,
+  "baseline_total": 232,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,7 +10,7 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 137,
+    "explicit-safety-policy": 136,
     "platform-adapter": 28,
     "protocol-abi": 38,
     "test-demo-fixture": 11
@@ -655,16 +655,6 @@
       "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G5",
       "source": "max_tasks: 64,"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "51fdc6d8e4f905938ddecf0cc7068e868c400e9b7dc93a292e97b636975223e5",
-      "line": 25,
-      "path": "kernel-core/src/elf.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_SEGMENTS: usize = 16;"
     },
     {
       "category": "explicit-safety-policy",
@@ -2159,7 +2149,7 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 140,
+    "explicit-safety-policy": 139,
     "platform-adapter": 44,
     "protocol-abi": 38,
     "test-demo-fixture": 11

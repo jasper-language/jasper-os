@@ -7,7 +7,7 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
-kernel-core = { path = "../kernel-core", features = ["acpi-dynamic", "network-dynamic", "terminal-dynamic", "display-dynamic", "hwvirt-vcpu-dynamic", "runtime-registries", "gpu-dynamic", "irq-dynamic", "cpu-dynamic"] }
+kernel-core = { path = "../kernel-core", features = ["acpi-dynamic", "network-dynamic", "terminal-dynamic", "display-dynamic", "hwvirt-vcpu-dynamic", "runtime-registries", "gpu-dynamic", "irq-dynamic", "cpu-dynamic", "elf-dynamic"] }
 jasper-lifecycle-boot = { path = "../lifecycle-boot" }
 jasper-lifecycle-model = { path = "../lifecycle-model" }
 # Compatibility crates are optional services. Native Jasper profiles must link
@@ -273,7 +273,7 @@ selftest-inject-failure = []
 
 [build-dependencies]
 # 构建期复用 kernel-core 的登记表解析与校验（宿主上编译，零依赖）。
-kernel-core = { path = "../kernel-core" }
+kernel-core = { path = "../kernel-core", features = ["elf-dynamic"] }
 
 [lib]
 name = "jasper_kernel"

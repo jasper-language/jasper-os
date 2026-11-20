@@ -385,12 +385,6 @@
       "rules": "HC-G1"
     },
     {
-      "count": 1,
-      "fingerprint": "51fdc6d8e4f905938ddecf0cc7068e868c400e9b7dc93a292e97b636975223e5",
-      "path": "kernel-core/src/elf.rs",
-      "rules": "HC-G1"
-    },
-    {
       "count": 2,
       "fingerprint": "53e6372220dcc8fbc898ed8e2bec0097454ac4781644197bd8006771e6871b77",
       "path": "kernel-core/src/config.rs",
@@ -1305,5 +1299,5 @@
     "user",
     "xtask"
   ],
-  "total": 233
+  "total": 232
 }

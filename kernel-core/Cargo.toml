@@ -76,6 +76,9 @@ irq-dynamic = []
 # Firmware CPU identity inventories use heap-backed topology records in the
 # kernel. User ABI crates retain the allocation-free bitmap surface.
 cpu-dynamic = []
+# Native ELF program-header inventories follow the image itself and require the
+# caller's allocator for capacity-checked segment metadata.
+elf-dynamic = []
 # Persistent installation requires the kernel heap for bounded transactional
 # state snapshots; core profiles that do not use it remain allocation-free.
 persistent-install = []
