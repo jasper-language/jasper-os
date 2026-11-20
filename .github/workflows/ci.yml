@@ -36,8 +36,13 @@ env:
 jobs:
   host:
     name: host tests (64/32-bit, AArch64, RISC-V64)
-    # 公开仓库的每次推送；以及开发仓库中 verify/* 分支（开发机上暂停本地 QEMU 期间，用托管运行器做验收）
-    if: github.repository == 'jasper-language/jasper-os' || startsWith(github.ref, 'refs/heads/verify/')
+    # 公开仓库的每次推送；开发仓库中 verify/* 的 push 或 PR
+    # （开发机上暂停本地 QEMU 期间，用托管运行器做验收）。PR 的 github.ref 是
+    # refs/pull/*/merge，必须检查 github.head_ref，否则会再次产生空成功。
+    if: >-
+      github.repository == 'jasper-language/jasper-os' ||
+      (github.event_name == 'pull_request' && startsWith(github.head_ref, 'verify/')) ||
+      startsWith(github.ref, 'refs/heads/verify/')
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -54,6 +59,10 @@ jobs:
             --target x86_64-unknown-none,x86_64-unknown-uefi,aarch64-unknown-none,aarch64-unknown-none-softfloat,riscv64gc-unknown-none-elf,riscv64imac-unknown-none-elf,riscv32imac-unknown-none-elf,i686-unknown-linux-musl,aarch64-unknown-linux-musl,riscv64gc-unknown-linux-musl
           echo "RUSTUP_TOOLCHAIN=$RUST_NIGHTLY" >> "$GITHUB_ENV"
       - run: rustc -Vv && cargo -V
+      - name: Issue #15 私有 verify PR 实际作业门 / private verify PR gate
+        run: |
+          python3 scripts/check-ci-private-pr-gate.py --self-test
+          python3 scripts/check-ci-private-pr-gate.py
       - name: ABI 契约快照与历史不可变性 / ABI contract snapshots
         env:
           ABI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -171,8 +180,11 @@ jobs:
 
   accept:
     name: accept (x86_64 + AArch64 + RISC-V64 QEMU)
-    # 公开仓库的每次推送；以及开发仓库中 verify/* 分支（开发机上暂停本地 QEMU 期间，用托管运行器做验收）
-    if: github.repository == 'jasper-language/jasper-os' || startsWith(github.ref, 'refs/heads/verify/')
+    # 与 host 作业相同：verify/* 的 PR 必须依据 head_ref 进入真实验收。
+    if: >-
+      github.repository == 'jasper-language/jasper-os' ||
+      (github.event_name == 'pull_request' && startsWith(github.head_ref, 'verify/')) ||
+      startsWith(github.ref, 'refs/heads/verify/')
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
