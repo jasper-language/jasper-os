@@ -32,6 +32,15 @@ FRAMEWORK = {
 DIRECTORIES = {
     "permissions": "/system/etc/permissions",
     "runtime_apex": "/apex/com.android.runtime",
+    "linker_config_root": "/linkerconfig",
+    "system_apex_root": "/system/apex",
+    "selinux_policy": "/system/etc/selinux",
+    "init_hw": "/system/etc/init/hw",
+}
+STATIC_FILES = {
+    "linker_config": "/linkerconfig/ld.config.txt",
+    "vintf_manifest": "/system/etc/vintf/manifest.xml",
+    "passwd": "/system/etc/passwd",
 }
 REQUIRED_APK_ENTRIES = {"AndroidManifest.xml", "resources.arsc"}
 
@@ -194,6 +203,27 @@ def inspect_image(debugfs_bin: Path, image: Path) -> dict[str, object]:
             missing.append(name)
         directories[name] = {"path": path, "present": present}
 
+    static_files: dict[str, dict[str, object]] = {}
+    for name, path in STATIC_FILES.items():
+        inode = stat_path(debugfs_bin, image, path)
+        present = inode is not None and inode.file_type == "regular" and inode.size != 0
+        details: dict[str, object] = {"path": path, "present": present}
+        if present:
+            with tempfile.TemporaryDirectory(prefix="jasper-android-static-") as temporary:
+                dumped = Path(temporary) / name
+                dump_file(debugfs_bin, image, path, dumped)
+                content = dumped.read_bytes()
+                details["size"] = len(content)
+                details["sha256"] = hashlib.sha256(content).hexdigest()
+                if name == "linker_config":
+                    text = content.decode("utf-8", errors="replace")
+                    has_namespace = "namespace.default" in text
+                    details["has_default_namespace"] = has_namespace
+                    present = has_namespace
+        if not present:
+            missing.append(name)
+        static_files[name] = details
+
     zygote_rc = stat_path(debugfs_bin, image, ZYGOTE64_RC)
     zygote_text = ""
     if zygote_rc is not None and zygote_rc.file_type == "regular" and zygote_rc.size != 0:
@@ -235,6 +265,7 @@ def inspect_image(debugfs_bin: Path, image: Path) -> dict[str, object]:
         "executables": executables,
         "framework": framework,
         "directories": directories,
+        "static_files": static_files,
         "launch": launch,
     }
 

@@ -29,11 +29,20 @@ Static Activity launch prerequisites:
 - the image also contains `framework-res.apk`, the runtime APEX, permission
   configuration and the boot-critical Android user-space services listed above.
 
-Result: `container_ready=true`, `activity_runtime_ready=false`.
+The corrected check also found real namespace/identity blockers:
+
+- `/linkerconfig/ld.config.txt` is absent, so Bionic cannot apply the Android
+  Framework/APEX linker namespace map;
+- `/system/etc/passwd` exists only as a zero-byte file;
+- VINTF manifest, SELinux policy, init definitions and `/system/apex` are
+  present.
+
+Result: `container_ready=false`, `activity_runtime_ready=false`.
 
 This evidence does not claim Activity lifecycle. It establishes that the
-current root fixture has the static framework namespace needed to attempt
-zygote/system_server launch. The next slice must actually start that chain with
-matching APEX mounts, SELinux policy, Binder services and framework
-configuration, then exercise `onCreate/onStart/onResume`,
+current root fixture has the correct zygote/system_server launch *definition*
+and most Framework files, but still lacks the linker namespace map and
+non-empty Android user database needed for a complete static launch root. The
+next slice must supply those, actually start the chain with matching APEX
+mounts and Binder services, then exercise `onCreate/onStart/onResume`,
 resource/configuration delivery, graphics, input and audio.

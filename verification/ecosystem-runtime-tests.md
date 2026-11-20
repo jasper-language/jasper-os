@@ -131,8 +131,10 @@ real Android 34 framework-root preflight finds app_process64, servicemanager,
 installd, framework.jar, services.jar, am.jar and a structurally valid
 framework-res.apk/resources.arsc. `init.zygote64.rc` starts app_process64 with
 `--zygote --start-system-server`; separate zygote64/system_server binaries are
-not required by modern Android. Activity startup still cannot be claimed until
-that process chain actually runs.
+not required by modern Android. The corrected preflight still finds a missing
+`/linkerconfig/ld.config.txt` and zero-byte `/system/etc/passwd`, and Activity
+startup cannot be claimed until those static blockers are fixed and the process
+chain actually runs.
 
 ## Remaining Jasper work
 

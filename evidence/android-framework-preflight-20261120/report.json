@@ -5,14 +5,30 @@
     "Activity onCreate/onStart/onResume, resources/configuration, graphics, input and audio remain separate runtime gates."
   ],
   "activity_runtime_ready": false,
-  "container_ready": true,
+  "container_ready": false,
   "directories": {
+    "init_hw": {
+      "path": "/system/etc/init/hw",
+      "present": true
+    },
+    "linker_config_root": {
+      "path": "/linkerconfig",
+      "present": true
+    },
     "permissions": {
       "path": "/system/etc/permissions",
       "present": true
     },
     "runtime_apex": {
       "path": "/apex/com.android.runtime",
+      "present": true
+    },
+    "selinux_policy": {
+      "path": "/system/etc/selinux",
+      "present": true
+    },
+    "system_apex_root": {
+      "path": "/system/apex",
       "present": true
     }
   },
@@ -86,6 +102,25 @@
       "starts_system_server": true
     }
   },
-  "missing": [],
-  "schema": "jasper.android.framework-preflight/1"
+  "missing": [
+    "linker_config",
+    "passwd"
+  ],
+  "schema": "jasper.android.framework-preflight/1",
+  "static_files": {
+    "linker_config": {
+      "path": "/linkerconfig/ld.config.txt",
+      "present": false
+    },
+    "passwd": {
+      "path": "/system/etc/passwd",
+      "present": false
+    },
+    "vintf_manifest": {
+      "path": "/system/etc/vintf/manifest.xml",
+      "present": true,
+      "sha256": "37458b489e76a15e25aa7e38cdfd363be433b917484643e74e28d01c0f6dd341",
+      "size": 1715
+    }
+  }
 }
