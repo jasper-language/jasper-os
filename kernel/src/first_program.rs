@@ -98,6 +98,16 @@ pub(crate) fn image() -> &'static [u8] {
 /// 装载并运行生产首程序，要求退出码为 0 且页帧全部归还。
 /// Loads and runs the production first program; requires exit code zero and full frame reclamation.
 pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
+    // MAC policy is persistent boot state, not a per-program allocation. Install
+    // it before taking the reclamation baseline so the first authorization
+    // cannot grow the kernel heap while the program is running.
+    if let Err(error) = crate::security::init_mac() {
+        crate::kprintln!(
+            "[JSR-PROD-DIAG] first_program mac_init={}",
+            error.name()
+        );
+        return (None, false);
+    }
     #[cfg(all(feature = "terminal-session-verify", feature = "lifecycle-ab-health"))]
     {
         let frames_before_backend = frame::free_frames();

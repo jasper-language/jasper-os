@@ -73,6 +73,8 @@ AF_UNIX `listen` backlog 也改为使用同一进程对象预算；Linux ABI 的
 统一授权的 MAC 策略包不再固定为 32 条规则。策略类型改为由已验证包的
 `Vec<MacRule>` 驱动，64 条规则回归通过；内核显式启用 `mac-dynamic`，普通无堆用户
 程序仍只看到不分配内存的标签类型，不会因此要求全局分配器。
+首个生产程序会在记录页帧/堆回收基线之前显式安装 MAC 策略，避免持久策略分配被
+误计为程序泄漏；真实 OVMF/virtio-blk 复现达到 `reclaimed=true`。
 
 `compat-loader` 删除 17 个实现包络：program-header/PT_LOAD 数、重定位数、
 Android packed-relocation 字节、动态库名数量与长度、TLS/生命周期/COPY 大小、
