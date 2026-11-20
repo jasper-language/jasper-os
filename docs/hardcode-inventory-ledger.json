@@ -1,5 +1,5 @@
 {
-  "baseline_total": 296,
+  "baseline_total": 295,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -13,7 +13,7 @@
     "explicit-safety-policy": 139,
     "platform-adapter": 28,
     "protocol-abi": 42,
-    "runtime-resource-capacity": 57,
+    "runtime-resource-capacity": 56,
     "test-demo-fixture": 7
   },
   "entries": [
@@ -116,16 +116,6 @@
       "reason": "path owns a wire, loader, package, graphics, or lifecycle ABI; consumer review remains required",
       "rules": "HC-G1",
       "source": "pub const MAX_IMPORTS: usize = 32;"
-    },
-    {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "5fea521f8db878811b404ab7e386d0245dd71de5cc9c77750d13a1299e091557",
-      "line": 29,
-      "path": "compat-graphics/src/service.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
-      "rules": "HC-G1",
-      "source": "pub const MAX_SYNC_OBJECTS: usize = 32;"
     },
     {
       "category": "explicit-safety-policy",
@@ -2753,7 +2743,7 @@
     "explicit-safety-policy": 144,
     "platform-adapter": 44,
     "protocol-abi": 42,
-    "runtime-resource-capacity": 59,
+    "runtime-resource-capacity": 58,
     "test-demo-fixture": 7
   }
 }

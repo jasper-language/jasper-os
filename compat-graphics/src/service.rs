@@ -26,7 +26,6 @@ use crate::wsi::{
 };
 
 pub const MAX_IMPORTS: usize = 32;
-pub const MAX_SYNC_OBJECTS: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GraphicsLimit {
@@ -215,6 +214,7 @@ pub struct GraphicsService<
     const I: usize,
     const G: usize,
     const K: usize,
+    const Y: usize,
 > {
     caps: DeviceCapabilities,
     queue: GpuQueue<G, K>,
@@ -223,9 +223,9 @@ pub struct GraphicsService<
     buffers: [Option<ImportedBuffer>; MAX_IMPORTS],
     images: [Option<ImportedImage>; MAX_IMPORTS],
     work: [Option<Work>; G],
-    fences: [Option<Fence>; MAX_SYNC_OBJECTS],
-    semaphores: [Option<Semaphore>; MAX_SYNC_OBJECTS],
-    timelines: [Option<TimelineSemaphore>; MAX_SYNC_OBJECTS],
+    fences: [Option<Fence>; Y],
+    semaphores: [Option<Semaphore>; Y],
+    timelines: [Option<TimelineSemaphore>; Y],
     next_sync: u64,
     wsi: Wsi<W, S, I>,
     buffer_bytes: u64,
@@ -233,8 +233,14 @@ pub struct GraphicsService<
     active: bool,
 }
 
-impl<const W: usize, const S: usize, const I: usize, const G: usize, const K: usize>
-    GraphicsService<W, S, I, G, K>
+impl<
+        const W: usize,
+        const S: usize,
+        const I: usize,
+        const G: usize,
+        const K: usize,
+        const Y: usize,
+    > GraphicsService<W, S, I, G, K, Y>
 {
     pub fn new(
         caps: DeviceCapabilities,
@@ -258,9 +264,9 @@ impl<const W: usize, const S: usize, const I: usize, const G: usize, const K: us
             buffers: [None; MAX_IMPORTS],
             images: [None; MAX_IMPORTS],
             work: [None; G],
-            fences: [None; MAX_SYNC_OBJECTS],
-            semaphores: [None; MAX_SYNC_OBJECTS],
-            timelines: [None; MAX_SYNC_OBJECTS],
+            fences: [None; Y],
+            semaphores: [None; Y],
+            timelines: [None; Y],
             next_sync: 1,
             wsi: Wsi::new(),
             buffer_bytes: 0,
@@ -1050,7 +1056,7 @@ mod tests {
         .unwrap()
     }
 
-    fn test_service() -> GraphicsService<2, 2, 32, 32, 32> {
+    fn test_service() -> GraphicsService<2, 2, 32, 32, 32, 32> {
         GraphicsService::new(
             capabilities(),
             GpuIdentity {
@@ -1494,7 +1500,7 @@ mod tests {
         .unwrap();
         queue.submit(1, SUBMIT, 1).unwrap();
         assert_eq!(queue.submit(1, SUBMIT, 1), Err(GpuError::QueueFull));
-        assert_eq!(MAX_IMPORTS, MAX_SYNC_OBJECTS);
+        assert_eq!(MAX_IMPORTS, 32);
     }
 
     #[test]
@@ -1591,5 +1597,32 @@ mod tests {
                 missing: vec![],
             }
         );
+    }
+
+    #[test]
+    fn caller_selects_sync_object_capacity() {
+        let mut service = GraphicsService::<2, 2, 32, 32, 32, 1>::new(
+            capabilities(),
+            GpuIdentity {
+                object: 11,
+                generation: 1,
+            },
+            SUBMIT | CANCEL | CONTROL | MAP_DEVICE,
+            None,
+            GraphicsLimit {
+                max_buffer_bytes: 1 << 20,
+                total_buffer_bytes: 1 << 21,
+                max_image_bytes: 1 << 22,
+                total_image_bytes: 1 << 23,
+            },
+        )
+        .unwrap();
+        let timeline = service.create_timeline(0).unwrap();
+        assert_eq!(
+            service.create_timeline(0),
+            Err(GraphicsError::Capacity)
+        );
+        service.destroy_timeline(timeline).unwrap();
+        assert!(service.create_timeline(0).is_ok());
     }
 }
