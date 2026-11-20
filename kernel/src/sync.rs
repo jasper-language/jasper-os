@@ -6,7 +6,8 @@
 //!   必须用它，否则单 CPU 上任务持锁时来一个中断去抢同一把锁就会永远自旋
 //! * 全局锁以 [`IrqSpinLock::ranked`] 新建并在 `crate::lockorder` 登记级别：加锁时按本处理器的持有集合检查顺序，
 //!   违反顺序即停机（多处理器下逆序加锁会死锁，宁可第一次运行就暴露）；局部锁用 [`IrqSpinLock::new`]，不参与顺序
-//! * 每把 [`IrqSpinLock`] 使用排号锁；获取次数按CPU分别记录，争用路径才更新共享自旋计数。
+//! * 每把 [`IrqSpinLock`] 使用排号锁；获取次数与争用统计使用锁内原子总计，
+//!   不保存固定大小的每 CPU 数组，因此逻辑 CPU 数不受 `MAX_CPUS` 限制。
 //! * 每把 [`IrqSpinLock`] 自带争用计数（加锁次数、遇到占用的次数、等待时的自旋次数与单次最多自旋次数），
 //!   供验收测量关键路径锁的争用；计数只用 32 位原子（所有目标都有），回绕不影响正确性
 //! * [`IrqU64`]：中断处理程序与任务可共享的 64 位计数单元——有 64 位原子指令的目标上是硬件原子，
@@ -22,7 +23,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use kernel_core::lockorder::{HeldRanks, LockClass, LockOrderError};
 
 use crate::arch;
-pub use kernel_core::sync::{SpinLock, SpinLockGuard};
+pub use kernel_core::sync::{CpuAtomicCounter, SpinLock, SpinLockGuard};
 use kernel_core::ticket::{TicketLock, TicketGuard};
 
 /// 经平台契约关 / 开本处理器中断的屏蔽策略。
@@ -49,8 +50,10 @@ pub type IrqU64 = kernel_core::sync::IrqSafeU64<ArchIrqMask>;
 pub struct IrqSpinLock<T> {
     inner: TicketLock<T>,
     class: Option<LockClass>,
-    // Author: chatgpt. Count acquisitions on this CPU, without a shared RMW word.
-    acquired: [AtomicU32; kernel_core::smp::MAX_CPUS],
+    // Bootstrap-local acquisition counters plus a global tail for CPUs beyond
+    // the pre-heap inventory. The tail prevents a logical-CPU ceiling without
+    // allocating from the lock hot path.
+    acquired: CpuAtomicCounter<{ kernel_core::smp::MAX_CPUS }>,
     contended: AtomicU32,
     spins: AtomicU32,
     max_spins: AtomicU32,
@@ -75,7 +78,7 @@ impl<T> IrqSpinLock<T> {
     /// 新建不登记顺序的局部锁（未加锁）。持有期间不得获取其他锁。
     /// Create an unranked, local lock.
     pub const fn new(data: T) -> Self {
-        IrqSpinLock { inner: TicketLock::new(data), class: None, acquired: [const { AtomicU32::new(0) }; kernel_core::smp::MAX_CPUS], contended: AtomicU32::new(0), spins: AtomicU32::new(0), max_spins: AtomicU32::new(0) }
+        IrqSpinLock { inner: TicketLock::new(data), class: None, acquired: CpuAtomicCounter::new(), contended: AtomicU32::new(0), spins: AtomicU32::new(0), max_spins: AtomicU32::new(0) }
     }
 
     /// 新建登记了级别的全局锁（未加锁）；级别见 [`crate::lockorder`]。
@@ -84,7 +87,7 @@ impl<T> IrqSpinLock<T> {
         IrqSpinLock {
             inner: TicketLock::new(data),
             class: Some(class),
-            acquired: [const { AtomicU32::new(0) }; kernel_core::smp::MAX_CPUS],
+            acquired: CpuAtomicCounter::new(),
             contended: AtomicU32::new(0),
             spins: AtomicU32::new(0),
             max_spins: AtomicU32::new(0),
@@ -110,7 +113,7 @@ impl<T> IrqSpinLock<T> {
                 (g, true, n)
             }
         };
-        self.acquired[arch::cpu_index()].fetch_add(1, Ordering::Relaxed);
+        self.acquired.record(arch::cpu_index());
         // Commit contention only after the acquisition exists. A concurrent
         // snapshot may then observe either both counters or neither, never a
         // contended acquisition that has not yet been acquired.
@@ -150,7 +153,7 @@ impl<T> IrqSpinLock<T> {
     /// Contention counters.
     pub fn stats(&self) -> LockStats {
         LockStats {
-            acquired: self.acquired.iter().fold(0u32, |sum, c| sum.wrapping_add(c.load(Ordering::Relaxed))),
+            acquired: self.acquired.total(),
             contended: self.contended.load(Ordering::Relaxed),
             spins: self.spins.load(Ordering::Relaxed),
             max_spins: self.max_spins.load(Ordering::Relaxed),
@@ -160,7 +163,8 @@ impl<T> IrqSpinLock<T> {
     /// 清零争用测量值（测量窗口开始时调用）。
     /// Reset the contention counters.
     pub fn reset_stats(&self) {
-        for c in self.acquired.iter().chain([&self.contended, &self.spins, &self.max_spins]) {
+        self.acquired.reset();
+        for c in [&self.contended, &self.spins, &self.max_spins] {
             c.store(0, Ordering::Relaxed);
         }
     }

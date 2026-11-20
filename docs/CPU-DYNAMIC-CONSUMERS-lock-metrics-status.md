@@ -1,0 +1,52 @@
+# Issue #47: lock diagnostics and runtime-capacity reporting
+
+更新时间：2026-11-20。
+
+状态：**software slice passed**。该切片移除锁统计中的永久 128-CPU 数组上限，
+并纠正启动报告把 bootstrap 槽位误报为实际 CPU 数量的问题；不代表
+`CPU-DYNAMIC-CONSUMERS-1` 或 Issue #47 全部完成。
+
+## 实现
+
+- `kernel-core::sync::CpuAtomicCounter` 封装 bootstrap 区内每 CPU 原子计数和统一
+  overflow 原子计数；CPU 2/129 的宿主测试验证超出 bootstrap 后计数不回绕到
+  CPU 0。
+- `IrqSpinLock` 的 acquisition 诊断使用该计数器；CPU 下标超出 bootstrap 区时不再
+  越界访问或别名 CPU 0。
+- CPU 129 及以后不再越界访问、停机或别名 CPU 0 的计数；`LockStats.acquired`
+  汇总 bootstrap 计数与 overflow 计数。
+- 正常 bootstrap 范围内的锁热路径仍使用本 CPU 独立原子计数，不引入额外共享
+  cache line RMW；只有超出 bootstrap 区的诊断计数使用 overflow 原子。
+- `[JSR-CAP]` 启动报告的 `cpus=` 改为 `cpu_bootstrap_slots=`，不再把
+  `MAX_CPUS`/128 冒充实际硬件或最终逻辑 CPU 数。
+- 拓扑准入失败日志从错误的 `cpu_set_capacity` 改为
+  `topology_inventory_incomplete`；动态 CPU 拓扑不再报告一个虚假的固定容量。
+
+## 验证
+
+```text
+cargo check -p jasper-kernel --target x86_64-unknown-none
+PASS
+
+cargo check -p jasper-kernel --target x86_64-unknown-none --no-default-features
+PASS
+
+cargo test -p kernel-core sync --lib
+27 passed; 0 failed
+
+python3 scripts/check-hardcode-gate.py --base HEAD
+PASS
+
+python3 scripts/check-hardcode-gate.py --inventory \
+  --inventory-baseline docs/hardcode-inventory-baseline.json
+findings=278; added=0; cleared=0
+```
+
+## 未完成
+
+- 当前主机没有 129+ CPU 的真实启动环境，因此该切片只证明软件不再以固定数组
+  表达最终 CPU 统计容量，不冒充大拓扑运行验收。
+- 亲和 ABI、剩余架构/path platform adapters、真实 129/256/1024-CPU、稀疏 NUMA、
+  discovery failure 和 hotplug race 矩阵仍属于后续 CPU dynamic 阶段。
+- 其余每核 state 必须继续按同一 admitted runtime inventory 审计，不能用新的大
+  魔数替代 128，也不能把 bootstrap-only 存储冒充最终容量。

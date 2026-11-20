@@ -16,7 +16,61 @@
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+/// Diagnostic counter with bootstrap-local CPU slots and an overflow tail.
+///
+/// Logical CPUs beyond `N` are counted in `overflow`, so `N` is only the
+/// allocation-free bootstrap representation and never a final CPU-count
+/// ceiling. The normal path performs one CPU-local atomic update.
+pub struct CpuAtomicCounter<const N: usize> {
+    slots: [AtomicU32; N],
+    overflow: AtomicU32,
+}
+
+impl<const N: usize> CpuAtomicCounter<N> {
+    pub const fn new() -> Self {
+        Self {
+            slots: [const { AtomicU32::new(0) }; N],
+            overflow: AtomicU32::new(0),
+        }
+    }
+
+    pub fn record(&self, cpu: usize) {
+        match self.slots.get(cpu) {
+            Some(counter) => {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+            None => {
+                self.overflow.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn total(&self) -> u32 {
+        self.slots
+            .iter()
+            .fold(self.overflow.load(Ordering::Relaxed), |sum, counter| {
+                sum.wrapping_add(counter.load(Ordering::Relaxed))
+            })
+    }
+
+    pub fn reset(&self) {
+        for counter in self
+            .slots
+            .iter()
+            .chain(core::iter::once(&self.overflow))
+        {
+            counter.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+impl<const N: usize> Default for CpuAtomicCounter<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// 自旋互斥锁。
 pub struct SpinLock<T> {
@@ -341,6 +395,18 @@ pub type Atomic64 = LockedU64;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_counter_bootstraps_and_accounts_overflow_without_alias() {
+        let counter = CpuAtomicCounter::<2>::new();
+        counter.record(0);
+        counter.record(1);
+        counter.record(2);
+        counter.record(129);
+        assert_eq!(counter.total(), 4);
+        counter.reset();
+        assert_eq!(counter.total(), 0);
+    }
 
     #[test]
     fn locked_u64_matches_native_semantics() {

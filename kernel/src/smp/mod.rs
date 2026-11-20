@@ -213,10 +213,9 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
     let topo = discovery.topology;
     if topo.dropped > 0 {
         crate::kprintln!(
-            "[JSR-SMP] reject=cpu_set_capacity discovered={} admitted={} capacity={} dropped={}",
+            "[JSR-SMP] reject=topology_inventory_incomplete discovered={} retained={} dropped={}",
             topo.count().saturating_add(topo.dropped),
             topo.count(),
-            kernel_core::smp::MAX_CPUS,
             topo.dropped
         );
         arch::halt_forever();

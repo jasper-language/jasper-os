@@ -51,7 +51,7 @@ pub fn report() {
         .map(|limits| limits.max_rings_per_process)
         .unwrap_or(0);
     kprintln!(
-        "[JSR-CAP] cpus={} tasks={} objects={} handles={} frames={} rings={} endpoints={}",
+        "[JSR-CAP] cpu_bootstrap_slots={} tasks={} objects={} handles={} frames={} rings={} endpoints={}",
         kernel_core::smp::MAX_CPUS,
         ACTIVE.sched.max_tasks,
         ACTIVE.objects.max_objects,
