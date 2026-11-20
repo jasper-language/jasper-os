@@ -6,6 +6,8 @@
 //! extend completed entries with their durable result instead of only recording the
 //! service identity.
 
+use alloc::vec::Vec;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Begin {
     New(usize),
@@ -29,15 +31,15 @@ struct Entry {
     order: u64,
 }
 
-pub struct Ledger<const N: usize> {
-    entries: [Option<Entry>; N],
+pub struct Ledger {
+    entries: Vec<Option<Entry>>,
     order: u64,
 }
 
-impl<const N: usize> Ledger<N> {
+impl Ledger {
     pub const fn new() -> Self {
         Self {
-            entries: [None; N],
+            entries: Vec::new(),
             order: 0,
         }
     }
@@ -56,20 +58,26 @@ impl<const N: usize> Ledger<N> {
             };
         }
 
-        let free = self.entries.iter().position(Option::is_none);
-        let evict = free.or_else(|| {
-            self.entries
-                .iter()
-                .enumerate()
-                .filter_map(|(index, entry)| {
-                    let entry = entry.as_ref()?;
-                    (entry.state == State::Completed).then_some((index, entry.order))
-                })
-                .min_by_key(|(_, order)| *order)
-                .map(|(index, _)| index)
-        });
-        let Some(slot) = evict else {
-            return Begin::Exhausted;
+        let slot = if let Some(free) = self.entries.iter().position(Option::is_none) {
+            free
+        } else if let Some(evict) = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                let entry = entry.as_ref()?;
+                (entry.state == State::Completed).then_some((index, entry.order))
+            })
+            .min_by_key(|(_, order)| *order)
+            .map(|(index, _)| index)
+        {
+            evict
+        } else {
+            if self.entries.try_reserve(1).is_err() {
+                return Begin::Exhausted;
+            }
+            self.entries.push(None);
+            self.entries.len() - 1
         };
         self.order = match self.order.checked_add(1) {
             Some(order) => order,
@@ -107,7 +115,7 @@ impl<const N: usize> Ledger<N> {
     }
 }
 
-impl<const N: usize> Default for Ledger<N> {
+impl Default for Ledger {
     fn default() -> Self {
         Self::new()
     }
@@ -119,7 +127,7 @@ mod tests {
 
     #[test]
     fn retry_conflict_busy_and_abort_are_distinct() {
-        let mut ledger = Ledger::<2>::new();
+        let mut ledger = Ledger::new();
         let Begin::New(slot) = ledger.begin(7, 1) else {
             panic!("first request must be new");
         };
@@ -127,14 +135,16 @@ mod tests {
         assert_eq!(ledger.begin(7, 2), Begin::Conflict);
         ledger.complete(slot, 7, 1);
         assert_eq!(ledger.begin(7, 1), Begin::Retry);
-        assert_eq!(ledger.begin(8, 1), Begin::New(1));
-        ledger.abort(1, 8, 1);
-        assert_eq!(ledger.begin(8, 1), Begin::New(1));
+        let Begin::New(next) = ledger.begin(8, 1) else {
+            panic!("second request must be new");
+        };
+        ledger.abort(next, 8, 1);
+        assert!(matches!(ledger.begin(8, 1), Begin::New(_)));
     }
 
     #[test]
     fn completed_entries_evict_oldest_but_pending_entries_remain() {
-        let mut ledger = Ledger::<2>::new();
+        let mut ledger = Ledger::new();
         let Begin::New(a) = ledger.begin(1, 1) else {
             panic!();
         };
@@ -149,12 +159,12 @@ mod tests {
         assert_eq!(slot, a);
         assert_eq!(ledger.begin(1, 1), Begin::New(b), "evicted key may be reused");
         assert_eq!(ledger.begin(3, 1), Begin::Busy);
-        assert_eq!(ledger.begin(4, 1), Begin::Exhausted);
+        assert_eq!(ledger.begin(4, 1), Begin::New(2), "pending entries grow the ledger");
     }
 
     #[test]
     fn conflicting_request_performs_no_mutation() {
-        let mut ledger = Ledger::<1>::new();
+        let mut ledger = Ledger::new();
         let Begin::New(slot) = ledger.begin(11, 3) else {
             panic!();
         };

@@ -68,7 +68,6 @@ pub mod spawn;
 
 /// 每个进程句柄表的容量。
 pub const HANDLES_PER_PROCESS: usize = crate::config::ACTIVE.objects.handles_per_process;
-const USI_REQUEST_SLOTS: usize = 16;
 #[cfg(feature = "linux-abi")]
 static LINUX_PID_NEXT: AtomicU32 = AtomicU32::new(1);
 #[cfg(feature = "linux-abi")]
@@ -807,7 +806,7 @@ pub struct Process {
     ring_quota: ResourceQuota,
     /// USI request IDs are scoped to this process; completed read-only entries are
     /// bounded and evicted oldest-first.
-    usi_requests: UsiRequestLedger<USI_REQUEST_SLOTS>,
+    usi_requests: UsiRequestLedger,
     /// 本进程的退出状态（持有一个内部引用）。
     exit_state: ObjId,
     /// 子进程表：每项持有子进程的一个内部引用（父 → 子单向）；本进程退出时释放。

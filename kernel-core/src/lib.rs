@@ -197,6 +197,7 @@ pub mod trap;
 pub mod ui_protocol;
 pub mod ui_service;
 pub mod usi;
+#[cfg(any(test, feature = "runtime-registries"))]
 pub mod usi_request;
 pub mod user_layout;
 pub mod vmm_device;
