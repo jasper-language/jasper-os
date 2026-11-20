@@ -12,9 +12,9 @@
   "counts": {
     "explicit-safety-policy": 139,
     "platform-adapter": 28,
-    "protocol-abi": 42,
-    "runtime-resource-capacity": 52,
-    "test-demo-fixture": 7
+    "protocol-abi": 41,
+    "runtime-resource-capacity": 51,
+    "test-demo-fixture": 9
   },
   "entries": [
     {
@@ -1688,22 +1688,22 @@
       "source": "Err(e) => return Err(sbi::decode(e).err().unwrap_or(SbiError::Failed).to_smp()),"
     },
     {
-      "category": "protocol-abi",
+      "category": "test-demo-fixture",
       "count": 1,
       "fingerprint": "f867c16208d540069d383b9d5ad73d0a5a7411230d336b265be77a50d0d6b1f3",
       "line": 104,
       "path": "kernel/src/arch/x86_64/bm1.rs",
-      "reason": "architecture or wire protocol reset/default value, not a runtime inventory fact",
+      "reason": "QEMU-only BM-1 acceptance trace buffer; the module has no effect on the default kernel",
       "rules": "HC-G7",
       "source": "for chunk in bytes.chunks(2) { sum += ((chunk[0] as u32) << 8) | *chunk.get(1).unwrap_or(&0) as u32; }"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "test-demo-fixture",
       "count": 1,
       "fingerprint": "ac49022d1ec47f3280c56f7cfede2d2ffb1da42045a0e945830856f2da55989d",
       "line": 11,
       "path": "kernel/src/arch/x86_64/bm1.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
+      "reason": "QEMU-only BM-1 acceptance trace buffer; the module has no effect on the default kernel",
       "rules": "HC-G8",
       "source": "const CAPACITY: usize = 8 * 1024 * 1024;"
     },
@@ -2702,8 +2702,8 @@
   "weighted_counts": {
     "explicit-safety-policy": 144,
     "platform-adapter": 44,
-    "protocol-abi": 42,
-    "runtime-resource-capacity": 54,
-    "test-demo-fixture": 7
+    "protocol-abi": 41,
+    "runtime-resource-capacity": 53,
+    "test-demo-fixture": 9
   }
 }

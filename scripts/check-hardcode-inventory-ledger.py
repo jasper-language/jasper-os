@@ -162,6 +162,11 @@ def classify(path: str, rules: str, source: str) -> tuple[str, str]:
             "test-demo-fixture",
             "bounded benchmark or probe fixture, not a production hardware fact",
         )
+    if path == "kernel/src/arch/x86_64/bm1.rs":
+        return (
+            "test-demo-fixture",
+            "QEMU-only BM-1 acceptance trace buffer; the module has no effect on the default kernel",
+        )
     if path == "kernel/src/s2.rs":
         return (
             "test-demo-fixture",
