@@ -47,6 +47,8 @@
 - Linux graphics `GraphicsService<..., Y>` 的 fence、binary semaphore 和 timeline
   容量改由调用方显式选择；`Y=1` 负例验证第二对象 `Capacity` 拒绝，销毁后槽位可
   重新使用。
+- `process_vm_readv/writev` 删除 1 MiB 总传输上限；iovec 解析到 `usize` 溢出边界，
+  实际复制量由双方向量长度、进程 IO 预算和可失败 `try_reserve_exact` 共同裁决。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -66,7 +68,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=295, runtime-resource-capacity=56, unclassified=0, added=0
+findings=294, runtime-resource-capacity=55, unclassified=0, added=0
 ```
 
 ## 尚未完成
