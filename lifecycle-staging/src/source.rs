@@ -5,12 +5,15 @@
 //! staging coordinator. Transport identity never replaces signature, grant,
 //! dependency, capacity or digest checks.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use jasper_lifecycle_model::manifest::{
     SignatureSet, ThresholdError, ThresholdTrustPolicy, TrustPolicy, UpdateTarget,
@@ -37,9 +40,22 @@ const READ_BUFFER_BYTES: usize = 64 * 1024;
 const SIGNATURE_BYTES: usize = 64;
 const RESUME_CHECKPOINT_FILE: &str = ".update-source-resume";
 const RESUME_CHECKPOINT_MAGIC: &[u8; 8] = b"JSURES01";
+const MIRROR_HEALTH_MAGIC: &[u8; 8] = b"JSURHM01";
+const MIRROR_HEALTH_VERSION: u16 = 1;
+const MIRROR_HEALTH_HEADER_BYTES: usize = 16;
+const MIRROR_HEALTH_ENTRY_BYTES: usize = 48;
+static MIRROR_HEALTH_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// A transport-independent source for one signed update bundle.
 pub trait UpdateBundleSource {
+    /// Stable, path-free mirror identity for persistent health ordering.
+    ///
+    /// Sources without a stable identity retain caller priority and receive no
+    /// persisted health state.
+    fn mirror_identity(&self) -> Option<[u8; 32]> {
+        None
+    }
+
     /// Returns exactly one bounded canonical manifest candidate.
     fn read_manifest(&self) -> Result<Vec<u8>, SourceError>;
     /// Returns exactly one detached 64-byte signature candidate.
@@ -76,6 +92,273 @@ pub trait UpdateBundleSource {
     }
 }
 
+/// One durable mirror-health record. It is ordering information only and never
+/// participates in manifest trust, signature, authorization or anti-rollback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MirrorHealthEntry {
+    /// Stable path-free mirror identity. 稳定、无路径的镜像身份。
+    pub identity: [u8; 32],
+    /// Successful completed materializations. 成功完成材料化的次数。
+    pub successes: u32,
+    /// Failed authentication or artifact attempts. 认证或工件尝试失败次数。
+    pub failures: u32,
+    /// Monotonic local update sequence. 单调递增的本地更新序号。
+    pub last_sequence: u64,
+}
+
+/// Caller-selected durable snapshot of long-term mirror outcomes.
+#[derive(Clone, Debug)]
+pub struct MirrorHealthStore {
+    path: PathBuf,
+}
+
+impl MirrorHealthStore {
+    /// Selects the exact non-directory snapshot path. The parent must exist.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// Returns the exact snapshot path. 返回精确的快照路径。
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn load(&self) -> Result<MirrorHealthState, SourceError> {
+        let metadata = match fs::symlink_metadata(&self.path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(MirrorHealthState::default())
+            }
+            Err(source) => {
+                return Err(SourceError::Io {
+                    operation: "inspect mirror health snapshot",
+                    path: self.path.clone(),
+                    source,
+                })
+            }
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(mirror_health_error(
+                &self.path,
+                "snapshot is not a regular non-symlink file",
+            ));
+        }
+        let len = usize::try_from(metadata.len())
+            .map_err(|_| mirror_health_error(&self.path, "snapshot length is not addressable"))?;
+        if len < MIRROR_HEALTH_HEADER_BYTES
+            || !(len - MIRROR_HEALTH_HEADER_BYTES).is_multiple_of(MIRROR_HEALTH_ENTRY_BYTES)
+        {
+            return Err(mirror_health_error(&self.path, "snapshot length is invalid"));
+        }
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(len)
+            .map_err(|_| mirror_health_error(&self.path, "snapshot allocation failed"))?;
+        bytes.resize(len, 0);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&self.path)
+            .map_err(|source| SourceError::Io {
+                operation: "open mirror health snapshot",
+                path: self.path.clone(),
+                source,
+            })?;
+        file.read_exact(&mut bytes)
+            .map_err(|source| SourceError::Io {
+                operation: "read mirror health snapshot",
+                path: self.path.clone(),
+                source,
+            })?;
+        if &bytes[..8] != MIRROR_HEALTH_MAGIC
+            || u16::from_le_bytes([bytes[8], bytes[9]]) != MIRROR_HEALTH_VERSION
+            || bytes[10..12] != [0, 0]
+        {
+            return Err(mirror_health_error(&self.path, "snapshot header is invalid"));
+        }
+        let count = u32::from_le_bytes(bytes[12..16].try_into().expect("four-byte field")) as usize;
+        if count != (len - MIRROR_HEALTH_HEADER_BYTES) / MIRROR_HEALTH_ENTRY_BYTES {
+            return Err(mirror_health_error(
+                &self.path,
+                "snapshot entry count is inconsistent",
+            ));
+        }
+        let mut state = MirrorHealthState::default();
+        let (records, remainder) =
+            bytes[MIRROR_HEALTH_HEADER_BYTES..].as_chunks::<MIRROR_HEALTH_ENTRY_BYTES>();
+        if !remainder.is_empty() {
+            return Err(mirror_health_error(
+                &self.path,
+                "snapshot has a partial entry",
+            ));
+        }
+        for record in records {
+            let identity: [u8; 32] = record[..32].try_into().expect("32-byte identity");
+            if identity == [0; 32] || state.entries.contains_key(&identity) {
+                return Err(mirror_health_error(
+                    &self.path,
+                    "snapshot contains zero or duplicate identity",
+                ));
+            }
+            let entry = MirrorHealthEntry {
+                identity,
+                successes: u32::from_le_bytes(record[32..36].try_into().expect("four-byte field")),
+                failures: u32::from_le_bytes(record[36..40].try_into().expect("four-byte field")),
+                last_sequence: u64::from_le_bytes(
+                    record[40..48].try_into().expect("eight-byte field"),
+                ),
+            };
+            if entry.last_sequence == 0 {
+                return Err(mirror_health_error(
+                    &self.path,
+                    "snapshot contains a zero sequence",
+                ));
+            }
+            state.next_sequence = state
+                .next_sequence
+                .max(entry.last_sequence.saturating_add(1));
+            state.entries.insert(identity, entry);
+        }
+        Ok(state)
+    }
+
+    fn store(&self, state: &MirrorHealthState) -> Result<(), SourceError> {
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| mirror_health_error(&self.path, "snapshot has no parent"))?;
+        let file_name = self
+            .path
+            .file_name()
+            .ok_or_else(|| mirror_health_error(&self.path, "snapshot has no file name"))?
+            .to_string_lossy();
+        let sequence = MIRROR_HEALTH_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temporary = parent.join(format!(
+            ".{file_name}.{}.{sequence}.tmp",
+            std::process::id()
+        ));
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(
+                MIRROR_HEALTH_HEADER_BYTES
+                    .checked_add(state.entries.len().saturating_mul(MIRROR_HEALTH_ENTRY_BYTES))
+                    .ok_or_else(|| mirror_health_error(&self.path, "snapshot length overflow"))?,
+            )
+            .map_err(|_| mirror_health_error(&self.path, "snapshot allocation failed"))?;
+        bytes.extend_from_slice(MIRROR_HEALTH_MAGIC);
+        bytes.extend_from_slice(&MIRROR_HEALTH_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        let count = u32::try_from(state.entries.len())
+            .map_err(|_| mirror_health_error(&self.path, "too many mirror entries"))?;
+        bytes.extend_from_slice(&count.to_le_bytes());
+        for entry in state.entries.values() {
+            bytes.extend_from_slice(&entry.identity);
+            bytes.extend_from_slice(&entry.successes.to_le_bytes());
+            bytes.extend_from_slice(&entry.failures.to_le_bytes());
+            bytes.extend_from_slice(&entry.last_sequence.to_le_bytes());
+        }
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&temporary)
+            .map_err(|source| SourceError::Io {
+                operation: "create mirror health temporary snapshot",
+                path: temporary.clone(),
+                source,
+            })?;
+        if let Err(source) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
+            drop(file);
+            let _ = fs::remove_file(&temporary);
+            return Err(SourceError::Io {
+                operation: "persist mirror health temporary snapshot",
+                path: temporary,
+                source,
+            });
+        }
+        drop(file);
+        if let Err(source) = fs::rename(&temporary, &self.path) {
+            let _ = fs::remove_file(&temporary);
+            return Err(SourceError::Io {
+                operation: "publish mirror health snapshot",
+                path: self.path.clone(),
+                source,
+            });
+        }
+        sync_directory(parent)
+    }
+}
+
+#[derive(Default)]
+struct MirrorHealthState {
+    entries: BTreeMap<[u8; 32], MirrorHealthEntry>,
+    next_sequence: u64,
+}
+
+impl MirrorHealthState {
+    fn record(&mut self, identity: [u8; 32], success: bool) {
+        let sequence = self.next_sequence.max(1);
+        self.next_sequence = sequence.saturating_add(1);
+        let entry = self
+            .entries
+            .entry(identity)
+            .or_insert(MirrorHealthEntry {
+                identity,
+                successes: 0,
+                failures: 0,
+                last_sequence: sequence,
+            });
+        if success {
+            entry.successes = entry.successes.saturating_add(1);
+        } else {
+            entry.failures = entry.failures.saturating_add(1);
+        }
+        entry.last_sequence = sequence;
+    }
+
+    fn score(&self, identity: [u8; 32]) -> (i64, u64) {
+        self.entries
+            .get(&identity)
+            .map(|entry| {
+                (
+                    i64::from(entry.successes)
+                        .saturating_mul(4)
+                        .saturating_sub(i64::from(entry.failures).saturating_mul(3)),
+                    entry.last_sequence,
+                )
+            })
+            .unwrap_or((0, 0))
+    }
+}
+
+fn mirror_health_error(path: &Path, reason: &'static str) -> SourceError {
+    SourceError::MirrorHealth {
+        path: path.to_path_buf(),
+        reason,
+    }
+}
+
+fn mirror_identity(domain: &[u8], value: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update([0]);
+    hasher.update(value);
+    hasher.finalize().into()
+}
+
+fn note_mirror_outcome(
+    health: Option<&MirrorHealthStore>,
+    state: &mut MirrorHealthState,
+    identity: Option<[u8; 32]>,
+    success: bool,
+) -> Result<(), SourceError> {
+    let (Some(store), Some(identity)) = (health, identity) else {
+        return Ok(());
+    };
+    state.record(identity, success);
+    store.store(state)
+}
+
 /// Offline bundle rooted in a local directory.
 #[derive(Clone, Debug)]
 pub struct DirectoryBundle {
@@ -95,6 +378,14 @@ impl DirectoryBundle {
 }
 
 impl UpdateBundleSource for DirectoryBundle {
+    fn mirror_identity(&self) -> Option<[u8; 32]> {
+        let root = fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
+        Some(mirror_identity(
+            b"directory",
+            root.as_os_str().as_bytes(),
+        ))
+    }
+
     fn read_manifest(&self) -> Result<Vec<u8>, SourceError> {
         read_bounded_regular(
             &self.root.join(SOURCE_MANIFEST_FILE),
@@ -149,6 +440,7 @@ pub struct HttpBundle {
     base_url: String,
     curl: PathBuf,
     allow_http: bool,
+    identity: Option<[u8; 32]>,
 }
 
 impl HttpBundle {
@@ -158,12 +450,22 @@ impl HttpBundle {
             base_url: base_url.into(),
             curl: curl.into(),
             allow_http: false,
+            identity: None,
         }
     }
 
     /// Allows plain HTTP for an explicitly controlled local test origin.
     pub fn allow_http(mut self, allow: bool) -> Self {
         self.allow_http = allow;
+        self
+    }
+
+    /// Supplies a stable, path-free identity for durable health ordering.
+    ///
+    /// Callers should derive this from configuration rather than embedding URL
+    /// credentials or query parameters in the persisted health record.
+    pub fn with_mirror_identity(mut self, identity: [u8; 32]) -> Self {
+        self.identity = (identity != [0; 32]).then_some(identity);
         self
     }
 
@@ -313,6 +615,10 @@ impl HttpBundle {
 }
 
 impl UpdateBundleSource for HttpBundle {
+    fn mirror_identity(&self) -> Option<[u8; 32]> {
+        self.identity
+    }
+
     fn read_manifest(&self) -> Result<Vec<u8>, SourceError> {
         let mut bytes = Vec::new();
         self.run_curl(
@@ -585,7 +891,7 @@ pub fn materialize_verified_resumable(
     target: UpdateTarget,
     spool_root: &Path,
 ) -> Result<MaterializedUpdate, SourceError> {
-    materialize_verified_mirrors(sources, spool_root, |source| {
+    materialize_verified_mirrors(sources, spool_root, None, |source| {
         let manifest_bytes = source.read_manifest()?;
         let signature = source.read_signature()?;
         let manifest = verify_cbor_manifest(policy, target, &manifest_bytes, signature)
@@ -601,7 +907,44 @@ pub fn materialize_verified_threshold_resumable(
     target: UpdateTarget,
     spool_root: &Path,
 ) -> Result<MaterializedUpdate, SourceError> {
-    materialize_verified_mirrors(sources, spool_root, |source| {
+    materialize_verified_mirrors(sources, spool_root, None, |source| {
+        let manifest_bytes = source.read_manifest()?;
+        let signatures = source.read_signature_set()?;
+        let manifest = verify_cbor_manifest_threshold(policy, target, &manifest_bytes, signatures)
+            .map_err(SourceError::Manifest)?;
+        Ok((manifest_bytes, manifest))
+    })
+}
+
+/// Mirror variant that durably ranks stable mirror identities by long-term
+/// outcomes. Health affects only attempt order; every admitted mirror still
+/// passes the same manifest, signature, rollback and artifact-digest checks.
+pub fn materialize_verified_resumable_with_health(
+    sources: &[&dyn UpdateBundleSource],
+    policy: TrustPolicy<'_>,
+    target: UpdateTarget,
+    spool_root: &Path,
+    health: &MirrorHealthStore,
+) -> Result<MaterializedUpdate, SourceError> {
+    materialize_verified_mirrors(sources, spool_root, Some(health), |source| {
+        let manifest_bytes = source.read_manifest()?;
+        let signature = source.read_signature()?;
+        let manifest = verify_cbor_manifest(policy, target, &manifest_bytes, signature)
+            .map_err(SourceError::Manifest)?;
+        Ok((manifest_bytes, manifest))
+    })
+}
+
+/// Threshold-authenticated persistent-health variant of
+/// [`materialize_verified_resumable_with_health`].
+pub fn materialize_verified_threshold_resumable_with_health(
+    sources: &[&dyn UpdateBundleSource],
+    policy: ThresholdTrustPolicy<'_>,
+    target: UpdateTarget,
+    spool_root: &Path,
+    health: &MirrorHealthStore,
+) -> Result<MaterializedUpdate, SourceError> {
+    materialize_verified_mirrors(sources, spool_root, Some(health), |source| {
         let manifest_bytes = source.read_manifest()?;
         let signatures = source.read_signature_set()?;
         let manifest = verify_cbor_manifest_threshold(policy, target, &manifest_bytes, signatures)
@@ -613,6 +956,7 @@ pub fn materialize_verified_threshold_resumable(
 fn materialize_verified_mirrors<F>(
     sources: &[&dyn UpdateBundleSource],
     spool_root: &Path,
+    health: Option<&MirrorHealthStore>,
     verify: F,
 ) -> Result<MaterializedUpdate, SourceError>
 where
@@ -621,25 +965,58 @@ where
     if sources.is_empty() {
         return Err(SourceError::NoVerifiedSource);
     }
+    let mut health_state = health
+        .map(MirrorHealthStore::load)
+        .transpose()?
+        .unwrap_or_default();
+    let active_identities: BTreeSet<[u8; 32]> =
+        sources.iter().filter_map(|source| source.mirror_identity()).collect();
+    health_state
+        .entries
+        .retain(|identity, _| active_identities.contains(identity));
+    let mut ordered: Vec<usize> = (0..sources.len()).collect();
+    ordered.sort_by_key(|index| {
+        let identity = sources[*index].mirror_identity();
+        let (score, sequence) = identity
+            .map(|identity| health_state.score(identity))
+            .unwrap_or((0, 0));
+        (std::cmp::Reverse(score), std::cmp::Reverse(sequence), *index)
+    });
     let mut authenticated = Vec::new();
     let mut primary_digest = None;
     let mut primary_bytes = None;
     let mut primary_manifest = None;
     let mut last_error = None;
-    for source in sources {
-        match verify(*source) {
+    for index in ordered {
+        let source = sources[index];
+        match verify(source) {
             Ok((bytes, manifest)) => {
                 let digest = manifest.manifest.manifest_sha256;
                 if primary_digest.is_none() {
                     primary_digest = Some(digest);
                     primary_bytes = Some(bytes);
                     primary_manifest = Some(manifest);
-                    authenticated.push(*source);
+                    authenticated.push(source);
                 } else if primary_digest == Some(digest) {
-                    authenticated.push(*source);
+                    authenticated.push(source);
+                } else {
+                    note_mirror_outcome(
+                        health,
+                        &mut health_state,
+                        source.mirror_identity(),
+                        false,
+                    )?;
                 }
             }
-            Err(error) => last_error = Some(error),
+            Err(error) => {
+                note_mirror_outcome(
+                    health,
+                    &mut health_state,
+                    source.mirror_identity(),
+                    false,
+                )?;
+                last_error = Some(error);
+            }
         }
     }
     let (Some(digest), Some(manifest_bytes), Some(manifest)) =
@@ -676,7 +1053,14 @@ where
     let mut artifacts = Vec::with_capacity(manifest.artifacts.len());
     for artifact in &manifest.artifacts {
         let path = artifact_root.join(&artifact.name);
-        materialize_one_artifact(&authenticated, artifact.name.as_str(), &path, artifact)?;
+        materialize_one_artifact(
+            &authenticated,
+            artifact.name.as_str(),
+            &path,
+            artifact,
+            health,
+            &mut health_state,
+        )?;
         artifacts.push(OwnedArtifactSource {
             name: artifact.name.clone(),
             path,
@@ -778,6 +1162,8 @@ fn materialize_one_artifact(
     name: &str,
     path: &Path,
     artifact: &jasper_lifecycle_model::manifest_cbor::VerifiedArtifact,
+    health: Option<&MirrorHealthStore>,
+    health_state: &mut MirrorHealthState,
 ) -> Result<(), SourceError> {
     let mut last_error = None;
     for source in sources {
@@ -808,8 +1194,15 @@ fn materialize_one_artifact(
         };
         if offset == artifact.size {
             if artifact_matches(path, artifact)? {
+                note_mirror_outcome(
+                    health,
+                    health_state,
+                    source.mirror_identity(),
+                    true,
+                )?;
                 return Ok(());
             }
+            note_mirror_outcome(health, health_state, source.mirror_identity(), false)?;
             truncate_artifact(path)?;
         }
         let resume_offset = if offset == artifact.size { 0 } else { offset };
@@ -823,12 +1216,22 @@ fn materialize_one_artifact(
                     })?
                     .len();
                 if actual == artifact.size && artifact_matches(path, artifact)? {
+                    note_mirror_outcome(
+                        health,
+                        health_state,
+                        source.mirror_identity(),
+                        true,
+                    )?;
                     return Ok(());
                 }
+                note_mirror_outcome(health, health_state, source.mirror_identity(), false)?;
                 last_error = Some(SourceError::ArtifactDigest { name: name.into() });
                 truncate_artifact(path)?;
             }
-            Err(error) => last_error = Some(error),
+            Err(error) => {
+                note_mirror_outcome(health, health_state, source.mirror_identity(), false)?;
+                last_error = Some(error);
+            }
         }
     }
     Err(last_error.unwrap_or(SourceError::NoVerifiedSource))
@@ -967,6 +1370,13 @@ pub enum SourceError {
     NoVerifiedSource,
     /// The requested spool has no usable parent.
     InvalidSpoolPath(PathBuf),
+    /// Persistent mirror-health snapshot is malformed or unsafe.
+    MirrorHealth {
+        /// Snapshot path.
+        path: PathBuf,
+        /// Stable failure reason.
+        reason: &'static str,
+    },
     /// Manifest parsing, trust, signature, rollback or policy verification failed.
     Manifest(CborManifestError),
     /// Process, transport, or stream operation failed.
@@ -1039,6 +1449,9 @@ impl fmt::Display for SourceError {
             }
             Self::InvalidSpoolPath(path) => {
                 write!(formatter, "source spool has no parent: {}", path.display())
+            }
+            Self::MirrorHealth { path, reason } => {
+                write!(formatter, "invalid mirror health snapshot {}: {reason}", path.display())
             }
             Self::Manifest(error) => write!(formatter, "update manifest rejected: {error:?}"),
             Self::Transport {
@@ -1295,4 +1708,51 @@ fn copy_regular_resume(
             source,
         })
     })()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_health_writers_never_share_a_temporary_path() {
+        let directory = std::env::temp_dir().join(format!(
+            "jasper-mirror-health-{}-{}",
+            std::process::id(),
+            MIRROR_HEALTH_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&directory).unwrap();
+        let store = MirrorHealthStore::new(directory.join("health.bin"));
+        let mut writers = Vec::new();
+        for index in 0..8u8 {
+            let store = store.clone();
+            writers.push(std::thread::spawn(move || {
+                let mut state = MirrorHealthState::default();
+                state.record([index + 1; 32], true);
+                store.store(&state)
+            }));
+        }
+        for writer in writers {
+            writer.join().unwrap().unwrap();
+        }
+        assert!(store.load().is_ok());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn http_health_identity_is_explicit_and_rejects_zero() {
+        let source = HttpBundle::new("https://example.invalid", "curl");
+        assert_eq!(source.mirror_identity(), None);
+        assert_eq!(
+            source
+                .clone()
+                .with_mirror_identity([7; 32])
+                .mirror_identity(),
+            Some([7; 32])
+        );
+        assert_eq!(
+            source.with_mirror_identity([0; 32]).mirror_identity(),
+            None
+        );
+    }
 }

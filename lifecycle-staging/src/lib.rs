@@ -45,7 +45,10 @@ use crate::archive_store::FileArchiveStore;
 use crate::control::{ControlStoreError, FileControlStore};
 use crate::source::{
     materialize_verified, materialize_verified_resumable, materialize_verified_threshold,
-    materialize_verified_threshold_resumable, MaterializedUpdate, SourceError, UpdateBundleSource,
+    materialize_verified_resumable_with_health,
+    materialize_verified_threshold_resumable,
+    materialize_verified_threshold_resumable_with_health, MaterializedUpdate, MirrorHealthStore,
+    SourceError, UpdateBundleSource,
 };
 
 const MANIFEST_FILE: &str = "manifest.cbor";
@@ -358,6 +361,72 @@ impl UpdateCoordinator {
         let materialized =
             materialize_verified_threshold_resumable(sources, policy, target, source_spool)
                 .map_err(CoordinatorError::Source)?;
+        self.prepare_materialized_source(
+            materialized,
+            grant,
+            now,
+            installed_dependencies,
+            staging_root,
+            metadata_headroom,
+        )
+    }
+
+    /// Ordered-mirror variant with a durable long-term health snapshot.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_from_sources_with_health(
+        &mut self,
+        policy: TrustPolicy<'_>,
+        target: UpdateTarget,
+        sources: &[&dyn UpdateBundleSource],
+        source_spool: &Path,
+        health: &MirrorHealthStore,
+        grant: LocalInstallGrant,
+        now: u64,
+        installed_dependencies: &[String],
+        staging_root: &Path,
+        metadata_headroom: u64,
+    ) -> Result<PreparedUpdate, CoordinatorError> {
+        let materialized = materialize_verified_resumable_with_health(
+            sources,
+            policy,
+            target,
+            source_spool,
+            health,
+        )
+        .map_err(CoordinatorError::Source)?;
+        self.prepare_materialized_source(
+            materialized,
+            grant,
+            now,
+            installed_dependencies,
+            staging_root,
+            metadata_headroom,
+        )
+    }
+
+    /// Threshold-authenticated mirror variant with durable health ordering.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_from_sources_threshold_with_health(
+        &mut self,
+        policy: ThresholdTrustPolicy<'_>,
+        target: UpdateTarget,
+        sources: &[&dyn UpdateBundleSource],
+        source_spool: &Path,
+        health: &MirrorHealthStore,
+        grant: LocalInstallGrant,
+        now: u64,
+        installed_dependencies: &[String],
+        staging_root: &Path,
+        metadata_headroom: u64,
+    ) -> Result<PreparedUpdate, CoordinatorError> {
+        let materialized = materialize_verified_threshold_resumable_with_health(
+            sources,
+            policy,
+            target,
+            source_spool,
+            health,
+        )
+        .map_err(CoordinatorError::Source)?;
         self.prepare_materialized_source(
             materialized,
             grant,
@@ -1876,6 +1945,88 @@ impl UpdateService {
         Ok(self.status())
     }
 
+    /// Acquire from health-ranked mirrors and publish the prepared generation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_from_sources_with_health(
+        &mut self,
+        policy: TrustPolicy<'_>,
+        target: UpdateTarget,
+        sources: &[&dyn UpdateBundleSource],
+        source_spool: &Path,
+        health: &MirrorHealthStore,
+        grant: LocalInstallGrant,
+        now: u64,
+        installed_dependencies: &[String],
+        staging_root: &Path,
+        metadata_headroom: u64,
+    ) -> Result<ServiceStatus, ServiceError> {
+        self.require_idle()?;
+        let generation = self.peek_generation()?;
+        let mut coordinator = UpdateCoordinator::idle();
+        let prepared = coordinator.prepare_from_sources_with_health(
+            policy,
+            target,
+            sources,
+            source_spool,
+            health,
+            grant,
+            now,
+            installed_dependencies,
+            staging_root,
+            metadata_headroom,
+        )?;
+        let manifest_sha256 = prepared.manifest.manifest.manifest_sha256;
+        self.publish_active(
+            generation,
+            coordinator,
+            prepared,
+            staging_root,
+            manifest_sha256,
+        )?;
+        Ok(self.status())
+    }
+
+    /// Threshold-authenticated service variant with durable health ordering.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_from_sources_threshold_with_health(
+        &mut self,
+        policy: ThresholdTrustPolicy<'_>,
+        target: UpdateTarget,
+        sources: &[&dyn UpdateBundleSource],
+        source_spool: &Path,
+        health: &MirrorHealthStore,
+        grant: LocalInstallGrant,
+        now: u64,
+        installed_dependencies: &[String],
+        staging_root: &Path,
+        metadata_headroom: u64,
+    ) -> Result<ServiceStatus, ServiceError> {
+        self.require_idle()?;
+        let generation = self.peek_generation()?;
+        let mut coordinator = UpdateCoordinator::idle();
+        let prepared = coordinator.prepare_from_sources_threshold_with_health(
+            policy,
+            target,
+            sources,
+            source_spool,
+            health,
+            grant,
+            now,
+            installed_dependencies,
+            staging_root,
+            metadata_headroom,
+        )?;
+        let manifest_sha256 = prepared.manifest.manifest.manifest_sha256;
+        self.publish_active(
+            generation,
+            coordinator,
+            prepared,
+            staging_root,
+            manifest_sha256,
+        )?;
+        Ok(self.status())
+    }
+
     /// Commit the prepared candidate into the inactive slot and dual-copy control store.
     pub fn commit(
         &mut self,
@@ -2243,7 +2394,8 @@ fn advance_update_machine(
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2257,7 +2409,7 @@ mod tests {
     use jasper_lifecycle_model::manifest_cbor::{Channel, MAX_MANIFEST_CBOR_BYTES};
     use sha2::{Digest, Sha256};
 
-    use crate::source::{DirectoryBundle, UpdateBundleSource};
+    use crate::source::{DirectoryBundle, MirrorHealthStore, UpdateBundleSource};
 
     use super::*;
 
@@ -2654,6 +2806,55 @@ server.serve_forever()
         }
     }
 
+    struct IdentifiedBundle<S> {
+        inner: S,
+        identity: [u8; 32],
+        calls: Rc<Cell<usize>>,
+    }
+
+    impl<S: UpdateBundleSource> UpdateBundleSource for IdentifiedBundle<S> {
+        fn mirror_identity(&self) -> Option<[u8; 32]> {
+            Some(self.identity)
+        }
+
+        fn read_manifest(&self) -> Result<Vec<u8>, crate::source::SourceError> {
+            self.inner.read_manifest()
+        }
+
+        fn read_signature(&self) -> Result<[u8; 64], crate::source::SourceError> {
+            self.inner.read_signature()
+        }
+
+        fn read_signature_set(
+            &self,
+        ) -> Result<jasper_lifecycle_model::manifest::SignatureSet, crate::source::SourceError>
+        {
+            self.inner.read_signature_set()
+        }
+
+        fn copy_artifact(
+            &self,
+            name: &str,
+            destination: &Path,
+            max_bytes: u64,
+        ) -> Result<(), crate::source::SourceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            self.inner.copy_artifact(name, destination, max_bytes)
+        }
+
+        fn resume_artifact(
+            &self,
+            name: &str,
+            destination: &Path,
+            max_bytes: u64,
+            offset: u64,
+        ) -> Result<(), crate::source::SourceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            self.inner
+                .resume_artifact(name, destination, max_bytes, offset)
+        }
+    }
+
     struct InvalidSignatureBundle {
         manifest: Vec<u8>,
         artifact: Vec<u8>,
@@ -2920,6 +3121,95 @@ server.serve_forever()
     }
 
     #[test]
+    fn persisted_mirror_health_reorders_the_next_materialization() {
+        let temp = TestDir::new("persistent-mirror-health");
+        let artifact_bytes = b"health-ranked-mirror-artifact";
+        let (manifest_bytes, signature, signer, _) = signed_cbor_bundle(artifact_bytes);
+        let trusted = [signer];
+        let revoked = [[0u8; 32]];
+        let policy = TrustPolicy {
+            trusted_keys: &trusted,
+            revoked_keys: &revoked,
+            minimum_security_epoch: 3,
+        };
+        let target = UpdateTarget {
+            rollback_floor: 8,
+            profile: [0x42; 32],
+        };
+        let bad_calls = Rc::new(Cell::new(0));
+        let good_calls = Rc::new(Cell::new(0));
+        let bad = IdentifiedBundle {
+            inner: WrongArtifactBundle {
+                manifest: manifest_bytes.clone(),
+                signature,
+                size: artifact_bytes.len(),
+            },
+            identity: [1; 32],
+            calls: Rc::clone(&bad_calls),
+        };
+        let good = IdentifiedBundle {
+            inner: MemoryBundle {
+                manifest: manifest_bytes,
+                signature,
+                artifact: artifact_bytes.to_vec(),
+            },
+            identity: [2; 32],
+            calls: Rc::clone(&good_calls),
+        };
+        let sources: [&dyn UpdateBundleSource; 2] = [&bad, &good];
+        let health = MirrorHealthStore::new(temp.path().join("mirror-health.bin"));
+        let first_spool = temp.path().join("first-health-spool");
+        let first = crate::source::materialize_verified_resumable_with_health(
+            &sources,
+            policy,
+            target,
+            &first_spool,
+            &health,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(first.artifact_sources()[0].path).unwrap(),
+            artifact_bytes
+        );
+        assert_eq!((bad_calls.get(), good_calls.get()), (1, 1));
+        drop(first);
+
+        bad_calls.set(0);
+        good_calls.set(0);
+        let second_spool = temp.path().join("second-health-spool");
+        let second = crate::source::materialize_verified_resumable_with_health(
+            &sources,
+            policy,
+            target,
+            &second_spool,
+            &health,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(second.artifact_sources()[0].path).unwrap(),
+            artifact_bytes
+        );
+        assert_eq!(
+            (bad_calls.get(), good_calls.get()),
+            (0, 1),
+            "persisted health must try the known-good mirror before the failed mirror"
+        );
+        drop(second);
+        fs::write(health.path(), b"short").unwrap();
+        let corrupt_spool = temp.path().join("corrupt-health-spool");
+        assert!(matches!(
+            crate::source::materialize_verified_resumable_with_health(
+                &sources,
+                policy,
+                target,
+                &corrupt_spool,
+                &health,
+            ),
+            Err(crate::source::SourceError::MirrorHealth { .. })
+        ));
+    }
+
+    #[test]
     fn mirror_failover_rejects_invalid_signature_and_wrong_artifact_bytes() {
         let temp = TestDir::new("mirror-failover");
         let artifact_bytes = b"mirror-owned-kernel-bytes";
@@ -3104,12 +3394,14 @@ server.serve_forever()
             UpdateService::initialize(temp.path().join("resume-control"), initial).unwrap();
         let spool = temp.path().join("service-resume-spool");
         let staging = temp.path().join("service-resume-staging");
+        let health = MirrorHealthStore::new(temp.path().join("service-mirror-health"));
         let status = service
-            .prepare_from_sources(
+            .prepare_from_sources_with_health(
                 policy,
                 target,
                 &mirrors,
                 &spool,
+                &health,
                 grant,
                 150,
                 &[],
