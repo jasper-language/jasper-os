@@ -23,7 +23,7 @@ Issue #42 的所有外部内核经验只作为问题域来源：
 | M-01 能力化 IPC/死亡通知 | Handle/Rights、Channel、Event、对象 generation；IPC 多 Handle 原子交付、对象 transfer 回滚和订阅关闭已实现 | 部分具备 | 跨域队列所有者退出、请求方取消、服务重启 generation 与完整回收矩阵 |
 | M-02 服务生命周期 | Assembly、Workload、Workload Recovery、ServiceGate | 部分具备 | 版本化 Registered/Admitted/Starting/Ready/Draining/Stopped/Failed 契约和热替换 |
 | M-03 QoS/Deadline 传播 | scheduler、Deadline、Priority Inheritance、AsyncRing controls | 部分具备 | 跨 IPC 有效 QoS 求交集、级联取消、过载和多核尾延迟 |
-| M-04 用户态 Pager | MemoryObject、MemoryCapability、页错误基础 | 未实现 | 原生需求、PagerCapability、FaultEvent、死亡/超时/递归缺页/资源撤销 |
+| M-04 用户态 Pager | MemoryObject、MemoryCapability、`fault_pager` 原生状态机 | 部分具备 | 真实页表/调度接线、CPL3 多处理器压力、重载和内存压力协作 |
 | M-05 操作前 PEP 与操作后事件 | authz、PEP/MAC、security event、bounded audit | 部分具备 | 授权与安全观察分离、观察者 scope、持续容量与故障策略 |
 | M-06 用户态驱动与静止 | Driver Host、DMA/IRQ/IOMMU、Driver Lifecycle | 部分具备 | 真实 MMIO/virtqueue、设备 reset/crash/hotplug 和物理隔离 |
 | M-07 可信系统映像 | NativeInstall、PersistentInstall、LC-2/3/5 | 部分具备 | 真实生产密钥/TPM、公开启动链、物理安装/回滚 |
@@ -62,19 +62,23 @@ Issue #42 的所有外部内核经验只作为问题域来源：
 - `kernel-core::address_sync` 以 MemoryObject backing/generation 为条件身份，
   复用 Registration/WaitSet，完成受 capability 约束的 check/register/park
   状态机；它尚不是新 ABI，也未接线到原生 CPL3/MemoryObject 临界区；
+- `kernel-core::fault_pager` 以既有 MemoryCapability 授权 Pager handler，
+  完成 FaultEvent、handler generation、递归缺页、deadline、撤销和两阶段页表裁决；
+  它不是 userfaultfd ABI，尚未修改真实页表或调度任务；
 - root-exec 在真实 OVMF/CPL3 中恢复通过，包括 40 个并发 eventfd 和
   timerfd/signalfd/pipe 批量压力。
 
 证据见 `docs/ISSUE-42-IPC-DELIVERY-ATOMICITY-status.md`、
 `docs/ISSUE-42-OBJECT-TRANSFER-status.md`、
 `docs/ISSUE-42-SUBSCRIPTION-RESYNC-status.md` 和
-`docs/ISSUE-42-COMPAT-ROOT-EXEC-status.md`；地址同步切片见
-`docs/ISSUE-42-NATIVE-ADDRESS-SYNC-status.md`。
+`docs/ISSUE-42-COMPAT-ROOT-EXEC-status.md`；地址同步和 Pager 切片见
+`docs/ISSUE-42-NATIVE-ADDRESS-SYNC-status.md` 与
+`docs/ISSUE-42-NATIVE-PAGER-status.md`。
 
 ## 尚未关闭
 
 - Native userspace address synchronization 的 check/register/park 原子性；
-- 经原生场景证明必要后的用户态 Pager；
+- 用户态 Pager 到真实 MemoryObject/页表/调度临界区的接线与 CPL3 压力矩阵；
 - FS/NET/device/graphics 四类 AsyncRing backend 的 quiescence 与取消完成证明；
 - 385 项 syscall disposition 到原生后端的完整矩阵；当前枚举包含 2 个显式
   Jasper 扩展 `RseqSliceYield`（471）与 `Uprobe`（336），不得混入 Linux 兼容语义；

@@ -136,6 +136,7 @@ pub mod frame;
 pub mod fs;
 pub mod fs_prod;
 pub mod fault;
+pub mod fault_pager;
 pub mod heap;
 pub mod image_header;
 pub mod interrupt;
