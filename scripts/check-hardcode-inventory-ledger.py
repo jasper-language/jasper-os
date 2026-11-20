@@ -444,8 +444,8 @@ def classify(path: str, rules: str, source: str) -> tuple[str, str]:
         )
     if lowered == "kernel-core/src/config.rs":
         return (
-            "runtime-resource-capacity",
-            "kernel product capacity policy; must remain explicit, budget-derived, and rejection-visible",
+            "explicit-safety-policy",
+            "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
         )
     return (
         "unclassified",

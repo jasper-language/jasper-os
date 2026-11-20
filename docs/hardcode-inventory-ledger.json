@@ -10,10 +10,10 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 140,
+    "explicit-safety-policy": 153,
     "platform-adapter": 28,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 47,
+    "runtime-resource-capacity": 34,
     "test-demo-fixture": 9
   },
   "entries": [
@@ -708,12 +708,12 @@
       "source": "pub const MAX_OBJECTS: usize = 65536;"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "2ed1828f9bd7d4ebdb42bca987bc558b2d4dcd5bc940dee173775fb4fe689824",
       "line": 332,
       "path": "kernel-core/src/config.rs",
-      "reason": "kernel product capacity policy; must remain explicit, budget-derived, and rejection-visible",
+      "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G1",
       "source": "pub const MAX_RT: usize = 64;"
     },
@@ -778,122 +778,122 @@
       "source": "pub const MIN_OBJECTS: usize = 64;"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "e6f54e086fa894e67167a5f665eb9c73d0a1b79e6187f332f17b098b60e28abc",
       "line": 330,
       "path": "kernel-core/src/config.rs",
-      "reason": "kernel product capacity policy; must remain explicit, budget-derived, and rejection-visible",
+      "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G1",
       "source": "pub const MIN_RT: usize = 1;"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "fdb5b6ab1d85711cd8e59b6a4624149e3b5be1d4de04648604d1da86d1182e8e",
       "line": 334,
       "path": "kernel-core/src/config.rs",
-      "reason": "kernel product capacity policy; must remain explicit, budget-derived, and rejection-visible",
+      "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G1",
       "source": "pub const MIN_KERNEL_STACK: usize = 32 * 1024;"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "12ebab77e4506ca47016470d70eb063ce11e25549c58e330650b209c905f082a",
       "line": 416,
       "path": "kernel-core/src/config.rs",
-      "reason": "kernel product capacity policy; must remain explicit, budget-derived, and rejection-visible",
+      "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G5",
       "source": "max_vm_guest_frames: 16 * 1024,"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "1f97fc801cd396be015ab743b5ebf907a991f059fc14003afc8593a00ca4da54",
       "line": 366,
       "path": "kernel-core/src/config.rs",
-      "reason": "kernel product capacity policy; must remain explicit, budget-derived, and rejection-visible",
+      "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G5",
       "source": "max_objects: 1024,"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "391243580a659af9f635f24a4e03661e3170c8a77341e5a973228d772e427af3",
       "line": 424,
       "path": "kernel-core/src/config.rs",
-      "reason": "kernel product capacity policy; must remain explicit, budget-derived, and rejection-visible",
+      "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G5",
       "source": "max_endpoints_per_process: 32,"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 2,
       "fingerprint": "53e6372220dcc8fbc898ed8e2bec0097454ac4781644197bd8006771e6871b77",
       "line": 363,
       "path": "kernel-core/src/config.rs",
-      "reason": "kernel product capacity policy; must remain explicit, budget-derived, and rejection-visible",
+      "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G5",
       "source": "max_map_pages: 1024,"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "57e9e477b4382fee2689eb2541544b94e79aede7a324c4ab50c84f3ba6f59e5c",
       "line": 420,
       "path": "kernel-core/src/config.rs",
-      "reason": "kernel product capacity policy; must remain explicit, budget-derived, and rejection-visible",
+      "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G5",
       "source": "max_objects: 512,"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "72af3b32f4dd71b05c0e8ddeb3465da90814312e9fb502cd895c54ee53348f51",
       "line": 400,
       "path": "kernel-core/src/config.rs",
-      "reason": "kernel product capacity policy; must remain explicit, budget-derived, and rejection-visible",
+      "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G5",
       "source": "max_tasks: 32,"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "b39603885ae311945d9f56e0a355b0ac931d7d6cf3a12982dfeaa075598e5f69",
       "line": 370,
       "path": "kernel-core/src/config.rs",
-      "reason": "kernel product capacity policy; must remain explicit, budget-derived, and rejection-visible",
+      "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G5",
       "source": "max_endpoints_per_process: 64,"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "c11f86af37cf136762e4b2ab85e97fa1a5f844b318e8da41d12e5b816056396c",
       "line": 362,
       "path": "kernel-core/src/config.rs",
-      "reason": "kernel product capacity policy; must remain explicit, budget-derived, and rejection-visible",
+      "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G5",
       "source": "max_vm_guest_frames: 32 * 1024,"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 2,
       "fingerprint": "ec71b1db6aed3226d06b5c5dd61f447b782574aac8cb7804c21061280f50a688",
       "line": 351,
       "path": "kernel-core/src/config.rs",
-      "reason": "kernel product capacity policy; must remain explicit, budget-derived, and rejection-visible",
+      "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G5",
       "source": "max_rt: 8,"
     },
     {
-      "category": "runtime-resource-capacity",
+      "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "ed562be2c962a2e03aa5e03d5d45b17521ac4e18c3cf6ba0f776c97789dfa05c",
       "line": 350,
       "path": "kernel-core/src/config.rs",
-      "reason": "kernel product capacity policy; must remain explicit, budget-derived, and rejection-visible",
+      "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G5",
       "source": "max_tasks: 64,"
     },
@@ -2670,10 +2670,10 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 145,
+    "explicit-safety-policy": 160,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 49,
+    "runtime-resource-capacity": 34,
     "test-demo-fixture": 9
   }
 }
