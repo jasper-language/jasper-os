@@ -49,7 +49,6 @@ static ART_TLS_TRACE_REMAINING: AtomicU32 = AtomicU32::new(0);
 const LINUX_PROC_MAPS_HANDLE: u64 = 0x4a53_5052_4f43_4d50;
 const LINUX_PROC_STAT_HANDLE: u64 = 0x4a53_5052_4f43_5354;
 
-const MAX_PROCESS_SIGNAL_SETS: usize = 16;
 const MAX_SYSV_MESSAGE_QUEUES: usize = 16;
 const SYSV_MSGMAX: usize = 8192;
 const SYSV_MSGMNB: usize = 16384;
@@ -334,7 +333,7 @@ struct CompatState {
     thread_landlock_domains:
         alloc::vec::Vec<Option<alloc::vec::Vec<alloc::sync::Arc<proc::LinuxLandlockRuleset>>>>,
     futexes: alloc::vec::Vec<Option<FutexWord>>,
-    process_signals: [Option<ProcessSignalSet>; MAX_PROCESS_SIGNAL_SETS],
+    process_signals: alloc::vec::Vec<Option<ProcessSignalSet>>,
     flock_locks: alloc::vec::Vec<Option<FlockLock>>,
     flock_waiters: alloc::vec::Vec<Option<FlockWaiter>>,
     posix_timers: alloc::vec::Vec<PosixTimer>,
@@ -364,7 +363,7 @@ impl CompatState {
             threads: alloc::vec::Vec::new(),
             thread_landlock_domains: alloc::vec::Vec::new(),
             futexes: alloc::vec::Vec::new(),
-            process_signals: [None; MAX_PROCESS_SIGNAL_SETS],
+            process_signals: alloc::vec::Vec::new(),
             flock_locks: alloc::vec::Vec::new(),
             flock_waiters: alloc::vec::Vec::new(),
             posix_timers: alloc::vec::Vec::new(),
@@ -542,14 +541,18 @@ pub(crate) fn register_linux_thread(
         } else {
             pid
         };
-        if state.threads.try_reserve(1).is_err()
-            || state.thread_landlock_domains.try_reserve(1).is_err()
-        {
-            return false;
-        }
-        state.threads.push(None);
-        state.thread_landlock_domains.push(None);
-        let slot = state.threads.len() - 1;
+        let slot = if let Some(slot) = state.threads.iter().position(Option::is_none) {
+            slot
+        } else {
+            if state.threads.try_reserve(1).is_err()
+                || state.thread_landlock_domains.try_reserve(1).is_err()
+            {
+                return false;
+            }
+            state.threads.push(None);
+            state.thread_landlock_domains.push(None);
+            state.threads.len() - 1
+        };
         state.threads[slot] = Some(LinuxThread {
             process,
             task,
@@ -875,8 +878,14 @@ fn queue_process_signal_info(
         {
             slot
         } else {
-            let Some(slot) = state.process_signals.iter().position(Option::is_none) else {
-                return false;
+            let slot = if let Some(slot) = state.process_signals.iter().position(Option::is_none) {
+                slot
+            } else {
+                if state.process_signals.try_reserve(1).is_err() {
+                    return false;
+                }
+                state.process_signals.push(None);
+                state.process_signals.len() - 1
             };
             state.process_signals[slot] = Some(ProcessSignalSet {
                 process,
@@ -13456,12 +13465,12 @@ pub(crate) fn settle_posix_timers(now: u64) {
         if pending.try_reserve(timer_count).is_err() {
             return;
         }
-        let mut process_pending = [None; MAX_PROCESS_SIGNAL_SETS];
-        for (slot, signals) in process_pending
-            .iter_mut()
-            .zip(state.process_signals.iter().flatten())
-        {
-            *slot = Some((signals.process, signals.pending));
+        let mut process_pending = alloc::vec::Vec::new();
+        if process_pending.try_reserve_exact(state.process_signals.len()).is_err() {
+            return;
+        }
+        for signals in state.process_signals.iter().flatten() {
+            process_pending.push((signals.process, signals.pending));
         }
         for timer in state.posix_timers.iter_mut() {
             if !timer.active {
@@ -13486,7 +13495,6 @@ pub(crate) fn settle_posix_timers(now: u64) {
             let already_pending = timer.notify == 0
                 && process_pending
                     .iter()
-                    .flatten()
                     .find(|(process, _)| *process == timer.process)
                     .is_some_and(|(_, pending)| {
                         timer.signal >= 1
