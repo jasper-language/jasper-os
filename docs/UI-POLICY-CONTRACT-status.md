@@ -14,7 +14,8 @@ remains open.**
 - Scene visible/focused/rendering/background-grant facts with fail-closed
   invariants;
 - generation-safe Surface migration bound to scene and input generations and to
-  an external unified authorization receipt;
+  the existing unified `authz::Decision`, specifically
+  `ServiceUiFramePresent`, user scope, tenant and policy epoch;
 - bounded 80-byte snapshot encoding with version, length, magic, reserved-byte,
   profile, surface and epoch rejection.
 
@@ -35,6 +36,7 @@ Tests cover capability-based profile degradation, snapshot round-trip and
 malformed/unsupported records, invisible focus, independent hidden rendering,
 focus conflicts, stale scene/surface generations, stale revocation epochs,
 authorization epoch mismatch and migration rollback identity.
+The contract does not define a parallel authorization receipt type.
 
 ## Remaining gates
 

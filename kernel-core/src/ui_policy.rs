@@ -4,6 +4,7 @@
 //! authorization, display sessions, input routing, rendering or window policy.
 
 use crate::display_input::{PixelLayout, SurfaceSpec};
+use crate::authz::{AccessScope, Decision, Operation};
 
 pub const UI_POLICY_SCHEMA_VERSION: u16 = 1;
 pub const UI_POLICY_SNAPSHOT_BYTES: usize = 80;
@@ -136,6 +137,8 @@ pub enum UiPolicyError {
     UnauthorizedBackground,
     AuthorizationDenied,
     AuthorizationEpoch,
+    AuthorizationOperation,
+    AuthorizationScope,
     InvalidTransaction,
     Closed,
 }
@@ -160,6 +163,8 @@ impl UiPolicyError {
             Self::UnauthorizedBackground => "system.ui.policy.error.background",
             Self::AuthorizationDenied => "system.ui.policy.error.authorization_denied",
             Self::AuthorizationEpoch => "system.ui.policy.error.authorization_epoch",
+            Self::AuthorizationOperation => "system.ui.policy.error.authorization_operation",
+            Self::AuthorizationScope => "system.ui.policy.error.authorization_scope",
             Self::InvalidTransaction => "system.ui.policy.error.transaction",
             Self::Closed => "system.ui.policy.error.closed",
         }
@@ -392,14 +397,6 @@ impl UiSceneState {
     }
 }
 
-/// Receipt supplied by the one unified PEP/authorization path.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct UiPolicyAuthorization {
-    pub decision_id: u64,
-    pub policy_epoch: u64,
-    pub allowed: bool,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SurfaceMigration {
     transaction_id: u64,
@@ -466,13 +463,21 @@ impl SurfaceMigration {
         self,
         scene: UiSceneState,
         policy: UiPolicySnapshot,
-        authorization: UiPolicyAuthorization,
+        authorization: Decision,
     ) -> Result<UiSceneState, UiPolicyError> {
-        if !authorization.allowed {
+        if !authorization.admitted() {
             return Err(UiPolicyError::AuthorizationDenied);
         }
-        if authorization.decision_id == 0 || authorization.policy_epoch != policy.policy_epoch {
+        if authorization.policy_epoch != policy.policy_epoch {
             return Err(UiPolicyError::AuthorizationEpoch);
+        }
+        if authorization.operation != Operation::ServiceUiFramePresent {
+            return Err(UiPolicyError::AuthorizationOperation);
+        }
+        if authorization.scope != AccessScope::User(u64::from(policy.scope.user))
+            || authorization.tenant != u64::from(policy.scope.tenant)
+        {
+            return Err(UiPolicyError::AuthorizationScope);
         }
         if scene.key != self.scene_key
             || scene.key.generation != self.expected_scene_generation.saturating_sub(1)
@@ -597,6 +602,7 @@ fn get_u64(input: &[u8], offset: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authz::{Effect, Reason, AUTHZ_FORMAT_VERSION};
 
     const SURFACE: SurfaceSpec = SurfaceSpec {
         width: 1280,
@@ -654,6 +660,30 @@ mod tests {
             policy(),
         )
         .unwrap()
+    }
+
+    fn authorization(
+        policy: UiPolicySnapshot,
+        operation: Operation,
+        scope: AccessScope,
+        policy_epoch: u64,
+    ) -> Decision {
+        Decision {
+            format_version: AUTHZ_FORMAT_VERSION,
+            issuer: crate::authz::KERNEL_PEP_ISSUER,
+            subject: 1,
+            executor_object: 1,
+            executor_generation: 1,
+            tenant: u64::from(policy.scope.tenant),
+            domain: 0,
+            operation,
+            scope,
+            effect: Effect::Write,
+            policy_epoch,
+            revocation_generation: Some(policy.revocation_epoch as u32),
+            allowed: true,
+            reason: Reason::Allowed,
+        }
     }
 
     #[test]
@@ -767,11 +797,12 @@ mod tests {
             ..SURFACE
         };
         let migration = SurfaceMigration::begin(41, scene, policy, new_surface, 9).unwrap();
-        let auth = UiPolicyAuthorization {
-            decision_id: 88,
-            policy_epoch: policy.policy_epoch,
-            allowed: true,
-        };
+        let auth = authorization(
+            policy,
+            Operation::ServiceUiFramePresent,
+            AccessScope::User(u64::from(policy.scope.user)),
+            policy.policy_epoch,
+        );
         let committed = migration.commit(scene, policy, auth).unwrap();
         assert_eq!(committed.key.generation, 6);
         assert_eq!(committed.surface_generation, 9);
@@ -784,11 +815,12 @@ mod tests {
                 .commit(
                     committed,
                     policy,
-                    UiPolicyAuthorization {
-                        decision_id: 89,
-                        policy_epoch: policy.policy_epoch,
-                        allowed: true,
-                    },
+                    authorization(
+                        policy,
+                        Operation::ServiceUiFramePresent,
+                        AccessScope::User(u64::from(policy.scope.user)),
+                        policy.policy_epoch,
+                    ),
                 )
                 .unwrap_err(),
             UiPolicyError::StaleSceneGeneration
@@ -820,11 +852,12 @@ mod tests {
                 .commit(
                     scene,
                     changed,
-                    UiPolicyAuthorization {
-                        decision_id: 90,
-                        policy_epoch: changed.policy_epoch,
-                        allowed: true,
-                    },
+                    authorization(
+                        changed,
+                        Operation::ServiceUiFramePresent,
+                        AccessScope::User(u64::from(changed.scope.user)),
+                        changed.policy_epoch,
+                    ),
                 )
                 .unwrap_err(),
             UiPolicyError::StaleRevocationEpoch
@@ -835,11 +868,12 @@ mod tests {
                 .commit(
                     scene,
                     policy,
-                    UiPolicyAuthorization {
-                        decision_id: 91,
-                        policy_epoch: policy.policy_epoch + 1,
-                        allowed: true,
-                    },
+                    authorization(
+                        policy,
+                        Operation::ServiceUiFramePresent,
+                        AccessScope::User(u64::from(policy.scope.user)),
+                        policy.policy_epoch + 1,
+                    ),
                 )
                 .unwrap_err(),
             UiPolicyError::AuthorizationEpoch
@@ -853,14 +887,63 @@ mod tests {
                 .commit(
                     scene,
                     changed_scope,
-                    UiPolicyAuthorization {
-                        decision_id: 92,
-                        policy_epoch: changed_scope.policy_epoch,
-                        allowed: true,
-                    },
+                    authorization(
+                        changed_scope,
+                        Operation::ServiceUiFramePresent,
+                        AccessScope::User(u64::from(changed_scope.scope.user)),
+                        changed_scope.policy_epoch,
+                    ),
                 )
                 .unwrap_err(),
             UiPolicyError::InvalidScope
+        );
+
+        let migration = SurfaceMigration::begin(54, scene, policy, new_surface, 9).unwrap();
+        assert_eq!(
+            migration
+                .commit(
+                    scene,
+                    policy,
+                    authorization(
+                        policy,
+                        Operation::ServiceUiFocusSet,
+                        AccessScope::User(u64::from(policy.scope.user)),
+                        policy.policy_epoch,
+                    ),
+                )
+                .unwrap_err(),
+            UiPolicyError::AuthorizationOperation
+        );
+
+        let migration = SurfaceMigration::begin(55, scene, policy, new_surface, 9).unwrap();
+        assert_eq!(
+            migration
+                .commit(
+                    scene,
+                    policy,
+                    authorization(
+                        policy,
+                        Operation::ServiceUiFramePresent,
+                        AccessScope::Tenant(u64::from(policy.scope.tenant)),
+                        policy.policy_epoch,
+                    ),
+                )
+                .unwrap_err(),
+            UiPolicyError::AuthorizationScope
+        );
+
+        let migration = SurfaceMigration::begin(56, scene, policy, new_surface, 9).unwrap();
+        let mut denied = authorization(
+            policy,
+            Operation::ServiceUiFramePresent,
+            AccessScope::User(u64::from(policy.scope.user)),
+            policy.policy_epoch,
+        );
+        denied.allowed = false;
+        denied.reason = Reason::InvalidEffect;
+        assert_eq!(
+            migration.commit(scene, policy, denied).unwrap_err(),
+            UiPolicyError::AuthorizationDenied
         );
     }
 }
