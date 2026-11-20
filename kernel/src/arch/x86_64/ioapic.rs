@@ -18,11 +18,11 @@ use alloc::vec::Vec;
 
 use kernel_core::acpi::{IoController, Madt};
 use kernel_core::irq::IrqError;
-use spin::Mutex;
 
 use super::port::{inb, outb};
 use super::smp;
 use crate::arch::without_irq;
+use crate::sync::IrqSpinLock;
 
 /// 串口线的向量。
 pub const SERIAL_VECTOR: u8 = 0x50;
@@ -118,9 +118,9 @@ struct Pin {
     kind: DeviceKind,
 }
 
-static PINS: Mutex<Vec<Pin>> = Mutex::new(Vec::new());
+static PINS: IrqSpinLock<Vec<Pin>> = IrqSpinLock::new(Vec::new());
 /// CMOS 索引 / 数据端口。
-static CMOS: Mutex<()> = Mutex::new(());
+static CMOS: IrqSpinLock<()> = IrqSpinLock::new(());
 
 fn pin_read(base: u64, reg: u32) -> Option<u32> {
     let selector = base.checked_add(IOREGSEL)?;
