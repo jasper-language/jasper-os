@@ -72,6 +72,9 @@
 - Linux futex 删除全局 32 个 word 和每 word 16 个 waiter 的固定数组；word 与 waiter
   均由可失败堆增长，注册、wake 快照和 requeue 批量复制都在改变等待状态前使用
   `try_reserve`，分配失败返回 `ENOMEM`，原 waiter 状态不被部分修改。
+- POSIX timer 与 REAL interval timer 删除 32/16 个固定槽位，创建前使用可失败
+  `try_reserve`；周期结算的待投递快照按当前 timer 数量预留，预留失败时保持 timer
+  状态并留待下一次时钟结算重试。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -91,7 +94,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=283, runtime-resource-capacity=18, unclassified=0, added=0
+findings=281, runtime-resource-capacity=16, unclassified=0, added=0
 ```
 
 ## 尚未完成

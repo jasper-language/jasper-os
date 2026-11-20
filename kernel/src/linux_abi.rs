@@ -51,8 +51,6 @@ const LINUX_PROC_STAT_HANDLE: u64 = 0x4a53_5052_4f43_5354;
 
 const MAX_LINUX_THREADS: usize = 64;
 const MAX_PROCESS_SIGNAL_SETS: usize = 16;
-const MAX_POSIX_TIMERS: usize = 32;
-const MAX_INTERVAL_TIMER_SETS: usize = 16;
 const MAX_SYSV_MESSAGE_QUEUES: usize = 16;
 const SYSV_MSGMAX: usize = 8192;
 const SYSV_MSGMNB: usize = 16384;
@@ -341,8 +339,8 @@ struct CompatState {
     process_signals: [Option<ProcessSignalSet>; MAX_PROCESS_SIGNAL_SETS],
     flock_locks: alloc::vec::Vec<Option<FlockLock>>,
     flock_waiters: alloc::vec::Vec<Option<FlockWaiter>>,
-    posix_timers: [Option<PosixTimer>; MAX_POSIX_TIMERS],
-    interval_timers: [Option<IntervalTimer>; MAX_INTERVAL_TIMER_SETS],
+    posix_timers: alloc::vec::Vec<PosixTimer>,
+    interval_timers: alloc::vec::Vec<IntervalTimer>,
     message_queue_names: alloc::vec::Vec<MessageQueueName>,
     pending_signal_records: alloc::vec::Vec<Option<QueuedSignalRecord>>,
     next_signal_sequence: u64,
@@ -371,8 +369,8 @@ impl CompatState {
             process_signals: [None; MAX_PROCESS_SIGNAL_SETS],
             flock_locks: alloc::vec::Vec::new(),
             flock_waiters: alloc::vec::Vec::new(),
-            posix_timers: [None; MAX_POSIX_TIMERS],
-            interval_timers: [None; MAX_INTERVAL_TIMER_SETS],
+            posix_timers: alloc::vec::Vec::new(),
+            interval_timers: alloc::vec::Vec::new(),
             message_queue_names: alloc::vec::Vec::new(),
             pending_signal_records: alloc::vec::Vec::new(),
             next_signal_sequence: 0,
@@ -8327,7 +8325,6 @@ fn interval_timer_snapshot(pid: ObjId, now: u64) -> (u64, u64, bool) {
     let Some(timer) = state
         .interval_timers
         .iter_mut()
-        .flatten()
         .find(|timer| timer.process == pid)
     else {
         return (0, 0, false);
@@ -8346,7 +8343,6 @@ fn replace_interval_timer(
     if let Some(timer) = state
         .interval_timers
         .iter_mut()
-        .flatten()
         .find(|timer| timer.process == pid)
     {
         *timer = IntervalTimer {
@@ -8360,12 +8356,11 @@ fn replace_interval_timer(
     if next == 0 {
         return Ok(());
     }
-    let slot = state
+    state
         .interval_timers
-        .iter()
-        .position(Option::is_none)
-        .ok_or(CompatErrno::NoSpace)?;
-    state.interval_timers[slot] = Some(IntervalTimer {
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    state.interval_timers.push(IntervalTimer {
         process: pid,
         next,
         interval,
@@ -13434,10 +13429,13 @@ fn linux_posix_timer_settle_one(
 /// Settles process timers from the periodic clock interrupt.
 /// 从周期时钟中断结算进程计时器。
 pub(crate) fn settle_posix_timers(now: u64) {
-    let mut pending = [None; MAX_POSIX_TIMERS + MAX_INTERVAL_TIMER_SETS];
-    let mut pending_count = 0usize;
+    let mut pending = alloc::vec::Vec::new();
     {
         let mut state = COMPAT.lock();
+        let timer_count = state.posix_timers.len().saturating_add(state.interval_timers.len());
+        if pending.try_reserve(timer_count).is_err() {
+            return;
+        }
         let mut process_pending = [None; MAX_PROCESS_SIGNAL_SETS];
         for (slot, signals) in process_pending
             .iter_mut()
@@ -13445,7 +13443,7 @@ pub(crate) fn settle_posix_timers(now: u64) {
         {
             *slot = Some((signals.process, signals.pending));
         }
-        for timer in state.posix_timers.iter_mut().flatten() {
+        for timer in state.posix_timers.iter_mut() {
             if !timer.active {
                 continue;
             }
@@ -13490,35 +13488,27 @@ pub(crate) fn settle_posix_timers(now: u64) {
                     .saturating_add(expired.saturating_mul(timer.interval))
             };
             timer.active = timer.next != 0;
-            if timer.notify == 0 && !already_pending && pending_count < pending.len() {
-                pending[pending_count] = Some((timer.process, timer.signal, -2));
-                pending_count += 1;
+            if timer.notify == 0 && !already_pending {
+                pending.push((timer.process, timer.signal, -2));
             }
         }
-        for timer in state.interval_timers.iter_mut().flatten() {
-            if settle_interval_timer(timer, now) && pending_count < pending.len() {
-                pending[pending_count] = Some((timer.process, 14, 128));
-                pending_count += 1;
+        for timer in state.interval_timers.iter_mut() {
+            if settle_interval_timer(timer, now) {
+                pending.push((timer.process, 14, 128));
             }
         }
     }
-    for (process, signal, code) in pending.into_iter().flatten() {
+    for (process, signal, code) in pending {
         let _ = queue_process_signal(process, signal, 0, code);
     }
 }
 
 fn release_posix_timers(process: ObjId) {
     let mut state = COMPAT.lock();
-    for timer in state.posix_timers.iter_mut() {
-        if timer.is_some_and(|timer| timer.process == process) {
-            *timer = None;
-        }
-    }
-    for timer in state.interval_timers.iter_mut() {
-        if timer.is_some_and(|timer| timer.process == process) {
-            *timer = None;
-        }
-    }
+    state.posix_timers.retain(|timer| timer.process != process);
+    state
+        .interval_timers
+        .retain(|timer| timer.process != process);
 }
 
 /// Removes one dead process's one-shot POSIX message-queue registrations.
@@ -13560,10 +13550,11 @@ fn linux_timer_create(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     {
         let mut state = COMPAT.lock();
-        let Some(slot) = state.posix_timers.iter().position(Option::is_none) else {
-            return Err(CompatErrno::NoSpace);
-        };
-        state.posix_timers[slot] = Some(PosixTimer {
+        state
+            .posix_timers
+            .try_reserve(1)
+            .map_err(|_| CompatErrno::NoMemory)?;
+        state.posix_timers.push(PosixTimer {
             process: pid,
             id,
             clock,
@@ -13595,7 +13586,6 @@ fn linux_timer_settime(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         let timer = state
             .posix_timers
             .iter_mut()
-            .flatten()
             .find(|timer| timer.process == pid && timer.id == args[0])
             .ok_or(CompatErrno::Invalid)?;
         let now = linux_posix_timer_settle_one(timer)?;
@@ -13615,7 +13605,6 @@ fn linux_timer_settime(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let timer = state
         .posix_timers
         .iter_mut()
-        .flatten()
         .find(|timer| timer.process == pid && timer.id == args[0])
         .ok_or(CompatErrno::Invalid)?;
     timer.next = next;
@@ -13631,7 +13620,6 @@ fn linux_timer_gettime(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         let timer = state
             .posix_timers
             .iter_mut()
-            .flatten()
             .find(|timer| timer.process == pid && timer.id == args[0])
             .ok_or(CompatErrno::Invalid)?;
         let now = linux_posix_timer_settle_one(timer)?;
@@ -13646,7 +13634,6 @@ fn linux_timer_getoverrun(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno
     let timer = state
         .posix_timers
         .iter_mut()
-        .flatten()
         .find(|timer| timer.process == pid && timer.id == args[0])
         .ok_or(CompatErrno::Invalid)?;
     let _ = linux_posix_timer_settle_one(timer)?;
@@ -13655,14 +13642,14 @@ fn linux_timer_getoverrun(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno
 
 fn linux_timer_delete(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let mut state = COMPAT.lock();
-    let Some(slot) = state
+    let Some(index) = state
         .posix_timers
         .iter()
-        .position(|timer| timer.is_some_and(|timer| timer.process == pid && timer.id == args[0]))
+        .position(|timer| timer.process == pid && timer.id == args[0])
     else {
         return Err(CompatErrno::Invalid);
     };
-    state.posix_timers[slot] = None;
+    state.posix_timers.remove(index);
     Ok(0)
 }
 
