@@ -1,6 +1,6 @@
 # Issue #35 Linux 兼容共享内存与 BAR 容量切片
 
-更新时间：2026-11-18。
+更新时间：2026-11-20。
 
 状态：**错误生产容量已移除并改由既有内存/MMIO 准入；真实 Linux 用户态超限矩阵仍待
 兼容层运行验收。**
@@ -18,6 +18,9 @@
   `memory_capabilities(DeviceMmio)` 预算共同裁决；
 - MMIO capability 预算检查移到逐页冲突扫描之前，超大请求不会先消耗 O(pages)
   扫描工作。
+- ELF 页计划器不再保留私有 1 GiB 页数上限或 64 KiB 页大小默认上限；
+  `ImageLayout` 和动态程序规划显式接收调用方页预算，内核按进程剩余内存额度与
+  当前可用物理帧的较小值准入。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -29,9 +32,15 @@ cargo check -p jasper-kernel --target x86_64-unknown-none \
   --features compat-syscall-verify
 PASS
 
+cargo test -p jasper-compat-loader
+36 passed
+
+cargo check -p jasper-kernel --target x86_64-unknown-none
+PASS
+
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=423, added=0, cleared=5
+findings=310, runtime-resource-capacity=42, added=0
 ```
 
 ## 尚未完成
