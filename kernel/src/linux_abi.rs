@@ -4400,7 +4400,6 @@ fn linux_process_vm_io(
     args: [u64; 6],
     write: bool,
 ) -> Result<u64, CompatErrno> {
-    const MAX_PROCESS_VM: usize = 1024 * 1024;
     if args[5] != 0 {
         return Err(CompatErrno::Invalid);
     }
@@ -4413,8 +4412,8 @@ fn linux_process_vm_io(
     }
     let local_count = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
     let remote_count = usize::try_from(args[4]).map_err(|_| CompatErrno::Invalid)?;
-    let local = read_message_iovecs(pid, args[1], local_count, MAX_PROCESS_VM)?;
-    let remote = read_message_iovecs(pid, args[3], remote_count, MAX_PROCESS_VM)?;
+    let local = read_message_iovecs(pid, args[1], local_count, usize::MAX)?;
+    let remote = read_message_iovecs(pid, args[3], remote_count, usize::MAX)?;
     let local_total = local.iter().map(|(_, length)| *length).sum::<usize>();
     let remote_total = remote.iter().map(|(_, length)| *length).sum::<usize>();
     let total = local_total.min(remote_total);
@@ -4423,7 +4422,12 @@ fn linux_process_vm_io(
     } else {
         (&remote, &local, target, pid)
     };
-    let mut bytes = alloc::vec![0u8; total];
+    let io = admit_process_io(pid, u64::try_from(total).map_err(|_| CompatErrno::Invalid)?, 1)?;
+    let mut bytes = alloc::vec::Vec::new();
+    bytes
+        .try_reserve_exact(total)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    bytes.resize(total, 0);
     let mut offset = 0usize;
     for (address, length) in source {
         if offset == total {
@@ -4452,6 +4456,7 @@ fn linux_process_vm_io(
             .map_err(|_| CompatErrno::Fault)?;
         offset += take;
     }
+    io.commit();
     Ok(total as u64)
 }
 
