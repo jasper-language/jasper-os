@@ -8,12 +8,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "013d016afe65533dfd10a1cdacbd875256755ef5eb8bab0c0501ac35cac0cf9a",
-      "path": "compat-core/src/executable.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "0230a1d28f5a2f2361cb9b62926295139b984ac9dfdd27652698107aa9335d61",
       "path": "jaso/src/lib.rs",
       "rules": "HC-G1"
@@ -752,12 +746,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "7b47f14aab6aa0692890501174a2b7ba3c2201344b42626c40700f95bf57204d",
-      "path": "compat-core/src/executable.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "7bfc1f8490d1ea29829cfc20db7c40cc8c8a22a5744a6c1e7060622ff796d1ea",
       "path": "lifecycle-model/src/manifest.rs",
       "rules": "HC-G1"
@@ -964,12 +952,6 @@
       "count": 1,
       "fingerprint": "a26645371b1cb69467fb21b79eddcb7523b5da7c6c24d9ab79a5571bca729da0",
       "path": "kernel-core/src/virtio_fs.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "a31e9fcebe9b66bcb5256bc96545965076ba913d97708f5c8158050d9c690b61",
-      "path": "compat-core/src/executable.rs",
       "rules": "HC-G1"
     },
     {
@@ -1539,5 +1521,5 @@
     "user",
     "xtask"
   ],
-  "total": 276
+  "total": 273
 }

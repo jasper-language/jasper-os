@@ -14,12 +14,6 @@ use core::fmt;
 
 /// Maximum normalized logical path, including the leading slash.
 pub const MAX_LOGICAL_PATH: usize = 256;
-/// Maximum distinct image records held by one registry.
-pub const MAX_IMAGES: usize = 128;
-/// Maximum executable bindings held by one registry.
-pub const MAX_PROGRAMS: usize = 64;
-/// Maximum aggregate declared image length accepted by one registry.
-pub const MAX_REGISTERED_BYTES: usize = 256 * 1024 * 1024;
 
 /// System root that supplied an image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,26 +190,6 @@ impl ExecutableRegistry {
 
         let new_images =
             usize::from(executable_match.is_none()) + usize::from(interpreter_match.is_none());
-        let added_bytes = executable_match
-            .is_none()
-            .then_some(executable_len)
-            .unwrap_or(0)
-            .saturating_add(
-                interpreter_match
-                    .is_none()
-                    .then_some(interpreter_len)
-                    .unwrap_or(0),
-            );
-        let stored_bytes = self
-            .images
-            .iter()
-            .fold(0usize, |total, image| total.saturating_add(image.len));
-        if self.images.len().saturating_add(new_images) > MAX_IMAGES
-            || self.programs.len() == MAX_PROGRAMS
-            || stored_bytes.saturating_add(added_bytes) > MAX_REGISTERED_BYTES
-        {
-            return Err(RegistryError::Capacity);
-        }
         if self
             .next_image
             .checked_add(new_images as u64)
@@ -431,19 +405,21 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_declared_lengths_fail_closed() {
+    fn registry_grows_past_former_fixed_envelopes() {
         let mut registry = ExecutableRegistry::new();
-        assert_eq!(
-            registry.register_program(
+        for index in 0..140 {
+            let path = alloc::format!("/usr/bin/tool-{index}");
+            registry
+                .register_program(
                 SystemImage::A,
-                b"/usr/bin/large",
-                MAX_REGISTERED_BYTES,
+                path.as_bytes(),
+                4,
                 b"/lib64/ld.so",
                 b"loader".len(),
-            ),
-            Err(RegistryError::Capacity)
-        );
-        assert_eq!(registry.program_count(), 0);
-        assert_eq!(registry.image_count(), 0);
+                )
+                .unwrap();
+        }
+        assert_eq!(registry.program_count(), 140);
+        assert_eq!(registry.image_count(), 141);
     }
 }

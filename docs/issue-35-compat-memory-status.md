@@ -87,6 +87,9 @@
   定向测试验证全部图像可依次获取，耗尽后明确返回 `ImageBusy`。
 - 删除无消费者的 `compat-core::native::MAX_EPOLL_EVENTS=16` 遗留常量；真实
   epoll_wait 输出容量已由调用方 `maxevents` 与分配准入决定。
+- `ExecutableRegistry` 删除 128 image、64 program 和 256 MiB 声明长度三个
+  隐藏上限。登记表仅保存路径/长度元数据，改用可失败 `Vec::try_reserve` 和 ID
+  溢出检查；140 个程序/141 个镜像的定向测试通过。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -106,7 +109,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=276, runtime-resource-capacity=0, unclassified=0, added=0
+findings=273, runtime-resource-capacity=0, unclassified=0, added=0
 ```
 
 ## 尚未完成

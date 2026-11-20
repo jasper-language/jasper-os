@@ -1,5 +1,5 @@
 {
-  "baseline_total": 276,
+  "baseline_total": 273,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,7 +10,7 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 171,
+    "explicit-safety-policy": 168,
     "platform-adapter": 28,
     "protocol-abi": 43,
     "test-demo-fixture": 11
@@ -25,36 +25,6 @@
       "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
       "rules": "HC-G7",
       "source": ".unwrap_or(false);"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "013d016afe65533dfd10a1cdacbd875256755ef5eb8bab0c0501ac35cac0cf9a",
-      "line": 20,
-      "path": "compat-core/src/executable.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_PROGRAMS: usize = 64;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "7b47f14aab6aa0692890501174a2b7ba3c2201344b42626c40700f95bf57204d",
-      "line": 22,
-      "path": "compat-core/src/executable.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_REGISTERED_BYTES: usize = 256 * 1024 * 1024;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "a31e9fcebe9b66bcb5256bc96545965076ba913d97708f5c8158050d9c690b61",
-      "line": 18,
-      "path": "compat-core/src/executable.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_IMAGES: usize = 128;"
     },
     {
       "category": "explicit-safety-policy",
@@ -2549,7 +2519,7 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 178,
+    "explicit-safety-policy": 175,
     "platform-adapter": 44,
     "protocol-abi": 43,
     "test-demo-fixture": 11
