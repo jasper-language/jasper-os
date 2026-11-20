@@ -7811,7 +7811,7 @@ fn linux_landlock_add_rule(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrn
     if ruleset.rules.iter().any(|rule| rule.node == node) {
         return Err(CompatErrno::Exists);
     }
-    if ruleset.rules.len() >= 64 {
+    if ruleset.rules.len() >= proc::linux_metadata_capacity() {
         return Err(CompatErrno::NoMemory);
     }
     ruleset
@@ -7873,7 +7873,9 @@ fn linux_landlock_restrict_self(
     if slots.iter().any(|slot| {
         state.thread_landlock_domains[*slot]
             .as_ref()
-            .is_some_and(|domains| domains.len() >= 16)
+            .is_some_and(|domains| {
+                domains.len() >= proc::linux_metadata_capacity()
+            })
     }) {
         return Err(CompatErrno::NoSpace);
     }
@@ -8902,7 +8904,9 @@ fn linux_mq_open(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 queue.gid,
                 queue.mode,
             )))
-        } else if state.message_queue_names.len() >= 16 {
+        } else if state.message_queue_names.len()
+            >= proc::linux_global_metadata_capacity()
+        {
             Err(CompatErrno::NoSpace)
         } else {
             match state.message_queue_names.try_reserve(1) {
@@ -13159,7 +13163,7 @@ fn linux_fanotify_mark(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         mark.mask = mask;
         return Ok(0);
     }
-    if state.fanotify_marks.len() >= 64 {
+    if state.fanotify_marks.len() >= proc::linux_metadata_capacity() {
         return Err(CompatErrno::NoSpace);
     }
     state
@@ -13223,10 +13227,12 @@ fn linux_inotify_add_watch(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrn
         };
         return Ok(watch.wd as u64);
     }
-    if state.watches.len() >= 64 {
+    let watch_capacity = proc::linux_metadata_capacity()
+        .min(i32::MAX as usize);
+    if state.watches.len() >= watch_capacity {
         return Err(CompatErrno::NoSpace);
     }
-    let wd = (1..=64)
+    let wd = (1..=watch_capacity as i32)
         .find(|candidate| !state.watches.iter().any(|watch| watch.wd == *candidate))
         .ok_or(CompatErrno::NoSpace)?;
     state

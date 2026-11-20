@@ -49,6 +49,14 @@ path 实现上限。三级拓扑都按固件表长度执行可失败分配；10 
 x86_64 ECAM 不再叠加 256 MiB 软件夹取。窗口长度直接来自 ACPI `Ecam` 的
 `u8` 起止总线范围，映射仍检查基址、页对齐和地址溢出。
 
+Linux/Android 兼容状态中的行内槽位检查也完成了一轮消费链审计。Binder、
+inotify/fanotify、userfaultfd、消息队列、fs-context、Landlock、ION、dma-heap、
+dmabuf、sync_file、AIO 与 sealed-range 不再使用 8/16/32/64 的私有实例上限；
+进程内元数据使用已验证的 `handles_per_process`，全局消息队列名使用
+`max_objects`，分配仍通过 `try_reserve` 失败关闭。该审计覆盖的是常量扫描器无法
+识别的 `len() >= N` 行内容量，不能把扫描器 `runtime-resource-capacity=0` 当作
+整个问题的唯一证据。
+
 `compat-loader` 删除 17 个实现包络：program-header/PT_LOAD 数、重定位数、
 Android packed-relocation 字节、动态库名数量与长度、TLS/生命周期/COPY 大小、
 模块与 lifecycle 数、入口调用数、初始栈字节/项数和 auxv 项数。段、重定位和

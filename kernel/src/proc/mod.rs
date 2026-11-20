@@ -68,6 +68,17 @@ pub mod spawn;
 
 /// 每个进程句柄表的容量。
 pub const HANDLES_PER_PROCESS: usize = crate::config::ACTIVE.objects.handles_per_process;
+
+/// Process-local compatibility metadata uses the same admitted handle budget as
+/// native objects instead of a protocol-specific slot constant.
+pub(crate) const fn linux_metadata_capacity() -> usize {
+    HANDLES_PER_PROCESS
+}
+
+/// Global compatibility namespaces use the admitted object-table budget.
+pub(crate) const fn linux_global_metadata_capacity() -> usize {
+    crate::config::ACTIVE.objects.max_objects
+}
 #[cfg(feature = "linux-abi")]
 static LINUX_PID_NEXT: AtomicU32 = AtomicU32::new(1);
 #[cfg(feature = "linux-abi")]
@@ -2696,7 +2707,7 @@ pub(crate) fn linux_ashmem_fscrypt_pwsalt(
     Ok(crate::fscrypt::pwsalt(crate::security::boot_id()))
 }
 
-/// Opens one bounded Android binder device descriptor.
+/// Opens one budget-admitted Android binder device descriptor.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_open_binder(
     pid: ObjId,
@@ -2705,9 +2716,6 @@ pub(crate) fn linux_open_binder(
 ) -> Option<u32> {
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
-        if linux.binder.len() >= 8 {
-            return Err(ProcError::NoTaskSlot);
-        }
         linux
             .binder
             .try_reserve(1)
@@ -2958,7 +2966,7 @@ pub(crate) fn linux_signalfd_state(
     })
 }
 
-/// Creates one bounded inotify instance shared across inherited descriptors.
+/// Creates one budget-admitted inotify instance shared across inherited descriptors.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_inotify_create(
     pid: ObjId,
@@ -2968,7 +2976,7 @@ pub(crate) fn linux_inotify_create(
     linux_notification_create(pid, close_on_exec, nonblocking, false, false)
 }
 
-/// Creates one bounded fanotify notification instance.
+/// Creates one budget-admitted fanotify notification instance.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_fanotify_create(
     pid: ObjId,
@@ -2989,9 +2997,6 @@ fn linux_notification_create(
 ) -> Option<u32> {
     with_proc(pid, |process| {
         let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
-        if linux.inotifies.len() >= 8 {
-            return Err(ProcError::NoTaskSlot);
-        }
         linux
             .inotifies
             .try_reserve(1)
@@ -3061,14 +3066,11 @@ pub(crate) fn linux_notification_ready(pid: ObjId, handle: u64) -> Option<bool> 
     })
 }
 
-/// Creates one bounded userfaultfd missing-page handler.
+/// Creates one budget-admitted userfaultfd missing-page handler.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_userfault_create(pid: ObjId, close_on_exec: bool) -> Option<u32> {
     with_proc(pid, |process| {
         let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
-        if linux.userfaultfds.len() >= 8 {
-            return Err(ProcError::NoTaskSlot);
-        }
         linux
             .userfaultfds
             .try_reserve(1)
@@ -3214,9 +3216,10 @@ pub(crate) fn linux_fanotify_notify(
         });
     });
     let mut delivered = false;
+    let event_capacity = linux_metadata_capacity();
     for state in states {
         let mut state = state.lock();
-        if !state.fanotify || state.fanotify_events.len() >= 64 {
+        if !state.fanotify || state.fanotify_events.len() >= event_capacity {
             continue;
         }
         let selected = state.fanotify_marks.iter().any(|mark| {
@@ -3230,7 +3233,7 @@ pub(crate) fn linux_fanotify_notify(
                     );
             in_scope && mark.mask & mask != 0
         });
-        if selected && state.fanotify_events.len() < 64 {
+        if selected && state.fanotify_events.len() < event_capacity {
             state.fanotify_events.push_back(LinuxFanotifyEvent {
                 node,
                 mask,
@@ -3255,9 +3258,6 @@ pub(crate) fn linux_mq_install(
 ) -> Option<u32> {
     with_proc(pid, |process| {
         let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
-        if linux.message_queues.len() >= 32 {
-            return Err(ProcError::NoTaskSlot);
-        }
         linux
             .message_queues
             .try_reserve(1)
@@ -3357,9 +3357,6 @@ pub(crate) fn linux_install_fs_context(
 ) -> Option<u32> {
     with_proc(pid, |process| {
         let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
-        if linux.fs_contexts.len() >= 16 {
-            return Err(ProcError::NoTaskSlot);
-        }
         linux
             .fs_contexts
             .try_reserve(1)
@@ -3395,9 +3392,6 @@ pub(crate) fn linux_install_landlock_ruleset(
 ) -> Option<u32> {
     with_proc(pid, |process| {
         let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
-        if linux.landlock_rulesets.len() >= 16 {
-            return Err(ProcError::NoTaskSlot);
-        }
         linux
             .landlock_rulesets
             .try_reserve(1)
@@ -3793,9 +3787,6 @@ pub(crate) fn linux_is_binder(pid: ObjId, handle: u64) -> bool {
 pub(crate) fn linux_open_ion(pid: ObjId, close_on_exec: bool) -> Option<u32> {
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
-        if linux.ion_devices.len() >= 8 {
-            return Err(ProcError::NoTaskSlot);
-        }
         linux
             .ion_devices
             .try_reserve(1)
@@ -3834,9 +3825,6 @@ pub(crate) fn linux_is_ion_device(pid: ObjId, handle: u64) -> bool {
 pub(crate) fn linux_open_dma_heap(pid: ObjId, close_on_exec: bool) -> Option<u32> {
     with_proc(pid, |process| {
         let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
-        if linux.dma_heaps.len() >= 8 {
-            return Err(ProcError::NoTaskSlot);
-        }
         linux
             .dma_heaps
             .try_reserve(1)
@@ -3876,7 +3864,7 @@ pub(crate) fn linux_is_dma_heap(pid: ObjId, handle: u64) -> bool {
 pub(crate) fn linux_register_dmabuf(pid: ObjId, handle: u64) -> bool {
     with_proc(pid, |process| {
         let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
-        if linux.dmabufs.len() >= 32 || linux.dmabufs.contains(&handle) {
+        if linux.dmabufs.contains(&handle) {
             return Err(ProcError::NoTaskSlot);
         }
         linux
@@ -3913,9 +3901,6 @@ pub(crate) fn linux_create_sync_file(
     }
     with_proc(pid, |process| {
         let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
-        if linux.sync_files.len() >= 32 {
-            return Err(ProcError::NoTaskSlot);
-        }
         linux
             .sync_files
             .try_reserve(1)
@@ -5879,12 +5864,12 @@ pub(crate) fn set_linux_rlimits(pid: ObjId, limits: LinuxRlimits) -> bool {
     .is_ok()
 }
 
-/// Creates one bounded legacy AIO context.
+/// Creates one budget-admitted legacy AIO context.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_aio_create(pid: ObjId, max_events: usize) -> Option<u64> {
     with_proc(pid, |process| {
         let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
-        if linux.aio_contexts.len() >= 8 {
+        if linux.aio_contexts.len() >= HANDLES_PER_PROCESS {
             return Err(ProcError::NoTaskSlot);
         }
         let id = NEXT_LINUX_AIO_CONTEXT.fetch_add(1, Ordering::AcqRel);
@@ -6733,7 +6718,7 @@ pub(crate) fn linux_range_is_sealed(pid: ObjId, start: u64, end: u64) -> bool {
     .unwrap_or(false)
 }
 
-/// Adds one bounded, merged sealed range.
+/// Adds one budget-admitted, merged sealed range.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn seal_linux_range(pid: ObjId, start: u64, end: u64) -> bool {
     if start >= end {
@@ -6741,7 +6726,9 @@ pub(crate) fn seal_linux_range(pid: ObjId, start: u64, end: u64) -> bool {
     }
     with_proc(pid, |process| {
         let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
-        if linux.sealed_ranges.len() >= 32 {
+        let mapping_budget =
+            usize::try_from(MAX_MAP_PAGES).unwrap_or(usize::MAX);
+        if linux.sealed_ranges.len() >= mapping_budget {
             return Err(ProcError::NoTaskSlot);
         }
         linux
