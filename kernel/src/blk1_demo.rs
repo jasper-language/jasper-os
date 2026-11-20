@@ -78,6 +78,7 @@ pub fn run() {
                     block_size: true,
                 },
                 geometry.capacity_sectors,
+                DATA_PAGES,
             ) == Err(block::Error::Alignment),
             "misaligned request was admitted",
         );

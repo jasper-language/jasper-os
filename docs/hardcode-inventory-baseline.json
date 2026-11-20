@@ -1118,12 +1118,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "baff9c9ea2b78b20249aff542eb328868238ae7e2d284d6c15d2b3bc33de620e",
-      "path": "kernel-core/src/block.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "bb4dfd142c69ff5ac0a2d6d266b4ada9b9e137aaf18a4f547a34256b1d0fcbd1",
       "path": "compat-loader/src/lib.rs",
       "rules": "HC-G1"
@@ -1485,5 +1479,5 @@
     "user",
     "xtask"
   ],
-  "total": 316
+  "total": 315
 }

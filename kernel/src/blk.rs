@@ -109,9 +109,6 @@ impl BlockDevice {
         inline(never)
     )]
     pub fn new(device: &pci::Device, data_pages: u64) -> Result<Self, BlkError> {
-        if data_pages == 0 || data_pages > block::MAX_DATA_PAGES as u64 {
-            return Err(BlkError::Admission(block::Error::ChainTooLong));
-        }
         let virtio = VirtioPci::new(device).map_err(|e| BlkError::Virtio(e.name()))?;
         virtio.reset().map_err(|e| BlkError::Virtio(e.name()))?;
         let offered = virtio.device_features(0);
@@ -166,6 +163,11 @@ impl BlockDevice {
         let notify_off = virtio
             .setup_queue(&mut queue, 0)
             .map_err(|e| BlkError::Virtio(e.name()))?;
+        let max_data_pages = u64::from(queue.size().saturating_sub(2));
+        if data_pages == 0 || data_pages > max_data_pages {
+            let _ = virtio.reset();
+            return Err(BlkError::Admission(block::Error::ChainTooLong));
+        }
 
         let pid = proc::create("blk1", SyscallSet::EMPTY).map_err(|_| BlkError::Process)?;
         let memory_handle = match proc::create_memory(pid, data_pages) {
@@ -343,11 +345,12 @@ impl BlockDevice {
         cancel_after_submit: bool,
     ) -> Result<Terminal, BlkError> {
         request
-            .validate(self.features, self.geometry.capacity_sectors)
+            .validate(
+                self.features,
+                self.geometry.capacity_sectors,
+                self.data_pages,
+            )
             .map_err(BlkError::Admission)?;
-        if request.pages > self.data_pages {
-            return Err(BlkError::Admission(block::Error::Range));
-        }
         if self.queue.take_used().is_some() {
             return Err(BlkError::StaleCompletion);
         }

@@ -465,6 +465,7 @@ impl BlockDurabilityChain {
                 pages
                     .checked_mul(crate::block::SECTORS_PER_IO_UNIT)
                     .ok_or(FsError::SyncIncomplete)?,
+                pages,
             )
             .map_err(|_| FsError::SyncIncomplete)?;
         Ok(request)

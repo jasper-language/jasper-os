@@ -6,7 +6,6 @@ pub const SECTORS_PER_IO_UNIT: u64 = IO_ALIGNMENT / SECTOR_BYTES;
 pub const HEADER_BYTES: usize = 16;
 pub const DISCARD_RANGE_BYTES: usize = 16;
 pub const STATUS_BYTES: usize = 1;
-pub const MAX_DATA_PAGES: usize = 14;
 
 pub const TYPE_IN: u32 = 0;
 pub const TYPE_OUT: u32 = 1;
@@ -85,13 +84,18 @@ impl Request {
         }
     }
 
-    pub fn validate(self, features: Features, capacity_sectors: u64) -> Result<(), Error> {
+    pub fn validate(
+        self,
+        features: Features,
+        capacity_sectors: u64,
+        max_data_pages: u64,
+    ) -> Result<(), Error> {
         match self.kind {
             RequestKind::Read | RequestKind::Write => {
                 if self.pages == 0 {
                     return Err(Error::Range);
                 }
-                if self.pages > MAX_DATA_PAGES as u64 {
+                if self.pages > max_data_pages {
                     return Err(Error::ChainTooLong);
                 }
                 if self.fua && !features.flush {
@@ -256,22 +260,21 @@ mod tests {
 
     #[test]
     fn admission_requires_4k_alignment_and_capacity() {
-        assert_eq!(Request::read(8, 1).validate(FEATURES, 16), Ok(()));
+        assert_eq!(Request::read(8, 1).validate(FEATURES, 16, 14), Ok(()));
         assert_eq!(
-            Request::read(1, 1).validate(FEATURES, 16),
+            Request::read(1, 1).validate(FEATURES, 16, 14),
             Err(Error::Alignment)
         );
         assert_eq!(
-            Request::read(16, 1).validate(FEATURES, 16),
+            Request::read(16, 1).validate(FEATURES, 16, 14),
             Err(Error::Range)
         );
         assert_eq!(
-            Request::write(0, 0, false).validate(FEATURES, 16),
+            Request::write(0, 0, false).validate(FEATURES, 16, 14),
             Err(Error::Range)
         );
         assert_eq!(
-            Request::write(0, MAX_DATA_PAGES as u64 + 1, false)
-                .validate(FEATURES, u64::MAX),
+            Request::write(0, 15, false).validate(FEATURES, u64::MAX, 14),
             Err(Error::ChainTooLong)
         );
     }
@@ -284,15 +287,15 @@ mod tests {
             block_size: false,
         };
         assert_eq!(
-            Request::flush().validate(no_optional, 16),
+            Request::flush().validate(no_optional, 16, 14),
             Err(Error::Unsupported)
         );
         assert_eq!(
-            Request::discard(0, 1).validate(no_optional, 16),
+            Request::discard(0, 1).validate(no_optional, 16, 14),
             Err(Error::Unsupported)
         );
         assert_eq!(
-            Request::write(0, 1, true).validate(no_optional, 16),
+            Request::write(0, 1, true).validate(no_optional, 16, 14),
             Err(Error::Unsupported)
         );
     }

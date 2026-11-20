@@ -1,5 +1,5 @@
 {
-  "baseline_total": 316,
+  "baseline_total": 315,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -13,7 +13,7 @@
     "explicit-safety-policy": 125,
     "platform-adapter": 28,
     "protocol-abi": 38,
-    "runtime-resource-capacity": 47,
+    "runtime-resource-capacity": 46,
     "test-demo-fixture": 6
   },
   "entries": [
@@ -656,16 +656,6 @@
       "reason": "bounded benchmark or probe fixture, not a production hardware fact",
       "rules": "HC-G1",
       "source": "pub const MAX_SAMPLES: usize = 256;"
-    },
-    {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "baff9c9ea2b78b20249aff542eb328868238ae7e2d284d6c15d2b3bc33de620e",
-      "line": 9,
-      "path": "kernel-core/src/block.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
-      "rules": "HC-G1",
-      "source": "pub const MAX_DATA_PAGES: usize = 14;"
     },
     {
       "category": "explicit-safety-policy",
@@ -2463,7 +2453,7 @@
     "explicit-safety-policy": 141,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 83,
+    "runtime-resource-capacity": 82,
     "test-demo-fixture": 7
   }
 }
