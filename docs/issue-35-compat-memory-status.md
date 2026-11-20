@@ -36,6 +36,10 @@
   索引仍可无损编码进现有 `FileId::AndroidFile(u8)`。
 - 每个 epoll 实例的 64 条 interest registration 固定上限已移除；新增登记继续先
   `try_reserve`，失败返回 `ENOSPC`，实际容量由可失败堆增长决定。
+- Linux supplementary groups 不再固定 32 项，`getgroups`/`setgroups` 使用调用方
+  数量、可失败 `Vec` 准入和逐项用户读取/写入；System V user/logon/keyring 不再
+  固定 16 项，keys 与 process keyring 继续由 `try_reserve`、序列号和内存失败
+  语义准入。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -55,7 +59,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=302, runtime-resource-capacity=63, unclassified=0, added=0
+findings=300, runtime-resource-capacity=61, unclassified=0, added=0
 ```
 
 ## 尚未完成
