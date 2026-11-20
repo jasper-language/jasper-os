@@ -74,6 +74,7 @@ pub enum Operation {
     ServiceUiFocusSet,
     ServiceUiFramePresent,
     ServiceUiInputRead,
+    AndroidHalServiceBind,
 }
 
 impl Operation {
@@ -90,6 +91,7 @@ impl Operation {
             Self::ServiceUiFocusSet => "service.ui.focus.set",
             Self::ServiceUiFramePresent => "service.ui.frame.present",
             Self::ServiceUiInputRead => "service.ui.input.read",
+            Self::AndroidHalServiceBind => "service.android.hal.bind",
         }
     }
 
@@ -109,7 +111,8 @@ impl Operation {
             | Self::ServiceUiSessionCreate
             | Self::ServiceUiSessionClose
             | Self::ServiceUiFocusSet
-            | Self::ServiceUiFramePresent => Effect::Write,
+            | Self::ServiceUiFramePresent
+            | Self::AndroidHalServiceBind => Effect::Write,
         }
     }
 }

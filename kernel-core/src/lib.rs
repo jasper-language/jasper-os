@@ -171,6 +171,7 @@ pub mod program_caps;
 pub mod assembly;
 /// Unified authorization projection over identity, capability, policy and audit facts.
 pub mod authz;
+pub mod android_hal;
 /// 可撤回能力发布门：读者租约、撤位与排空（issue #6）。
 pub mod service_gate;
 pub mod paging;
