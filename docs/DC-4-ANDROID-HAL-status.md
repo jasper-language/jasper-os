@@ -35,7 +35,7 @@ compatibility-layer data. They are not registered as Jasper native ABI.
 cargo test --locked -p kernel-core android_hal --lib
 5 passed; 0 failed
 
-cargo check --locked -p jasper-os-kernel --target x86_64-unknown-none
+cargo check --locked -p jasper-kernel --target x86_64-unknown-none
 PASS
 ```
 
