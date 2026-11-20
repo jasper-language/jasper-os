@@ -19,11 +19,6 @@ const BINDER_READ_PACKET_BYTES: usize = 4 + BINDER_TRANSACTION_BYTES;
 const BINDER_SEC_CTX_PACKET_BYTES: usize = BINDER_READ_PACKET_BYTES + 8;
 const MAX_TRANSACTION_BYTES: usize = 64 * 1024;
 const MAX_OFFSET_BYTES: usize = 4096;
-const MAX_QUEUE: usize = 64;
-const MAX_NODES: usize = 128;
-const MAX_HANDLES: usize = 512;
-const MAX_BINDER_THREADS: usize = 64;
-
 const BINDER_TYPE_BINDER: u32 = 0x7362_2a85;
 const BINDER_TYPE_WEAK_BINDER: u32 = 0x7762_2a85;
 const BINDER_TYPE_HANDLE: u32 = 0x7368_2a85;
@@ -245,7 +240,7 @@ pub(crate) fn set_context_manager(pid: ObjId) -> bool {
         .iter()
         .any(|node| node.owner == pid && node.pointer == 0 && !node.dead)
     {
-        if state.nodes.len() >= MAX_NODES {
+        if state.nodes.try_reserve(1).is_err() {
             return false;
         }
         let id = state.next_node;
@@ -286,10 +281,10 @@ pub(crate) fn set_context_manager_ext(
     {
         return false;
     }
-    if state.nodes.len() >= MAX_NODES {
-        return false;
-    }
     if state.nodes.iter().all(|node| node.owner != pid || node.pointer != pointer) {
+        if state.nodes.try_reserve(1).is_err() {
+            return false;
+        }
         let id = state.next_node;
         let Some(next) = id.checked_add(1) else {
             return false;
@@ -339,27 +334,32 @@ pub(crate) fn release_process(pid: ObjId) {
     if state.context_manager == Some(pid) {
         state.context_manager = None;
     }
-    let mut dead_nodes = [0u64; MAX_NODES];
-    let mut dead_count = 0usize;
-    for node in state
+    let dead_count = state
         .nodes
         .iter()
         .filter(|node| node.owner == pid && !node.dead)
-    {
-        dead_nodes[dead_count] = node.id;
-        dead_count += 1;
+        .count();
+    let mut dead_nodes = Vec::new();
+    if dead_nodes.try_reserve_exact(dead_count).is_ok() {
+        dead_nodes.extend(
+            state
+                .nodes
+                .iter()
+                .filter(|node| node.owner == pid && !node.dead)
+                .map(|node| node.id),
+        );
     }
     let notifications = state
         .death_requests
         .iter()
-        .filter(|request| dead_nodes[..dead_count].contains(&request.node))
+        .filter(|request| dead_nodes.contains(&request.node))
         .count();
     if state
         .queue
         .try_reserve(notifications.saturating_add(dead_replies.len()))
         .is_ok()
     {
-        for node in dead_nodes[..dead_count].iter().copied() {
+        for node in dead_nodes.iter().copied() {
             for index in 0..state.death_requests.len() {
                 let request = state.death_requests[index];
                 if request.node == node {
@@ -558,9 +558,6 @@ pub(crate) fn set_frozen(
                 .any(|node| node.id == request.node && node.owner == target)
         })
         .count();
-    if state.queue.len().saturating_add(notification_count) > MAX_QUEUE {
-        return Err(CompatErrno::TryAgain);
-    }
     state
         .queue
         .try_reserve(notification_count)
@@ -1020,9 +1017,6 @@ fn update_looper(
         state.threads[index].pool_member |= pool_member;
         state.threads[index].task = task;
     } else {
-        if state.threads.len() >= MAX_BINDER_THREADS {
-            return Err(CompatErrno::NoSpace);
-        }
         state
             .threads
             .try_reserve(1)
@@ -1358,9 +1352,6 @@ fn queue_reply_error(
     param: CompatErrno,
 ) -> Result<(), CompatErrno> {
     let mut state = BINDER.lock();
-    if state.queue.len().saturating_add(2) > MAX_QUEUE {
-        return Err(CompatErrno::TryAgain);
-    }
     state
         .queue
         .try_reserve(2)
@@ -1496,9 +1487,6 @@ fn translate_objects(
                 {
                     node.id
                 } else {
-                    if state.nodes.len() >= MAX_NODES {
-                        return Err(CompatErrno::NoSpace);
-                    }
                     let id = state.next_node;
                     state.next_node = id.checked_add(1).ok_or(CompatErrno::NoSpace)?;
                     state.nodes.push(Node {
@@ -1550,9 +1538,6 @@ fn translate_objects(
                 }) {
                     binding.handle
                 } else {
-                    if state.handles.len() >= MAX_HANDLES {
-                        return Err(CompatErrno::NoSpace);
-                    }
                     let handle = state.next_handle;
                     state.next_handle = handle.checked_add(1).ok_or(CompatErrno::NoSpace)?;
                     state.handles.push(LocalHandle {
@@ -1771,9 +1756,14 @@ fn enqueue_transaction(
             + usize::from(request_spawn)
             + usize::from(frozen && one_way)
             + usize::from(spam_suspect);
-        if state.queue.len().saturating_add(queued) > MAX_QUEUE {
-            return Err(CompatErrno::TryAgain);
-        }
+        let wake_count = state
+            .threads
+            .iter()
+            .filter(|thread| thread.process == target)
+            .count();
+        let mut wake = Vec::new();
+        wake.try_reserve_exact(wake_count)
+            .map_err(|_| CompatErrno::NoMemory)?;
         state
             .queue
             .try_reserve(queued)
@@ -1826,15 +1816,13 @@ fn enqueue_transaction(
                 sender: pid,
             });
         }
-        let mut wake = [None; MAX_BINDER_THREADS];
-        for (slot, thread) in wake.iter_mut().zip(
+        wake.extend(
             state
                 .threads
                 .iter()
-                .filter(|thread| thread.process == target),
-        ) {
-            *slot = Some(thread.task);
-        }
+                .filter(|thread| thread.process == target)
+                .map(|thread| thread.task),
+        );
         drop(state);
         crate::kprintln!(
             "[JSR-BINDER] transaction sender={} target={} code={:#x} flags={:#x} max_threads={} active_pool={} spawn={}",
@@ -1849,7 +1837,7 @@ fn enqueue_transaction(
         if frozen && one_way {
             note_frozen_transaction(target, true);
         }
-        for task in wake.into_iter().flatten() {
+        for task in wake {
             crate::sched::wake(task);
         }
         return Ok(());
@@ -1879,13 +1867,6 @@ fn enqueue_transaction(
         .rposition(|active| active.target == pid)
         .ok_or(CompatErrno::Invalid)?;
     state.active.remove(index);
-    if state.queue.len().saturating_add(2) > MAX_QUEUE {
-        state.active.push(ActiveTransaction {
-            target: pid,
-            sender,
-        });
-        return Err(CompatErrno::TryAgain);
-    }
     if state.queue.try_reserve(2).is_err() {
         state.active.push(ActiveTransaction {
             target: pid,

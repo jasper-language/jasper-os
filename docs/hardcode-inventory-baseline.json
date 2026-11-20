@@ -62,12 +62,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "0c2e2b95553b9fa20c527447be9ff6e7c5f46d0645a0c729ef059e7480c55ac0",
-      "path": "kernel/src/binder.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "0cc686476f25d3ba306772ad78012c365fb66cca72d91e5d96aaaf0d437663af",
       "path": "jaso/src/manifest.rs",
       "rules": "HC-G1"
@@ -77,12 +71,6 @@
       "fingerprint": "0cea368b9bd7cd52a5020e91353fb8a87fae379b32cea0a46d7e4f984f28062c",
       "path": "kernel/src/arch/aarch64/boot.rs",
       "rules": "HC-G3"
-    },
-    {
-      "count": 1,
-      "fingerprint": "0de4529159bb2b8d95b6b042f8aa7ad43feef1a621cd8e6c45e682692e0746fc",
-      "path": "kernel/src/binder.rs",
-      "rules": "HC-G1"
     },
     {
       "count": 1,
@@ -740,12 +728,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "6dd13c16071ed3edb6dd4d37f03510a4283f72114ab7e32c1cc9d6b056bdc14e",
-      "path": "kernel/src/binder.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "6de6466858e8668a5fd81e2f044ad6ffd3e2735287dc39ac55ed0acf6c6c3fd3",
       "path": "jaso/src/platform.rs",
       "rules": "HC-G1"
@@ -1025,12 +1007,6 @@
       "fingerprint": "9f1736c3ef19f749a7beebc1dec869212027735899dc8933babb7517042885b8",
       "path": "kernel/src/arch/aarch64/boot.rs",
       "rules": "HC-G3"
-    },
-    {
-      "count": 1,
-      "fingerprint": "9fe8f758225fb12261fda89e390d620a1d6990eb72adaf637ccf7ea44bcd7588",
-      "path": "kernel/src/binder.rs",
-      "rules": "HC-G1"
     },
     {
       "count": 1,
@@ -1683,5 +1659,5 @@
     "user",
     "xtask"
   ],
-  "total": 300
+  "total": 296
 }

@@ -1,5 +1,5 @@
 {
-  "baseline_total": 300,
+  "baseline_total": 296,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -13,7 +13,7 @@
     "explicit-safety-policy": 139,
     "platform-adapter": 28,
     "protocol-abi": 42,
-    "runtime-resource-capacity": 61,
+    "runtime-resource-capacity": 57,
     "test-demo-fixture": 7
   },
   "entries": [
@@ -1788,46 +1788,6 @@
       "source": ".unwrap_or(0);"
     },
     {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "0c2e2b95553b9fa20c527447be9ff6e7c5f46d0645a0c729ef059e7480c55ac0",
-      "line": 23,
-      "path": "kernel/src/binder.rs",
-      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
-      "rules": "HC-G1",
-      "source": "const MAX_NODES: usize = 128;"
-    },
-    {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "0de4529159bb2b8d95b6b042f8aa7ad43feef1a621cd8e6c45e682692e0746fc",
-      "line": 25,
-      "path": "kernel/src/binder.rs",
-      "reason": "per-process Binder looper registry; the Vec already admits each registration with try_reserve",
-      "rules": "HC-G1",
-      "source": "const MAX_BINDER_THREADS: usize = 64;"
-    },
-    {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "6dd13c16071ed3edb6dd4d37f03510a4283f72114ab7e32c1cc9d6b056bdc14e",
-      "line": 24,
-      "path": "kernel/src/binder.rs",
-      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
-      "rules": "HC-G1",
-      "source": "const MAX_HANDLES: usize = 512;"
-    },
-    {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "9fe8f758225fb12261fda89e390d620a1d6990eb72adaf637ccf7ea44bcd7588",
-      "line": 22,
-      "path": "kernel/src/binder.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
-      "rules": "HC-G1",
-      "source": "const MAX_QUEUE: usize = 64;"
-    },
-    {
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "b9949b03cdc1bd3bb45da34c76c26273bba83cb2397cb362b29fbfd981d8541d",
@@ -2793,7 +2753,7 @@
     "explicit-safety-policy": 144,
     "platform-adapter": 44,
     "protocol-abi": 42,
-    "runtime-resource-capacity": 63,
+    "runtime-resource-capacity": 59,
     "test-demo-fixture": 7
   }
 }
