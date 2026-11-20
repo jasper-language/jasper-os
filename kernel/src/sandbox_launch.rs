@@ -12,6 +12,7 @@ use kernel_core::sandbox_launch::{
     CapabilitySet, DataScopeGrant, DeviceGrant, LaunchAuthority, LaunchError, LaunchPlanKey,
     LaunchPlanSnapshot, LaunchSpec, NetworkPolicyRef, SandboxLaunchTable,
 };
+use kernel_core::sandbox_launch_abi::{MAX_DATA_SCOPES, MAX_DEVICE_GRANTS};
 use kernel_core::security_domain::DomainKey;
 use kernel_core::spawn_abi::{CPU_UNLIMITED, MAX_IMAGE_BYTES};
 use kernel_core::workload::{ResourceUsage, WorkloadKey, WorkloadState};
@@ -25,8 +26,10 @@ use crate::sync::IrqSpinLock;
 use crate::syscall::{table as abi, SyscallSet};
 use crate::workload::WORKLOADS;
 
+type LaunchTable = SandboxLaunchTable<MAX_DEVICE_GRANTS, MAX_DATA_SCOPES>;
+
 /// Lock order: `SANDBOX -> SANDBOX_STORAGE -> WORKLOADS -> SANDBOX_LAUNCH`.
-static LAUNCH: IrqSpinLock<SandboxLaunchTable> =
+static LAUNCH: IrqSpinLock<LaunchTable> =
     IrqSpinLock::ranked(crate::lockorder::SANDBOX_LAUNCH, SandboxLaunchTable::new());
 
 const DEVICE_RIGHTS: Rights = Rights::READ
@@ -52,8 +55,8 @@ struct KernelLaunchAuthority {
     root_capabilities: CapabilitySet,
     network_policy: Option<NetworkPolicyRef>,
     root_ticket: Option<DeviceAuthorityTicket>,
-    device_tickets: [Option<DeviceAuthorityTicket>; kernel_core::sandbox_launch::MAX_DEVICE_GRANTS],
-    data_tickets: [Option<DataAuthorityTicket>; kernel_core::sandbox_launch::MAX_DATA_SCOPES],
+    device_tickets: [Option<DeviceAuthorityTicket>; MAX_DEVICE_GRANTS],
+    data_tickets: [Option<DataAuthorityTicket>; MAX_DATA_SCOPES],
 }
 
 impl KernelLaunchAuthority {
@@ -75,7 +78,7 @@ impl KernelLaunchAuthority {
         if root_ticket.is_some() {
             intrinsic = intrinsic.union(CapabilitySet::DEVICE);
         }
-        let mut device_tickets = [None; kernel_core::sandbox_launch::MAX_DEVICE_GRANTS];
+        let mut device_tickets = [None; MAX_DEVICE_GRANTS];
         for (index, grant) in devices
             .iter()
             .copied()
@@ -100,7 +103,7 @@ impl KernelLaunchAuthority {
             }
             device_tickets[index] = proc::device_authority_ticket(domain, Some(object), rights);
         }
-        let mut data_tickets = [None; kernel_core::sandbox_launch::MAX_DATA_SCOPES];
+        let mut data_tickets = [None; MAX_DATA_SCOPES];
         for (index, grant) in data.iter().copied().take(data_tickets.len()).enumerate() {
             if grant.owner != domain || grant.grantee != domain {
                 continue;
@@ -270,11 +273,11 @@ fn plan_authority(
     let (plan, device_count, devices, data_count, data_scopes) = {
         let plans = LAUNCH.lock();
         let plan = plans.plan(domain, key)?;
-        let mut devices = [None; kernel_core::sandbox_launch::MAX_DEVICE_GRANTS];
+        let mut devices = [None; MAX_DEVICE_GRANTS];
         for (index, slot) in devices.iter_mut().enumerate().take(plan.devices as usize) {
             *slot = Some(plans.device(domain, key, index as u16)?);
         }
-        let mut data_scopes = [None; kernel_core::sandbox_launch::MAX_DATA_SCOPES];
+        let mut data_scopes = [None; MAX_DATA_SCOPES];
         for (index, slot) in data_scopes
             .iter_mut()
             .enumerate()
@@ -296,7 +299,7 @@ fn plan_authority(
         rights: 0,
         owner: DomainKey::NONE,
         grantee: DomainKey::NONE,
-    }; kernel_core::sandbox_launch::MAX_DEVICE_GRANTS];
+    }; MAX_DEVICE_GRANTS];
     for (target, source) in device_grants
         .iter_mut()
         .zip(devices[..device_count].iter().flatten())
@@ -309,7 +312,7 @@ fn plan_authority(
         owner: DomainKey::NONE,
         grantee: DomainKey::NONE,
         writable: false,
-    }; kernel_core::sandbox_launch::MAX_DATA_SCOPES];
+    }; MAX_DATA_SCOPES];
     for (target, source) in data_grants[..data_count]
         .iter_mut()
         .zip(data_scopes[..data_count].iter().flatten())

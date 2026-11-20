@@ -20,8 +20,6 @@ use crate::workload::{WorkloadState, WorkloadTable};
 #[cfg(any(test, feature = "runtime-registries"))]
 use alloc::vec::Vec;
 
-pub const MAX_DEVICE_GRANTS: usize = 16;
-pub const MAX_DATA_SCOPES: usize = 16;
 pub const MAX_VIEW_PATH: usize = 64;
 
 /// A compact capability set. Capabilities are explicit identifiers, never
@@ -173,14 +171,14 @@ pub enum LaunchState {
 
 #[derive(Clone, Copy)]
 #[cfg(any(test, feature = "runtime-registries"))]
-struct Record {
+struct Record<const DEVICES: usize, const DATA: usize> {
     key: LaunchPlanKey,
     domain: DomainKey,
     plan: LaunchPlanSnapshot,
     state: LaunchState,
     child_workload: Option<WorkloadKey>,
-    devices: [Option<DeviceGrant>; MAX_DEVICE_GRANTS],
-    data: [Option<DataScopeGrant>; MAX_DATA_SCOPES],
+    devices: [Option<DeviceGrant>; DEVICES],
+    data: [Option<DataScopeGrant>; DATA],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -257,8 +255,8 @@ impl From<SandboxStorageError> for LaunchError {
 /// Heap-backed launch-plan table. Admission validates every referenced
 /// fact before writing the first plan byte.
 #[cfg(any(test, feature = "runtime-registries"))]
-pub struct SandboxLaunchTable {
-    slots: Vec<Option<Record>>,
+pub struct SandboxLaunchTable<const DEVICES: usize, const DATA: usize> {
+    slots: Vec<Option<Record<DEVICES, DATA>>>,
     generations: Vec<u32>,
 }
 
@@ -346,7 +344,7 @@ impl LaunchAuthority for IntrinsicLaunchAuthority {
 }
 
 #[cfg(any(test, feature = "runtime-registries"))]
-impl SandboxLaunchTable {
+impl<const DEVICES: usize, const DATA: usize> SandboxLaunchTable<DEVICES, DATA> {
     pub const fn new() -> Self {
         Self {
             slots: Vec::new(),
@@ -408,15 +406,15 @@ impl SandboxLaunchTable {
         {
             return Err(LaunchError::InvalidNetwork);
         }
-        validate_devices(domain, spec.capabilities, spec.devices)?;
-        validate_data(domain, spec.capabilities, spec.data)?;
+        validate_devices(domain, spec.capabilities, spec.devices, DEVICES)?;
+        validate_data(domain, spec.capabilities, spec.data, DATA)?;
         let (slot, generation) = self.vacant()?;
         let key = LaunchPlanKey {
             slot: slot as u16,
             generation,
         };
-        let mut devices = [None; MAX_DEVICE_GRANTS];
-        let mut data = [None; MAX_DATA_SCOPES];
+        let mut devices = [None; DEVICES];
+        let mut data = [None; DATA];
         for (target, source) in devices.iter_mut().zip(spec.devices.iter().copied()) {
             *target = Some(source);
         }
@@ -689,7 +687,11 @@ impl SandboxLaunchTable {
         Ok(())
     }
 
-    fn record(&self, domain: DomainKey, key: LaunchPlanKey) -> Result<Record, LaunchError> {
+    fn record(
+        &self,
+        domain: DomainKey,
+        key: LaunchPlanKey,
+    ) -> Result<Record<DEVICES, DATA>, LaunchError> {
         self.slots
             .get(key.slot as usize)
             .and_then(|record| *record)
@@ -724,7 +726,7 @@ impl SandboxLaunchTable {
 }
 
 #[cfg(any(test, feature = "runtime-registries"))]
-impl Default for SandboxLaunchTable {
+impl<const DEVICES: usize, const DATA: usize> Default for SandboxLaunchTable<DEVICES, DATA> {
     fn default() -> Self {
         Self::new()
     }
@@ -763,8 +765,9 @@ fn validate_devices(
     domain: DomainKey,
     capabilities: CapabilitySet,
     grants: &[DeviceGrant],
+    capacity: usize,
 ) -> Result<(), LaunchError> {
-    if grants.len() > MAX_DEVICE_GRANTS
+    if grants.len() > capacity
         || (!grants.is_empty() && !capabilities.contains(CapabilitySet::DEVICE))
     {
         return Err(LaunchError::InvalidDevice);
@@ -791,8 +794,9 @@ fn validate_data(
     domain: DomainKey,
     capabilities: CapabilitySet,
     grants: &[DataScopeGrant],
+    capacity: usize,
 ) -> Result<(), LaunchError> {
-    if grants.len() > MAX_DATA_SCOPES {
+    if grants.len() > capacity {
         return Err(LaunchError::InvalidData);
     }
     for (index, grant) in grants.iter().copied().enumerate() {
@@ -884,6 +888,8 @@ mod tests {
         ContentDigest, ImageLayerSpec, ImageSpec, ImageVersion, SignedImage,
     };
     use crate::workload::{ResourceLimits, WorkloadTable};
+
+    type TestLaunchTable = SandboxLaunchTable<16, 16>;
 
     const DOMAIN: DomainKey = DomainKey {
         id: 41,
@@ -1088,7 +1094,7 @@ mod tests {
             },
         ];
         let spec = launch_spec(sandbox, root, image, Some(volume), &devices, &data);
-        let mut plans = SandboxLaunchTable::new();
+        let mut plans: TestLaunchTable = SandboxLaunchTable::new();
         let key = plans
             .create(DOMAIN, &workloads, &sandboxes, &storage, spec)
             .unwrap();
@@ -1121,7 +1127,7 @@ mod tests {
             .create_volume(DOMAIN, sandbox, other_image, 8 * 1024)
             .unwrap();
         let spec = launch_spec(sandbox, root, image, Some(other_volume), &[], &[]);
-        let mut plans = SandboxLaunchTable::new();
+        let mut plans: TestLaunchTable = SandboxLaunchTable::new();
         assert_eq!(
             plans.create(DOMAIN, &workloads, &sandboxes, &storage, spec),
             Err(LaunchError::Ownership)
@@ -1132,7 +1138,7 @@ mod tests {
     #[test]
     fn resource_and_capability_escalation_are_failure_atomic() {
         let (workloads, sandboxes, storage, sandbox, root, image, volume, _) = fixture();
-        let mut plans = SandboxLaunchTable::new();
+        let mut plans: TestLaunchTable = SandboxLaunchTable::new();
         let good = launch_spec(sandbox, root, image, Some(volume), &[], &[]);
         let key = plans
             .create(DOMAIN, &workloads, &sandboxes, &storage, good)
@@ -1165,7 +1171,7 @@ mod tests {
     #[test]
     fn device_data_and_network_grants_are_checked_and_duplicate_free() {
         let (workloads, sandboxes, storage, sandbox, root, image, volume, _) = fixture();
-        let mut plans = SandboxLaunchTable::new();
+        let mut plans: TestLaunchTable = SandboxLaunchTable::new();
         let bad_device = [DeviceGrant {
             object: 0x701,
             generation: 1,
@@ -1289,7 +1295,7 @@ mod tests {
             writable: false,
         }];
         let spec = launch_spec(sandbox, root, image, Some(volume), &devices, &data);
-        let mut plans = SandboxLaunchTable::new();
+        let mut plans: TestLaunchTable = SandboxLaunchTable::new();
         let key = plans
             .create(DOMAIN, &workloads, &sandboxes, &storage, spec)
             .unwrap();
@@ -1300,7 +1306,7 @@ mod tests {
     #[test]
     fn logical_views_are_derived_and_cannot_change_launch_authority() {
         let (workloads, sandboxes, storage, sandbox, root, image, volume, _) = fixture();
-        let mut plans = SandboxLaunchTable::new();
+        let mut plans: TestLaunchTable = SandboxLaunchTable::new();
         let key = plans
             .create(
                 DOMAIN,
@@ -1338,7 +1344,7 @@ mod tests {
     #[test]
     fn plans_grow_past_fixed_envelopes_and_old_keys_never_revive() {
         let (workloads, sandboxes, storage, sandbox, root, image, volume, _) = fixture();
-        let mut plans = SandboxLaunchTable::new();
+        let mut plans: TestLaunchTable = SandboxLaunchTable::new();
         let spec = launch_spec(sandbox, root, image, Some(volume), &[], &[]);
         let mut old = None;
         for _ in 0..80 {
@@ -1379,7 +1385,7 @@ mod tests {
             root: CapabilitySet::ALL,
             external: false,
         };
-        let mut plans = SandboxLaunchTable::new();
+        let mut plans: TestLaunchTable = SandboxLaunchTable::new();
         let key = plans
             .create_live(DOMAIN, &workloads, &sandboxes, &storage, &authority, spec)
             .unwrap();
@@ -1410,7 +1416,7 @@ mod tests {
     #[test]
     fn live_authority_is_rechecked_at_create_and_query() {
         let (workloads, sandboxes, storage, sandbox, root, image, volume, _) = fixture();
-        let mut plans = SandboxLaunchTable::new();
+        let mut plans: TestLaunchTable = SandboxLaunchTable::new();
         let spec = launch_spec(sandbox, root, image, Some(volume), &[], &[]);
         let mut authority = TestAuthority {
             root: CapabilitySet::ALL,
@@ -1452,7 +1458,7 @@ mod tests {
     #[test]
     fn stopping_sandbox_invalidates_live_plan_queries() {
         let (mut workloads, sandboxes, storage, sandbox, root, image, volume, _) = fixture();
-        let mut plans = SandboxLaunchTable::new();
+        let mut plans: TestLaunchTable = SandboxLaunchTable::new();
         let authority = TestAuthority {
             root: CapabilitySet::ALL,
             external: true,

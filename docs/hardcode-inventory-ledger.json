@@ -1,5 +1,5 @@
 {
-  "baseline_total": 319,
+  "baseline_total": 316,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -12,8 +12,8 @@
   "counts": {
     "explicit-safety-policy": 125,
     "platform-adapter": 28,
-    "protocol-abi": 39,
-    "runtime-resource-capacity": 48,
+    "protocol-abi": 38,
+    "runtime-resource-capacity": 47,
     "test-demo-fixture": 6
   },
   "entries": [
@@ -1098,16 +1098,6 @@
       "source": "let mask = self.masks.get(&(bdf, slot)).copied().unwrap_or(0);"
     },
     {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "f0aa3d37e85012876652fbf2b4c47dcf49d74ba117b921bfbc3091709f87ce76",
-      "line": 32,
-      "path": "kernel-core/src/persistent_install.rs",
-      "reason": "fixed v4 on-disk blob slot map; resize requires a format migration and crash recovery test",
-      "rules": "HC-G8",
-      "source": "const BLOB_SLOTS: usize = 16; // JASPER-HARDCODE-REVIEW: issue=35 source=persistent-install-format-v4 reason=fixed-on-disk-slot-map"
-    },
-    {
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "cf7d3d34e51f2d5b91eca86c0e813f4b43304402c84aca5eb30aa66e8abe0f72",
@@ -1128,20 +1118,10 @@
       "source": "pub const DEFAULT_UTILISATION_PERMILLE: u32 = 900;"
     },
     {
-      "category": "runtime-resource-capacity",
-      "count": 2,
-      "fingerprint": "b1a9b0d8fe5579ac28d3c5c6e2093534ac579bc155e5db147ee27d5e5ce12c61",
-      "line": 23,
-      "path": "kernel-core/src/sandbox_launch.rs",
-      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
-      "rules": "HC-G1",
-      "source": "pub const MAX_DEVICE_GRANTS: usize = 16;"
-    },
-    {
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "ec10d48d136f491d2048c5d32ebf4810ebccca8bf9b2d8ff8a0a7222ad0024c1",
-      "line": 25,
+      "line": 23,
       "path": "kernel-core/src/sandbox_launch.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
@@ -2482,8 +2462,8 @@
   "weighted_counts": {
     "explicit-safety-policy": 141,
     "platform-adapter": 44,
-    "protocol-abi": 42,
-    "runtime-resource-capacity": 85,
+    "protocol-abi": 41,
+    "runtime-resource-capacity": 83,
     "test-demo-fixture": 7
   }
 }

@@ -1063,12 +1063,6 @@
       "rules": "HC-G5"
     },
     {
-      "count": 2,
-      "fingerprint": "b1a9b0d8fe5579ac28d3c5c6e2093534ac579bc155e5db147ee27d5e5ce12c61",
-      "path": "kernel-core/src/sandbox_launch.rs",
-      "rules": "HC-G1"
-    },
-    {
       "count": 3,
       "fingerprint": "b1ea071445b87e98e8e58761cfc59762c7985bb31b9bab7b17642c8fbcf68d73",
       "path": "kernel/src/arch/aarch64/mod.rs",
@@ -1370,12 +1364,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "f0aa3d37e85012876652fbf2b4c47dcf49d74ba117b921bfbc3091709f87ce76",
-      "path": "kernel-core/src/persistent_install.rs",
-      "rules": "HC-G8"
-    },
-    {
-      "count": 1,
       "fingerprint": "f120e3853a6f157c5977306c31965183a2894d9e12da01abf171ea68f32b7773",
       "path": "kernel-core/src/user_layout.rs",
       "rules": "HC-G1"
@@ -1497,5 +1485,5 @@
     "user",
     "xtask"
   ],
-  "total": 319
+  "total": 316
 }
