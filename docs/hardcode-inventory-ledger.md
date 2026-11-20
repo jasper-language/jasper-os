@@ -20,8 +20,8 @@
 
 | 类别 | 唯一指纹 | 基线命中 | 含义 |
 | --- | ---: | ---: | --- |
-| `explicit-safety-policy` | 139 | 144 | 有界工作、解析/等待上限、fail-closed 或诊断哨兵、明确策略默认 |
-| `runtime-resource-capacity` | 50 | 52 | 运行期集合/容量，应由资源预算和准入决定 |
+| `explicit-safety-policy` | 140 | 145 | 有界工作、解析/等待上限、fail-closed 或诊断哨兵、明确策略默认 |
+| `runtime-resource-capacity` | 49 | 51 | 运行期集合/容量，应由资源预算和准入决定 |
 | `platform-adapter` | 28 | 44 | QEMU/Pixel 等架构特定选择，需保留显式 Profile 边界 |
 | `protocol-abi` | 41 | 41 | Wire、FDT/PCI、Linux UAPI、磁盘格式、地址宽度或内部位域契约 |
 | `confirmed-defect` | 0 | 0 | 当前分类账中尚无新增的已证实未修缺陷 |
@@ -34,6 +34,9 @@
 `kernel/src/arch/x86_64/bm1.rs` 明确是 QEMU-only BM-1 验收 Profile，且对默认
 内核无影响；其 8 MiB trace buffer 与相关固定值按测试夹具登记，不冒充生产运行期
 容量。
+
+Linux robust-list 的 64 节点上限属于故障进程退出时的有界遍历与环检测保护；该路径
+不能依赖堆分配成功，因此按显式安全策略登记。
 
 ## 校验
 
@@ -57,7 +60,7 @@ python3 scripts/check-hardcode-inventory-ledger.py --check \
 
 ## 后续清零顺序
 
-1. 先沿运行时消费者处理 50 个 `runtime-resource-capacity`，并补齐调用方预算和
+1. 先沿运行时消费者处理 49 个 `runtime-resource-capacity`，并补齐调用方预算和
    拒绝负例；
 2. 将 139 个 `explicit-safety-policy` 逐项绑定到规范、策略或负例证据；
 3. 把 28 个 `platform-adapter` 收敛到经验证的平台 Profile；
