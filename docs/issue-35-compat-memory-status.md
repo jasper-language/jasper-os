@@ -40,6 +40,10 @@
   数量、可失败 `Vec` 准入和逐项用户读取/写入；System V user/logon/keyring 不再
   固定 16 项，keys 与 process keyring 继续由 `try_reserve`、序列号和内存失败
   语义准入。
+- Android Binder 不再固定 64 queue、128 node、512 local handle 或 64 looper 项。
+  queue、node、handle、thread、wake target 和退出通知快照全部在变更前使用可失败
+  堆准入；分配失败在会改变事务/队列之前返回 `ENOMEM`，清理路径仍保持代际与
+  dead-node tombstone 语义。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -59,7 +63,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=300, runtime-resource-capacity=61, unclassified=0, added=0
+findings=296, runtime-resource-capacity=57, unclassified=0, added=0
 ```
 
 ## 尚未完成
