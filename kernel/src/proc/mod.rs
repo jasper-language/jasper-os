@@ -1528,7 +1528,10 @@ pub(crate) fn linux_socket_listen(
                 return Err(LinuxSocketError::IsConnected);
             }
             let listener = socket.listener.as_ref().ok_or(LinuxSocketError::NotBound)?;
-            let backlog = backlog.clamp(1, 128);
+            // Listen backlog is admitted from the same per-process object
+            // budget as the listener metadata; zero still means one pending
+            // connection as required by the Linux ABI.
+            let backlog = backlog.clamp(1, HANDLES_PER_PROCESS);
             listener
                 .pending
                 .lock()

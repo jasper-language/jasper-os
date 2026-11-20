@@ -57,6 +57,9 @@ dmabuf、sync_file、AIO 与 sealed-range 不再使用 8/16/32/64 的私有实�
 识别的 `len() >= N` 行内容量，不能把扫描器 `runtime-resource-capacity=0` 当作
 整个问题的唯一证据。
 
+AF_UNIX `listen` backlog 也改为使用同一进程对象预算；Linux ABI 的零值仍按规范
+折算为一个等待连接。
+
 原生 CLI 的 `echo` 输出也删除了 256 字节输入上限和 300 字节拼接缓冲，改为按
 前缀、调用方文本、后缀分段写入；容量由终端会话和实际输入长度决定。
 
