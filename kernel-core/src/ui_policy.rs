@@ -465,13 +465,23 @@ impl SurfaceMigration {
         policy: UiPolicySnapshot,
         authorization: Decision,
     ) -> Result<UiSceneState, UiPolicyError> {
-        if !authorization.admitted() {
+        if !authorization.admitted()
+            || authorization.issuer != crate::authz::KERNEL_PEP_ISSUER
+        {
             return Err(UiPolicyError::AuthorizationDenied);
         }
         if authorization.policy_epoch != policy.policy_epoch {
             return Err(UiPolicyError::AuthorizationEpoch);
         }
+        let revocation_generation = u32::try_from(policy.revocation_epoch)
+            .map_err(|_| UiPolicyError::AuthorizationEpoch)?;
+        if authorization.revocation_generation != Some(revocation_generation) {
+            return Err(UiPolicyError::AuthorizationEpoch);
+        }
         if authorization.operation != Operation::ServiceUiFramePresent {
+            return Err(UiPolicyError::AuthorizationOperation);
+        }
+        if authorization.effect != crate::authz::Effect::Write {
             return Err(UiPolicyError::AuthorizationOperation);
         }
         if authorization.scope != AccessScope::User(u64::from(policy.scope.user))
