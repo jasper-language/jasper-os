@@ -169,8 +169,6 @@ struct FutexWord {
     waiters: [FutexWaiter; MAX_FUTEX_WAITERS],
 }
 
-const MAX_FLOCK_LOCKS: usize = 64;
-
 #[derive(Clone, Copy)]
 struct FlockLock {
     backing: u64,
@@ -358,8 +356,8 @@ struct CompatState {
     >; MAX_LINUX_THREADS],
     futexes: [Option<FutexWord>; MAX_FUTEX_WORDS],
     process_signals: [Option<ProcessSignalSet>; MAX_PROCESS_SIGNAL_SETS],
-    flock_locks: [Option<FlockLock>; MAX_FLOCK_LOCKS],
-    flock_waiters: [Option<FlockWaiter>; MAX_FLOCK_LOCKS],
+    flock_locks: alloc::vec::Vec<Option<FlockLock>>,
+    flock_waiters: alloc::vec::Vec<Option<FlockWaiter>>,
     posix_timers: [Option<PosixTimer>; MAX_POSIX_TIMERS],
     interval_timers: [Option<IntervalTimer>; MAX_INTERVAL_TIMER_SETS],
     message_queue_names: alloc::vec::Vec<MessageQueueName>,
@@ -388,8 +386,8 @@ impl CompatState {
             thread_landlock_domains: [const { None }; MAX_LINUX_THREADS],
             futexes: [None; MAX_FUTEX_WORDS],
             process_signals: [None; MAX_PROCESS_SIGNAL_SETS],
-            flock_locks: [None; MAX_FLOCK_LOCKS],
-            flock_waiters: [None; MAX_FLOCK_LOCKS],
+            flock_locks: alloc::vec::Vec::new(),
+            flock_waiters: alloc::vec::Vec::new(),
             posix_timers: [None; MAX_POSIX_TIMERS],
             interval_timers: [None; MAX_INTERVAL_TIMER_SETS],
             message_queue_names: alloc::vec::Vec::new(),
@@ -16530,8 +16528,6 @@ fn linux_flock(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let task = sched::current().0;
     let mut registered = false;
     loop {
-        let mut wake = [crate::task::TaskId(0); MAX_FLOCK_LOCKS];
-        let mut wake_count = 0usize;
         let acquired = {
             let mut state = COMPAT.lock();
             let conflict = state.flock_locks.iter().flatten().any(|lock| {
@@ -16549,13 +16545,9 @@ fn linux_flock(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                         })
                     })
                     .for_each(|lock| *lock = None);
-                for waiter in state.flock_waiters.iter_mut().flatten() {
-                    wake[wake_count] = waiter.task;
-                    wake_count += 1;
-                }
-                state.flock_waiters.fill(None);
+                let waiters = core::mem::take(&mut state.flock_waiters);
                 drop(state);
-                for task in wake[..wake_count].iter().copied() {
+                for task in waiters.into_iter().flatten().map(|waiter| waiter.task) {
                     sched::wake(task);
                 }
                 return Ok(0);
@@ -16570,8 +16562,15 @@ fn linux_flock(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                         })
                     })
                     .for_each(|lock| *lock = None);
-                let Some(slot) = state.flock_locks.iter().position(Option::is_none) else {
-                    return Err(CompatErrno::NoSpace);
+                let slot = if let Some(slot) = state.flock_locks.iter().position(Option::is_none) {
+                    slot
+                } else {
+                    state
+                        .flock_locks
+                        .try_reserve(1)
+                        .map_err(|_| CompatErrno::NoMemory)?;
+                    state.flock_locks.push(None);
+                    state.flock_locks.len() - 1
                 };
                 state.flock_locks[slot] = Some(FlockLock {
                     backing,
@@ -16593,8 +16592,17 @@ fn linux_flock(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                     return Err(CompatErrno::TryAgain);
                 }
                 if !registered {
-                    let Some(slot) = state.flock_waiters.iter().position(Option::is_none) else {
-                        return Err(CompatErrno::NoSpace);
+                    let slot = if let Some(slot) =
+                        state.flock_waiters.iter().position(Option::is_none)
+                    {
+                        slot
+                    } else {
+                        state
+                            .flock_waiters
+                            .try_reserve(1)
+                            .map_err(|_| CompatErrno::NoMemory)?;
+                        state.flock_waiters.push(None);
+                        state.flock_waiters.len() - 1
                     };
                     state.flock_waiters[slot] = Some(FlockWaiter { task });
                     registered = true;
@@ -16625,8 +16633,6 @@ fn linux_flock(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 /// Releases flock state after the final descriptor of one open-file
 /// description closes and wakes every blocked flock waiter.
 pub(crate) fn release_flock_description(owner: u64) {
-    let mut tasks = [crate::task::TaskId(0); MAX_FLOCK_LOCKS];
-    let mut count = 0usize;
     let mut state = COMPAT.lock();
     state
         .flock_locks
@@ -16640,13 +16646,9 @@ pub(crate) fn release_flock_description(owner: u64) {
     {
         return;
     }
-    for waiter in state.flock_waiters.iter_mut().flatten() {
-        tasks[count] = waiter.task;
-        count += 1;
-    }
-    state.flock_waiters.fill(None);
+    let waiters = core::mem::take(&mut state.flock_waiters);
     drop(state);
-    for task in tasks[..count].iter().copied() {
+    for task in waiters.into_iter().flatten().map(|waiter| waiter.task) {
         sched::wake(task);
     }
 }

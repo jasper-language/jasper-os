@@ -1208,12 +1208,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "c250b7f7149788423350fe66b1e22c68eb45e494b9f5dabb783c73e848a2a065",
-      "path": "kernel/src/linux_abi.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "c2e26df14441f1d2cd94b57337af01f2ed8d1c931693d4eb1434d5934382bea3",
       "path": "user/irqprobe/build.rs",
       "rules": "HC-G7"
@@ -1617,5 +1611,5 @@
     "user",
     "xtask"
   ],
-  "total": 289
+  "total": 288
 }
