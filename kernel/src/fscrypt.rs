@@ -15,6 +15,7 @@
 use crate::sync::SpinLock;
 use aes::cipher::{Array, BlockCipherEncrypt, KeyInit};
 use aes::{Aes128, Aes256};
+use alloc::vec::Vec;
 use hmac::{Hmac, Mac};
 use kernel_core::security::BootId;
 use sha2::{Digest, Sha512};
@@ -26,8 +27,6 @@ pub(crate) const MAX_KEY_BYTES: usize = 64;
 pub(crate) const FILE_NONCE_BYTES: usize = 16;
 
 const DATA_UNIT_BYTES: usize = kernel_core::frame::FRAME_SIZE as usize;
-const MAX_KEYS: usize = 4;
-const MAX_KEY_USERS: usize = 4;
 const HKDF_CONTEXT_KEY_IDENTIFIER: u8 = 1;
 const HKDF_CONTEXT_PER_FILE_ENC_KEY: u8 = 2;
 
@@ -146,22 +145,20 @@ impl Policy {
     }
 }
 
-#[derive(Clone, Copy)]
 struct StoredKey {
     spec: KeySpecifier,
     raw: [u8; MAX_KEY_BYTES],
     raw_len: u8,
-    users: [u32; MAX_KEY_USERS],
-    user_len: u8,
+    users: Vec<u32>,
 }
 
 struct Keyring {
-    entries: [Option<StoredKey>; MAX_KEYS],
+    entries: Vec<StoredKey>,
     next_nonce: u64,
 }
 
 static KEYRING: SpinLock<Keyring> = SpinLock::new(Keyring {
-    entries: [None; MAX_KEYS],
+    entries: Vec::new(),
     next_nonce: 1,
 });
 
@@ -251,34 +248,38 @@ pub(crate) fn add_key(
     if let Some(existing) = ring
         .entries
         .iter_mut()
-        .flatten()
         .find(|entry| entry.spec == spec)
     {
         if &existing.raw[..existing.raw_len as usize] != raw {
             return Err(FscryptError::NoKey);
         }
-        if !existing.users[..existing.user_len as usize].contains(&uid) {
-            if existing.user_len as usize == MAX_KEY_USERS {
-                return Err(FscryptError::NoSpace);
-            }
-            existing.users[existing.user_len as usize] = uid;
-            existing.user_len += 1;
+        if !existing.users.contains(&uid) {
+            existing
+                .users
+                .try_reserve(1)
+                .map_err(|_| FscryptError::NoSpace)?;
+            existing.users.push(uid);
         }
         return Ok(spec);
     }
-    let Some(slot) = ring.entries.iter_mut().find(|entry| entry.is_none()) else {
-        return Err(FscryptError::NoSpace);
-    };
-    let mut stored = StoredKey {
+    ring.entries
+        .try_reserve(1)
+        .map_err(|_| FscryptError::NoSpace)?;
+    let mut users = Vec::new();
+    users
+        .try_reserve(1)
+        .map_err(|_| FscryptError::NoSpace)?;
+    users.push(uid);
+    ring.entries.push(StoredKey {
         spec,
         raw: [0; MAX_KEY_BYTES],
         raw_len: raw.len() as u8,
-        users: [0; MAX_KEY_USERS],
-        user_len: 1,
+        users,
+    });
+    let Some(stored) = ring.entries.last_mut() else {
+        return Err(FscryptError::NoSpace);
     };
     stored.raw[..raw.len()].copy_from_slice(raw);
-    stored.users[0] = uid;
-    *slot = Some(stored);
     Ok(spec)
 }
 
@@ -287,7 +288,6 @@ fn take_key(spec: KeySpecifier) -> Option<([u8; MAX_KEY_BYTES], u8)> {
         .lock()
         .entries
         .iter()
-        .flatten()
         .find(|entry| entry.spec == spec)
         .map(|entry| (entry.raw, entry.raw_len))
 }
@@ -311,42 +311,36 @@ pub(crate) fn remove_key(
     let Some(index) = ring
         .entries
         .iter()
-        .position(|entry| entry.is_some_and(|entry| entry.spec == spec))
+        .position(|entry| entry.spec == spec)
     else {
         return Err(FscryptError::NoKey);
     };
-    let Some(mut key) = ring.entries[index] else {
-        return Err(FscryptError::NoKey);
-    };
     if spec.kind == KEY_SPEC_TYPE_DESCRIPTOR {
-        let mut key = key;
+        let key = &mut ring.entries[index];
         key.raw.fill(0);
-        ring.entries[index] = None;
+        ring.entries.swap_remove(index);
         return Ok(0);
     }
-    let Some(user_index) = key.users[..key.user_len as usize]
+    if all_users {
+        let key = &mut ring.entries[index];
+        key.raw.fill(0);
+        ring.entries.swap_remove(index);
+        return Ok(0);
+    }
+    let key = &mut ring.entries[index];
+    let Some(user_index) = key
+        .users
         .iter()
         .position(|candidate| *candidate == uid)
     else {
         return Err(FscryptError::NoKey);
     };
-    if all_users {
+    key.users.swap_remove(user_index);
+    if key.users.is_empty() {
         key.raw.fill(0);
-        ring.entries[index] = None;
-        return Ok(0);
-    }
-    let len = key.user_len as usize;
-    for index in user_index..len - 1 {
-        key.users[index] = key.users[index + 1];
-    }
-    key.users[len - 1] = 0;
-    key.user_len -= 1;
-    if key.user_len == 0 {
-        key.raw.fill(0);
-        ring.entries[index] = None;
+        ring.entries.swap_remove(index);
         Ok(0)
     } else {
-        ring.entries[index] = Some(key);
         Ok(2)
     }
 }
@@ -359,7 +353,6 @@ pub(crate) fn key_status(spec: KeySpecifier, uid: u32) -> Result<(u32, u32, u32)
     let Some(key) = ring
         .entries
         .iter()
-        .flatten()
         .find(|entry| entry.spec == spec)
     else {
         return Ok((1, 0, 0));
@@ -367,17 +360,16 @@ pub(crate) fn key_status(spec: KeySpecifier, uid: u32) -> Result<(u32, u32, u32)
     if spec.kind == KEY_SPEC_TYPE_DESCRIPTOR {
         return Ok((2, 0, 0));
     }
-    let added_by_self = key.users[..key.user_len as usize].contains(&uid);
-    Ok((2, u32::from(added_by_self), u32::from(key.user_len)))
+    let added_by_self = key.users.contains(&uid);
+    Ok((2, u32::from(added_by_self), key.users.len() as u32))
 }
 
 pub(crate) fn key_added_by(spec: KeySpecifier, uid: u32) -> bool {
     let ring = KEYRING.lock();
     ring.entries
         .iter()
-        .flatten()
         .find(|entry| entry.spec == spec)
-        .is_some_and(|entry| entry.users[..entry.user_len as usize].contains(&uid))
+        .is_some_and(|entry| entry.users.contains(&uid))
 }
 
 fn derive_v1_key(master: &[u8], nonce: &[u8; 16]) -> [u8; MAX_KEY_BYTES] {
@@ -521,5 +513,42 @@ mod tests {
         assert_eq!(key_status(identifier, 1000), Ok((2, 0, 1)));
         assert_eq!(remove_key(identifier, 2000, false, false), Ok(0));
         assert_eq!(key_status(identifier, 2000), Ok((1, 0, 0)));
+    }
+
+    #[test]
+    fn keyring_and_user_claims_grow_past_former_slots() {
+        let requested = KeySpecifier::identifier([0x31; 16]);
+        let raw = [0x32; 32];
+        let identifier = add_key(requested, &raw, 3000, false).unwrap();
+        for uid in 3001..3008 {
+            add_key(requested, &raw, uid, false).unwrap();
+        }
+        assert_eq!(key_status(identifier, 3007).unwrap().2, 8);
+        assert_eq!(remove_key(identifier, 3000, true, true), Ok(0));
+
+        let mut identifiers = Vec::new();
+        for value in 0..6u8 {
+            let requested = KeySpecifier::identifier([value; 16]);
+            let raw = [value + 0x40; 32];
+            identifiers.push((add_key(requested, &raw, 4000, false).unwrap(), value));
+        }
+        for (identifier, expected) in &identifiers {
+            assert!(
+                FileCipher::new(
+                    Policy::V2 {
+                        contents_mode: 1,
+                        filenames_mode: 4,
+                        flags: 0,
+                        log2_data_unit_size: 12,
+                        identifier: identifier.bytes[..16]
+                            .try_into()
+                            .expect("identifier width"),
+                    },
+                    [*expected; 16],
+                )
+                .is_ok()
+            );
+            assert_eq!(remove_key(*identifier, 4000, false, false), Ok(0));
+        }
     }
 }

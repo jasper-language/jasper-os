@@ -1201,12 +1201,6 @@
       "rules": "HC-G6"
     },
     {
-      "count": 2,
-      "fingerprint": "db0c05ee4500893b2fbacdc2d16fe7ce3eb13733826c6700d51c10cbe7a9b49c",
-      "path": "kernel/src/fscrypt.rs",
-      "rules": "HC-G1"
-    },
-    {
       "count": 1,
       "fingerprint": "dc90084693c8ea89a00e0f2b302487b795c608f343271b932be96a8f680c9ee1",
       "path": "lifecycle-model/src/manifest_cbor.rs",
@@ -1455,5 +1449,5 @@
     "user",
     "xtask"
   ],
-  "total": 310
+  "total": 308
 }

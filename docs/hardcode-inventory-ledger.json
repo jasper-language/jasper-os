@@ -1,5 +1,5 @@
 {
-  "baseline_total": 310,
+  "baseline_total": 308,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -13,7 +13,7 @@
     "explicit-safety-policy": 125,
     "platform-adapter": 28,
     "protocol-abi": 38,
-    "runtime-resource-capacity": 42,
+    "runtime-resource-capacity": 41,
     "test-demo-fixture": 6
   },
   "entries": [
@@ -1791,21 +1791,11 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "4fe0491e6723c5bf88d3f088d1276fdc3822fef91ada2566722b9245c788c2fa",
-      "line": 25,
+      "line": 26,
       "path": "kernel/src/fscrypt.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
       "source": "pub(crate) const MAX_KEY_BYTES: usize = 64;"
-    },
-    {
-      "category": "runtime-resource-capacity",
-      "count": 2,
-      "fingerprint": "db0c05ee4500893b2fbacdc2d16fe7ce3eb13733826c6700d51c10cbe7a9b49c",
-      "line": 29,
-      "path": "kernel/src/fscrypt.rs",
-      "reason": "runtime-owned collection or metadata capacity; callers must enforce budget and expose rejection",
-      "rules": "HC-G1",
-      "source": "const MAX_KEYS: usize = 4;"
     },
     {
       "category": "protocol-abi",
@@ -2413,7 +2403,7 @@
     "explicit-safety-policy": 141,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 77,
+    "runtime-resource-capacity": 75,
     "test-demo-fixture": 7
   }
 }
