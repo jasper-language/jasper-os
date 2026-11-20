@@ -75,6 +75,10 @@ jobs:
           python3 scripts/check-hardcode-inventory-ledger.py --self-test
           python3 scripts/check-hardcode-inventory-ledger.py \
             --check docs/hardcode-inventory-ledger.json
+      - name: Issue #42 syscall 枚举与分发表完整性 / syscall disposition inventory
+        run: |
+          python3 scripts/check-linux-syscall-disposition.py --self-test
+          python3 scripts/check-linux-syscall-disposition.py
       - name: Issue #36/#37 GPU 与 UI ABI 边界 / GPU-UI boundary
         run: |
           python3 scripts/check-gpu-abi-boundary.py --self-test

@@ -72,7 +72,15 @@ Issue #42 的所有外部内核经验只作为问题域来源：
 - Native userspace address synchronization 的 check/register/park 原子性；
 - 经原生场景证明必要后的用户态 Pager；
 - FS/NET/device/graphics 四类 AsyncRing backend 的 quiescence 与取消完成证明；
-- 385 项 Linux syscall disposition 到原生后端的完整矩阵；当前枚举另有 1 个
-  Jasper `RseqSliceYield` 扩展（编号 471），不得混入 Linux 数量或兼容语义；
+- 385 项 syscall disposition 到原生后端的完整矩阵；当前枚举包含 2 个显式
+  Jasper 扩展 `RseqSliceYield`（471）与 `Uprobe`（336），不得混入 Linux 兼容语义；
 - 关闭兼容层后的 native Profile 全链路；
 - NT-03/04/05 的代码与生产调用链专项审计。
+
+## Syscall disposition 基础门
+
+`docs/linux-syscall-disposition.tsv` 对 385 个枚举项逐项记录 scope、当前
+disposition 和 `linux_abi.rs` dispatch 证据；`check-linux-syscall-disposition.py`
+拒绝枚举遗漏、未知 variant 和矩阵漂移。当前结果为 383 个 Linux 项、2 个 Jasper
+扩展、19 项显式 unsupported ABI。该矩阵只证明“每项都有可追踪分支”，不证明
+Linux 语义、原生后端静止或生产验收已经完成。
