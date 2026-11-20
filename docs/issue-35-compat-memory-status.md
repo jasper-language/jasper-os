@@ -82,6 +82,9 @@
 - 原生 Subscription 的每订阅 16 条与每进程 512 slot 保留为显式背压策略：队列
   满时不丢弃事件或发布不连续局部状态，而是交付一份权威 Resync；每进程订阅数与
   slot 记账在创建前原子准入，超限返回 `Quota`。该策略不再计为隐藏运行期容量。
+- Vulkan WSI swapchain 不再把最多 4 张图像写成隐藏上限；`SurfaceCaps.max_images`
+  是公开能力字段，`acquired` 集合在创建 Surface 前按该值可失败预留。8-image
+  定向测试验证全部图像可依次获取，耗尽后明确返回 `ImageBusy`。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -101,7 +104,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=278, runtime-resource-capacity=0, unclassified=0, added=0
+findings=277, runtime-resource-capacity=0, unclassified=0, added=0
 ```
 
 ## 尚未完成

@@ -6,8 +6,6 @@
 
 use alloc::vec::Vec;
 
-pub const MAX_SWAPCHAIN_IMAGES: usize = 4;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WindowId(u64);
 
@@ -91,7 +89,6 @@ impl SurfaceCaps {
             || self.present_modes.is_empty()
             || self.min_images == 0
             || self.max_images < self.min_images
-            || usize::from(self.max_images) > MAX_SWAPCHAIN_IMAGES
         {
             return Err(WsiError::InvalidSurfaceCaps);
         }
@@ -171,7 +168,7 @@ struct Surface {
     generation: u32,
     geometry: WindowGeometry,
     caps: SurfaceCaps,
-    acquired: [bool; MAX_SWAPCHAIN_IMAGES],
+    acquired: Vec<bool>,
     next_image: u8,
     active: bool,
 }
@@ -193,7 +190,7 @@ impl Surface {
                 min_images: 0,
                 max_images: 0,
             },
-            acquired: [false; MAX_SWAPCHAIN_IMAGES],
+            acquired: Vec::new(),
             next_image: 0,
             active: false,
         }
@@ -327,13 +324,18 @@ impl<const W: usize, const S: usize, const Q: usize> Wsi<W, S, Q> {
             .ok_or(WsiError::Capacity)?;
         let generation = self.next_surface_generation;
         self.next_surface_generation = generation.checked_add(1).ok_or(WsiError::Capacity)?;
+        let mut acquired = Vec::new();
+        acquired
+            .try_reserve_exact(usize::from(caps.max_images))
+            .map_err(|_| WsiError::Capacity)?;
+        acquired.resize(usize::from(caps.max_images), false);
         *slot = Surface {
             id,
             window,
             generation,
             geometry: self.windows[window_slot].geometry,
             caps,
-            acquired: [false; MAX_SWAPCHAIN_IMAGES],
+            acquired,
             next_image: 0,
             active: true,
         };
@@ -368,10 +370,10 @@ impl<const W: usize, const S: usize, const Q: usize> Wsi<W, S, Q> {
         if !surface.active || surface.generation != generation {
             return Err(WsiError::StaleGeneration);
         }
-        let count = usize::from(surface.caps.max_images);
+        let count = surface.acquired.len();
         for _ in 0..count {
             let image = usize::from(surface.next_image);
-            surface.next_image = (surface.next_image + 1) % surface.caps.max_images;
+            surface.next_image = (surface.next_image + 1) % count as u8;
             if !surface.acquired[image] {
                 surface.acquired[image] = true;
                 return Ok(image as u32);
@@ -613,5 +615,28 @@ mod tests {
             wsi.create_surface(SurfaceId::new(3).unwrap(), window, caps()),
             Err(WsiError::ImageBusy)
         );
+    }
+
+    #[test]
+    fn swapchain_grows_from_advertised_capabilities() {
+        let window = WindowId::new(1).unwrap();
+        let surface = SurfaceId::new(2).unwrap();
+        let mut wsi = Wsi::<1, 1, 8>::new();
+        wsi.register_window(
+            window,
+            WindowGeometry {
+                width: 1,
+                height: 1,
+                scale_milli: 1000,
+            },
+        )
+        .unwrap();
+        let mut caps = caps();
+        caps.max_images = 8;
+        wsi.create_surface(surface, window, caps).unwrap();
+        for expected in 0..8 {
+            assert_eq!(wsi.acquire_image(surface, 1), Ok(expected));
+        }
+        assert_eq!(wsi.acquire_image(surface, 1), Err(WsiError::ImageBusy));
     }
 }

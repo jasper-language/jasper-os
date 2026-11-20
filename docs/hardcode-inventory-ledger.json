@@ -1,5 +1,5 @@
 {
-  "baseline_total": 278,
+  "baseline_total": 277,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,7 +10,7 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 173,
+    "explicit-safety-policy": 172,
     "platform-adapter": 28,
     "protocol-abi": 43,
     "test-demo-fixture": 11
@@ -115,16 +115,6 @@
       "reason": "path owns a wire, loader, package, graphics, or lifecycle ABI; consumer review remains required",
       "rules": "HC-G1",
       "source": "pub const MAX_IMPORTS: usize = 32;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "50ec8aa1c31e56047949a126908f363d211112a7c42f42c75b3702cfeeb08ea3",
-      "line": 9,
-      "path": "compat-graphics/src/wsi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_SWAPCHAIN_IMAGES: usize = 4;"
     },
     {
       "category": "explicit-safety-policy",
@@ -2569,7 +2559,7 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 180,
+    "explicit-safety-policy": 179,
     "platform-adapter": 44,
     "protocol-abi": 43,
     "test-demo-fixture": 11
