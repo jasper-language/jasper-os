@@ -50,11 +50,6 @@ static LIBPCRE2: &[u8] = include_bytes!(env!("JSR_UBUNTU_LIBPCRE2"));
 #[cfg(not(feature = "compat-dynamic-libc-verify"))]
 static LIBPCRE2: &[u8] = &[];
 #[cfg(feature = "lifecycle-root-exec-verify")]
-const ROOT_LIBRARY_SLOTS: usize = 96;
-#[cfg(feature = "lifecycle-root-exec-verify")]
-static ROOT_LIBRARIES: [Once<Vec<u8>>; ROOT_LIBRARY_SLOTS] =
-    [const { Once::new() }; ROOT_LIBRARY_SLOTS];
-#[cfg(feature = "lifecycle-root-exec-verify")]
 static ROOT_EXECUTABLES: Mutex<ExecutableRegistry> = Mutex::new(ExecutableRegistry::new());
 #[cfg(feature = "lifecycle-root-exec-verify")]
 static ROOT_ORIGIN: Mutex<Option<SystemImage>> = Mutex::new(None);
@@ -152,6 +147,12 @@ pub(crate) const ANDROID_FILE_PATHS: &[&[u8]] = &[
     b"/proc/stat",
     b"/SwiftShader.ini",
 ];
+
+#[cfg(feature = "lifecycle-root-exec-verify")]
+static ROOT_LIBRARIES: [Once<Vec<u8>>; ANDROID_FILE_PATHS.len()] =
+    [const { Once::new() }; ANDROID_FILE_PATHS.len()];
+#[cfg(feature = "lifecycle-root-exec-verify")]
+const _: () = assert!(ANDROID_FILE_PATHS.len() <= (u8::MAX as usize) + 1);
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
 #[derive(Clone)]

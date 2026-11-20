@@ -1,5 +1,5 @@
 {
-  "baseline_total": 304,
+  "baseline_total": 303,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -13,7 +13,7 @@
     "explicit-safety-policy": 139,
     "platform-adapter": 28,
     "protocol-abi": 42,
-    "runtime-resource-capacity": 65,
+    "runtime-resource-capacity": 64,
     "test-demo-fixture": 7
   },
   "entries": [
@@ -2458,16 +2458,6 @@
       "source": "let chunk = (pages - done).min(proc::MAX_MAP_PAGES);"
     },
     {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "49cbfd0b8c4d4e35cd4287c0d54234018898b1d938cad53bdccc43a293268c21",
-      "line": 53,
-      "path": "kernel/src/linux_vfs.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
-      "rules": "HC-G8",
-      "source": "const ROOT_LIBRARY_SLOTS: usize = 96;"
-    },
-    {
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "da5ce7c398c47043ba405f574aad6713e5873666860d41c7aec9793c3ce38f07",
@@ -2833,7 +2823,7 @@
     "explicit-safety-policy": 144,
     "platform-adapter": 44,
     "protocol-abi": 42,
-    "runtime-resource-capacity": 67,
+    "runtime-resource-capacity": 66,
     "test-demo-fixture": 7
   }
 }

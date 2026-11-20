@@ -428,12 +428,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "49cbfd0b8c4d4e35cd4287c0d54234018898b1d938cad53bdccc43a293268c21",
-      "path": "kernel/src/linux_vfs.rs",
-      "rules": "HC-G8"
-    },
-    {
-      "count": 1,
       "fingerprint": "4c7dcb0691bf28cda198b3827a030b7b5d90448c1b1cd2cae932d7951c93ed3d",
       "path": "kernel-core/src/rt.rs",
       "rules": "HC-G1"
@@ -1707,5 +1701,5 @@
     "user",
     "xtask"
   ],
-  "total": 304
+  "total": 303
 }
