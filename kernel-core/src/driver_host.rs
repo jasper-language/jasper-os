@@ -110,6 +110,51 @@ impl PassToken {
     }
 }
 
+/// Immutable facts copied from one currently admitted pass.
+///
+/// Compatibility adapters receive these facts as a read-only lease. The pass
+/// itself remains the only authority accepted by the broker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PassFacts {
+    device: DeviceIdentity,
+    host_generation: u64,
+    pass_generation: u64,
+    rights: Needs,
+    mmio_regions: u16,
+    dma_pages: u64,
+    irq_routes: u16,
+}
+
+impl PassFacts {
+    pub const fn device(self) -> DeviceIdentity {
+        self.device
+    }
+
+    pub const fn host_generation(self) -> u64 {
+        self.host_generation
+    }
+
+    pub const fn pass_generation(self) -> u64 {
+        self.pass_generation
+    }
+
+    pub const fn rights(self) -> Needs {
+        self.rights
+    }
+
+    pub const fn mmio_regions(self) -> u16 {
+        self.mmio_regions
+    }
+
+    pub const fn dma_pages(self) -> u64 {
+        self.dma_pages
+    }
+
+    pub const fn irq_routes(self) -> u16 {
+        self.irq_routes
+    }
+}
+
 /// One in-flight driver operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RequestToken {
@@ -407,6 +452,24 @@ impl<const DEVICES: usize, const HOSTS: usize, const PASSES: usize, const REQUES
     /// Start one bounded request. The grant already reserves its resource.
     pub fn begin(&mut self, pass: PassToken, kind: RequestKind) -> Result<RequestToken, Error> {
         self.begin_bounded(pass, kind, 1)
+    }
+
+    /// Copy the immutable facts of one still-live admitted pass.
+    pub fn pass_facts(&self, pass: PassToken) -> Result<PassFacts, Error> {
+        let admitted = self.require_pass(pass)?;
+        let device = self.devices[admitted.device_slot]
+            .as_ref()
+            .ok_or(Error::DeviceNotDiscovered)?
+            .identity;
+        Ok(PassFacts {
+            device,
+            host_generation: admitted.host_generation,
+            pass_generation: admitted.generation,
+            rights: admitted.rights,
+            mmio_regions: admitted.mmio_regions,
+            dma_pages: admitted.dma_pages,
+            irq_routes: admitted.irq_routes,
+        })
     }
 
     /// Reserve an explicit amount from one admitted resource grant.

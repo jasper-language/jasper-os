@@ -147,6 +147,7 @@ pub mod job;
 /// Jasper Unified Command Standard command identities and parsing.
 pub mod jucs;
 pub mod l10n;
+pub mod linux_device_uapi;
 pub mod lockorder;
 pub mod mac;
 pub mod memory;
