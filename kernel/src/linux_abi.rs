@@ -49,7 +49,6 @@ static ART_TLS_TRACE_REMAINING: AtomicU32 = AtomicU32::new(0);
 const LINUX_PROC_MAPS_HANDLE: u64 = 0x4a53_5052_4f43_4d50;
 const LINUX_PROC_STAT_HANDLE: u64 = 0x4a53_5052_4f43_5354;
 
-const MAX_LINUX_THREADS: usize = 64;
 const MAX_PROCESS_SIGNAL_SETS: usize = 16;
 const MAX_SYSV_MESSAGE_QUEUES: usize = 16;
 const SYSV_MSGMAX: usize = 8192;
@@ -331,10 +330,9 @@ struct LinuxCacheDir {
 }
 
 struct CompatState {
-    threads: [Option<LinuxThread>; MAX_LINUX_THREADS],
-    thread_landlock_domains: [Option<
-        alloc::vec::Vec<alloc::sync::Arc<proc::LinuxLandlockRuleset>>,
-    >; MAX_LINUX_THREADS],
+    threads: alloc::vec::Vec<Option<LinuxThread>>,
+    thread_landlock_domains:
+        alloc::vec::Vec<Option<alloc::vec::Vec<alloc::sync::Arc<proc::LinuxLandlockRuleset>>>>,
     futexes: alloc::vec::Vec<Option<FutexWord>>,
     process_signals: [Option<ProcessSignalSet>; MAX_PROCESS_SIGNAL_SETS],
     flock_locks: alloc::vec::Vec<Option<FlockLock>>,
@@ -363,8 +361,8 @@ struct CompatState {
 impl CompatState {
     const fn new() -> Self {
         Self {
-            threads: [None; MAX_LINUX_THREADS],
-            thread_landlock_domains: [const { None }; MAX_LINUX_THREADS],
+            threads: alloc::vec::Vec::new(),
+            thread_landlock_domains: alloc::vec::Vec::new(),
             futexes: alloc::vec::Vec::new(),
             process_signals: [None; MAX_PROCESS_SIGNAL_SETS],
             flock_locks: alloc::vec::Vec::new(),
@@ -544,9 +542,14 @@ pub(crate) fn register_linux_thread(
         } else {
             pid
         };
-        let Some(slot) = state.threads.iter().position(Option::is_none) else {
+        if state.threads.try_reserve(1).is_err()
+            || state.thread_landlock_domains.try_reserve(1).is_err()
+        {
             return false;
-        };
+        }
+        state.threads.push(None);
+        state.thread_landlock_domains.push(None);
+        let slot = state.threads.len() - 1;
         state.threads[slot] = Some(LinuxThread {
             process,
             task,
@@ -853,10 +856,18 @@ fn queue_process_signal_info(
     if !(1..=64).contains(&signal) {
         return false;
     }
-    let mut targets = [None; MAX_LINUX_THREADS];
-    let mut target_count = 0usize;
+    let mut targets = alloc::vec::Vec::new();
     {
         let mut state = COMPAT.lock();
+        let target_count = state
+            .threads
+            .iter()
+            .flatten()
+            .filter(|thread| thread.process == process)
+            .count();
+        if targets.try_reserve_exact(target_count).is_err() {
+            return false;
+        }
         let slot = if let Some(slot) = state
             .process_signals
             .iter()
@@ -906,14 +917,13 @@ fn queue_process_signal_info(
             entry.pending
         );
         for thread in state.threads.iter().flatten() {
-            if thread.process == process && target_count < targets.len() {
-                targets[target_count] = Some(thread.task);
-                target_count += 1;
+            if thread.process == process {
+                targets.push(thread.task);
             }
         }
     }
-    for task in targets[..target_count].iter().flatten() {
-        sched::wake(*task);
+    for task in targets {
+        sched::wake(task);
     }
     true
 }
@@ -7817,33 +7827,40 @@ fn linux_landlock_restrict_self(
     let (task, _) = sched::current();
     let mut state = COMPAT.lock();
     let sync_threads = args[1] & 0x8 != 0;
-    let mut slots = [0usize; MAX_LINUX_THREADS];
-    let mut count = 0usize;
+    let target_count = state
+        .threads
+        .iter()
+        .flatten()
+        .filter(|entry| entry.process == pid && (sync_threads || entry.task == task))
+        .count();
+    if target_count == 0 {
+        return Err(CompatErrno::NoProcess);
+    }
+    let mut slots = alloc::vec::Vec::new();
+    slots
+        .try_reserve_exact(target_count)
+        .map_err(|_| CompatErrno::NoMemory)?;
     for (slot, entry) in state.threads.iter().enumerate() {
         if entry.is_some_and(|entry| {
             entry.process == pid && (sync_threads || entry.task == task)
         }) {
-            slots[count] = slot;
-            count += 1;
+            slots.push(slot);
         }
     }
-    if count == 0 {
-        return Err(CompatErrno::NoProcess);
-    }
-    if slots[..count].iter().any(|slot| {
+    if slots.iter().any(|slot| {
         state.thread_landlock_domains[*slot]
             .as_ref()
             .is_some_and(|domains| domains.len() >= 16)
     }) {
         return Err(CompatErrno::NoSpace);
     }
-    for slot in &slots[..count] {
+    for slot in &slots {
         state.thread_landlock_domains[*slot]
             .get_or_insert_with(alloc::vec::Vec::new)
             .try_reserve(1)
             .map_err(|_| CompatErrno::NoSpace)?;
     }
-    for slot in &slots[..count] {
+    for slot in &slots {
         state.thread_landlock_domains[*slot]
             .as_mut()
             .expect("reserved Landlock domain slot")
@@ -8742,19 +8759,22 @@ fn open_message_queue_any(
 
 /// Wakes Linux threads so blocked queue senders and receivers can recheck.
 pub(crate) fn wake_message_queue_waiters() {
-    let mut tasks = [None; MAX_LINUX_THREADS];
-    let mut count = 0usize;
-    {
-        let state = COMPAT.lock();
-        for thread in state.threads.iter().flatten() {
-            if count < tasks.len() {
-                tasks[count] = Some(thread.task);
-                count += 1;
-            }
+    let mut index = 0usize;
+    loop {
+        let current = {
+            let state = COMPAT.lock();
+            state
+                .threads
+                .get(index)
+                .map(|thread| thread.map(|entry| entry.task))
+        };
+        index += 1;
+        let Some(task) = current else {
+            break;
+        };
+        if let Some(task) = task {
+            sched::wake(task);
         }
-    }
-    for task in tasks[..count].iter().flatten() {
-        sched::wake(*task);
     }
 }
 

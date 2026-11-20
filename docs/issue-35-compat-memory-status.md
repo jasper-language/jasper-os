@@ -75,6 +75,9 @@
 - POSIX timer 与 REAL interval timer 删除 32/16 个固定槽位，创建前使用可失败
   `try_reserve`；周期结算的待投递快照按当前 timer 数量预留，预留失败时保持 timer
   状态并留待下一次时钟结算重试。
+- Linux thread/Landlock 并行登记表删除固定 64 槽数组，线程登记先对两张表完成
+  可失败预留，再发布新槽；进程信号唤醒和 Landlock 同步线程快照改用动态索引集合，
+  不再截断大线程组。
 
 以上仍使用既有 MemoryAccount、MemoryCapability、Handle/Rights、Device Broker 和
 页表机制，不创建第二套容量或权限权威。
@@ -94,7 +97,7 @@ PASS
 
 python3 scripts/check-hardcode-gate.py --inventory \
   --inventory-baseline docs/hardcode-inventory-baseline.json
-findings=280, runtime-resource-capacity=15, unclassified=0, added=0
+findings=279, runtime-resource-capacity=14, unclassified=0, added=0
 ```
 
 ## 尚未完成
