@@ -54,7 +54,6 @@ const MAX_FUTEX_WORDS: usize = 32;
 const MAX_PROCESS_SIGNAL_SETS: usize = 16;
 const MAX_POSIX_TIMERS: usize = 32;
 const MAX_INTERVAL_TIMER_SETS: usize = 16;
-const MAX_PENDING_SIGNAL_RECORDS: usize = 256;
 const MAX_SYSV_MESSAGE_QUEUES: usize = 16;
 const MAX_SYSV_MESSAGES_PER_QUEUE: usize = 64;
 const SYSV_MSGMAX: usize = 8192;
@@ -361,7 +360,7 @@ struct CompatState {
     posix_timers: [Option<PosixTimer>; MAX_POSIX_TIMERS],
     interval_timers: [Option<IntervalTimer>; MAX_INTERVAL_TIMER_SETS],
     message_queue_names: alloc::vec::Vec<MessageQueueName>,
-    pending_signal_records: [Option<QueuedSignalRecord>; MAX_PENDING_SIGNAL_RECORDS],
+    pending_signal_records: alloc::vec::Vec<Option<QueuedSignalRecord>>,
     next_signal_sequence: u64,
     sysv_message_queues: alloc::vec::Vec<SysVMessageQueue>,
     next_sysv_message_queue_id: i32,
@@ -391,7 +390,7 @@ impl CompatState {
             posix_timers: [None; MAX_POSIX_TIMERS],
             interval_timers: [None; MAX_INTERVAL_TIMER_SETS],
             message_queue_names: alloc::vec::Vec::new(),
-            pending_signal_records: [None; MAX_PENDING_SIGNAL_RECORDS],
+            pending_signal_records: alloc::vec::Vec::new(),
             next_signal_sequence: 0,
             sysv_message_queues: alloc::vec::Vec::new(),
             next_sysv_message_queue_id: 1,
@@ -674,12 +673,18 @@ fn enqueue_signal_record(
     target_tid: u32,
     record: SignalFdRecord,
 ) -> bool {
-    let Some(slot) = state
+    let slot = if let Some(slot) = state
         .pending_signal_records
         .iter()
         .position(Option::is_none)
-    else {
-        return false;
+    {
+        slot
+    } else {
+        if state.pending_signal_records.try_reserve(1).is_err() {
+            return false;
+        }
+        state.pending_signal_records.push(None);
+        state.pending_signal_records.len() - 1
     };
     let sequence = state.next_signal_sequence;
     state.next_signal_sequence = sequence.wrapping_add(1);
