@@ -50,6 +50,12 @@
     },
     {
       "count": 1,
+      "fingerprint": "0e533a38d2cc42353f4e838c70ef2ebc237ad81e553f47169ee49b624c431fa9",
+      "path": "kernel-core/src/assembly.rs",
+      "rules": "HC-G9"
+    },
+    {
+      "count": 1,
       "fingerprint": "0e7f89cfd68d3eb3d4778e5e34088b0e60d703c10e6e5b8863fc65a0898a0451",
       "path": "jaso/src/wire.rs",
       "rules": "HC-G1"
@@ -155,6 +161,12 @@
       "fingerprint": "23a0af74db73125c6412e45c874653dabafc49f7d08750cd20884b8b22758977",
       "path": "kernel-core/src/native_module_lifecycle.rs",
       "rules": "HC-G1"
+    },
+    {
+      "count": 1,
+      "fingerprint": "23b01768504abc42992b32800f4456d59042dcf23108d7625031d1a5e4f5f63e",
+      "path": "kernel/src/arch/x86_64/linux_guest.rs",
+      "rules": "HC-G9"
     },
     {
       "count": 1,
@@ -541,6 +553,12 @@
       "rules": "HC-G1"
     },
     {
+      "count": 2,
+      "fingerprint": "7026011b82fffc0f7f1bd9494bc79a89deeaf80c05acfa9b223e272174be9c72",
+      "path": "jaso/src/lib.rs",
+      "rules": "HC-G9"
+    },
+    {
       "count": 1,
       "fingerprint": "7036109aed6f1b09bd757c3b9291286ae317b398ceea2e1ac6585cdf64f9c2d4",
       "path": "jaso/src/lib.rs",
@@ -731,6 +749,12 @@
       "fingerprint": "9a03ca8e829ba6777e75b4e908ee3748ff086f2ef1ae1ebfbcb4c8736bc16035",
       "path": "kernel-core/src/trace.rs",
       "rules": "HC-G1"
+    },
+    {
+      "count": 1,
+      "fingerprint": "9bc23add5e467d4613f09a4dc0470e86e1745f7e07bfbc22b662e59f398dfe14",
+      "path": "kernel-core/src/abi.rs",
+      "rules": "HC-G9"
     },
     {
       "count": 1,
@@ -1269,5 +1293,5 @@
     "user",
     "xtask"
   ],
-  "total": 227
+  "total": 232
 }

@@ -110,6 +110,11 @@ def classify(path: str, rules: str, source: str) -> tuple[str, str]:
     """
     name = identifier(source)
     lowered = path.lower()
+    if rules == "HC-G9":
+        return (
+            "protocol-abi",
+            "fixed length is a wire field width, minimum record size, or u32 publication-mask boundary in a bounded parser",
+        )
     if lowered == "kernel-core/src/config.rs":
         return (
             "explicit-safety-policy",

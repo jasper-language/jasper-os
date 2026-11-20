@@ -104,6 +104,13 @@ RULES = (
         ),
         "fixed production capacity introduced as a numeric constant",
     ),
+    Rule(
+        "HC-G9",
+        re.compile(
+            r"\b(?:if|while)\b[^;\n]*\.(?:len|count)\(\)\s*>=\s*\d"
+        ),
+        "inline runtime collection capacity check with a fixed numeric limit",
+    ),
 )
 
 DISCOVERY_PATH = re.compile(
@@ -336,12 +343,13 @@ def self_test() -> None:
     patch = """diff --git a/kernel/src/arch/boot.rs b/kernel/src/arch/boot.rs
 --- a/kernel/src/arch/boot.rs
 +++ b/kernel/src/arch/boot.rs
-@@ -1,0 +1,8 @@
+@@ -1,0 +1,9 @@
 +const MAX_CPUS: usize = 32;
 +let line = count.min(MAX_LINES);
 +let verified = true;
 +let name = entries.get(index).unwrap_or("none");
 +const INPUT_CAPACITY: usize = 4096;
++if entries.len() >= 8 { process(); }
 +const MAX_PROTOCOL: usize = 64; // JASPER-HARDCODE-REVIEW: issue=33 source=PCI-SIG-MSI-X reason=11-bit-table-size-field
 +const BAD_CAPACITY_SOURCE: usize = 16; // JASPER-HARDCODE-REVIEW: issue=33 source=unregistered reason=missing
 +const BAD_CAPACITY_SHAPE: usize = 16; // JASPER-HARDCODE-REVIEW: issue=33 source=PCI-SIG-MSI-X
@@ -352,11 +360,12 @@ diff --git a/boot-manager/src/lib.rs b/boot-manager/src/lib.rs
 +const MAX_LOADERS: usize = 8;
 """
     found = scan_patch(patch)
-    assert len(found) == 8, found
+    assert len(found) == 9, found
     assert any("HC-G1" in item for item in found)
     assert any("HC-G2" in item for item in found)
     assert any("HC-G7" in item for item in found)
     assert any("HC-G8" in item for item in found)
+    assert any("HC-G9" in item for item in found)
     assert any("BAD_CAPACITY_SOURCE" in item for item in found)
     assert any("BAD_CAPACITY_SHAPE" in item for item in found)
     assert any("boot-manager/src/lib.rs" in item for item in found)

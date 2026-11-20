@@ -394,15 +394,17 @@ unsafe fn uefi_console_line(system_table: u64, text: &[u8]) {
         return;
     }
     let function = ((conout + OUTPUT_STRING) as *const usize).read();
-    if function == 0 || text.len() >= 256 {
+    if function == 0 {
         return;
     }
     let output: OutputString = core::mem::transmute(function);
-    let mut wide = [0u16; 256];
-    for (slot, &byte) in wide.iter_mut().zip(text) {
-        *slot = u16::from(byte);
+    for &byte in text {
+        if byte == 0 {
+            return;
+        }
+        let wide = [u16::from(byte), 0];
+        output(conout as *mut u8, wide.as_ptr());
     }
-    output(conout as *mut u8, wide.as_ptr());
 }
 
 #[cfg(feature = "pixel6a-full")]

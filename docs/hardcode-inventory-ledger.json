@@ -1,5 +1,5 @@
 {
-  "baseline_total": 227,
+  "baseline_total": 232,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -12,7 +12,7 @@
   "counts": {
     "explicit-safety-policy": 131,
     "platform-adapter": 28,
-    "protocol-abi": 38,
+    "protocol-abi": 42,
     "test-demo-fixture": 11
   },
   "entries": [
@@ -217,6 +217,16 @@
       "source": "pub const MAX_EXTENSION_NAME: usize = 64;"
     },
     {
+      "category": "protocol-abi",
+      "count": 2,
+      "fingerprint": "7026011b82fffc0f7f1bd9494bc79a89deeaf80c05acfa9b223e272174be9c72",
+      "line": 874,
+      "path": "jaso/src/lib.rs",
+      "reason": "fixed length is a wire field width, minimum record size, or u32 publication-mask boundary in a bounded parser",
+      "rules": "HC-G9",
+      "source": "let n = if b.len() >= 4 { u32_at(b, 0) } else { 0 };"
+    },
+    {
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "0cc686476f25d3ba306772ad78012c365fb66cca72d91e5d96aaaf0d437663af",
@@ -347,6 +357,16 @@
       "source": "pub const MAX_CHUNK: usize = MAX_MESSAGE - 16;"
     },
     {
+      "category": "protocol-abi",
+      "count": 1,
+      "fingerprint": "9bc23add5e467d4613f09a4dc0470e86e1745f7e07bfbc22b662e59f398dfe14",
+      "line": 188,
+      "path": "kernel-core/src/abi.rs",
+      "reason": "fixed length is a wire field width, minimum record size, or u32 publication-mask boundary in a bounded parser",
+      "rules": "HC-G9",
+      "source": "if line.bytes().filter(|&b| b == b'\\t').count() >= 5 {"
+    },
+    {
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "aa2855caf44b98cce086778ab50ce6eeb5a0a8a88f703681396c0cf45e7a8d5d",
@@ -375,6 +395,16 @@
       "reason": "documented scheduling, pressure, or arbitration policy default; not a discovered hardware fact",
       "rules": "HC-G1",
       "source": "pub const DEFAULT: ArbiterParams = ArbiterParams {"
+    },
+    {
+      "category": "protocol-abi",
+      "count": 1,
+      "fingerprint": "0e533a38d2cc42353f4e838c70ef2ebc237ad81e553f47169ee49b624c431fa9",
+      "line": 877,
+      "path": "kernel-core/src/assembly.rs",
+      "reason": "fixed length is a wire field width, minimum record size, or u32 publication-mask boundary in a bounded parser",
+      "rules": "HC-G9",
+      "source": "let known = if caps.len() >= 32 {"
     },
     {
       "category": "test-demo-fixture",
@@ -1100,7 +1130,7 @@
       "category": "platform-adapter",
       "count": 1,
       "fingerprint": "48d1a7c796bc4541288d6a2b18e0e77ff70d2f42187ce23709d49c6ca23cb621",
-      "line": 2034,
+      "line": 2036,
       "path": "kernel/src/arch/aarch64/boot.rs",
       "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
       "rules": "HC-G3",
@@ -1110,7 +1140,7 @@
       "category": "platform-adapter",
       "count": 1,
       "fingerprint": "5cd11148499d83a8addbb77b81249ce603db9702abf141f63cfb191790d890ad",
-      "line": 1869,
+      "line": 1871,
       "path": "kernel/src/arch/aarch64/boot.rs",
       "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
       "rules": "HC-G3",
@@ -1120,7 +1150,7 @@
       "category": "platform-adapter",
       "count": 3,
       "fingerprint": "64edf197e056e2afe89c15915116c7be995afe9a8eb344669c7e98a3b1f6b12a",
-      "line": 408,
+      "line": 410,
       "path": "kernel/src/arch/aarch64/boot.rs",
       "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
       "rules": "HC-G3",
@@ -1140,7 +1170,7 @@
       "category": "platform-adapter",
       "count": 1,
       "fingerprint": "6a22e63e2cac653a9d292827cd43534383bc1363d0d550dfe796e74e1251ca4a",
-      "line": 1873,
+      "line": 1875,
       "path": "kernel/src/arch/aarch64/boot.rs",
       "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
       "rules": "HC-G3",
@@ -1160,7 +1190,7 @@
       "category": "platform-adapter",
       "count": 2,
       "fingerprint": "9f1736c3ef19f749a7beebc1dec869212027735899dc8933babb7517042885b8",
-      "line": 1572,
+      "line": 1574,
       "path": "kernel/src/arch/aarch64/boot.rs",
       "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
       "rules": "HC-G3",
@@ -1170,7 +1200,7 @@
       "category": "platform-adapter",
       "count": 1,
       "fingerprint": "a815f11890dc5e2e067a36e88ca343863f4786586dda452031f446ba209b03e6",
-      "line": 2030,
+      "line": 2032,
       "path": "kernel/src/arch/aarch64/boot.rs",
       "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
       "rules": "HC-G3",
@@ -1190,7 +1220,7 @@
       "category": "platform-adapter",
       "count": 1,
       "fingerprint": "e3d4b22c145fbc57fbd4fc38a92233eb9613452f4404e0b6b2409c1347dbfdf6",
-      "line": 1838,
+      "line": 1840,
       "path": "kernel/src/arch/aarch64/boot.rs",
       "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
       "rules": "HC-G3",
@@ -1210,7 +1240,7 @@
       "category": "protocol-abi",
       "count": 1,
       "fingerprint": "7290df3d0cfc785ea4d76bb50b7f9456a883a4bc9f7eaa963a9817395dbe2f27",
-      "line": 1699,
+      "line": 1701,
       "path": "kernel/src/arch/aarch64/boot.rs",
       "reason": "architecture or wire protocol reset/default value, not a runtime inventory fact",
       "rules": "HC-G7",
@@ -1220,7 +1250,7 @@
       "category": "protocol-abi",
       "count": 1,
       "fingerprint": "fb684b72e50689d5889f284a9aa53f180d225ca9d1f6aac37e7f229bda6b008f",
-      "line": 1693,
+      "line": 1695,
       "path": "kernel/src/arch/aarch64/boot.rs",
       "reason": "architecture or wire protocol reset/default value, not a runtime inventory fact",
       "rules": "HC-G7",
@@ -1435,6 +1465,16 @@
       "reason": "absent-device sentinel or diagnostic-only display; control paths reject zero/unknown ids",
       "rules": "HC-G7",
       "source": "MAP.get(make as usize).copied().unwrap_or(b'?')"
+    },
+    {
+      "category": "protocol-abi",
+      "count": 1,
+      "fingerprint": "23b01768504abc42992b32800f4456d59042dcf23108d7625031d1a5e4f5f63e",
+      "line": 705,
+      "path": "kernel/src/arch/x86_64/linux_guest.rs",
+      "reason": "fixed length is a wire field width, minimum record size, or u32 publication-mask boundary in a bounded parser",
+      "rules": "HC-G9",
+      "source": "Err(_) if request.len() >= 16 => {"
     },
     {
       "category": "explicit-safety-policy",
@@ -2101,7 +2141,7 @@
   "weighted_counts": {
     "explicit-safety-policy": 134,
     "platform-adapter": 44,
-    "protocol-abi": 38,
+    "protocol-abi": 43,
     "test-demo-fixture": 11
   }
 }
