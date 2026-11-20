@@ -18477,7 +18477,6 @@ fn linux_epoll_ctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const EPOLLONESHOT: u32 = 1 << 30;
     const EPOLLET: u32 = 1 << 31;
     const EVENT_BYTES: usize = 12;
-    const MAX_REGISTRATIONS: usize = 64;
 
     let epfd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let target_fd = u32::try_from(args[2]).map_err(|_| CompatErrno::BadFd)?;
@@ -18533,9 +18532,6 @@ fn linux_epoll_ctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if let Some(index) = existing {
         registrations[index] = registration;
         return Ok(0);
-    }
-    if registrations.len() >= MAX_REGISTRATIONS {
-        return Err(CompatErrno::NoSpace);
     }
     registrations
         .try_reserve(1)
