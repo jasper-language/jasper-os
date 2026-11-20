@@ -81,4 +81,5 @@ uptr_demo = verification-only
 user_demo = verification-only
 usi1_demo = verification-only
 usi2_demo = verification-only
+ui_process_demo = verification-only
 virtio_rng_demo = verification-only

@@ -125,6 +125,20 @@ pub const KERNEL_PROBE_VA: u64 = <Current as Platform>::KERNEL_PROBE_VA;
 /// 超出可用虚拟地址范围的地址，见 [`Platform::INVALID_VA`]。
 pub const INVALID_VA: u64 = <Current as Platform>::INVALID_VA;
 
+/// Read one hardware input transition through the current platform backend.
+///
+/// The generic display/session layer has no ISA-specific input dependency.
+#[cfg(target_arch = "x86_64")]
+pub fn try_read_input_event() -> Option<kernel_core::display_input::KeyInput> {
+    self::x86_64::keyboard::try_read_event()
+}
+
+/// No polled keyboard backend is wired for this target yet.
+#[cfg(not(target_arch = "x86_64"))]
+pub fn try_read_input_event() -> Option<kernel_core::display_input::KeyInput> {
+    None
+}
+
 /// Returns the current trusted wall-clock value in Unix nanoseconds.
 ///
 /// 返回可信实时 wall clock 的 Unix 纳秒值；没有可信 RTC 的平台返回 `None`，

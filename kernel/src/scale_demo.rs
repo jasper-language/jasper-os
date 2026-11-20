@@ -386,11 +386,21 @@ fn deadline_owner_contract(n: usize) {
     let (spawned, registered, moved, consumed, ran) = loop {
         let id = TaskId(0x444541444f574e + attempt);
         TIMED_CPU.store(0, Ordering::Relaxed);
-        let spawned = quiet(|| sched::spawn_on(id, "deadline-owner", timed_remote_worker, None, first).is_ok());
+        let spawned = quiet(|| {
+            sched::spawn_on(
+                id,
+                "deadline-owner",
+                timed_remote_worker,
+                None,
+                first.clone(),
+            )
+            .is_ok()
+        });
         let limit = sched::timer_ticks() + 100;
         while sched::deadline_owners(id).and_then(|(w,_)|w).is_none() && sched::timer_ticks() < limit { sched::sleep_ticks(1); }
         let registered = sched::deadline_owners(id).is_some_and(|(w,_)|w == Some(1));
-        let moved = sched::set_affinity(id, dest).is_ok() && sched::deadline_owners(id).is_some_and(|(w,_)|w == Some(target));
+        let moved = sched::set_affinity(id, dest.clone()).is_ok()
+            && sched::deadline_owners(id).is_some_and(|(w, _)| w == Some(target));
         #[cfg(feature = "fault-inject")]
         sched::fault_delay_deadline_timer(target, true);
         let before = sched::deadline_stats().0[target];
@@ -611,7 +621,18 @@ fn mailbox_full_contract(n: usize) {
     let saved = baseline();
     FULL_AWAKE.store(0, Ordering::Relaxed);
     let mut cpus = CpuSet::EMPTY; cpus.insert(1);
-    let spawned = quiet(|| ids.iter().all(|&id| sched::spawn_on(id, "mailbox-full", full_mailbox_worker, None, cpus).is_ok()));
+    let spawned = quiet(|| {
+        ids.iter().all(|&id| {
+            sched::spawn_on(
+                id,
+                "mailbox-full",
+                full_mailbox_worker,
+                None,
+                cpus.clone(),
+            )
+            .is_ok()
+        })
+    });
     let limit = sched::timer_ticks() + 100;
     let registered = loop {
         let all = ids.iter().all(|&id| sched::deadline_owners(id).is_some_and(|(w,_)| w == Some(1)));

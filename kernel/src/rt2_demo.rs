@@ -72,7 +72,7 @@ fn timer_identity_second(){timer_identity_worker(1)}
 fn timer_identity_contract(){
  let mut cpu=kernel_core::smp::CpuSet::EMPTY;cpu.insert(0);
  for entry in [timer_identity_first as fn(),timer_identity_second] {
-  sched::spawn_on(TaskId(98850),"issue3-timer-identity",entry,None,cpu).unwrap();
+  sched::spawn_on(TaskId(98850),"issue3-timer-identity",entry,None,cpu.clone()).unwrap();
   sched::run();
  }
  let audit=sched::timer_identity_audit();

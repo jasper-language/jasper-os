@@ -228,38 +228,30 @@ pub fn start() -> Result<(), DisplayInputError> {
 ///
 /// 轮询真实键盘并写入有界会话，同时更新可见状态。
 pub fn poll_input() -> usize {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let mut count = 0;
-        for _ in 0..32 {
-            let Some(key) = crate::arch::x86_64::keyboard::try_read_event() else {
-                // JASPER-ISA-REFERENCE: x86_64 input backend.
-                break;
-            };
-            let mut guard = DISPLAY.lock();
-            let Some(runtime) = guard.as_mut() else {
-                break;
-            };
-            if runtime.session.push_key(key).is_err() {
-                break;
-            }
-            if key.pressed {
-                runtime.pressed = runtime.pressed.saturating_add(1);
-            } else {
-                runtime.released = runtime.released.saturating_add(1);
-            }
-            runtime.paint_input_indicator();
-            count += 1;
+    let mut count = 0;
+    for _ in 0..32 {
+        let Some(key) = crate::arch::try_read_input_event() else {
+            break;
+        };
+        let mut guard = DISPLAY.lock();
+        let Some(runtime) = guard.as_mut() else {
+            break;
+        };
+        if runtime.session.push_key(key).is_err() {
+            break;
         }
-        if count != 0 {
-            report();
+        if key.pressed {
+            runtime.pressed = runtime.pressed.saturating_add(1);
+        } else {
+            runtime.released = runtime.released.saturating_add(1);
         }
-        count
+        runtime.paint_input_indicator();
+        count += 1;
     }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        0
+    if count != 0 {
+        report();
     }
+    count
 }
 
 /// Remove one key transition for a terminal frontend.
