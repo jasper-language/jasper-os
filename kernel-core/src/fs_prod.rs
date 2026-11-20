@@ -8,6 +8,7 @@ use crate::fs::PersistentIdentity;
 use crate::ifc::{FlowError, FlowLabel, FlowPolicy, PURPOSE_SYSTEM};
 use crate::mac::{MacDenial, MacEffect, MacLabel, MacPolicy, SubjectLabel};
 use crate::security::IdentityClass;
+use crate::service_events::{self, Source as ServiceEventSource};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileAccess {
@@ -167,11 +168,21 @@ pub struct ProductionFileGate<const N: usize, const A: usize> {
     audit_len: usize,
     sequence: u64,
     quota: FileQuota,
+    events: ServiceEventSource,
 }
 
 impl<const N: usize, const A: usize> ProductionFileGate<N, A> {
-    pub fn new(policy: MacPolicy, quota: FileQuota) -> Self {
-        Self {
+    pub fn new(
+        policy: MacPolicy,
+        quota: FileQuota,
+        event_identity: service_events::Identity,
+    ) -> Result<Self, FileSecurityError> {
+        if event_identity.kind != service_events::ServiceKind::File {
+            return Err(FileSecurityError::InvalidIdentity);
+        }
+        let events =
+            ServiceEventSource::new(event_identity).map_err(|_| FileSecurityError::InvalidIdentity)?;
+        Ok(Self {
             policy,
             files: [None; N],
             audit: [None; A],
@@ -179,7 +190,12 @@ impl<const N: usize, const A: usize> ProductionFileGate<N, A> {
             audit_len: 0,
             sequence: 0,
             quota,
-        }
+            events,
+        })
+    }
+
+    pub const fn event_source(&self) -> &ServiceEventSource {
+        &self.events
     }
 
     pub fn register(
@@ -221,7 +237,13 @@ impl<const N: usize, const A: usize> ProductionFileGate<N, A> {
         if record.label.generation != generation {
             return Err(FileSecurityError::StaleGeneration);
         }
+        if !self.events.can_publish() {
+            return Err(FileSecurityError::Capacity);
+        }
         record.label.revoked = true;
+        self.events
+            .publish(u64::from(generation))
+            .expect("checked semantic-event publication");
         Ok(())
     }
 
@@ -396,12 +418,18 @@ mod tests {
         PersistentIdentity::new(1, 2, 0)
     }
 
+    fn event_identity() -> service_events::Identity {
+        service_events::Identity::new(service_events::ServiceKind::File, 1, 1).unwrap()
+    }
+
     #[test]
     fn default_deny_mac_flow_and_revocation_fail_closed() {
         let mut gate = ProductionFileGate::<8, 32>::new(
             policy(),
             FileQuota::new(100, 4096, 4),
-        );
+            event_identity(),
+        )
+        .unwrap();
         gate.register(identity(), FileSecurityLabel::standard(Secrecy::Sensitive))
             .unwrap();
         assert_eq!(
@@ -444,7 +472,9 @@ mod tests {
         let mut gate = ProductionFileGate::<8, 16>::new(
             policy(),
             FileQuota::new(2, 8, 1),
-        );
+            event_identity(),
+        )
+        .unwrap();
         gate.register(identity(), FileSecurityLabel::standard(Secrecy::Secret))
             .unwrap();
         let label = gate
@@ -478,7 +508,9 @@ mod tests {
         let mut gate = ProductionFileGate::<4, 1>::new(
             policy(),
             FileQuota::new(10, 10, 2),
-        );
+            event_identity(),
+        )
+        .unwrap();
         gate.register(identity(), FileSecurityLabel::standard(Secrecy::Public))
             .unwrap();
         let subject = subject(Secrecy::Public, Integrity::Managed);
@@ -502,5 +534,36 @@ mod tests {
             Err(FileSecurityError::AuditFull)
         );
         assert_eq!(gate.audit_events().count(), 1);
+    }
+
+    #[test]
+    fn committed_revoke_publishes_file_semantic_event() {
+        let mut gate = ProductionFileGate::<4, 4>::new(
+            policy(),
+            FileQuota::new(10, 10, 2),
+            event_identity(),
+        )
+        .unwrap();
+        gate.register(identity(), FileSecurityLabel::standard(Secrecy::Public))
+            .unwrap();
+        let observed = gate.event_source().identity();
+        let initial = gate.event_source().snapshot();
+        let mut subscriber =
+            crate::subscription::Queue::<2>::new(initial, crate::subscription::Policy::Events);
+
+        gate.revoke(identity(), 1).unwrap();
+        service_events::publish(gate.event_source(), observed, &mut subscriber).unwrap();
+        assert_eq!(
+            subscriber.take(),
+            Some(crate::subscription::Delivery::Event(
+                crate::subscription::Event {
+                    first: 1,
+                    last: 1,
+                    value: 1
+                }
+            ))
+        );
+        assert_eq!(gate.label(identity()).unwrap().generation, 1);
+        assert!(gate.label(identity()).unwrap().revoked);
     }
 }

@@ -9,6 +9,7 @@
 
 #[cfg(any(test, feature = "gpu-dynamic"))]
 use alloc::vec::Vec;
+use crate::service_events::{self, Source as ServiceEventSource};
 
 pub const CONTROL_HEADER_BYTES: usize = 24;
 /// Protocol-defined scanout slots in `resp_display_info`.
@@ -145,6 +146,7 @@ pub struct VirtioGpuBackend {
     scanouts: u64,
     transfers: u64,
     flushes: u64,
+    events: Option<ServiceEventSource>,
 }
 
 #[cfg(any(test, feature = "gpu-dynamic"))]
@@ -169,7 +171,25 @@ impl VirtioGpuBackend {
             scanouts: 0,
             transfers: 0,
             flushes: 0,
+            events: None,
         })
+    }
+
+    pub fn new_with_events(
+        policy: GpuPolicy,
+        event_identity: service_events::Identity,
+    ) -> Result<Self, GpuFrontendError> {
+        if event_identity.kind != service_events::ServiceKind::Graphics {
+            return Err(GpuFrontendError::InvalidPolicy);
+        }
+        let mut backend = Self::new(policy)?;
+        backend.events =
+            Some(ServiceEventSource::new(event_identity).map_err(|_| GpuFrontendError::InvalidPolicy)?);
+        Ok(backend)
+    }
+
+    pub const fn event_source(&self) -> Option<&ServiceEventSource> {
+        self.events.as_ref()
     }
 
     /// A fail-closed backend used when the platform has no verified display
@@ -194,6 +214,7 @@ impl VirtioGpuBackend {
             scanouts: 0,
             transfers: 0,
             flushes: 0,
+            events: None,
         }
     }
 
@@ -246,6 +267,12 @@ impl VirtioGpuBackend {
         self.resources.fill(None);
         self.resident_bytes = 0;
         self.scanout = None;
+        if let Some(events) = self.events.as_mut() {
+            let _ = events.restart(
+                u64::from(self.generation),
+                self.commands ^ self.destroyed,
+            );
+        }
     }
 
     pub fn handle_command(
@@ -784,7 +811,17 @@ mod tests {
 
     #[test]
     fn display_info_and_reset_revoke_old_resources() {
-        let mut gpu = gpu();
+        let identity =
+            service_events::Identity::new(service_events::ServiceKind::Graphics, 1, 1).unwrap();
+        let mut gpu = VirtioGpuBackend::new_with_events(
+            GpuPolicy::single_display(1024, 768, 8, 16 * 1024 * 1024).unwrap(),
+            identity,
+        )
+        .unwrap();
+        let observed = gpu.event_source().unwrap().identity();
+        let initial = gpu.event_source().unwrap().snapshot();
+        let mut subscriber =
+            crate::subscription::Queue::<2>::new(initial, crate::subscription::Policy::Events);
         let mut response = [0u8; DISPLAY_INFO_BYTES];
         assert_eq!(
             gpu.handle_command(&command(CMD_GET_DISPLAY_INFO, 7, &[]), &mut response),
@@ -798,6 +835,17 @@ mod tests {
         assert_eq!(gpu.generation(), 2);
         assert_eq!(gpu.resource_count(), 0);
         assert_eq!(gpu.resident_bytes(), 0);
+        service_events::publish(gpu.event_source().unwrap(), observed, &mut subscriber).unwrap();
+        assert_eq!(
+            subscriber.take(),
+            Some(crate::subscription::Delivery::Resync(
+                gpu.event_source().unwrap().snapshot()
+            ))
+        );
+        assert_ne!(
+            gpu.event_source().unwrap().identity().generation,
+            observed.generation
+        );
     }
 
     #[test]

@@ -252,6 +252,8 @@ pub mod subscription;
 
 pub mod subscription_abi;
 
+pub mod service_events;
+
 pub mod rt_partition;
 
 pub mod rt_abi;

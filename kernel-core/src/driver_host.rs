@@ -16,6 +16,7 @@ pub use journal::{
     DriverHostJournal, DriverHostJournalError, DriverHostPersistentEvent,
     DriverHostPersistentEventKind,
 };
+use crate::service_events::{self, Source as ServiceEventSource};
 
 /// Device discovery is permission to consider a device, never permission to use it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -219,6 +220,7 @@ pub struct Stats {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
+    InvalidIdentity,
     InvalidDevice,
     DuplicateDevice,
     StaleHost,
@@ -308,6 +310,7 @@ pub struct DriverHostBroker<
     completed: u64,
     cancelled: u64,
     revoked: u64,
+    events: Option<ServiceEventSource>,
 }
 
 impl<const DEVICES: usize, const HOSTS: usize, const PASSES: usize, const REQUESTS: usize>
@@ -325,7 +328,22 @@ impl<const DEVICES: usize, const HOSTS: usize, const PASSES: usize, const REQUES
             completed: 0,
             cancelled: 0,
             revoked: 0,
+            events: None,
         }
+    }
+
+    pub fn new_with_events(event_identity: service_events::Identity) -> Result<Self, Error> {
+        if event_identity.kind != service_events::ServiceKind::DriverHost {
+            return Err(Error::InvalidIdentity);
+        }
+        let mut broker = Self::new();
+        broker.events =
+            Some(ServiceEventSource::new(event_identity).map_err(|_| Error::InvalidIdentity)?);
+        Ok(broker)
+    }
+
+    pub const fn event_source(&self) -> Option<&ServiceEventSource> {
+        self.events.as_ref()
     }
 
     /// Record a hardware discovery result. This does not grant access.
@@ -663,11 +681,26 @@ impl<const DEVICES: usize, const HOSTS: usize, const PASSES: usize, const REQUES
         if !proof.dma_quiesced || !proof.irq_quiesced {
             return Err(Error::NotQuiesced);
         }
+        let new_generation = host.generation.checked_add(1).ok_or(Error::Capacity)?;
+        if self
+            .events
+            .as_ref()
+            .is_some_and(|events| !events.can_restart(new_generation))
+        {
+            return Err(Error::Capacity);
+        }
         let cancelled = self.cancel_requests_for_host(host.slot, host.generation);
         let (revoked_passes, _) = self.revoke_passes_for_host(host.slot, host.generation, false);
-        let new_generation = host.generation.checked_add(1).ok_or(Error::Capacity)?;
         let record = self.hosts[host.slot].as_mut().expect("validated host");
         record.generation = new_generation;
+        if let Some(events) = self.events.as_mut() {
+            events
+                .restart(
+                    new_generation,
+                    (cancelled as u64) << 32 | revoked_passes as u64,
+                )
+                .expect("checked reset event generation");
+        }
         Ok(ResetReceipt {
             cancelled,
             revoked_passes,
@@ -682,6 +715,13 @@ impl<const DEVICES: usize, const HOSTS: usize, const PASSES: usize, const REQUES
     /// quarantined and cannot be rebound by another host.
     pub fn crash(&mut self, host: HostToken, proof: QuiesceProof) -> Result<CrashReceipt, Error> {
         self.require_running_host(host)?;
+        if self
+            .events
+            .as_ref()
+            .is_some_and(|events| !events.can_publish())
+        {
+            return Err(Error::Capacity);
+        }
         let cancelled = self.cancel_requests_for_host(host.slot, host.generation);
         let (revoked_passes, quarantined_devices) = self.revoke_passes_for_host(
             host.slot,
@@ -692,6 +732,11 @@ impl<const DEVICES: usize, const HOSTS: usize, const PASSES: usize, const REQUES
             .as_mut()
             .expect("validated host")
             .state = HostState::Crashed;
+        if let Some(events) = self.events.as_mut() {
+            events
+                .terminate((cancelled as u64) << 32 | u64::from(quarantined_devices as u32))
+                .expect("checked crash event publication");
+        }
         Ok(CrashReceipt {
             cancelled,
             revoked_passes,
@@ -711,6 +756,14 @@ impl<const DEVICES: usize, const HOSTS: usize, const PASSES: usize, const REQUES
         if !proof.dma_quiesced || !proof.irq_quiesced {
             return Err(Error::NotQuiesced);
         }
+        let new_generation = host.generation.checked_add(1).ok_or(Error::Capacity)?;
+        if self
+            .events
+            .as_ref()
+            .is_some_and(|events| !events.can_restart(new_generation))
+        {
+            return Err(Error::Capacity);
+        }
         for device in self.devices.iter_mut().flatten() {
             if device.state
                 == (DeviceState::Quarantined {
@@ -721,10 +774,14 @@ impl<const DEVICES: usize, const HOSTS: usize, const PASSES: usize, const REQUES
                 device.state = DeviceState::Available;
             }
         }
-        let new_generation = host.generation.checked_add(1).ok_or(Error::Capacity)?;
         let record = self.hosts[host.slot].as_mut().expect("validated host");
         record.state = HostState::Running;
         record.generation = new_generation;
+        if let Some(events) = self.events.as_mut() {
+            events
+                .restart(new_generation, u64::from(record.generation as u32))
+                .expect("checked recovery event generation");
+        }
         Ok(HostToken {
             slot: host.slot,
             generation: new_generation,
@@ -927,8 +984,12 @@ mod tests {
         generation: 7,
     };
 
+    fn event_identity() -> service_events::Identity {
+        service_events::Identity::new(service_events::ServiceKind::DriverHost, 1, 1).unwrap()
+    }
+
     fn broker() -> DriverHostBroker<4, 4, 4, 8> {
-        DriverHostBroker::new()
+        DriverHostBroker::new_with_events(event_identity()).unwrap()
     }
 
     fn admit(
@@ -1177,6 +1238,8 @@ mod tests {
     #[test]
     fn reset_is_atomic_requires_quiescence_and_stales_all_old_tokens() {
         let mut broker = broker();
+        let observed = broker.event_source().unwrap().identity();
+        let initial = broker.event_source().unwrap().snapshot();
         let host = broker.register_host().unwrap();
         broker.discover(DEV).unwrap();
         let allowed = Needs::DEVICE.union(Needs::DMA).union(Needs::IRQ);
@@ -1200,6 +1263,19 @@ mod tests {
         assert_eq!(receipt.cancelled, 1);
         assert_eq!(receipt.revoked_passes, 1);
         assert_eq!(receipt.token.generation, host.generation + 1);
+        let mut subscriber =
+            crate::subscription::Queue::<2>::new(initial, crate::subscription::Policy::Events);
+        service_events::publish(broker.event_source().unwrap(), observed, &mut subscriber).unwrap();
+        assert_eq!(
+            subscriber.take(),
+            Some(crate::subscription::Delivery::Resync(
+                broker.event_source().unwrap().snapshot()
+            ))
+        );
+        assert_ne!(
+            broker.event_source().unwrap().identity().generation,
+            observed.generation
+        );
         assert_eq!(broker.begin(pass, RequestKind::Dma), Err(Error::StalePass));
         assert_eq!(broker.complete(request), Err(Error::StaleRequest));
         assert_eq!(broker.stats().pending_requests, 0);
@@ -1221,6 +1297,10 @@ mod tests {
     #[test]
     fn crash_quarantines_without_quiescence_and_recovery_releases_it() {
         let mut broker = broker();
+        let observed = broker.event_source().unwrap().identity();
+        let initial = broker.event_source().unwrap().snapshot();
+        let mut subscriber =
+            crate::subscription::Queue::<2>::new(initial, crate::subscription::Policy::Events);
         let host = broker.register_host().unwrap();
         broker.discover(DEV).unwrap();
         let allowed = Needs::DEVICE.union(Needs::DMA).union(Needs::IRQ);
@@ -1237,6 +1317,19 @@ mod tests {
             .unwrap();
         assert_eq!(crash.quarantined_devices, 1);
         assert_eq!(broker.stats().quarantined, 1);
+        service_events::publish(broker.event_source().unwrap(), observed, &mut subscriber).unwrap();
+        assert_eq!(
+            subscriber.take(),
+            Some(crate::subscription::Delivery::Event(
+                crate::subscription::Event {
+                    first: 1,
+                    last: 1,
+                    value: (crash.cancelled as u64) << 32
+                        | u64::from(crash.quarantined_devices as u32)
+                }
+            ))
+        );
+        assert!(broker.event_source().unwrap().is_closed());
         assert_eq!(
             broker.recover(
                 host,
@@ -1249,6 +1342,17 @@ mod tests {
         );
         let recovered = broker.recover(host, QuiesceProof::CLEAN).unwrap();
         assert_eq!(recovered.generation, host.generation + 1);
+        service_events::publish(broker.event_source().unwrap(), observed, &mut subscriber).unwrap();
+        assert_eq!(
+            subscriber.take(),
+            Some(crate::subscription::Delivery::Resync(
+                broker.event_source().unwrap().snapshot()
+            ))
+        );
+        assert_ne!(
+            broker.event_source().unwrap().identity().generation,
+            observed.generation
+        );
         assert_eq!(broker.stats().quarantined, 0);
         let pass = broker
             .admit(

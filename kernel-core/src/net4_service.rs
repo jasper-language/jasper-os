@@ -11,6 +11,7 @@ use crate::net4_runtime::{
     UdpAddress, UdpHandle, UdpLimits, UdpQuota, UdpRights, UdpRuntimeError, UdpSocketRuntime,
     UdpStats,
 };
+use crate::service_events::{self, Source as ServiceEventSource};
 use crate::wireguard::{
     Config, Encapsulated, EntropySource, Error as WireGuardError, Now, PollOutput, Received,
     Stats as WireGuardStats, Tunnel,
@@ -29,6 +30,8 @@ pub enum NetServiceError {
     UnexpectedPeer,
     Inactive,
     PollLimit,
+    InvalidEventIdentity,
+    EventCapacity,
 }
 
 impl From<UdpRuntimeError> for NetServiceError {
@@ -76,6 +79,7 @@ pub struct WireGuardService {
     remote: UdpAddress,
     tunnel: Tunnel,
     active: bool,
+    events: Option<ServiceEventSource>,
 }
 
 impl WireGuardService {
@@ -88,6 +92,33 @@ impl WireGuardService {
         remote: UdpAddress,
         quota: UdpQuota,
         limits: UdpLimits,
+    ) -> Result<Self, NetServiceError> {
+        Self::new_inner(config, local, remote, quota, limits, None)
+    }
+
+    pub fn new_with_events(
+        config: Config,
+        local: UdpAddress,
+        remote: UdpAddress,
+        quota: UdpQuota,
+        limits: UdpLimits,
+        event_identity: service_events::Identity,
+    ) -> Result<Self, NetServiceError> {
+        if event_identity.kind != service_events::ServiceKind::Network {
+            return Err(NetServiceError::InvalidEventIdentity);
+        }
+        let events = ServiceEventSource::new(event_identity)
+            .map_err(|_| NetServiceError::InvalidEventIdentity)?;
+        Self::new_inner(config, local, remote, quota, limits, Some(events))
+    }
+
+    fn new_inner(
+        config: Config,
+        local: UdpAddress,
+        remote: UdpAddress,
+        quota: UdpQuota,
+        limits: UdpLimits,
+        events: Option<ServiceEventSource>,
     ) -> Result<Self, NetServiceError> {
         if remote.ip == local.ip && remote.port == local.port {
             return Err(NetServiceError::UnexpectedPeer);
@@ -102,7 +133,12 @@ impl WireGuardService {
             remote,
             tunnel,
             active: true,
+            events,
         })
+    }
+
+    pub const fn event_source(&self) -> Option<&ServiceEventSource> {
+        self.events.as_ref()
     }
 
     pub const fn local(&self) -> UdpAddress {
@@ -174,7 +210,7 @@ impl WireGuardService {
         if source != self.remote {
             return Err(NetServiceError::UnexpectedPeer);
         }
-        match self.tunnel.decapsulate(
+        let received: Result<WireGuardReceive<'a>, NetServiceError> = match self.tunnel.decapsulate(
             now,
             &self.remote.ip,
             false,
@@ -190,7 +226,21 @@ impl WireGuardService {
             }
             Received::HandshakeComplete => Ok(WireGuardReceive::HandshakeComplete),
             Received::CookieStored => Ok(WireGuardReceive::CookieStored),
+        };
+        let received = received?;
+        if let Some(events) = self.events.as_mut() {
+            let value = match received {
+                WireGuardReceive::Data(bytes) => bytes as u64,
+                WireGuardReceive::Keepalive => 2,
+                WireGuardReceive::Reply(_) => 3,
+                WireGuardReceive::HandshakeComplete => 4,
+                WireGuardReceive::CookieStored => 5,
+            };
+            events
+                .publish(value)
+                .map_err(|_| NetServiceError::EventCapacity)?;
         }
+        Ok(received)
     }
 
     /// 执行成熟状态机在 `now` 时刻要求的定时发送工作。
@@ -244,8 +294,20 @@ impl WireGuardService {
         if !self.active {
             return Err(NetServiceError::Inactive);
         }
+        if self
+            .events
+            .as_ref()
+            .is_some_and(|events| !events.can_publish())
+        {
+            return Err(NetServiceError::EventCapacity);
+        }
         self.runtime.close(self.socket)?;
         self.active = false;
+        if let Some(events) = self.events.as_mut() {
+            events
+                .terminate(1)
+                .expect("checked network close event publication");
+        }
         Ok(())
     }
 }
@@ -282,14 +344,21 @@ mod tests {
         let b_public = b_key.public_key();
         let quota = UdpQuota::new(2, 4, 4096);
         let limits = UdpLimits::new(2, 4, 1200);
-        let mut a = WireGuardService::new(
+        let event_identity =
+            service_events::Identity::new(service_events::ServiceKind::Network, 1, 1).unwrap();
+        let mut a = WireGuardService::new_with_events(
             Config::new(a_key, b_public),
             address(1),
             address(2),
             quota,
             limits,
+            event_identity,
         )
         .unwrap();
+        let observed = a.event_source().unwrap().identity();
+        let initial = a.event_source().unwrap().snapshot();
+        let mut subscriber =
+            crate::subscription::Queue::<2>::new(initial, crate::subscription::Policy::Events);
         let mut b = WireGuardService::new(
             Config::new(b_key, a_public),
             address(2),
@@ -318,6 +387,17 @@ mod tests {
             a.receive(now, &mut plaintext, &mut rng).unwrap(),
             WireGuardReceive::HandshakeComplete
         );
+        service_events::publish(a.event_source().unwrap(), observed, &mut subscriber).unwrap();
+        assert_eq!(
+            subscriber.take(),
+            Some(crate::subscription::Delivery::Event(
+                crate::subscription::Event {
+                    first: 1,
+                    last: 1,
+                    value: 4
+                }
+            ))
+        );
 
         let (action, transport) = a
             .encapsulate(now, &packet[..packet_len], &mut a_wire, &mut rng)
@@ -334,6 +414,18 @@ mod tests {
         assert_eq!(b.udp_stats().received_datagrams, 2);
 
         a.close().unwrap();
+        service_events::publish(a.event_source().unwrap(), observed, &mut subscriber).unwrap();
+        assert_eq!(
+            subscriber.take(),
+            Some(crate::subscription::Delivery::Event(
+                crate::subscription::Event {
+                    first: 2,
+                    last: 2,
+                    value: 1
+                }
+            ))
+        );
+        assert!(a.event_source().unwrap().is_closed());
         assert!(!a.is_active());
         assert_eq!(a.quota().sockets, 0);
         assert_eq!(a.quota().datagrams, 0);
