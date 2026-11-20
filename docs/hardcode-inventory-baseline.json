@@ -590,12 +590,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "65bea46d364fb2e6759a942219db37a54635a4ac6099673b065f4962f96b36d3",
-      "path": "kernel-core/src/objtable.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "66232241a8116729353b3738dbbf6581d5c1aea488dfd99a8056df72e92a0677",
       "path": "kernel/src/arch/loongarch64/boot.rs",
       "rules": "HC-G3"
@@ -1473,5 +1467,5 @@
     "user",
     "xtask"
   ],
-  "total": 313
+  "total": 312
 }

@@ -159,7 +159,7 @@ impl<T: 'static> ObjectTable<T> {
         if slots.len() != pending.len() {
             return Err(InstallError::LengthMismatch);
         }
-        if slots.len() > MAX_CAPACITY {
+        if slots.len() > u32::MAX as usize {
             return Err(InstallError::TooLarge);
         }
         if !slots.iter().all(Slot::is_vacant) {
@@ -523,9 +523,6 @@ impl<T: 'static> Default for ObjectTable<T> {
         Self::empty()
     }
 }
-
-/// 容量上限：下标存成 `u32`，标识里存「下标 + 1」，所以最多 `u32::MAX` 个槽位。
-pub const MAX_CAPACITY: usize = u32::MAX as usize;
 
 /// 清理过程：最多处理 `limit` 个死亡对象。`destroy` 收到对象值后执行销毁动作，可以经传入的表释放其他对象
 /// 的引用（级联）；被级联释放的对象只会入队，在本轮剩余预算或下一轮被处理——迭代、不递归。返回本轮处理数。

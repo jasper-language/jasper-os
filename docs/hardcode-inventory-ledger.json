@@ -1,5 +1,5 @@
 {
-  "baseline_total": 313,
+  "baseline_total": 312,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -13,7 +13,7 @@
     "explicit-safety-policy": 125,
     "platform-adapter": 28,
     "protocol-abi": 38,
-    "runtime-resource-capacity": 45,
+    "runtime-resource-capacity": 44,
     "test-demo-fixture": 6
   },
   "entries": [
@@ -1036,16 +1036,6 @@
       "reason": "PCI configuration limit, architecture address width, wire handle count, or internal bit field",
       "rules": "HC-G1",
       "source": "const MAX_GENERATION: u32 = if HANDLE_GEN_BITS >= 32 { u32::MAX } else { (1u32 << HANDLE_GEN_BITS) - 1 };"
-    },
-    {
-      "category": "runtime-resource-capacity",
-      "count": 1,
-      "fingerprint": "65bea46d364fb2e6759a942219db37a54635a4ac6099673b065f4962f96b36d3",
-      "line": 528,
-      "path": "kernel-core/src/objtable.rs",
-      "reason": "identifier names a runtime-owned collection or capacity; consumer must derive an admission budget",
-      "rules": "HC-G1",
-      "source": "pub const MAX_CAPACITY: usize = u32::MAX as usize;"
     },
     {
       "category": "explicit-safety-policy",
@@ -2443,7 +2433,7 @@
     "explicit-safety-policy": 141,
     "platform-adapter": 44,
     "protocol-abi": 41,
-    "runtime-resource-capacity": 80,
+    "runtime-resource-capacity": 79,
     "test-demo-fixture": 7
   }
 }
