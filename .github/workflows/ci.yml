@@ -89,6 +89,8 @@ jobs:
         run: |
           python3 scripts/check-issue43-driver-ledger.py --self-test
           python3 scripts/check-issue43-driver-ledger.py
+      - name: 原生 Profile 与兼容依赖隔离 / native profile isolation
+        run: python3 scripts/check-native-ecosystem.py --dependency-tree
       - name: Issue #36/#37 GPU 与 UI ABI 边界 / GPU-UI boundary
         run: |
           python3 scripts/check-gpu-abi-boundary.py --self-test

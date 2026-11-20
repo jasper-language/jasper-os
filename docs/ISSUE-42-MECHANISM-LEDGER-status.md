@@ -42,6 +42,14 @@ total=25
 `implemented-tested=0` 是刻意结果：这 25 族都是跨多层、跨生命周期的机制，
 不存在仅凭一个内核状态机或一条 QEMU 日志便可标为全量完成的族。
 
+## 兼容关闭的 Profile 门
+
+CI 新增 `scripts/check-native-ecosystem.py --dependency-tree`。它分别检查
+`no-default-features`、默认和 `production` 三个 kernel 依赖树，要求均不包含
+`jasper-compat-core` 或 `jasper-compat-loader`；同时要求 syscall、ELF 和动态
+libc 验收特性只在显式启用时引入对应兼容组件。该检查证明构建依赖隔离，不证明
+关闭兼容层后的原生 Pager/服务全链路已经运行。
+
 ## 不代表完成
 
 - `compat-retained` 表示该语义应永久留在版本化兼容层，例如 POSIX signal frame；
