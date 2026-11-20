@@ -249,6 +249,8 @@ def main() -> int:
     parser.add_argument("--image", type=Path)
     parser.add_argument("--debugfs", type=Path, default=Path("/usr/sbin/debugfs"))
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--write", type=Path, help="write the deterministic JSON report")
+    parser.add_argument("--check", type=Path, help="compare against a saved deterministic report")
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -260,7 +262,16 @@ def main() -> int:
     except PreflightError as error:
         print(f"android-framework-preflight: FAIL: {error}", file=sys.stderr)
         return 1
-    print(json.dumps(report, indent=2, sort_keys=True))
+    rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    if args.write is not None:
+        args.write.parent.mkdir(parents=True, exist_ok=True)
+        args.write.write_text(rendered, encoding="utf-8")
+    elif args.check is not None:
+        if not args.check.is_file() or args.check.read_text(encoding="utf-8") != rendered:
+            print("android-framework-preflight: FAIL report drift", file=sys.stderr)
+            return 1
+    else:
+        print(rendered, end="")
     print(
         "android-framework-preflight: "
         f"container_ready={str(report['container_ready']).lower()} "
