@@ -2,8 +2,8 @@
 
 Updated: 2026-11-21
 
-Status: **layout and atomic migration contract implemented; runtime hotplug
-event wiring remains open.**
+Status: **core-passed: layout, CPL3 migration and dual-Surface framebuffer output
+are verified; real display/DPI/keyboard hotplug remains open.**
 
 `kernel-core::ui_workspace` provides a bounded, allocation-fallible contract for
 the same application/Scene model under Single, Split and MultiWindow layouts:
