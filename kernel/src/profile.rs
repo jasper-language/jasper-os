@@ -42,7 +42,7 @@ pub const ACTIVE: SystemProfile = SystemProfile {
 };
 
 /// 渲染缓冲区的最小长度（再小一定放不下）。
-pub const MIN_TEXT: usize = 1536;
+pub const MIN_TEXT: usize = 1536; // JASPER-HARDCODE-REVIEW: issue=35 source=profile-render-layout reason=minimum-fixed-buffer-derivated-from-complete-profile-record
 static RESOLVED: Once<ResolvedProfile> = Once::new();
 
 /// 内建 Profile 的数量。

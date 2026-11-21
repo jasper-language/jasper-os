@@ -17,13 +17,13 @@
 //! 小端；字符串为 `u8` 长度 + UTF-8 字节（≤ [`MAX_STR`]）。解码器检查每个长度与取值，多余尾部字节拒绝，从不 panic。
 
 /// 单条消息的字节数上限（与内核通道一致）。
-pub const MAX_MESSAGE: usize = 64 * 1024;
+pub const MAX_MESSAGE: usize = 64 * 1024; // JASPER-HARDCODE-REVIEW: issue=33 source=jaso-wire-v1 reason=fixed-per-message-byte-envelope
 /// 单个分片的数据字节数上限（留出消息头）。
-pub const MAX_CHUNK: usize = MAX_MESSAGE - 16;
+pub const MAX_CHUNK: usize = MAX_MESSAGE - 16; // JASPER-HARDCODE-REVIEW: issue=33 source=jaso-wire-v1 reason=chunk-payload-derived-from-versioned-message-envelope
 /// 字符串字节数上限。
-pub const MAX_STR: usize = 255;
+pub const MAX_STR: usize = 255; // JASPER-HARDCODE-REVIEW: issue=33 source=jaso-wire-v1 reason=u8-length-prefixed-wire-string
 /// 授予的能力名个数上限。
-pub const MAX_CAPS: usize = 16;
+pub const MAX_CAPS: usize = 16; // JASPER-HARDCODE-REVIEW: issue=33 source=jaso-wire-v1 reason=fixed-capability-name-array-in-load-request
 /// 随 Load 附带的句柄个数上限（与内核通道单条消息的句柄上限一致）。
 pub const MAX_HANDLES: usize = 8; // JASPER-HARDCODE-REVIEW: issue=33 source=jaso-wire-v1 reason=fixed-per-message-handle-array-in-v1-wire-layout
 

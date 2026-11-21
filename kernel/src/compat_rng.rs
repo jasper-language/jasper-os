@@ -15,7 +15,7 @@ use crate::{kprintln, mmio, pci, sched};
 
 const QUEUE_ENTRY: u16 = 0;
 const WAIT_TICKS: u64 = 1_000;
-const MAX_SPINS: u64 = 50_000_000;
+const MAX_SPINS: u64 = 50_000_000; // JASPER-HARDCODE-REVIEW: issue=35 source=virtio-rng-wait-policy reason=bounded-polling-backstop-for-unresponsive-device
 
 struct Device {
     virtio: VirtioPci,

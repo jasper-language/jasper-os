@@ -18,7 +18,7 @@
 //! 得到的是预算允许的边界，不是唯一答案：默认值只要在预算内即可保留，由调用者结合其它约束决定。
 
 /// 单个缓冲最多保存的样本数。
-pub const MAX_SAMPLES: usize = 256;
+pub const MAX_SAMPLES: usize = 256; // JASPER-HARDCODE-REVIEW: issue=33 source=test-fixture reason=benchmark-sample-array-fixture
 
 /// 定长样本缓冲。
 /// Fixed-capacity sample buffer (no heap).

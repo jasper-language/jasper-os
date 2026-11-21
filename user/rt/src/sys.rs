@@ -183,13 +183,13 @@ pub const STACK_STRIDE: u64 = 0x4_0000;
 /// 每个线程栈映射的页数（64 KiB）。
 pub const STACK_PAGES: u64 = 16;
 /// 线程栈槽位数（槽位占用位图是一个 32 位原子字：32 位指令集也有原生的 32 位原子操作）。
-pub const STACK_SLOTS: u32 = 32;
+pub const STACK_SLOTS: u32 = 32; // JASPER-HARDCODE-REVIEW: issue=35 source=user-runtime-layout-v1 reason=fixed-stack-slot-region-in-frozen-user-address-layout
 /// 模块区间：私有窗口起点 + 384 MiB 起，每个槽位 [`MODULE_STRIDE`] 字节（= `.jaso` 映像大小上限），共 512 MiB。
 pub const MODULES_BASE: u64 = WINDOW_BASE + (384 << 20);
 /// 模块槽位间距（64 MiB）。
 pub const MODULE_STRIDE: u64 = 64 << 20;
 /// 模块槽位数。
-pub const MODULE_SLOTS: u32 = 8;
+pub const MODULE_SLOTS: u32 = 8; // JASPER-HARDCODE-REVIEW: issue=35 source=user-runtime-layout-v1 reason=fixed-module-slot-region-in-frozen-user-address-layout
 /// 页大小。
 pub const PAGE: u64 = 4096;
 /// 布局可用的上限（不含）：各指令集中最小的私有窗口的末端。程序自选的固定地址也应落在它之下。

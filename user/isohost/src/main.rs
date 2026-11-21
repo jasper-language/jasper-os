@@ -80,7 +80,7 @@ const IDLE_BOUND_TICKS: u64 = 1;
 /// 每阶段的往返调用次数。
 const ROUNDS: u32 = 20;
 /// 每个父进程同时拥有的子进程上限（与内核的配额一致）。
-const MAX_CHILDREN: usize = 8;
+const MAX_CHILDREN: usize = 8; // JASPER-HARDCODE-REVIEW: issue=33 source=test-fixture reason=isolation-host-acceptance-child-array
 /// 等待另一线程进入模块的最长时间（tick）。
 const ENTER_TIMEOUT_TICKS: u64 = 500;
 /// 功能全过、只有计时类断言超界时的退出码。

@@ -702,7 +702,7 @@ impl VirtioGuestBus {
             } else {
                 match self.fs_backend.handle_request(request, &mut response) {
                     Ok(length) => length,
-                    Err(_) if request.len() >= 16 => {
+                    Err(_) if request.len() >= 16 => { // JASPER-HARDCODE-REVIEW: issue=35 source=fuse-uapi-v1 reason=out-header-carries-16-byte-unique-field
                         let unique = u64::from_le_bytes(request[8..16].try_into().unwrap());
                         response[..FUSE_OUT_HEADER_BYTES].fill(0);
                         response[..4]

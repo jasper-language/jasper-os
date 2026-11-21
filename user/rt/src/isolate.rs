@@ -49,7 +49,7 @@ pub const CONTAINER_CALLS: &[u64] = &[
 
 /// 容器接收的模块文件字节数上限。
 /// Upper bound on the module file a container accepts.
-pub const MAX_MODULE_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_MODULE_BYTES: usize = 4 * 1024 * 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=isolation-wire-v1 reason=versioned-isolated-module-image-envelope
 
 /// 创建隔离模块的授权。
 /// What the host grants to an isolated module.

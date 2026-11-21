@@ -272,7 +272,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
             let table = unsafe { table.as_ref() };
             !table.boot_services.is_null() && !table.stdout.is_null()
         })
-        .unwrap_or(false);
+        .unwrap_or(false); // JASPER-HARDCODE-REVIEW: issue=35 source=diagnostic-unknown-label reason=panic-console-unavailable-is-explicitly-detected
     if stdout_available {
         uefi::system::with_stdout(|stdout| {
             let _ = stdout.clear();

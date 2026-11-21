@@ -1099,7 +1099,7 @@ fn linux_sigaltstack(process: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno>
     const STACK_T_BYTES: usize = 24;
     const SS_DISABLE: u32 = 2;
     const SS_AUTODISARM: u32 = 0x8000_0000;
-    const MIN_ALTSTACK: u64 = 2048;
+    const MIN_ALTSTACK: u64 = 2048; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-uapi-v1 reason=sigaltstack-minimum-size
     let (sp, size, configured_flags, active_depth, disarm_depth) =
         current_altstack(process).ok_or(CompatErrno::NoSys)?;
     let flags = if configured_flags & SS_DISABLE != 0 || disarm_depth != 0 {
@@ -2206,7 +2206,7 @@ pub(crate) fn linux_thread_exit(process: ObjId, task: crate::task::TaskId) {
 }
 
 fn process_robust_list(process: ObjId, tid: u32, head: u64) -> usize {
-    const MAX_NODES: usize = 64;
+    const MAX_NODES: usize = 64; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-robust-list-policy reason=bounded-exit-traversal-with-cycle-detection-no-allocation
     const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
     let window = crate::arch::USER_WINDOW;
     let Some(first) = proc::read_u64(process, head) else {
@@ -3847,7 +3847,7 @@ fn linux_cache_getdents64(
 }
 
 fn linux_getdents64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const MAX_GETDENTS: usize = 64 * 1024;
+    const MAX_GETDENTS: usize = 64 * 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-batch-partial-policy reason=bounded-directory-prefix-return
     const DT_DIR: u8 = 4;
     const DT_REG: u8 = 8;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
@@ -3917,7 +3917,7 @@ fn linux_getdents64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 
 /// Reads bounded legacy `linux_dirent` records from one compatibility directory.
 fn linux_getdents(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    const MAX_GETDENTS: usize = 64 * 1024;
+    const MAX_GETDENTS: usize = 64 * 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-batch-partial-policy reason=bounded-directory-prefix-return
     const DT_DIR: u8 = 4;
     const DT_REG: u8 = 8;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
@@ -12431,7 +12431,7 @@ fn linux_eventfd_write(
     address: u64,
     len: usize,
 ) -> Result<u64, CompatErrno> {
-    const MAX_COUNTER: u64 = u64::MAX - 1;
+    const MAX_COUNTER: u64 = u64::MAX - 1; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-uapi-v1 reason=eventfd-counter-saturation-bound
     if len < 8 {
         return Err(CompatErrno::Invalid);
     }
@@ -17185,7 +17185,7 @@ fn linux_fscrypt_get_pwsalt(pid: ObjId, fd: u32, request: u64) -> Result<u64, Co
 fn linux_fscrypt_add_key(pid: ObjId, fd: u32, request: u64) -> Result<u64, CompatErrno> {
     const ADD_KEY_BYTES: usize = 80;
     const HW_WRAPPED: u32 = 1;
-    const MAX_RAW_KEY: usize = 64;
+    const MAX_RAW_KEY: usize = 64; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-uapi-v1 reason=fscrypt-maximum-master-key-payload
     let mut raw = [0u8; ADD_KEY_BYTES];
     copy_from_user(&mut raw, request, ADD_KEY_BYTES).map_err(|_| CompatErrno::Fault)?;
     let spec = parse_fscrypt_key_specifier(&raw[..40])?;

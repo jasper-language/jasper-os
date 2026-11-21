@@ -3,7 +3,7 @@
 
 use super::*;
 
-const DEFAULTS: BootCapacity = BootCapacity { objects: 1024, tasks: 64, rt: 8 };
+const DEFAULTS: BootCapacity = BootCapacity { objects: 1024, tasks: 64, rt: 8 }; // JASPER-HARDCODE-REVIEW: issue=33 source=test-fixture reason=capacity-derivation-test-record
 const COST: MemoryCost = MemoryCost { per_object: 128, per_task: 70 * 1024, per_rt: 32, mem_limit: 32 * 1024 * 1024 };
 
 #[test]

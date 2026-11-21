@@ -347,8 +347,8 @@ impl KernelConfig {
         },
         sched: SchedParams {
             qos: QosParams::DEFAULT,
-            max_tasks: 64, // JASPER-HARDCODE-REVIEW: issue=35 source=test-fixture reason=capacity-model-test-input
-            max_rt: 8, // JASPER-HARDCODE-REVIEW: issue=35 source=test-fixture reason=capacity-model-test-input
+            max_tasks: 64, // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=validated-standard-profile-policy
+            max_rt: 8, // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=validated-standard-profile-policy
             kernel_stack_bytes: 128 * 1024,
             watchdog_ticks: 50,
             watchdog_log: 16,

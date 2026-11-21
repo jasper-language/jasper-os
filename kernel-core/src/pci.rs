@@ -1102,7 +1102,7 @@ mod tests {
             let idx = offset as usize / 4;
             if (4..10).contains(&idx) {
                 let slot = idx - 4;
-                let mask = self.masks.get(&(bdf, slot)).copied().unwrap_or(0);
+        let mask = self.masks.get(&(bdf, slot)).copied().unwrap_or(0); // JASPER-HARDCODE-REVIEW: issue=33 source=test-fixture reason=unconfigured-model-table-reads-zero-mask
                 let low_flags = s[idx] & 0xF & !mask;
                 s[idx] = (value & mask) | low_flags;
             } else if idx == 1 {

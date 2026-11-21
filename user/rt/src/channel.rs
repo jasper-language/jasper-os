@@ -18,7 +18,7 @@ use crate::{ids, sys};
 /// 单条消息的句柄数上限（与内核一致）。
 pub const MAX_HANDLES: usize = 8; // JASPER-HARDCODE-REVIEW: issue=33 source=channel-abi-v1 reason=fixed-per-message-handle-array-in-v1-ring-descriptor
 /// 单条消息的字节数上限（与内核一致）。
-pub const MAX_BYTES: usize = 64 * 1024;
+pub const MAX_BYTES: usize = 64 * 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=jasper-channel-byte-v1 reason=versioned-channel-message-byte-envelope
 
 /// 一个 Channel 端点（拥有其句柄）。
 #[derive(Debug)]

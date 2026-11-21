@@ -25,7 +25,7 @@ use crate::syscall::table::{
 use crate::syscall::{err, user_ptr_err};
 
 // JASPER-HARDCODE-REVIEW: issue=21 source=diagnostic-usi-v1-contract reason=response-size-is-derived-from-fixed-wire-record-width-and-max-page
-const MAX_RESPONSE_BYTES: usize = RESPONSE_HEADER_BYTES + MAX_PAGE_EVENTS * EVENT_BYTES;
+const MAX_RESPONSE_BYTES: usize = RESPONSE_HEADER_BYTES + MAX_PAGE_EVENTS * EVENT_BYTES; // JASPER-HARDCODE-REVIEW: issue=21 source=diagnostic-usi-v1-contract reason=response-size-derived-from-versioned-record-width
 
 struct RamDisk {
     bytes: alloc::vec::Vec<u8>,

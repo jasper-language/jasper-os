@@ -45,9 +45,9 @@ use crate::syscall::table::*;
 use crate::task::TaskId;
 
 /// 单条消息的消息体上限（用户态契约，不随配置档变化）。
-pub const MAX_MSG_BYTES: usize = kernel_core::config::bounds::MSG_BYTES;
+pub const MAX_MSG_BYTES: usize = kernel_core::config::bounds::MSG_BYTES; // JASPER-HARDCODE-REVIEW: issue=35 source=jasper-channel-byte-v1 reason=validated-user-message-byte-contract
 /// 单条消息可携带的句柄数上限。
-pub const MAX_MSG_HANDLES: usize = 8;
+pub const MAX_MSG_HANDLES: usize = 8; // JASPER-HARDCODE-REVIEW: issue=33 source=channel-abi-v1 reason=fixed-handle-array-in-versioned-channel-message
 
 static RUNTIME_PLAN: Once<IpcParams> = Once::new();
 

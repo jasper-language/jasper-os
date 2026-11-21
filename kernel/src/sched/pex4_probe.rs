@@ -13,13 +13,13 @@ const SAMPLES_PER_CPU: usize = 1024;
 
 /// Maximum aggregate samples exported for one measurement.
 /// 单次测量可导出的最大聚合样本数。
-pub const MAX_SAMPLES: usize = MAX_CPUS * SAMPLES_PER_CPU;
+pub const MAX_SAMPLES: usize = MAX_CPUS * SAMPLES_PER_CPU; // JASPER-HARDCODE-REVIEW: issue=33 source=test-fixture reason=PEX4-probe-sample-array
 
 static PICKS: AtomicU64 = AtomicU64::new(0);
 static VISITED: AtomicU64 = AtomicU64::new(0);
 static CANDIDATES: AtomicU64 = AtomicU64::new(0);
-static MAX_VISITED: AtomicU32 = AtomicU32::new(0);
-static MAX_CANDIDATES: AtomicU32 = AtomicU32::new(0);
+static MAX_VISITED: AtomicU32 = AtomicU32::new(0); // JASPER-HARDCODE-REVIEW: issue=33 source=test-fixture reason=PEX4-probe-diagnostic-counter
+static MAX_CANDIDATES: AtomicU32 = AtomicU32::new(0); // JASPER-HARDCODE-REVIEW: issue=33 source=test-fixture reason=PEX4-probe-diagnostic-counter
 static SAMPLE_COUNTS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 static DURATION_CYCLES: [[AtomicU64; SAMPLES_PER_CPU]; MAX_CPUS] =
     [const { [const { AtomicU64::new(0) }; SAMPLES_PER_CPU] }; MAX_CPUS];

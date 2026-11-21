@@ -12,7 +12,7 @@ use crate::{arch, baseline::baseline, kprintln, proc, robust_demo, sched, syscal
 /// One-shot failure point used to exercise the MMIO rollback branch.
 pub static MMIO_MAP: kernel_core::fault::FaultPoint = kernel_core::fault::FaultPoint::new();
 
-const MAX_WORKERS: usize = 8;
+const MAX_WORKERS: usize = 8; // JASPER-HARDCODE-REVIEW: issue=33 source=test-fixture reason=dedicated-S2-worker-drill
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static CPUS: AtomicU32 = AtomicU32::new(0);
 static CALLS: [AtomicU32; MAX_WORKERS] = [const { AtomicU32::new(0) }; MAX_WORKERS];

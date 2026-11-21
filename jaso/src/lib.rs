@@ -73,11 +73,11 @@ pub const MAX_SECTIONS: u32 = 64; // JASPER-HARDCODE-REVIEW: issue=35 source=jas
 /// 镜像数上限。
 pub const MAX_IMAGES: u32 = 8; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-container-v1 reason=fixed-image-directory-capacity-in-versioned-container
 /// 扩展段数上限。
-pub const MAX_EXTENSIONS: u32 = 32;
+pub const MAX_EXTENSIONS: u32 = 32; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-container-v1 reason=fixed-extension-directory-capacity-in-versioned-container
 /// 扩展名长度上限。
 pub const MAX_EXTENSION_NAME: usize = 64; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-container-v1 reason=fixed-extension-name-field-in-versioned-extension-record
 /// 导出项数上限。
-pub const MAX_EXPORTS: u32 = 1024;
+pub const MAX_EXPORTS: u32 = 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-container-v1 reason=fixed-export-directory-capacity-in-versioned-container
 /// 导出名长度上限。
 pub const MAX_NAME: u32 = 128; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-container-v1 reason=fixed-export-name-field-in-versioned-container
 /// 签名段长度：scheme(4) + 保留(4) + 发布者公钥(32) + 签名值(64)。
@@ -871,7 +871,7 @@ impl<'a> ImageRef<'a> {
     /// 全部导出项。
     pub fn exports(&self) -> impl Iterator<Item = Export<'a>> + '_ {
         let b = self.dir_of(SectionKind::Exports).map(|d| section_of(self.bytes, &d)).unwrap_or(&[]);
-        let n = if b.len() >= 4 { u32_at(b, 0) } else { 0 };
+        let n = if b.len() >= 4 { u32_at(b, 0) } else { 0 }; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-container-v1 reason=missing-export-section-has-zero-exports
         (0..n).filter_map(move |i| export_at(b, i))
     }
 
@@ -883,7 +883,7 @@ impl<'a> ImageRef<'a> {
     /// 全部重定位项。
     pub fn relocs(&self) -> impl Iterator<Item = Reloc> + '_ {
         let b = self.dir_of(SectionKind::Relocs).map(|d| section_of(self.bytes, &d)).unwrap_or(&[]);
-        let n = if b.len() >= 4 { u32_at(b, 0) } else { 0 };
+        let n = if b.len() >= 4 { u32_at(b, 0) } else { 0 }; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-container-v1 reason=u32-relocation-count-prefix-in-versioned-container
         (0..n).map(move |i| {
             let o = 4 + i as usize * RELOC_SIZE;
             Reloc { offset: u32_at(b, o), kind: u32_at(b, o + 4), addend: u64_at(b, o + 8) }

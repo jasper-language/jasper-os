@@ -8,7 +8,7 @@ use spin::Mutex;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::arch::{ExitStatus, Platform};
 
-const CAPACITY: usize = 8 * 1024 * 1024;
+const CAPACITY: usize = 8 * 1024 * 1024; // JASPER-HARDCODE-REVIEW: issue=33 source=test-fixture reason=dedicated-BM1-trace-drill-buffer
 struct Log { bytes: [u8; CAPACITY], len: usize, overflow: bool }
 static LOG: Mutex<Log> = Mutex::new(Log { bytes: [0; CAPACITY], len: 0, overflow: false });
 static BOOT_ID: AtomicU64 = AtomicU64::new(0);
@@ -101,7 +101,7 @@ impl Screen {
 
 fn checksum(bytes: &[u8]) -> u16 {
     let mut sum = 0u32;
-    for chunk in bytes.chunks(2) { sum += ((chunk[0] as u32) << 8) | *chunk.get(1).unwrap_or(&0) as u32; }
+for chunk in bytes.chunks(2) { sum += ((chunk[0] as u32) << 8) | *chunk.get(1).unwrap_or(&0) as u32; } // JASPER-HARDCODE-REVIEW: issue=33 source=test-fixture reason=odd-byte-checksum-fixture-padding
     while sum >> 16 != 0 { sum = (sum & 65535) + (sum >> 16); }
     !(sum as u16)
 }

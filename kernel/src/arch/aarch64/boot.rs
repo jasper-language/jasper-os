@@ -1692,13 +1692,13 @@ fn print_dtb_summary(
             Some(cpu_on) => crate::kprintln!(
                 "[JSR-DTB] psci=compatible={} method={} cpu_on=0x{:x}",
                 psci.compatible,
-                psci.method.unwrap_or("none"),
+                psci.method.unwrap_or("none"), // JASPER-HARDCODE-REVIEW: issue=35 source=diagnostic-unknown-label reason=missing-PSCI-method-is-diagnostic-only
                 cpu_on
             ),
             None => crate::kprintln!(
                 "[JSR-DTB] psci=compatible={} method={} cpu_on=none",
                 psci.compatible,
-                psci.method.unwrap_or("none")
+                psci.method.unwrap_or("none") // JASPER-HARDCODE-REVIEW: issue=35 source=diagnostic-unknown-label reason=missing-PSCI-method-is-diagnostic-only
             ),
         },
         None => crate::kprintln!("[JSR-DTB] psci=none"),

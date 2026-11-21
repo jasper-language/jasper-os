@@ -59,7 +59,7 @@ const BAD_ENTRY: u64 = 4096;
 /// 停车用的时间等待时长（远超演练时长；由内核取消放行，不靠它到期）。
 const PARK_TICKS: u64 = 1 << 40;
 /// Ring 完成队列容量。
-const RING_CAPACITY: u64 = 8;
+const RING_CAPACITY: u64 = 8; // JASPER-HARDCODE-REVIEW: issue=33 source=test-fixture reason=IRQ-probe-ring-capacity
 
 /// 退出码字段（与内核演练一致）。
 const EXIT_REJECTS_TOTAL_SHIFT: u32 = 8;
@@ -120,7 +120,7 @@ impl Line {
     }
 
     fn as_str(&self) -> &str {
-        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("") // JASPER-HARDCODE-REVIEW: issue=35 source=diagnostic-unknown-label reason=invalid-probe-text-is-display-only
     }
 }
 

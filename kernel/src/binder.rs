@@ -17,8 +17,8 @@ const BINDER_TRANSACTION_BYTES: usize = 64;
 const BINDER_TRANSACTION_SG_BYTES: usize = 72;
 const BINDER_READ_PACKET_BYTES: usize = 4 + BINDER_TRANSACTION_BYTES;
 const BINDER_SEC_CTX_PACKET_BYTES: usize = BINDER_READ_PACKET_BYTES + 8;
-const MAX_TRANSACTION_BYTES: usize = 64 * 1024;
-const MAX_OFFSET_BYTES: usize = 4096;
+const MAX_TRANSACTION_BYTES: usize = 64 * 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=android-binder-v1 reason=compat-profile-transaction-envelope-with-explicit-rejection
+const MAX_OFFSET_BYTES: usize = 4096; // JASPER-HARDCODE-REVIEW: issue=35 source=android-binder-v1 reason=compat-profile-offset-object-envelope-with-explicit-rejection
 const BINDER_TYPE_BINDER: u32 = 0x7362_2a85;
 const BINDER_TYPE_WEAK_BINDER: u32 = 0x7762_2a85;
 const BINDER_TYPE_HANDLE: u32 = 0x7368_2a85;
