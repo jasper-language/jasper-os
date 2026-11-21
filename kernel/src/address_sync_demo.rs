@@ -6,7 +6,7 @@
 //! while holding the same address-condition critical section that protects the
 //! mapped word.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use kernel_core::address_sync::{
     AddressGrant, AddressState, AddressSync, AddressWait,
@@ -14,6 +14,7 @@ use kernel_core::address_sync::{
 use kernel_core::memory_capability::MemoryRights;
 use kernel_core::object::{ObjectType, Rights};
 use kernel_core::objtable::ObjId;
+use kernel_core::smp::CpuSet;
 
 use crate::kobj;
 use crate::mm::pin::PinnedRange;
@@ -30,6 +31,9 @@ static FAILED: AtomicU32 = AtomicU32::new(0);
 static PARKED: AtomicU32 = AtomicU32::new(0);
 static DONE: AtomicU32 = AtomicU32::new(0);
 static STAGE: AtomicU32 = AtomicU32::new(0);
+static PASS_CPUS: AtomicU32 = AtomicU32::new(0);
+static DISTRIBUTED: AtomicBool = AtomicBool::new(false);
+static PUBLISHER_DISTRIBUTED: AtomicBool = AtomicBool::new(false);
 static SYNC: IrqSpinLock<Option<AddressSync<4>>> = IrqSpinLock::new(None);
 static GRANTS: IrqSpinLock<[Option<AddressGrant>; 2]> = IrqSpinLock::new([None; 2]);
 static TARGETS: IrqSpinLock<[Option<(ObjId, u64)>; 2]> =
@@ -46,6 +50,12 @@ fn finish(index: usize, ok: bool) {
     }
     DONE.fetch_add(1, Ordering::Release);
     let _ = index;
+}
+
+fn only(cpu: usize) -> CpuSet {
+    let mut set = CpuSet::EMPTY;
+    set.insert(cpu);
+    set
 }
 
 fn read_word(pin: &PinnedRange) -> Option<u64> {
@@ -211,6 +221,9 @@ fn reset_globals() {
     PARKED.store(0, Ordering::Relaxed);
     DONE.store(0, Ordering::Relaxed);
     STAGE.store(0, Ordering::Relaxed);
+    PASS_CPUS.store(0, Ordering::Relaxed);
+    DISTRIBUTED.store(false, Ordering::Relaxed);
+    PUBLISHER_DISTRIBUTED.store(false, Ordering::Relaxed);
     *SYNC.lock() = None;
     *GRANTS.lock() = [None; 2];
     *TARGETS.lock() = [None; 2];
@@ -311,9 +324,44 @@ fn run_pass(pass: u64) -> bool {
 
     STAGE.store(10, Ordering::Relaxed);
     let base = 0xa44_2000 + pass * 0x10;
-    if sched::spawn(TaskId(base), "address-sync-a", waiter0).is_err()
-        || sched::spawn(TaskId(base + 1), "address-sync-b", waiter1).is_err()
-        || sched::spawn(TaskId(base + 2), "address-sync-publisher", publisher).is_err()
+    let online: alloc::vec::Vec<_> = sched::online_cpus().iter().collect();
+    if online.is_empty() {
+        fail();
+        return false;
+    }
+    let cpu_a = online[0];
+    let cpu_b = online.get(1).copied().unwrap_or(cpu_a);
+    let cpu_p = online.get(2).copied().unwrap_or(cpu_a);
+    PASS_CPUS.store(online.len() as u32, Ordering::Relaxed);
+    DISTRIBUTED.store(cpu_a != cpu_b, Ordering::Relaxed);
+    PUBLISHER_DISTRIBUTED.store(
+        cpu_p != cpu_a && cpu_p != cpu_b,
+        Ordering::Relaxed,
+    );
+    if sched::spawn_on(
+        TaskId(base),
+        "address-sync-a",
+        waiter0,
+        None,
+        only(cpu_a),
+    )
+    .is_err()
+        || sched::spawn_on(
+            TaskId(base + 1),
+            "address-sync-b",
+            waiter1,
+            None,
+            only(cpu_b),
+        )
+        .is_err()
+        || sched::spawn_on(
+            TaskId(base + 2),
+            "address-sync-publisher",
+            publisher,
+            None,
+            only(cpu_p),
+        )
+        .is_err()
     {
         fail();
         return false;
@@ -321,6 +369,12 @@ fn run_pass(pass: u64) -> bool {
     STAGE.store(11, Ordering::Relaxed);
     sched::run();
     STAGE.store(12, Ordering::Relaxed);
+    if !sched::ran_on(TaskId(base)).is_some_and(|set| set.contains(cpu_a))
+        || !sched::ran_on(TaskId(base + 1)).is_some_and(|set| set.contains(cpu_b))
+        || !sched::ran_on(TaskId(base + 2)).is_some_and(|set| set.contains(cpu_p))
+    {
+        fail();
+    }
     if DONE.load(Ordering::Acquire) != 3 || FAILED.load(Ordering::Relaxed) != 0 {
         fail();
     }
@@ -345,9 +399,12 @@ pub fn run() {
         let parked = PARKED.load(Ordering::Acquire) == 2;
         let terminal = DONE.load(Ordering::Acquire) == 3 && FAILED.load(Ordering::Relaxed) == 0;
         kprintln!(
-            "[JSR-ADDRESS-SYNC] pass={} phase={} parked={} terminal={} same_object={} resources={} failed={}",
+            "[JSR-ADDRESS-SYNC] pass={} phase={} cpus={} distributed={} publisher_distributed={} parked={} terminal={} same_object={} resources={} failed={}",
             pass + 1,
             if pass == 0 { "warmup" } else { "measured" },
+            PASS_CPUS.load(Ordering::Relaxed),
+            DISTRIBUTED.load(Ordering::Relaxed),
+            PUBLISHER_DISTRIBUTED.load(Ordering::Relaxed),
             if parked { 2 } else { PARKED.load(Ordering::Acquire) },
             terminal,
             ok && FAILED.load(Ordering::Relaxed) == 0,

@@ -1,0 +1,6 @@
+qemu_rc=124
+m02_warmup=pass
+m02_measured=pass
+cpus=4
+distributed=true
+full_boot_acceptance=false
