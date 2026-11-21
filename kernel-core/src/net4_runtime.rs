@@ -597,4 +597,25 @@ mod tests {
         assert_eq!(runtime.quota().datagrams, 4);
         assert_eq!(runtime.limits(), UdpLimits::new(1, 6, 9_000));
     }
+
+    #[test]
+    fn mtu_boundary_rejects_one_extra_byte_without_quota_change() {
+        let mut runtime =
+            UdpSocketRuntime::new(UdpQuota::new(1, 1, 8), UdpLimits::new(1, 1, 8)).unwrap();
+        let handle = runtime.bind(local(), UdpRights::SERVICE).unwrap();
+        runtime.receive(remote(), local(), b"12345678").unwrap();
+        let before = runtime.quota();
+        let stats_before = runtime.stats();
+        assert_eq!(
+            runtime.receive(remote(), local(), b"123456789"),
+            Err(UdpRuntimeError::DatagramTooLarge)
+        );
+        assert_eq!(runtime.quota(), before);
+        assert_eq!(runtime.stats().queued_datagrams, stats_before.queued_datagrams);
+        assert_eq!(runtime.stats().rejected_datagrams, stats_before.rejected_datagrams + 1);
+
+        let mut output = [0u8; 8];
+        assert_eq!(runtime.recv(handle, &mut output), Ok((remote(), 8)));
+        assert_eq!(&output, b"12345678");
+    }
 }
