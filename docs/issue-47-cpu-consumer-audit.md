@@ -51,6 +51,9 @@ bitmap；MSI 每核向量表和 IRQ 每核计数、quota 也在 IRQ 路径前按
 
 2/4-vCPU UEFI 生产启动已通过 SMP、IRQ 拓扑、用户程序执行、生命周期健康检查和
 持续 tick。guard 槽位只由全局 scheduler 锁串行访问，不进入 lock-free tick 路径。
+通用 `kernel-core::cpu_table::CpuTable` 与 scheduler 使用同一实现；宿主测试覆盖
+bootstrap→129→256 行扩展、CPU 128/255 边界，以及超额预留失败时已发布表保持不变。
+x86_64 `no_std` production/lifecycle-health 检查通过。
 
 `kernel/src/irq.rs` 的 MSI 状态、设备中断计数和每核配额已改为
 `CpuTailLayout` 驱动的 bootstrap 区加准入数量堆后备尾部；读取、重置和越界

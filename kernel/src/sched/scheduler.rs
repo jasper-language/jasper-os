@@ -43,6 +43,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use crate::arch::TaskContext;
 use crate::task::{Task, TaskAffinity, TaskId, TaskState};
+use kernel_core::cpu_table::CpuTable;
 use kernel_core::deadline::{Deadline, ABSENT as NO_DEADLINE};
 use kernel_core::deadline_forest::DeadlineForest;
 use kernel_core::task_index::{TaskIndex, Node as IndexNode};
@@ -972,12 +973,6 @@ impl CpuAffinityTable {
     }
 }
 
-/// Per-CPU value table with a const-friendly bootstrap area and heap overflow.
-struct CpuTable<T, const N: usize> {
-    inline: [T; N],
-    extra: alloc::vec::Vec<T>,
-}
-
 enum LoadSnapshot {
     Inline([CoreLoad; MAX_CPUS]),
     Heap(Vec<CoreLoad>),
@@ -1000,83 +995,6 @@ impl LoadSnapshot {
 
     fn get(&self, cpu: usize) -> Option<&CoreLoad> {
         self.as_slice().get(cpu)
-    }
-}
-
-impl<T, const N: usize> CpuTable<T, N> {
-    const fn new(inline: [T; N]) -> Self {
-        Self {
-            inline,
-            extra: alloc::vec::Vec::new(),
-        }
-    }
-
-    fn len(&self) -> usize {
-        N + self.extra.len()
-    }
-
-    fn get(&self, cpu: usize) -> Option<&T> {
-        if cpu < N {
-            self.inline.get(cpu)
-        } else {
-            self.extra.get(cpu - N)
-        }
-    }
-
-    fn prepare_tail(
-        &self,
-        total: usize,
-        mut fill: impl FnMut() -> T,
-    ) -> Result<alloc::vec::Vec<T>, kernel_core::cpu_bitmap::CpuBitmapError> {
-        if total <= self.len() {
-            return Ok(alloc::vec::Vec::new());
-        }
-        let needed = total - self.len();
-        let mut tail = alloc::vec::Vec::new();
-        tail.try_reserve_exact(needed)
-            .map_err(|_| kernel_core::cpu_bitmap::CpuBitmapError::Allocation)?;
-        for _ in 0..needed {
-            tail.push(fill());
-        }
-        Ok(tail)
-    }
-
-    fn commit_tail(&mut self, tail: alloc::vec::Vec<T>) {
-        self.extra.extend(tail);
-    }
-
-    fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
-        self.inline.iter_mut().chain(self.extra.iter_mut())
-    }
-
-    fn iter(&self) -> impl Iterator<Item = &T> {
-        self.inline.iter().chain(self.extra.iter())
-    }
-
-    fn fill(&mut self, value: T)
-    where
-        T: Clone,
-    {
-        for slot in self.iter_mut() {
-            *slot = value.clone();
-        }
-    }
-}
-
-impl<T, const N: usize> core::ops::Index<usize> for CpuTable<T, N> {
-    type Output = T;
-    fn index(&self, cpu: usize) -> &T {
-        self.get(cpu).expect("admitted CPU index")
-    }
-}
-
-impl<T, const N: usize> core::ops::IndexMut<usize> for CpuTable<T, N> {
-    fn index_mut(&mut self, cpu: usize) -> &mut T {
-        if cpu < N {
-            &mut self.inline[cpu]
-        } else {
-            &mut self.extra[cpu - N]
-        }
     }
 }
 
