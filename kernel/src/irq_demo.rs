@@ -443,11 +443,16 @@ fn detach(n: usize, lines: usize) {
     let msi_quiesced = match msi_vector {
         Some(vector) => {
             let result = crate::irq::msi_bind(msi_cpu, vector, Some(count_msi_handler))
-                .and_then(|()| crate::irq::msi_quiesce_cpu(msi_cpu));
+                .and_then(|()| crate::interrupt::quiesce_cpu(msi_cpu));
             if result.is_ok() {
                 crate::irq::on_msi(vector);
             }
-            result == Ok(1)
+            result.is_ok_and(|report| {
+                report.objects_closed == 0
+                    && report.bindings_removed == 0
+                    && report.vectors_returned == 0
+                    && report.residual_bindings == 0
+            })
                 && HANDLED.load(Ordering::Relaxed) == handlers_before
                 && crate::irq::msi_detached_arrivals(msi_cpu)
                     == detached_before.saturating_add(1)

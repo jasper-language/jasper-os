@@ -73,6 +73,9 @@ CPU departure:
   MSI handler and budget callback. New MSI binding fails closed; a late arrival
   is counted in `detached_arrivals` and cannot invoke the previous handler.
   `msi_resume_cpu(cpu)` reopens dispatch without restoring old vector bindings.
+- `interrupt::quiesce_cpu(cpu)` composes the dispatch stop with Interrupt-object
+  teardown: affected objects are closed and completed as closed, MSI-X entries
+  are masked/unbound, vectors are returned, and residual bindings are reported.
 
 The existing CPL3 SMP-3 drill now routes both device lines to a secondary CPU,
 detaches that CPU, verifies no stale or offline target remains, demotes its
@@ -89,10 +92,12 @@ The complete x86_64 `accept.sh` run with 240-second per-guest limits reports
 `accept: ALL PASS`; 4-vCPU, 8-vCPU and q35 4-vCPU guests exit 37 for timing-only
 overruns while all functional SMP-3 checks pass.
 
-This is an IRQ/MSI dispatch handoff milestone, not complete CPU offline:
-interrupt-object ownership transfer, scheduler task migration, architecture
-stop IPIs, CPU runtime generation publication and hotplug rollback still require
-the following transactions before `CPU-DYNAMIC-CONSUMERS-1` can become done.
+This is an IRQ/MSI dispatch and object-teardown milestone, not complete CPU
+offline: a real guest currently exercises the zero-object/race path, so a
+hardware-bound Interrupt-object migration matrix still needs to be added.
+Scheduler task migration, architecture stop IPIs, CPU runtime generation
+publication and hotplug rollback also remain before
+`CPU-DYNAMIC-CONSUMERS-1` can become done.
 
 The runtime registry also rejects `mark_offline(boot_logical)` while another
 CPU is online and reports `LastOnlineCpu` before the final online CPU can leave.

@@ -184,6 +184,87 @@ pub fn redelivered() -> u64 {
     REDELIVERED.load(Ordering::Relaxed)
 }
 
+/// Result of moving all MSI-X interrupt objects away from one departing CPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuQuiesceReport {
+    /// Interrupt objects whose wait state was closed.
+    pub objects_closed: usize,
+    /// MSI-X bindings removed from the device table.
+    pub bindings_removed: usize,
+    /// Vector-pool entries returned by the departing CPU.
+    pub vectors_returned: usize,
+    /// Bindings still assigned to the CPU after teardown. Must be zero.
+    pub residual_bindings: usize,
+}
+
+/// Stop MSI dispatch, close every interrupt object bound to `cpu`, unbind its
+/// MSI-X entries and return its vectors. The caller must have quiesced the CPU
+/// itself; this function owns only the software interrupt-object generation.
+pub fn quiesce_cpu(cpu: usize) -> Result<CpuQuiesceReport, MsiError> {
+    crate::irq::msi_quiesce_cpu(cpu)?;
+    let binding_count = {
+        let devices = DEVICES.lock();
+        devices
+            .iter()
+            .map(|device| {
+                device
+                    .bound
+                    .iter()
+                    .filter(|binding| binding.cpu == cpu)
+                    .count()
+            })
+            .sum()
+    };
+    let mut entries = Vec::new();
+    entries
+        .try_reserve_exact(binding_count)
+        .map_err(|_| MsiError::Allocation)?;
+    {
+        let devices = DEVICES.lock();
+        entries.extend(devices.iter().flat_map(|device| {
+            device
+                .bound
+                .iter()
+                .filter(|binding| binding.cpu == cpu)
+                .map(|binding| (device.bdf, binding.entry, binding.obj))
+        }));
+    }
+    let objects_closed = entries.iter().filter(|entry| entry.2.is_some()).count();
+    kobj::with(|table| {
+        for (_, _, object) in entries.iter().copied() {
+            if let Some(object) = object {
+                close_in(table, object);
+            }
+        }
+    });
+    for (bdf, entry, _) in entries {
+        unbind_hw(bdf, entry);
+    }
+    let vectors_returned = pool().map_or(0, |pool| pool.allocated(cpu));
+    if let Some(pool) = pool() {
+        let _ = pool.free_all(cpu);
+    }
+    let residual_bindings = {
+        let devices = DEVICES.lock();
+        devices
+            .iter()
+            .map(|device| {
+                device
+                    .bound
+                    .iter()
+                    .filter(|binding| binding.cpu == cpu)
+                    .count()
+            })
+            .sum()
+    };
+    Ok(CpuQuiesceReport {
+        objects_closed,
+        bindings_removed: binding_count,
+        vectors_returned,
+        residual_bindings,
+    })
+}
+
 fn pool() -> Option<&'static VectorPool> {
     POOL.call_once(|| {
         let range = arch::msi_vector_range()?;
