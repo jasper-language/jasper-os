@@ -10,7 +10,7 @@ kernel/src/arch/x86_64/syscall.rs	8	0	verified	bootstrap	BOOTSTRAP_CPUS entry bl
 kernel/src/arch/x86_64/user.rs	5	0	verified	bootstrap	BOOTSTRAP_CPUS return frames + pre-start heap tail	Fail closed on missing frame storage	checked_sub(MAX_CPUS), user-return storage migration
 kernel/src/balance_demo.rs	4	0	fixture	excluded	demo-only arrays	not production	balance acceptance demo
 kernel/src/config.rs	1	0	verified	bootstrap	runtime admitted CPU-count report	Consume admitted topology count	JSR-CONFIG CPU inventory report
-kernel/src/irq.rs	16	0	in-progress	dynamic	BOOTSTRAP_CPUS bootstrap area + admitted-count heap tail	Transactional online/offline migration and full hotplug IRQ matrix	CpuTailLayout bounds; no_std and IRQ/MSI matrix pending
+kernel/src/irq.rs	16	0	verified	dynamic	BOOTSTRAP_CPUS bootstrap area + admitted-count heap tail	Online routing consumes runtime membership; phase 3 owns offline drain, route handoff and quota demotion	CpuTailLayout 1/32/128/129/256/1024 bounds; x86_64 no_std and 2/4-vCPU UEFI IRQ topology
 kernel/src/irq_demo.rs	9	0	fixture	excluded	demo-only arrays	not production	IRQ acceptance demo
 kernel/src/irqring_demo.rs	3	0	fixture	excluded	demo-only arrays	not production	IRQ Ring acceptance demo
 kernel/src/irqstorm_demo.rs	5	0	fixture	excluded	demo-only arrays	not production	IRQ storm acceptance demo

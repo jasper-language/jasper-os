@@ -2,7 +2,7 @@
 
 更新时间：2026-11-21。
 
-状态：**阶段 1 消费链已冻结为机器可查清单；3 个生产路径仍需迁移，阶段 2/3 尚未完成。**
+状态：**阶段 1 消费链已完成迁移与冻结；阶段 3 的实际在线/离线热插拔验收仍需完成。**
 
 ## 已知固定事实
 
@@ -24,16 +24,16 @@
 当前冻结结果：
 
 ```text
-verified=16 paths
-in-progress=3 paths
+verified=20 paths
+in-progress=0 paths
 fixture=11 paths
 ```
 
-`in-progress` 路径包括调度器、调度门面和 IRQ。核心 `CpuSet`
-128 位仅用于堆前 staging，最终集合采用堆后备 bitmap；MSI 每核向量表也在 IRQ
-路径前按动态 CPU 集合预分配，二者已移出未迁移列表。
-只要这些路径仍含未完成在线/离线事务、固定诊断数组或 bootstrap 宽度门面，
-`CPU-DYNAMIC-ADMISSION-1` 就保持 in-progress。
+31 条生产/夹具路径均已登记，所有生产路径使用 bootstrap staging 加准入数量堆后备
+存储或明确排除。核心 `CpuSet` 的 128 位仅用于堆前 staging，最终集合采用堆后备
+bitmap；MSI 每核向量表和 IRQ 每核计数、quota 也在 IRQ 路径前按动态 CPU 集合
+预分配。阶段 1 的迁移清单已关闭；实际 CPU offline、路由 drain、quota demote 与
+热插拔矩阵仍由阶段 3 的 `CPU-DYNAMIC-CONSUMERS-1` 独立验收。
 
 ### scheduler tick-lease 事务
 
@@ -54,8 +54,9 @@ fixture=11 paths
 
 `kernel/src/irq.rs` 的 MSI 状态、设备中断计数和每核配额已改为
 `CpuTailLayout` 驱动的 bootstrap 区加准入数量堆后备尾部；读取、重置和越界
-失败关闭使用同一布局，不再静默访问未准入 CPU。该行仍保持 in-progress，
-因为 transactional online/offline 迁移和完整热插拔 IRQ/MSI 矩阵尚未完成。
+失败关闭使用同一布局，不再静默访问未准入 CPU。在线路由选择统一消费
+`sched::online_cpus()` 的动态集合；CPU offline 时的路由改派、排队 IRQ drain 和
+quota 迁移保留为阶段 3 的执行门，不再混入阶段 1 的固定容量审计。
 
 以下清单排除了 `_demo`、`*/demo/*` 和测试文件。
 

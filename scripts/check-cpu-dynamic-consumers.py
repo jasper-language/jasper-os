@@ -161,7 +161,8 @@ def self_test() -> None:
     else:
         raise AssertionError("self-test accepted an unknown CPU consumer class")
     broken = [dict(row) for row in rows]
-    in_progress = next(row for row in broken if row["status"] == "in-progress")
+    in_progress = broken[0]
+    in_progress["status"] = "in-progress"
     in_progress["classification"] = "bootstrap"
     validate(broken)
     broken = [dict(row) for row in rows]
