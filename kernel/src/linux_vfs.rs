@@ -143,14 +143,21 @@ pub(crate) const ANDROID_FILE_PATHS: &[&[u8]] = &[
     b"/usr/lib/x86_64-linux-gnu/libpthread.so.0",
     b"/usr/lib/x86_64-linux-gnu/runtime_examples.air",
     b"/usr/bin/llvm-as",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-unix/ntdll.so",
+    b"/usr/lib/x86_64-linux-gnu/wine/wine",
+    b"/usr/lib/x86_64-linux-gnu/wine/wineserver",
+    b"/usr/lib/x86_64-linux-gnu/wine-path-shim.so",
+    b"/lib64/ld-linux-x86-64.so.2",
+    b"/usr/lib/x86_64-linux-gnu/libunwind.so.8",
+    b"/usr/lib/x86_64-linux-gnu/liblzma.so.5",
     b"/sys/devices/system/cpu/online",
     b"/proc/stat",
     b"/SwiftShader.ini",
 ];
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
-static ROOT_LIBRARIES: [Once<Vec<u8>>; ANDROID_FILE_PATHS.len()] =
-    [const { Once::new() }; ANDROID_FILE_PATHS.len()];
+static ROOT_LIBRARIES: [Once<Vec<u8>>; ANDROID_FILE_PATHS.len() + 6] =
+    [const { Once::new() }; ANDROID_FILE_PATHS.len() + 6];
 #[cfg(feature = "lifecycle-root-exec-verify")]
 const _: () = assert!(ANDROID_FILE_PATHS.len() <= (u8::MAX as usize) + 1);
 
@@ -378,6 +385,9 @@ pub enum DirectoryId {
     DataLocalTmp,
     DataCache,
     DataCacheMetal,
+    Lib64,
+    UsrLibX86Wine,
+    UsrLibX86WineUnix,
 }
 
 impl DirectoryId {
@@ -413,6 +423,9 @@ impl DirectoryId {
             Self::DataLocalTmp => 23,
             Self::DataCache => 24,
             Self::DataCacheMetal => 25,
+                Self::Lib64 => 26,
+                Self::UsrLibX86Wine => 27,
+                Self::UsrLibX86WineUnix => 28,
             }
     }
 
@@ -448,6 +461,9 @@ impl DirectoryId {
             Self::DataLocalTmp => 24,
             Self::DataCache => 25,
             Self::DataCacheMetal => 26,
+            Self::Lib64 => 27,
+            Self::UsrLibX86Wine => 28,
+            Self::UsrLibX86WineUnix => 29,
             }
     }
 
@@ -482,6 +498,9 @@ impl DirectoryId {
             value if value == (DIRECTORY_HANDLE_BASE | 24) => Some(Self::DataLocalTmp),
             value if value == (DIRECTORY_HANDLE_BASE | 25) => Some(Self::DataCache),
             value if value == (DIRECTORY_HANDLE_BASE | 26) => Some(Self::DataCacheMetal),
+            value if value == (DIRECTORY_HANDLE_BASE | 27) => Some(Self::Lib64),
+            value if value == (DIRECTORY_HANDLE_BASE | 28) => Some(Self::UsrLibX86Wine),
+            value if value == (DIRECTORY_HANDLE_BASE | 29) => Some(Self::UsrLibX86WineUnix),
             _ => None,
         }
     }
@@ -517,6 +536,11 @@ impl DirectoryId {
             Self::DataLocalTmp => b"/data/local/tmp",
             Self::DataCache => b"/data/.cache",
             Self::DataCacheMetal => b"/data/.cache/metal2vulkan",
+            Self::Lib64 => b"/lib64",
+            Self::UsrLibX86Wine => b"/usr/lib/x86_64-linux-gnu/wine",
+            Self::UsrLibX86WineUnix => {
+                b"/usr/lib/x86_64-linux-gnu/wine/x86_64-unix"
+            }
         }
     }
 }
@@ -633,10 +657,15 @@ pub fn lookup_node(path: &[u8]) -> Option<Node> {
         b"/" => Some(DirectoryId::Root),
         b"/lib" => Some(DirectoryId::Lib),
         b"/lib/x86_64-linux-gnu" => Some(DirectoryId::LibX86_64),
+        b"/lib64" => Some(DirectoryId::Lib64),
         b"/usr" => Some(DirectoryId::Usr),
         b"/usr/bin" => Some(DirectoryId::UsrBin),
         b"/usr/lib" => Some(DirectoryId::UsrLib),
         b"/usr/lib/x86_64-linux-gnu" => Some(DirectoryId::UsrLibX86_64),
+        b"/usr/lib/x86_64-linux-gnu/wine" => Some(DirectoryId::UsrLibX86Wine),
+        b"/usr/lib/x86_64-linux-gnu/wine/x86_64-unix" => {
+            Some(DirectoryId::UsrLibX86WineUnix)
+        }
         b"/system" => Some(DirectoryId::System),
         b"/system/bin" => Some(DirectoryId::SystemBin),
         b"/system/lib64" => Some(DirectoryId::SystemLib64),
@@ -675,10 +704,15 @@ pub fn lookup_node(path: &[u8]) -> Option<Node> {
         b"/" => Some(DirectoryId::Root),
         b"/lib" => Some(DirectoryId::Lib),
         b"/lib/x86_64-linux-gnu" => Some(DirectoryId::LibX86_64),
+        b"/lib64" => Some(DirectoryId::Lib64),
         b"/usr" => Some(DirectoryId::Usr),
         b"/usr/bin" => Some(DirectoryId::UsrBin),
         b"/usr/lib" => Some(DirectoryId::UsrLib),
         b"/usr/lib/x86_64-linux-gnu" => Some(DirectoryId::UsrLibX86_64),
+        b"/usr/lib/x86_64-linux-gnu/wine" => Some(DirectoryId::UsrLibX86Wine),
+        b"/usr/lib/x86_64-linux-gnu/wine/x86_64-unix" => {
+            Some(DirectoryId::UsrLibX86WineUnix)
+        }
         b"/system" => Some(DirectoryId::System),
         b"/system/bin" => Some(DirectoryId::SystemBin),
         b"/system/lib64" => Some(DirectoryId::SystemLib64),
@@ -714,6 +748,10 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         DirEntry {
             name: b"lib",
             node: Node::Directory(DirectoryId::Lib),
+        },
+        DirEntry {
+            name: b"lib64",
+            node: Node::Directory(DirectoryId::Lib64),
         },
         DirEntry {
             name: b"usr",
@@ -789,7 +827,45 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
             name: b"runtime_examples.air",
             node: Node::File(FileId::AndroidFile(81)),
         },
+        DirEntry {
+            name: b"libunwind.so.8",
+            node: Node::File(FileId::AndroidFile(88)),
+        },
+        DirEntry {
+            name: b"liblzma.so.5",
+            node: Node::File(FileId::AndroidFile(89)),
+        },
+        DirEntry {
+            name: b"wine",
+            node: Node::Directory(DirectoryId::UsrLibX86Wine),
+        },
+        DirEntry {
+            name: b"wine-path-shim.so",
+            node: Node::File(FileId::AndroidFile(86)),
+        },
     ];
+    const LIB64: &[DirEntry] = &[DirEntry {
+        name: b"ld-linux-x86-64.so.2",
+        node: Node::File(FileId::AndroidFile(87)),
+    }];
+    const WINE: &[DirEntry] = &[
+        DirEntry {
+            name: b"x86_64-unix",
+            node: Node::Directory(DirectoryId::UsrLibX86WineUnix),
+        },
+        DirEntry {
+            name: b"wine",
+            node: Node::File(FileId::AndroidFile(84)),
+        },
+        DirEntry {
+            name: b"wineserver",
+            node: Node::File(FileId::AndroidFile(85)),
+        },
+    ];
+    const WINE_UNIX: &[DirEntry] = &[DirEntry {
+        name: b"ntdll.so",
+        node: Node::File(FileId::AndroidFile(83)),
+    }];
     const USR: &[DirEntry] = &[
         DirEntry {
             name: b"bin",
@@ -1065,9 +1141,12 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         DirectoryId::Root => ROOT,
         DirectoryId::Lib => LIB,
         DirectoryId::LibX86_64 | DirectoryId::UsrLibX86_64 => LIB_X86_64,
+        DirectoryId::Lib64 => LIB64,
         DirectoryId::Usr => USR,
         DirectoryId::UsrBin => USR_BIN,
         DirectoryId::UsrLib => USR_LIB,
+        DirectoryId::UsrLibX86Wine => WINE,
+        DirectoryId::UsrLibX86WineUnix => WINE_UNIX,
         DirectoryId::System => SYSTEM,
         DirectoryId::SystemBin => SYSTEM_BIN,
         DirectoryId::SystemLib64 => SYSTEM_LIB64,

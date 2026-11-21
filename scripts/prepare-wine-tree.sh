@@ -60,9 +60,24 @@ test -f "$ROOT/usr/share/wine/wine.inf"
 test -f "$ROOT/usr/share/wine/nls/l_intl.nls"
 test -f "$ROOT/usr/x86_64-w64-mingw32/lib/zlib1.dll"
 test -f "$ROOT/usr/i686-w64-mingw32/lib/zlib1.dll"
-install -m 0755 "$ROOT/usr/x86_64-w64-mingw32/lib/zlib1.dll" \
+
+# libwine's trigger marks zlib as a Wine builtin by replacing the DOS stub
+# with the builtin header. A plain copy is rejected by the Windows loader.
+install_builtin_zlib() {
+  local source="$1"
+  local destination="$2"
+  head -c 64 "$source" > "$destination"
+  printf '%s' 'Wine builtin DLL' >> "$destination"
+  printf '\0\0\0\0\0\0\0\0' >> "$destination"
+  printf '\0\0\0\0\0\0\0\0' >> "$destination"
+  tail -c +97 "$source" >> "$destination"
+  chmod 0755 "$destination"
+}
+install_builtin_zlib \
+  "$ROOT/usr/x86_64-w64-mingw32/lib/zlib1.dll" \
   "$ROOT/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/zlib1.dll"
-install -m 0755 "$ROOT/usr/i686-w64-mingw32/lib/zlib1.dll" \
+install_builtin_zlib \
+  "$ROOT/usr/i686-w64-mingw32/lib/zlib1.dll" \
   "$ROOT/usr/lib/x86_64-linux-gnu/wine/i386-windows/zlib1.dll"
 
 copy_dependency() {
@@ -106,6 +121,10 @@ sha256sum \
   "$ROOT/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/cmd.exe" \
   > "$ROOT/SHA256SUMS"
 touch "$ROOT/.complete"
+
+gcc -shared -fPIC -O2 -Wl,-z,defs \
+  -o "$ROOT/usr/lib/x86_64-linux-gnu/wine-path-shim.so" \
+  "$(dirname "$0")/wine-path-shim.c" -ldl
 
 du -sh "$ROOT"
 printf 'wine-tree: PASS version=%s root=%s\n' "$VERSION" "$ROOT"

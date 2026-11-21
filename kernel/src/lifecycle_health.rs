@@ -909,12 +909,20 @@ fn install_root_android_files(
     origin: compat_core::executable::SystemImage,
 ) -> Result<(), HealthError> {
     for path in crate::linux_vfs::ANDROID_FILE_PATHS {
+        #[cfg(feature = "compat-wine-verify")]
+        if path.ends_with(b"/wine/x86_64-unix/ntdll.so") {
+            crate::kprintln!("[JSR-WINE-VFS] load path=/usr/lib/x86_64-linux-gnu/wine/x86_64-unix/ntdll.so");
+        }
         let bytes = match root.read_file(
             core::str::from_utf8(path).map_err(|_| HealthError::RootExecute)?,
             64 * 1024 * 1024,
         ) {
             Ok(bytes) => bytes,
             Err(_) => {
+                #[cfg(feature = "compat-wine-verify")]
+                if path.ends_with(b"/wine/x86_64-unix/ntdll.so") {
+                    crate::kprintln!("[JSR-WINE-VFS] read-fail path=ntdll.so");
+                }
                 #[cfg(any(
                     feature = "android-apk-verify",
                     feature = "android-art-verify",
@@ -928,7 +936,15 @@ fn install_root_android_files(
             }
         };
         let byte_len = bytes.len();
+        #[cfg(feature = "compat-wine-verify")]
+        if path.ends_with(b"/wine/x86_64-unix/ntdll.so") {
+            crate::kprintln!("[JSR-WINE-VFS] read path=ntdll.so bytes={}", bytes.len());
+        }
         if !crate::linux_vfs::install_root_android_file(path, bytes) {
+            #[cfg(feature = "compat-wine-verify")]
+            if path.ends_with(b"/wine/x86_64-unix/ntdll.so") {
+                crate::kprintln!("[JSR-WINE-VFS] install-fail path=ntdll.so");
+            }
             #[cfg(any(
                 feature = "android-apk-verify",
                 feature = "android-art-verify",
@@ -1045,28 +1061,47 @@ fn execute_root_dynamic_programs(
             b"echo",
             b"WINE_CMD_OK",
         ];
-        let wine_envp: [&[u8]; 10] = [
+        let wine_envp: [&[u8]; 13] = [
             b"HOME=/data",
+            b"WINEPRELOADRESERVE=100010000000-100070000000",
+            b"LD_PRELOAD=/usr/lib/x86_64-linux-gnu/wine-path-shim.so",
+            b"JASPER_WINE_NTDLL_PATH=/usr/lib/x86_64-linux-gnu/wine/x86_64-unix/ntdll.so",
             b"PATH=/usr/lib/x86_64-linux-gnu/wine:/usr/bin:/bin",
             b"WINEPREFIX=/data/wineprefix",
             b"WINEARCH=win64",
             b"WINEDEBUG=-all",
-            b"WINEDLLPATH=/usr/lib/x86_64-linux-gnu/wine/x86_64-windows:/usr/lib/x86_64-linux-gnu/wine/i386-windows",
+            b"WINEDLLPATH=/usr/lib/x86_64-linux-gnu/wine/x86_64-unix",
             b"WINEDLLOVERRIDES=winemenubuilder.exe=d;mscoree=d;mshtml=d",
             b"LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/wine/x86_64-unix",
             b"TMPDIR=/tmp",
             b"LANG=C.UTF-8",
         ];
-        let executable = root
+        let wine = root
             .read_file("/usr/lib/x86_64-linux-gnu/wine/wine", 4 * 1024 * 1024)
+            .map_err(|_| HealthError::RootExecute)?;
+        let wineserver = root
+            .read_file("/usr/lib/x86_64-linux-gnu/wine/wineserver", 4 * 1024 * 1024)
             .map_err(|_| HealthError::RootExecute)?;
         let interpreter = root
             .read_file("/lib64/ld-linux-x86-64.so.2", 4 * 1024 * 1024)
             .map_err(|_| HealthError::RootExecute)?;
+        if !crate::linux_vfs::install_root_program(
+            origin,
+            b"/usr/lib/x86_64-linux-gnu/wine/wine",
+            wine.len(),
+            interpreter.len(),
+        ) || !crate::linux_vfs::install_root_program(
+            origin,
+            b"/usr/lib/x86_64-linux-gnu/wine/wineserver",
+            wineserver.len(),
+            interpreter.len(),
+        ) {
+            return Err(HealthError::RootExecute);
+        }
         if !crate::compat_dynamic_demo::run_root_dynamic_program(
             "compat-wine-cmd",
             "/usr/lib/x86_64-linux-gnu/wine/wine",
-            &executable,
+            &wine,
             &interpreter,
             "/lib64/ld-linux-x86-64.so.2",
             &wine_argv,
@@ -1225,18 +1260,21 @@ fn execute_root_dynamic_programs(
             "android-toybox-uname",
             &toybox,
             &uname_argv,
+            &[],
             frames_before,
             false,
         ) || !crate::compat_dynamic_demo::run_root_static_program(
             "android-toybox-printf",
             &toybox,
             &printf_argv,
+            &[],
             frames_before,
             false,
         ) || !crate::compat_dynamic_demo::run_root_static_program(
             "android-toybox-sha256sum",
             &toybox,
             &sha_argv,
+            &[],
             frames_before,
             false,
         ) {
@@ -1250,6 +1288,7 @@ fn execute_root_dynamic_programs(
             "aosp-binder-driver-test",
             &binder_test,
             &binder_argv,
+            &[],
             crate::mm::frame::free_frames(),
             false,
         ) {

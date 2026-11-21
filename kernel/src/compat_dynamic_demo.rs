@@ -1049,6 +1049,7 @@ pub(crate) fn run_root_static_program(
     name: &'static str,
     executable: &[u8],
     argv: &[&[u8]],
+    envp: &[&[u8]],
     frames_before: usize,
     enforce_resources: bool,
 ) -> bool {
@@ -1090,7 +1091,7 @@ pub(crate) fn run_root_static_program(
         interpreter_base: 0,
         stack_top: STACK_TOP,
         argv,
-        envp: &[],
+        envp,
         auxv: &[],
         random: Some(&[0x5au8; 16]),
     })
