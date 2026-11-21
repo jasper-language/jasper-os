@@ -89,7 +89,7 @@ pub fn mark_ready(index: usize) {
 
 /// 引导处理器上配置（PLIC 自检之后调用一次）：设优先级、在所有上下文关闭两个源、目标为引导处理器且屏蔽。返回可用线数。
 pub fn configure() -> usize {
-    let uart_src = uart::interrupt().unwrap_or(0);
+    let uart_src = uart::interrupt().unwrap_or(0); // JASPER-HARDCODE-REVIEW: issue=35 source=irq-availability-sentinel reason=zero-means-uart-irq-absent-not-fabricated
     let rtc_src = if RTC_BASE.load(Ordering::Relaxed) != 0 { RTC_IRQ.load(Ordering::Relaxed) } else { 0 };
     let mut lines = LINES.lock();
     let mut n = 0;
@@ -116,7 +116,7 @@ pub fn count() -> usize {
 
 /// 线的规范名。
 pub fn name(line: usize) -> &'static str {
-    NAMES.get(line).copied().unwrap_or("none")
+    NAMES.get(line).copied().unwrap_or("none") // JASPER-HARDCODE-REVIEW: issue=35 source=diagnostic-unknown-label reason=invalid-line-name-is-diagnostic-only
 }
 
 /// 中断源编号对应的线（外部中断入口用）。

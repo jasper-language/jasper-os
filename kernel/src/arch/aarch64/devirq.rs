@@ -29,8 +29,8 @@ static STORM: [AtomicBool; 2] = [const { AtomicBool::new(false) }; 2];
 
 /// 登记设备树给出的两个共享外设中断号（`None` = 设备树里没有该设备）。
 pub fn set_ids(uart: Option<u32>, rtc: Option<u32>) {
-    IDS[0].store(uart.unwrap_or(0), Ordering::Relaxed);
-    IDS[1].store(rtc.unwrap_or(0), Ordering::Relaxed);
+    IDS[0].store(uart.unwrap_or(0), Ordering::Relaxed); // JASPER-HARDCODE-REVIEW: issue=35 source=irq-availability-sentinel reason=zero-means-device-absent-not-interrupt-line
+    IDS[1].store(rtc.unwrap_or(0), Ordering::Relaxed); // JASPER-HARDCODE-REVIEW: issue=35 source=irq-availability-sentinel reason=zero-means-device-absent-not-interrupt-line
 }
 
 /// 引导处理器上配置（分发器初始化、引导处理器接口位登记之后调用一次）：关闭、清挂起、目标为引导处理器。返回可用线数。
@@ -54,7 +54,7 @@ pub fn count() -> usize {
 
 /// 线的规范名。
 pub fn name(line: usize) -> &'static str {
-    NAMES.get(line).copied().unwrap_or("none")
+    NAMES.get(line).copied().unwrap_or("none") // JASPER-HARDCODE-REVIEW: issue=35 source=diagnostic-unknown-label reason=invalid-line-name-is-diagnostic-only
 }
 
 /// 中断号对应的线（中断入口用）。

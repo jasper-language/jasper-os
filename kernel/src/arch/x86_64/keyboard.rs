@@ -150,7 +150,7 @@ fn key_code(make: u8, extended: bool) -> Option<u16> {
 
 fn scancode_letter(make: u8) -> u8 {
     const MAP: [u8; 54] = *b"??1234567890-=??qwertyuiop[]??asdfghjkl;'`??zxcvbnm,./";
-    MAP.get(make as usize).copied().unwrap_or(b'?')
+    MAP.get(make as usize).copied().unwrap_or(b'?') // JASPER-HARDCODE-REVIEW: issue=35 source=diagnostic-unknown-label reason=unsupported-scancode-maps-to-visible-question-mark
 }
 
 #[cfg(test)]
@@ -163,5 +163,6 @@ mod tests {
         assert_eq!(scancode_letter(0x1E), b'a');
         assert_eq!(scancode_letter(0x2C), b'z');
         assert_eq!(scancode_letter(0x39), b' ');
+        assert_eq!(scancode_letter(u8::MAX), b'?');
     }
 }

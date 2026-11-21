@@ -7308,7 +7308,7 @@ pub(crate) fn unmap_shared_page(id: ObjId, va: u64) -> Result<bool, ProcError> {
 
 /// 每个进程最多拥有的数据帧数（ELF 段、栈与匿名映射合计）。
 /// Upper bound on data frames owned by one process (image, stacks and anonymous mappings together).
-pub const MAX_PROCESS_FRAMES: usize = {
+pub const MAX_PROCESS_FRAMES: usize = { // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-derived-process-limit reason=derived-from-active-profile-memory-policy
     let configured = crate::config::ACTIVE.memory.max_process_frames;
     if configured == 0 {
         usize::MAX
@@ -7317,9 +7317,9 @@ pub const MAX_PROCESS_FRAMES: usize = {
     }
 };
 /// Per-process VM guest RAM limit, independent from the ordinary process account.
-pub const MAX_VM_GUEST_FRAMES: u64 = crate::config::ACTIVE.memory.max_vm_guest_frames as u64;
+pub const MAX_VM_GUEST_FRAMES: u64 = crate::config::ACTIVE.memory.max_vm_guest_frames as u64; // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-derived-process-limit reason=active-profile-vm-frame-policy
 /// 单次 `system.memory.map` / `unmap` 最多涉及的页数。
-pub const MAX_MAP_PAGES: u64 = crate::config::ACTIVE.memory.max_map_pages;
+pub const MAX_MAP_PAGES: u64 = crate::config::ACTIVE.memory.max_map_pages; // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-derived-process-limit reason=active-profile-map-batch-policy
 /// 匿名映射 / 取消映射的失败原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemError {

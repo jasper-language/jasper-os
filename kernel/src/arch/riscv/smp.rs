@@ -189,7 +189,7 @@ pub unsafe fn start(req: &CpuStart<space::SpaceRoot>) -> Result<(), SmpError> {
     }
     let hart = req.hw_id as usize;
     match fw::hart_status(hart) {
-        Err(e) => return Err(sbi::decode(e).err().unwrap_or(SbiError::Failed).to_smp()),
+        Err(e) => return Err(sbi::decode(e).err().unwrap_or(SbiError::Failed).to_smp()), // JASPER-HARDCODE-REVIEW: issue=35 source=sbi-error-normalization reason=unknown-firmware-code-normalizes-to-failure
         Ok(v) => match HartState::decode(v) {
             Some(s) if s.startable() => {}
             Some(_) => return Err(SmpError::BadState),

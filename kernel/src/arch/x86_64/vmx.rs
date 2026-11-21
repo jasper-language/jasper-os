@@ -1287,7 +1287,7 @@ impl LinuxRuntime {
     fn syscall_msr(&self, index: u32) -> u64 {
         match index {
             0xc000_0081 | 0xc000_0082 | 0xc000_0083 | 0xc000_0084 => {
-                self.msr_read(index).unwrap_or(0)
+                self.msr_read(index).unwrap_or(0) // JASPER-HARDCODE-REVIEW: issue=35 source=x86-msr-reset-state reason=unwritten-guest-STAR-LSTAR-SFMASK-reflect-architectural-reset-value
             }
             0xc000_0102 => self.kernel_gs_base,
             _ => 0,
@@ -2554,7 +2554,7 @@ impl VmxVm {
             .pending_interrupt
             .map(u64::from)
             .map(|vector| (1u64 << 31) | vector)
-            .unwrap_or(0);
+            .unwrap_or(0); // JASPER-HARDCODE-REVIEW: issue=35 source=x86-vm-entry-control reason=no-pending-interrupt-means-zero-entry-interruption-field
         vmwrite(ENTRY_INTR_INFO, interruption)?;
         // SAFETY: HWV-2 intentionally permits one active VM entry on the
         // boot processor; VmxVm owns that execution until run() returns.

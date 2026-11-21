@@ -267,7 +267,7 @@ pub fn count() -> usize {
 
 /// 线的规范名。
 pub fn name(line: usize) -> &'static str {
-    PINS.lock().get(line).map(|pin| pin.name).unwrap_or("none")
+    PINS.lock().get(line).map(|pin| pin.name).unwrap_or("none") // JASPER-HARDCODE-REVIEW: issue=35 source=diagnostic-unknown-label reason=unregistered-ioapic-line-has-no-device-name
 }
 
 /// Resolve the runtime logical line for one registered device vector.

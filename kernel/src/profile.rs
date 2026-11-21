@@ -55,7 +55,7 @@ pub fn active_index() -> usize {
     profile::BUILTIN
         .iter()
         .position(|p| p.name == ACTIVE.name)
-        .unwrap_or(0)
+        .unwrap_or(0) // JASPER-HARDCODE-REVIEW: issue=35 source=profile-declaration-invariant reason=active-name-is-unique-and-published-from-builtin-registry
 }
 
 /// 解析生效 Profile；失败返回 None（启动期已经报告过原因）。

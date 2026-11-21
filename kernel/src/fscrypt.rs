@@ -23,7 +23,7 @@ use xts_mode::{get_tweak_default, Xts128};
 
 pub(crate) const KEY_SPEC_TYPE_DESCRIPTOR: u32 = 1;
 pub(crate) const KEY_SPEC_TYPE_IDENTIFIER: u32 = 2;
-pub(crate) const MAX_KEY_BYTES: usize = 64;
+pub(crate) const MAX_KEY_BYTES: usize = 64; // JASPER-HARDCODE-REVIEW: issue=35 source=android-fscrypt-uapi-v1 reason=fixed-maximum-master-key-payload
 pub(crate) const FILE_NONCE_BYTES: usize = 16;
 
 const DATA_UNIT_BYTES: usize = kernel_core::frame::FRAME_SIZE as usize;

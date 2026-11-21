@@ -213,7 +213,7 @@ pub fn ready() -> bool {
 /// 已建立的设备表；未初始化时返回空表（机制不可用，不伪造设备）。
 /// The established table, or an empty table when not initialised.
 pub fn table() -> &'static Table {
-    TABLE.get().unwrap_or(&EMPTY)
+    TABLE.get().unwrap_or(&EMPTY) // JASPER-HARDCODE-REVIEW: issue=35 source=pci-table-uninitialized reason=empty-view-is-always-paired-with-ready-false
 }
 
 /// 读取一个功能的配置空间双字；设备表尚未建立时返回 `None`。
