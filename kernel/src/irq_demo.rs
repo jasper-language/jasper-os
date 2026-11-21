@@ -283,6 +283,10 @@ fn count_handler(_line: usize) {
     HANDLED.fetch_add(1, Ordering::Relaxed);
 }
 
+fn count_msi_handler() {
+    HANDLED.fetch_add(1, Ordering::Relaxed);
+}
+
 /// 全部线的总处理次数。
 fn total_counts(lines: usize) -> u64 {
     (0..lines).map(|l| (0..MAX_CPUS).map(|c| device::count_on(l, c) as u64).sum::<u64>()).sum()
@@ -432,6 +436,25 @@ fn detach(n: usize, lines: usize) {
         configured &= device::set_enabled(line, true).is_ok();
     }
     let handoff = device::detach_cpu_lines(target);
+    let msi_cpu = arch::cpu_index();
+    let msi_vector = arch::msi_vector_range().map(|range| range.first);
+    let detached_before = crate::irq::msi_detached_arrivals(msi_cpu);
+    let handlers_before = HANDLED.load(Ordering::Relaxed);
+    let msi_quiesced = match msi_vector {
+        Some(vector) => {
+            let result = crate::irq::msi_bind(msi_cpu, vector, Some(count_msi_handler))
+                .and_then(|()| crate::irq::msi_quiesce_cpu(msi_cpu));
+            if result.is_ok() {
+                crate::irq::on_msi(vector);
+            }
+            result == Ok(1)
+                && HANDLED.load(Ordering::Relaxed) == handlers_before
+                && crate::irq::msi_detached_arrivals(msi_cpu)
+                    == detached_before.saturating_add(1)
+                && crate::irq::msi_resume_cpu(msi_cpu).is_ok()
+        }
+        None => true,
+    };
     let mut stale = 0;
     let mut outside = 0;
     for line in 0..lines {
@@ -449,17 +472,19 @@ fn detach(n: usize, lines: usize) {
         && handoff == Ok(lines)
         && stale == 0
         && outside == 0
+        && msi_quiesced
         && quota_demoted
         && changed.is_ok()
         && clean;
     check(ok, "CPU route detach, quota demotion or cleanup failed");
     kprintln!(
-        "[JSR-SMP3] case=detach target={} lines={} rerouted={:?} stale_targets={} outside_online={} quota_demoted={} resources={}",
+        "[JSR-SMP3] case=detach target={} lines={} rerouted={:?} stale_targets={} outside_online={} msi_quiesced={} quota_demoted={} resources={}",
         target,
         lines,
         handoff,
         stale,
         outside,
+        msi_quiesced,
         quota_demoted,
         clean
     );

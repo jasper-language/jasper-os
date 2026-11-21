@@ -69,6 +69,10 @@ CPU departure:
   only after controller routing succeeds, then unmasks;
 - `demote_cpu_quota(cpu)` clears stale tick/throttle/statistics state only after
   no enabled line remains routed to that CPU.
+- `msi_quiesce_cpu(cpu)` publishes a detached generation before clearing every
+  MSI handler and budget callback. New MSI binding fails closed; a late arrival
+  is counted in `detached_arrivals` and cannot invoke the previous handler.
+  `msi_resume_cpu(cpu)` reopens dispatch without restoring old vector bindings.
 
 The existing CPL3 SMP-3 drill now routes both device lines to a secondary CPU,
 detaches that CPU, verifies no stale or offline target remains, demotes its
@@ -77,14 +81,18 @@ quota and checks resource restoration. Real KVM runs passed in x86_64 4-vCPU,
 
 ```text
 [JSR-SMP3] case=detach ... rerouted=Ok(2) stale_targets=0 outside_online=0
-  quota_demoted=true resources=true
+  msi_quiesced=true quota_demoted=true resources=true
 [JSR-SMP3] summary ... checks=35 failed=0
 ```
 
-This is an IRQ route/quota handoff milestone, not complete CPU offline:
-in-flight MSI completions, scheduler task migration, architecture stop IPIs,
-CPU runtime generation publication and hotplug rollback still require the
-following transactions before `CPU-DYNAMIC-CONSUMERS-1` can become done.
+The complete x86_64 `accept.sh` run with 240-second per-guest limits reports
+`accept: ALL PASS`; 4-vCPU, 8-vCPU and q35 4-vCPU guests exit 37 for timing-only
+overruns while all functional SMP-3 checks pass.
+
+This is an IRQ/MSI dispatch handoff milestone, not complete CPU offline:
+interrupt-object ownership transfer, scheduler task migration, architecture
+stop IPIs, CPU runtime generation publication and hotplug rollback still require
+the following transactions before `CPU-DYNAMIC-CONSUMERS-1` can become done.
 
 The runtime registry also rejects `mark_offline(boot_logical)` while another
 CPU is online and reports `LastOnlineCpu` before the final online CPU can leave.

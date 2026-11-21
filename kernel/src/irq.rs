@@ -22,7 +22,7 @@
 //! 本处理器下一个 tick 调用解除屏蔽回调；设备在屏蔽期间只置挂起位，解除后重新送达，到达不丢。
 //! Core 不知道消息表项在哪里：回调与上下文值由绑定方登记。
 
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use alloc::vec::Vec;
 use kernel_core::cpu_bitmap::CpuBitmap;
@@ -216,6 +216,8 @@ struct MsiCpuState {
     handlers: [AtomicUsize; MSI_SLOTS],
     counts: [AtomicU32; MSI_SLOTS],
     spurious: AtomicU32,
+    detached: AtomicBool,
+    detached_arrivals: AtomicU32,
     mask_ops: [AtomicUsize; MSI_SLOTS],
     mask_ctx: [AtomicUsize; MSI_SLOTS],
 }
@@ -226,6 +228,8 @@ impl MsiCpuState {
             handlers: [const { AtomicUsize::new(0) }; MSI_SLOTS],
             counts: [const { AtomicU32::new(0) }; MSI_SLOTS],
             spurious: AtomicU32::new(0),
+            detached: AtomicBool::new(false),
+            detached_arrivals: AtomicU32::new(0),
             mask_ops: [const { AtomicUsize::new(0) }; MSI_SLOTS],
             mask_ctx: [const { AtomicUsize::new(0) }; MSI_SLOTS],
         }
@@ -339,6 +343,9 @@ pub fn msi_set_mask_ops(
     let v = vector as usize;
     match ops {
         Some((ops, ctx)) => {
+            if state.detached.load(Ordering::Acquire) {
+                return Err(MsiError::NotOnline);
+            }
             if state.handlers[v].load(Ordering::Acquire) == 0 {
                 return Err(MsiError::NotAllocated);
             }
@@ -380,11 +387,50 @@ pub fn msi_bind(cpu: usize, vector: u8, handler: Option<MsiHandler>) -> Result<(
     if vector as usize >= MSI_SLOTS {
         return Err(MsiError::OutOfRange);
     }
+    if handler.is_some() && state.detached.load(Ordering::Acquire) {
+        return Err(MsiError::NotOnline);
+    }
     state.handlers[vector as usize].store(
         handler.map_or(0, |handler| handler as usize),
         Ordering::Release,
     );
     Ok(())
+}
+
+/// Stop all MSI dispatch on a departing processor and clear every vector binding.
+///
+/// The flag is published before handlers are removed, so a concurrent bind either
+/// observes the departure and fails or completes before the clearing pass.
+/// Late arrivals are counted separately and never invoke an old handler.
+pub fn msi_quiesce_cpu(cpu: usize) -> Result<usize, MsiError> {
+    let state = msi_cpu_state(cpu).ok_or(MsiError::NoSuchCpu)?;
+    state.detached.store(true, Ordering::Release);
+    let mut cleared = 0;
+    for slot in 0..MSI_SLOTS {
+        if state.handlers[slot].swap(0, Ordering::AcqRel) != 0 {
+            cleared += 1;
+        }
+        state.mask_ctx[slot].store(0, Ordering::Relaxed);
+        state.mask_ops[slot].store(0, Ordering::Release);
+    }
+    Ok(cleared)
+}
+
+/// Reopen MSI dispatch only after the CPU lifecycle has published a new online
+/// generation. No vector binding from the previous generation is restored.
+pub fn msi_resume_cpu(cpu: usize) -> Result<(), MsiError> {
+    msi_cpu_state(cpu)
+        .ok_or(MsiError::NoSuchCpu)?
+        .detached
+        .store(false, Ordering::Release);
+    Ok(())
+}
+
+/// Arrivals rejected because a handler was racing with CPU MSI quiescence.
+pub fn msi_detached_arrivals(cpu: usize) -> u32 {
+    msi_cpu_state(cpu).map_or(0, |state| {
+        state.detached_arrivals.load(Ordering::Relaxed)
+    })
 }
 
 /// MSI 中断入口：由平台在中断上下文调用（EOI 之前）。
@@ -403,6 +449,10 @@ pub fn on_msi(vector: u8) {
         );
         arch::halt_forever();
     };
+    if state.detached.load(Ordering::Acquire) {
+        state.detached_arrivals.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
     if vector as usize >= MSI_SLOTS {
         state.spurious.fetch_add(1, Ordering::Relaxed);
         return;
