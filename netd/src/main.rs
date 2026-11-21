@@ -37,6 +37,9 @@ fn run() -> Result<(), String> {
     let (options, check_only) = parse_args(&args)?;
     options.validate().map_err(str::to_owned)?;
     if check_only {
+        options
+            .validate_credentials(QuicProfile::default())
+            .map_err(|error| format!("{} failed", error.name()))?;
         println!(
             "jasper-netd state=configuration-valid bind={} max_connections={} max_stream_bytes={} max_datagram_bytes={}",
             options.bind,

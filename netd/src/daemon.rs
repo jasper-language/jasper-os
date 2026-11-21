@@ -55,6 +55,18 @@ impl DaemonOptions {
         }
         Ok(())
     }
+
+    /// Validate the actual PEM material and TLS server configuration without
+    /// binding a socket. `--check` uses this so a readable path is not mistaken
+    /// for a valid certificate/key pair.
+    pub fn validate_credentials(&self, profile: QuicProfile) -> Result<(), DaemonError> {
+        self.validate().map_err(|_| DaemonError::ServerConfig)?;
+        let certificate = load_certificate(&self.certificate)?;
+        let private_key = load_private_key(&self.private_key)?;
+        server_config(certificate, private_key, profile)
+            .map(|_| ())
+            .map_err(|_| DaemonError::ServerConfig)
+    }
 }
 
 /// Start the daemon and drain it when the supplied shutdown future completes.
@@ -69,7 +81,7 @@ pub async fn run_until<F>(
 where
     F: Future<Output = ()>,
 {
-    options.validate().map_err(|_| DaemonError::ServerConfig)?;
+    options.validate_credentials(profile)?;
     let certificate = load_certificate(&options.certificate)?;
     let private_key = load_private_key(&options.private_key)?;
     let config =
