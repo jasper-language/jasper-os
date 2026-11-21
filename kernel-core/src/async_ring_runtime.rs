@@ -442,6 +442,93 @@ mod tests {
     }
 
     #[test]
+    fn device_backend_crash_quarantines_until_clean_recovery() {
+        use crate::driver_host::{
+            DeviceIdentity, DriverHostBroker, Needs, Policy, QuiesceProof,
+        };
+
+        let mut ring = RuntimeAsyncRing::new(2, 2).unwrap();
+        let mut broker = DriverHostBroker::<1, 1, 1, 1>::new();
+        let device = DeviceIdentity {
+            identity: 0x1045,
+            generation: 9,
+        };
+        broker.discover(device).unwrap();
+        let host = broker.register_host().unwrap();
+        let rights = Needs::DEVICE
+            .union(Needs::MMIO)
+            .union(Needs::MMIO_WRITE)
+            .union(Needs::DMA)
+            .union(Needs::DMA_WRITE)
+            .union(Needs::IRQ);
+        let pass = broker
+            .admit(host, device, rights, Policy::new(rights, 1, 1, 1))
+            .unwrap();
+        let driver_request = broker.begin_queue_work(pass, 1, 1, 1).unwrap();
+
+        let context = 0x52;
+        let request = ring
+            .submit(Submission {
+                op: 8,
+                user_tag: 10,
+                context,
+                uses_buffer: true,
+            })
+            .unwrap();
+        ring.start(request, Exec::Abortable).unwrap();
+        assert_eq!(
+            ring.cancel(request),
+            Ok(Cancelled::AbortBackend { context })
+        );
+        assert_eq!(ring.decided_unpublished(), 1);
+
+        let crash = broker
+            .crash(
+                host,
+                QuiesceProof {
+                    dma_quiesced: false,
+                    irq_quiesced: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(crash.cancelled, 1);
+        assert_eq!(crash.revoked_passes, 1);
+        assert_eq!(crash.quarantined_devices, 1);
+        assert_eq!(broker.stats().quarantined, 1);
+        assert_eq!(
+            broker.cancel(driver_request),
+            Err(crate::driver_host::Error::StaleRequest)
+        );
+        assert_eq!(ring.decided_unpublished(), 1);
+        assert_eq!(ring.ready(), 0);
+
+        assert_eq!(
+            broker.recover(
+                host,
+                QuiesceProof {
+                    dma_quiesced: false,
+                    irq_quiesced: true,
+                }
+            ),
+            Err(crate::driver_host::Error::NotQuiesced)
+        );
+        let recovered = broker.recover(host, QuiesceProof::CLEAN).unwrap();
+        assert_eq!(recovered.generation(), host.generation() + 1);
+        assert_eq!(broker.stats().quarantined, 0);
+
+        ring.quiesce(request).unwrap();
+        assert_eq!(ring.decided_unpublished(), 0);
+        assert_eq!(ring.in_flight(), 0);
+        assert_eq!(ring.take_reclaimed(), Some(context));
+        assert_eq!(
+            ring.peek(0).map(|completion| completion.terminal),
+            Some(Terminal::Cancelled)
+        );
+        assert_eq!(ring.consume(1), 1);
+        assert_eq!(ring.quiesce(request), Err(ProgressError::NoSuchRequest));
+    }
+
+    #[test]
     fn fs_backend_cancel_waits_for_mapping_quiescence_and_reclaims_handle() {
         use crate::fs::{
             EntryName, FsCapabilities, FsContract, MountIdentity, NodeKind,

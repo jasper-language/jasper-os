@@ -23,6 +23,13 @@ DMA/IRQ 故障注入、hot-unplug 与物理 IOMMU 仍未完成，不能关闭 M0
    不透明 context；
 6. 再次 quiesce/consume 不明显成功，Driver Host pending/pass/bound 均归零。
 
+同一矩阵新增 Host 崩溃/quarantine 路径：
+
+- 请求取消后 completion 仍不可见；
+- DMA 未静止时崩溃会把设备置为 quarantine，撤销 pass 和请求，并拒绝提前恢复；
+- 干净 quiescence proof 恢复新 Host generation 后才允许完成 AsyncRing quiesce；
+- 旧 Driver Host 请求 token 在崩溃后拒绝，Ring context 只回收一次。
+
 FS 矩阵使用真实 `FsContract` 文件、open Handle 和 file mapping：
 
 - 有缓冲的 AsyncRing 请求可中止取消后，completion 保持不可见；
@@ -50,12 +57,12 @@ Graphics 矩阵使用真实 `VirtioGpuBackend` 的 2D resource 和 backing：
 ```text
 cargo test -p kernel-core --features runtime-registries,network-dynamic \
   async_ring_runtime --lib
-6 passed; 0 failed
+7 passed; 0 failed
 ```
 
 ## 尚未关闭
 
-- 真实设备 DMA 仍访问、IRQ 迟到、FLR/reset 失败、hot-unplug 和物理 IOMMU；
+- 真实设备 DMA 仍访问、IRQ 迟到、FLR/物理 reset 失败、hot-unplug 和物理 IOMMU；
 - 多 CPU 取消/完成竞争与高负载 reclaim。
 
 本切片不新增用户 ABI，不把 Driver Host 测试提升为物理设备资格。
