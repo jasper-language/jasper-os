@@ -1323,11 +1323,7 @@ fn extract_archive(path: &Path, destination: &Path) -> Result<(), PackageError> 
         entry_count = entry_count
             .checked_add(1)
             .ok_or_else(|| PackageError::UnsafeArchive("entry count overflow".into()))?;
-        if entry_count > MAX_ARCHIVE_ENTRIES {
-            return Err(PackageError::UnsafeArchive(format!(
-                "归档条目超过 {MAX_ARCHIVE_ENTRIES}"
-            )));
-        }
+        archive_budget(entry_count, unpacked_bytes)?;
         let relative = entry.path()?.into_owned();
         if !safe_relative_path(&relative) {
             return Err(PackageError::UnsafeArchive(relative.display().to_string()));
@@ -1352,11 +1348,7 @@ fn extract_archive(path: &Path, destination: &Path) -> Result<(), PackageError> 
         unpacked_bytes = unpacked_bytes
             .checked_add(size)
             .ok_or_else(|| PackageError::UnsafeArchive("unpacked byte count overflow".into()))?;
-        if unpacked_bytes > MAX_UNPACKED_BYTES {
-            return Err(PackageError::UnsafeArchive(format!(
-                "解包大小超过 {MAX_UNPACKED_BYTES} 字节"
-            )));
-        }
+        archive_budget(entry_count, unpacked_bytes)?;
         let mode = entry.header().mode()?;
         if mode & 0o7000 != 0 {
             return Err(PackageError::UnsafeArchive(format!(
@@ -1373,6 +1365,20 @@ fn extract_archive(path: &Path, destination: &Path) -> Result<(), PackageError> 
             }
             entry.unpack(target)?;
         }
+    }
+    Ok(())
+}
+
+fn archive_budget(entry_count: usize, unpacked_bytes: u64) -> Result<(), PackageError> {
+    if entry_count > MAX_ARCHIVE_ENTRIES {
+        return Err(PackageError::UnsafeArchive(format!(
+            "归档条目超过 {MAX_ARCHIVE_ENTRIES}"
+        )));
+    }
+    if unpacked_bytes > MAX_UNPACKED_BYTES {
+        return Err(PackageError::UnsafeArchive(format!(
+            "解包大小超过 {MAX_UNPACKED_BYTES} 字节"
+        )));
     }
     Ok(())
 }
@@ -2247,6 +2253,19 @@ mod tests {
         assert!(matches!(
             linked.current("wine"),
             Err(PackageError::Incompatible(_))
+        ));
+    }
+
+    #[test]
+    fn archive_budget_accepts_exact_bounds_and_rejects_one_more() {
+        assert!(archive_budget(MAX_ARCHIVE_ENTRIES, MAX_UNPACKED_BYTES).is_ok());
+        assert!(matches!(
+            archive_budget(MAX_ARCHIVE_ENTRIES + 1, 0),
+            Err(PackageError::UnsafeArchive(_))
+        ));
+        assert!(matches!(
+            archive_budget(1, MAX_UNPACKED_BYTES + 1),
+            Err(PackageError::UnsafeArchive(_))
         ));
     }
 }
