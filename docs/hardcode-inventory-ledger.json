@@ -1,5 +1,5 @@
 {
-  "baseline_total": 225,
+  "baseline_total": 222,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,7 +10,7 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 124,
+    "explicit-safety-policy": 121,
     "platform-adapter": 28,
     "protocol-abi": 42,
     "test-demo-fixture": 11
@@ -699,16 +699,6 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "2c0a8a1ed2934f59412fb6f0c1008efe12830d4baf0baa72dfc2e987fff42c89",
-      "line": 18,
-      "path": "kernel-core/src/fs.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_NAME_BYTES: usize = 64;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
       "fingerprint": "814d7a7565e44893ae43973063c5d559b2df0ae690264186059f667d548d5342",
       "line": 30,
       "path": "kernel-core/src/heap.rs",
@@ -859,16 +849,6 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "7fd923ecbc94870f51576031f52bcaa904346cdc696a4fed3524cedd641fcfdc",
-      "line": 23,
-      "path": "kernel-core/src/sandbox_launch.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_VIEW_PATH: usize = 64;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
       "fingerprint": "cb9be57fdbacfeb04ad42b6206ea2340f1cbfbd4b35baa67cf6ebc4b497eb538",
       "line": 178,
       "path": "kernel-core/src/sched.rs",
@@ -997,16 +977,6 @@
       "source": "pub const MIN_WINDOW_SIZE: u64 = WINDOW_END_RISCV32 - WINDOW_BASE_RISCV32;"
     },
     {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "2641c1c27cebb55a7dcc8057c543ee0fa9e0ad306ee511458b5ad07727a81f4f",
-      "line": 15,
-      "path": "kernel-core/src/usi.rs",
-      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_MODULE_VERSION: usize = 8;"
-    },
-    {
       "category": "protocol-abi",
       "count": 1,
       "fingerprint": "37bb82019611fc48de5b5e08ac71b41c281cfbd8f12df026f1ea8c6689206ac1",
@@ -1050,7 +1020,7 @@
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "83c7ee0d0e1dee9a8f151af0aeee571e982fa2aa09647c37ac7aac99aad8c4b0",
-      "line": 36,
+      "line": 37,
       "path": "kernel-core/src/virtio_gpu.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
@@ -2069,7 +2039,7 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 127,
+    "explicit-safety-policy": 124,
     "platform-adapter": 44,
     "protocol-abi": 43,
     "test-demo-fixture": 11

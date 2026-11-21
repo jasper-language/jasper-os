@@ -45,3 +45,6 @@ update-agent-ipc-v2	34	spec	update-Agent-IPC-v2-bounded-list
 update-list-ui-v1	34	spec	tenant-update-list-structured-rendering
 ui-ipc-protocol-v1	36	spec	Issue-36-versioned-service-ui-ipc-envelope
 vmx-diagnostic	35	runtime	VMX-diagnostic-only-unavailable-field
+fs-entry-name-v1	35	spec	FS-0-versioned-entry-name-64-byte-field
+sandbox-view-path-v1	35	spec	Sandbox-launch-v1-display-path-64-byte-field
+usi-module-version-v1	35	spec	USI-v1-module-version-8-byte-field

@@ -15,7 +15,7 @@ pub const CONTRACT_MAJOR: u16 = 1;
 pub const CONTRACT_MINOR: u16 = 0;
 pub const CONTRACT_PATCH: u16 = 0;
 pub const WIRE_HEADER_BYTES: usize = 16;
-pub const MAX_NAME_BYTES: usize = 64;
+pub const MAX_NAME_BYTES: usize = 64; // JASPER-HARDCODE-REVIEW: issue=35 source=fs-entry-name-v1 reason=fixed-name-field-in-versioned-FS-0-record
 
 pub const OP_OPEN: &str = "system.fs.open";
 pub const OP_CREATE: &str = "system.fs.create";

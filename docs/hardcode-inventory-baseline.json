@@ -176,21 +176,9 @@
     },
     {
       "count": 1,
-      "fingerprint": "2641c1c27cebb55a7dcc8057c543ee0fa9e0ad306ee511458b5ad07727a81f4f",
-      "path": "kernel-core/src/usi.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "280f8c8e0f5ab6f64a405e6aa0000202517b7f45b8bec16d086a613e89cb7444",
       "path": "kernel/src/subscription.rs",
       "rules": "HC-G8"
-    },
-    {
-      "count": 1,
-      "fingerprint": "2c0a8a1ed2934f59412fb6f0c1008efe12830d4baf0baa72dfc2e987fff42c89",
-      "path": "kernel-core/src/fs.rs",
-      "rules": "HC-G1"
     },
     {
       "count": 1,
@@ -610,12 +598,6 @@
       "count": 1,
       "fingerprint": "7bfc1f8490d1ea29829cfc20db7c40cc8c8a22a5744a6c1e7060622ff796d1ea",
       "path": "lifecycle-model/src/manifest.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "7fd923ecbc94870f51576031f52bcaa904346cdc696a4fed3524cedd641fcfdc",
-      "path": "kernel-core/src/sandbox_launch.rs",
       "rules": "HC-G1"
     },
     {
@@ -1251,5 +1233,5 @@
     "user",
     "xtask"
   ],
-  "total": 225
+  "total": 222
 }

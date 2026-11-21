@@ -12,7 +12,7 @@ pub const PROCESS_BYTES: usize = 32;
 pub const MODULE_BYTES: usize = 48;
 pub const MAX_PROFILE_NAME: usize = 12;
 pub const MAX_MODULE_NAME: usize = 24;
-pub const MAX_MODULE_VERSION: usize = 8;
+pub const MAX_MODULE_VERSION: usize = 8; // JASPER-HARDCODE-REVIEW: issue=35 source=usi-module-version-v1 reason=fixed-version-field-in-USI-v1-module-record
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -353,5 +353,12 @@ mod tests {
             .encode();
         module[38] = 25;
         assert_eq!(Module::decode(&module), None);
+        assert!(Module::from_parts("core", "12345678", 0, 3, 1, 1, true).is_some());
+        assert!(Module::from_parts("core", "123456789", 0, 3, 1, 1, true).is_none());
+        let mut version = Module::from_parts("core", "1.0.0", 0, 3, 1, 1, true)
+            .unwrap()
+            .encode();
+        version[39] = MAX_MODULE_VERSION as u8 + 1;
+        assert_eq!(Module::decode(&version), None);
     }
 }

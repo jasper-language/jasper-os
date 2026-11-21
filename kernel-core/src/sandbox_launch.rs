@@ -20,7 +20,7 @@ use crate::workload::{WorkloadState, WorkloadTable};
 #[cfg(any(test, feature = "runtime-registries"))]
 use alloc::vec::Vec;
 
-pub const MAX_VIEW_PATH: usize = 64;
+pub const MAX_VIEW_PATH: usize = 64; // JASPER-HARDCODE-REVIEW: issue=35 source=sandbox-view-path-v1 reason=fixed-display-path-field-in-sandbox-launch-v1-record
 
 /// A compact capability set. Capabilities are explicit identifiers, never
 /// paths, AppIDs, UIDs or installation sources.
@@ -1326,6 +1326,18 @@ mod tests {
         assert_eq!(plans.plan(DOMAIN, key).unwrap(), before);
         assert_eq!(
             derive_mount_view(before, ViewSource::ImageRoot(image), b"/../etc"),
+            Err(LaunchError::InvalidView)
+        );
+        let mut maximum = [b'a'; MAX_VIEW_PATH];
+        maximum[0] = b'/';
+        assert!(
+            derive_mount_view(before, ViewSource::ImageRoot(image), &maximum).is_ok(),
+            "the v1 display field must accept its full declared width"
+        );
+        let mut too_long = [b'a'; MAX_VIEW_PATH + 1];
+        too_long[0] = b'/';
+        assert_eq!(
+            derive_mount_view(before, ViewSource::ImageRoot(image), &too_long),
             Err(LaunchError::InvalidView)
         );
         assert_eq!(
