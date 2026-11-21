@@ -10,6 +10,7 @@ use std::time::Duration;
 pub use quinn;
 pub use rustls;
 
+pub mod daemon;
 pub mod jasper_sink;
 pub mod service;
 pub mod wireguard_driver;
