@@ -116,9 +116,10 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    planning_present = MATRIX.is_file()
+    matrix_present = MATRIX.is_file()
+    planning_present = DAG.is_file()
     passed = pending = None
-    if planning_present:
+    if matrix_present:
         matrix = read_toml(MATRIX)
         if matrix.get("schema") != 1 or matrix.get("stage") != "NATIVE-ECOSYSTEM-1":
             fail("bad matrix schema or stage")

@@ -1,0 +1,41 @@
+schema = 1
+stage = "NATIVE-ECOSYSTEM-1"
+status = "core-passed"
+updated = "2026-11-21"
+evidence = "docs/native-ecosystem-independence.md; scripts/check-native-ecosystem.py; no-default/default/production and syscall-only/ELF-only/dynamic-libc dependency trees; jasper-compat-packages install/upgrade/rollback/uninstall tests"
+
+[[acceptance]]
+id = "optional-compat-dependencies"
+statement = "Linux compatibility crates are optional kernel dependencies and are absent from the default Jasper feature set."
+state = "passed"
+evidence = "kernel/Cargo.toml optional dependencies; default includes no compatibility component"
+
+[[acceptance]]
+id = "native-profile-isolation"
+statement = "The no-default x86_64 bare-metal kernel builds without either Linux compatibility crate in its normalized dependency tree."
+state = "passed"
+evidence = "cargo check -p jasper-kernel --target x86_64-unknown-none --no-default-features; cargo tree -e normal"
+
+[[acceptance]]
+id = "explicit-syscall-activation"
+statement = "The Linux syscall service and compatibility process state compile only when linux-abi is explicitly enabled."
+state = "passed"
+evidence = "compat-syscall-verify -> linux-abi -> dep:compat-core"
+
+[[acceptance]]
+id = "explicit-elf-activation"
+statement = "The Linux ELF backend, loader and dynamic libc fixture compile only when explicit compatibility features are enabled."
+state = "passed"
+evidence = "compat-elf-backend-verify -> compat-elf; compat-dynamic-libc-verify -> linux-abi + compat-elf"
+
+[[acceptance]]
+id = "runtime-install-stop-uninstall"
+statement = "Compatibility components install, update, stop and uninstall independently while native services continue operating."
+state = "pending"
+evidence = "Component installer lifecycle tests pass; a real default-distribution install, stop, uninstall and post-removal native service run is not yet accepted end to end"
+
+[[acceptance]]
+id = "default-distribution-exclusion"
+statement = "Default distributions exclude compatibility components while Jasper native language, application, driver and runtime paths remain complete."
+state = "pending"
+evidence = "Default kernel feature and dependency isolation pass; a real default distribution, replacement migration and rollback exercise remain pending"
