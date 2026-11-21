@@ -1,0 +1,165 @@
+; Jasper Trust Framework external protocol v1.
+; This CDDL is normative for field meaning and required presence. A future
+; transport profile may bind messages to COSE; it must not change these claims.
+
+protocol-version = 1
+message-type = "trust.challenge/v1" /
+                "trust.evidence/v1" /
+                "trust.result/v1" /
+                "trust.provider/v1" /
+                "trust.policy/v1" /
+                "trust.error/v1"
+
+digest = bytes .size (16 / 32 / 48 / 64)
+nonce = bytes .size (16..64)
+timestamp = uint
+
+subject-kind = "application" / "process" / "service" / "module" /
+               "device" / "execution-environment"
+evidence-level = "software-observation" /
+                 "signed-static-package" /
+                 "protected-system-measurement" /
+                 "hardware-backed"
+result-status = "verified" / "verified-with-gaps" /
+                "rejected" / "unavailable" / "unsupported"
+policy-decision = "allow" / "deny" / "degrade" / "unavailable"
+error-code = "bad-request" / "unsupported-version" /
+             "unauthenticated" / "unauthorized-scope" /
+             "stale-evidence" / "revoked" /
+             "provider-unavailable" / "capacity" / "internal"
+
+subject = {
+  1: subject-kind,
+  2: uint,              ; SEC object identity
+  3: uint,              ; subject generation
+  4: uint,              ; boot identity
+  ? 5: bytes,           ; application identity
+  ? 6: digest           ; current content measurement
+}
+
+measurement = {
+  1: "package" / "process-image" / "module" / "configuration" /
+     "boot-chain" / "device-firmware",
+  2: digest,
+  3: [* text],          ; covered components/ranges
+  4: [* text],          ; explicit coverage gaps
+  ? 5: uint             ; object generation, when applicable
+}
+
+provider = {
+  1: uint,              ; provider id
+  2: uint,              ; provider generation
+  3: evidence-level,
+  4: [* text],          ; protocol versions
+  5: [* text],          ; signature algorithms
+  6: [* text],          ; platform scope
+  7: uint,              ; revocation epoch
+  8: timestamp,         ; not-before
+  9: timestamp,         ; not-after
+  ? 10: digest          ; registry endorsement digest
+}
+
+challenge = {
+  1: "trust.challenge/v1",
+  2: protocol-version,
+  3: bytes,             ; challenge/message id
+  4: nonce,
+  5: bytes,             ; audience
+  6: subject-kind,
+  7: [* evidence-level],
+  8: [* text],          ; requested disclosure fields
+  9: uint,              ; policy epoch
+  10: timestamp,        ; issued-at
+  11: timestamp,        ; expires-at
+  ? 12: { * text => text },
+  ? 13: [* text]        ; non-critical extensions
+}
+
+coverage-gap = {
+  1: text,
+  2: "not-supported" / "not-observed" / "provider-unavailable" /
+     "measurement-truncated" / "unknown"
+}
+
+evidence = {
+  1: "trust.evidence/v1",
+  2: protocol-version,
+  3: bytes,             ; evidence/message id
+  4: bytes,             ; challenge/correlation id
+  5: nonce,
+  6: subject,
+  7: provider,
+  8: uint,              ; object generation
+  9: [* measurement],
+  10: [* coverage-gap],
+  11: timestamp,        ; issued-at
+  12: timestamp,        ; expires-at
+  13: uint,             ; policy epoch
+  14: [* bytes],        ; disclosure field ids
+  15: bytes,            ; signature or COSE structure
+  16: [* bytes],        ; trust chain
+  17: [* bytes],        ; revocation references
+  ? 18: { * text => text },
+  ? 19: [* text]
+}
+
+result = {
+  1: "trust.result/v1",
+  2: protocol-version,
+  3: bytes,             ; result/message id
+  4: bytes,             ; challenge id
+  5: bytes,             ; evidence id
+  6: nonce,
+  7: result-status,
+  8: evidence-level,
+  9: [* text],          ; verified properties
+  10: [* coverage-gap],
+  11: uint,             ; subject generation
+  12: uint,             ; object generation
+  13: uint,             ; provider generation
+  14: uint,             ; policy epoch
+  15: timestamp,        ; verifier issued-at
+  16: timestamp,        ; result expires-at
+  17: bytes,            ; verifier signature
+  ? 18: [* text],
+  ? 19: { * text => text }
+}
+
+provider-catalog = {
+  1: "trust.provider/v1",
+  2: protocol-version,
+  3: bytes,             ; catalog/message id
+  4: uint,              ; catalog generation
+  5: [* provider],
+  6: uint,              ; revocation epoch
+  7: timestamp,
+  8: bytes              ; registry signature
+}
+
+policy-result = {
+  1: "trust.policy/v1",
+  2: protocol-version,
+  3: bytes,             ; policy message id
+  4: bytes,             ; result id
+  5: bytes,             ; relying-party profile id
+  6: uint,              ; policy epoch
+  7: policy-decision,
+  8: [* text],          ; explainable reasons
+  9: [* coverage-gap],
+  10: timestamp,
+  11: timestamp,
+  12: bytes             ; policy evaluator signature
+}
+
+trust-error = {
+  1: "trust.error/v1",
+  2: protocol-version,
+  3: bytes,             ; error/message id
+  ? 4: bytes,           ; correlation id
+  5: error-code,
+  6: text,              ; bounded diagnostic
+  ? 7: [* text]
+}
+
+trust-message = challenge / evidence / result / provider-catalog /
+                policy-result / trust-error
