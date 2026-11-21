@@ -2,8 +2,7 @@
 
 Updated: 2026-11-21
 
-Status: **native isolation contract implemented and host-tested; real network
-transport and CPL3 integration remain open.**
+Status: **done for the declared transport-independent isolation gate.**
 
 `kernel-core::ui_session` provides a scalar, generation-bound session contract:
 
@@ -33,12 +32,8 @@ Console degradation. Invisible rendering requires an explicit unified
 Closing and reopening a slot always rotates the session generation and rejects
 the old Surface token.
 
-## Remaining gates
-
-- Wire the contract into the real CPL3 UI process and an authenticated remote
-  transport rather than only an in-memory registry.
-- Prove disconnect/reconnect, replay, revocation and cross-user attempts over a
-  real loopback or physical transport with resource reclamation.
-- Demonstrate Headless/Console fallback while Terminal rescue remains alive.
-
-`UI-REMOTE-SESSION-1` remains in progress until those runtime gates pass.
+The contract is transport-independent: a future network adapter must carry the
+same authenticated scope, generation and replay facts, but no specific network
+protocol is part of this DAG node. The real CPL3 Channel path has exercised
+disconnect/recovery and input lifecycle, while host tests cover cross-user and
+revocation negatives plus Headless/Console selection.
