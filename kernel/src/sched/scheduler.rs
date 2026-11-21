@@ -3199,6 +3199,61 @@ impl Scheduler {
         self.online.insert(c);
     }
 
+    /// Remove an idle secondary CPU from scheduling after all of its tasks and
+    /// tick leases have left. This is the software membership half of CPU
+    /// offline; architecture stop/start remains the caller's responsibility.
+    pub fn offline_idle_cpu(&mut self, c: usize) -> Result<(), &'static str> {
+        if c == this_cpu() || c == 0 {
+            return Err("boot-or-self");
+        }
+        if !self.online.contains(c) || self.online.len() <= 1 {
+            return Err("not-online");
+        }
+        if !leaf_execution_settled(c) {
+            return Err("leaf-busy");
+        }
+        let (current, _, _, _) = leaf_run_state(c);
+        if is_worker(current) || self.waiting(c) != ClassMask::EMPTY {
+            return Err("task-active");
+        }
+        if self.tasks.iter().flatten().any(|task| {
+            task.state != TaskState::Exited
+                && (task.home == c || task.on_cpu == Some(c))
+        }) {
+            return Err("task-bound");
+        }
+        if self.tick_publication.get(c).is_some_and(|value| value.is_some())
+            || self.tick_touched.get(c).is_some_and(|value| value.is_some())
+        {
+            return Err("tick-lease");
+        }
+        self.nohz.restart(c, self.now, self.local_ticks[c]);
+        self.online.remove(c);
+        self.kicks.remove(c);
+        Ok(())
+    }
+
+    /// Reattach a previously detached idle CPU to scheduling. The architecture
+    /// must have completed any platform-side restart before this call.
+    pub fn online_idle_cpu(&mut self, c: usize) -> Result<(), &'static str> {
+        if c == this_cpu() || self.cpu_stats.get(c).is_none() {
+            return Err("bad-cpu");
+        }
+        if self.online.contains(c) {
+            return Err("already-online");
+        }
+        if !leaf_execution_settled(c) {
+            return Err("leaf-busy");
+        }
+        let (current, _, _, _) = leaf_run_state(c);
+        if is_worker(current) || self.waiting(c) != ClassMask::EMPTY {
+            return Err("task-active");
+        }
+        self.online.insert(c);
+        self.kicks.insert(c);
+        Ok(())
+    }
+
     /// 参与调度的处理器集合。
     pub fn online(&self) -> CpuSet {
         self.online.clone()

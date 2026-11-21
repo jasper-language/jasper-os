@@ -832,6 +832,16 @@ pub fn online_cpus() -> CpuSet {
     with(|s| s.online())
 }
 
+/// Remove an already quiescent secondary CPU from scheduler membership.
+pub fn offline_idle_cpu(c: usize) -> Result<(), &'static str> {
+    with_mut(|s| s.offline_idle_cpu(c))
+}
+
+/// Reattach a quiescent secondary CPU after platform-side restart.
+pub fn online_idle_cpu(c: usize) -> Result<(), &'static str> {
+    with_mut(|s| s.online_idle_cpu(c))
+}
+
 /// 处理器 `c` 的调度统计（忙 / 闲 tick、空闲等待上界、窃取与均衡次数）。
 /// Scheduling statistics of processor `c`.
 pub fn cpu_stats(c: usize) -> CpuStats {

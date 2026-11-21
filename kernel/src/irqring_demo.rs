@@ -22,7 +22,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use kernel_core::frame::FRAME_SIZE;
 use kernel_core::paging::MapFlags;
 use kernel_core::pci::Bdf;
-use kernel_core::smp::MAX_CPUS;
+use kernel_core::smp::{CpuSet, MAX_CPUS};
 use spin::Mutex;
 
 use crate::mm::frame;
@@ -84,6 +84,8 @@ static DEPART_BINDINGS: AtomicU32 = AtomicU32::new(0);
 static DEPART_RETURNED: AtomicU32 = AtomicU32::new(0);
 static DEPART_RESIDUAL: AtomicU32 = AtomicU32::new(0);
 static DEPART_RESUMED: AtomicBool = AtomicBool::new(false);
+static DEPART_SCHED_OFF: AtomicBool = AtomicBool::new(false);
+static DEPART_SCHED_ON: AtomicBool = AtomicBool::new(false);
 
 fn check(ok: bool, what: &str) {
     CHECKS.fetch_add(1, Ordering::Relaxed);
@@ -242,7 +244,17 @@ fn depart_driver() {
                     DEPART_RETURNED.store(report.vectors_returned as u32, Ordering::Relaxed);
                     DEPART_RESIDUAL.store(report.residual_bindings as u32, Ordering::Relaxed);
                     DEPART_RESUMED.store(irq::msi_resume_cpu(target).is_ok(), Ordering::Release);
-                    ok = report.residual_bindings == 0;
+                    DEPART_SCHED_OFF.store(
+                        sched::offline_idle_cpu(target).is_ok(),
+                        Ordering::Release,
+                    );
+                    DEPART_SCHED_ON.store(
+                        sched::online_idle_cpu(target).is_ok(),
+                        Ordering::Release,
+                    );
+                    ok = report.residual_bindings == 0
+                        && DEPART_SCHED_OFF.load(Ordering::Acquire)
+                        && DEPART_SCHED_ON.load(Ordering::Acquire);
                 }
                 Err(error) => {
                     check(false, error.name());
@@ -258,13 +270,15 @@ fn depart_driver() {
     }
     DEPART_DONE.store(true, Ordering::Release);
     kprintln!(
-        "[JSR-IRQRING] depart target={} objects={} bindings={} vectors={} residual={} resumed={} ok={}",
+        "[JSR-IRQRING] depart target={} objects={} bindings={} vectors={} residual={} resumed={} sched_detached={} sched_resumed={} ok={}",
         target,
         DEPART_OBJECTS.load(Ordering::Relaxed),
         DEPART_BINDINGS.load(Ordering::Relaxed),
         DEPART_RETURNED.load(Ordering::Relaxed),
         DEPART_RESIDUAL.load(Ordering::Relaxed),
         DEPART_RESUMED.load(Ordering::Acquire),
+        DEPART_SCHED_OFF.load(Ordering::Acquire),
+        DEPART_SCHED_ON.load(Ordering::Acquire),
         ok
     );
 }
@@ -409,8 +423,14 @@ pub fn run() {
                 DEPART_RETURNED.store(0, Ordering::Relaxed);
                 DEPART_RESIDUAL.store(0, Ordering::Relaxed);
                 DEPART_RESUMED.store(false, Ordering::Release);
+                DEPART_SCHED_OFF.store(false, Ordering::Release);
+                DEPART_SCHED_ON.store(false, Ordering::Release);
                 depart_target = Some(target);
-                depart_code = run_depart_user(mask, target, kernel_core::device::pack_bdf(bdf));
+                depart_code = run_depart_user(
+                    CpuSet::first(1).bits() as u64,
+                    target,
+                    kernel_core::device::pack_bdf(bdf),
+                );
             }
             // 设备在这里复位、队列页归还
             drop(RIG.lock().0.take());
@@ -441,18 +461,22 @@ pub fn run() {
             && DEPART_BINDINGS.load(Ordering::Relaxed) >= 1
             && DEPART_RETURNED.load(Ordering::Relaxed) >= 1
             && DEPART_RESIDUAL.load(Ordering::Relaxed) == 0
-            && DEPART_RESUMED.load(Ordering::Acquire);
+            && DEPART_RESUMED.load(Ordering::Acquire)
+            && DEPART_SCHED_OFF.load(Ordering::Acquire)
+            && DEPART_SCHED_ON.load(Ordering::Acquire);
         check(user_ok, "CPU 离场时用户等待没有以 closed 完成");
         check(report_ok, "CPU 离场没有关闭对象、解绑并归还向量");
         let ok = user_ok && report_ok;
         kprintln!(
-            "[JSR-IRQRING] depart target={} objects={} bindings={} vectors={} residual={} resumed={} ok={}",
+            "[JSR-IRQRING] depart target={} objects={} bindings={} vectors={} residual={} resumed={} sched_detached={} sched_resumed={} ok={}",
             target,
             DEPART_OBJECTS.load(Ordering::Relaxed),
             DEPART_BINDINGS.load(Ordering::Relaxed),
             DEPART_RETURNED.load(Ordering::Relaxed),
             DEPART_RESIDUAL.load(Ordering::Relaxed),
             DEPART_RESUMED.load(Ordering::Acquire),
+            DEPART_SCHED_OFF.load(Ordering::Acquire),
+            DEPART_SCHED_ON.load(Ordering::Acquire),
             ok
         );
         ok
@@ -600,7 +624,15 @@ fn run_depart_user(cpu_mask: u64, target: usize, bdf: u32) -> Option<i64> {
     {
         return fail("thread");
     }
-    if sched::spawn(TaskId(DEPART_DRIVER_TASK), "irqring-depart", depart_driver).is_err() {
+    if sched::spawn_on(
+        TaskId(DEPART_DRIVER_TASK),
+        "irqring-depart",
+        depart_driver,
+        None,
+        CpuSet::first(1),
+    )
+    .is_err()
+    {
         check(false, "无法创建 CPU 离场驱动任务");
         abort_user();
         DEPART_DONE.store(true, Ordering::Release);

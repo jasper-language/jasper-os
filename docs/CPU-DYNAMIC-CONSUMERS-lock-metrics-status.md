@@ -80,6 +80,11 @@ CPU departure:
   parked on a non-BSP CPU, then quiesces that CPU. The user wait completes with
   `INTERRUPT_CLOSED`, a later wait is rejected, and the kernel reports
   `objects=1 bindings=1 vectors=1 residual=0 resumed=true`.
+- `Scheduler::offline_idle_cpu` accepts only a settled non-BSP leaf with no
+  current task, no queued work, no live task bound to that CPU and no tick
+  lease. It restarts tickless state, removes the CPU from online/steal/placement
+  membership and drops pending kicks. `online_idle_cpu` reattaches the same
+  quiescent leaf only after platform-side recovery.
 
 The existing CPL3 SMP-3 drill now routes both device lines to a secondary CPU,
 detaches that CPU, verifies no stale or offline target remains, demotes its
@@ -96,9 +101,12 @@ The complete x86_64 `accept.sh` run with 240-second per-guest limits reports
 `accept: ALL PASS`; 4-vCPU, 8-vCPU and q35 4-vCPU guests exit 37 for timing-only
 overruns while all functional SMP-3 checks pass.
 
-This is an IRQ/MSI dispatch and active-object teardown milestone, not complete
-CPU offline: scheduler task migration, architecture stop IPIs, CPU runtime
-generation publication and hotplug rollback remain before
+The depart drill now reports `sched_detached=true sched_resumed=true` in the
+same x86_64 4-vCPU, 8-vCPU and q35 guests.
+
+This is an IRQ/MSI, active-object and idle-scheduler membership teardown
+milestone, not complete CPU offline: non-idle task migration, architecture stop
+IPIs, CPU runtime generation publication and hotplug rollback remain before
 `CPU-DYNAMIC-CONSUMERS-1` can become done.
 
 The runtime registry also rejects `mark_offline(boot_logical)` while another
