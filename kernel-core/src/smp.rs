@@ -799,6 +799,8 @@ pub enum CpuState {
     Online = 2,
     /// 启动失败或超时未报到。
     Failed = 3,
+    /// 已在线，经过完整 drain 后离线。
+    Offline = 4,
 }
 
 impl CpuState {
@@ -810,6 +812,7 @@ impl CpuState {
             CpuState::Starting => "starting",
             CpuState::Online => "online",
             CpuState::Failed => "failed",
+            CpuState::Offline => "offline",
         }
     }
 
@@ -818,12 +821,14 @@ impl CpuState {
             1 => CpuState::Starting,
             2 => CpuState::Online,
             3 => CpuState::Failed,
+            4 => CpuState::Offline,
             _ => CpuState::Absent,
         }
     }
 }
 
-/// 跨核可见的启动状态单元：只允许 缺席→启动中、启动中→在线、启动中→失败 三种迁移。
+/// 跨核可见的启动状态单元：允许缺席/离线→启动中、启动中→在线、启动中→失败、
+/// 在线→离线四种显式迁移。
 /// Cross-CPU start-up state cell with only the legal transitions.
 pub struct CpuStateCell(AtomicU8);
 
@@ -851,12 +856,19 @@ impl CpuStateCell {
     /// `Absent` → `Starting`.
     pub fn begin_start(&self) -> Result<(), SmpError> {
         self.transit(CpuState::Absent, CpuState::Starting)
+            .or_else(|_| self.transit(CpuState::Offline, CpuState::Starting))
     }
 
     /// 启动中 → 在线（被启动的处理器自己报到）。
     /// `Starting` → `Online`.
     pub fn mark_online(&self) -> Result<(), SmpError> {
         self.transit(CpuState::Starting, CpuState::Online)
+    }
+
+    /// 在线 → 离线（调度与 IRQ 成员关系已先排空）。
+    /// `Online` → `Offline`.
+    pub fn mark_offline(&self) -> Result<(), SmpError> {
+        self.transit(CpuState::Online, CpuState::Offline)
     }
 
     /// 启动中 → 失败（发起方等待超时或平台报错）；之后该处理器即使迟到也不能再报到。
@@ -1422,6 +1434,12 @@ mod tests {
         c.mark_online().unwrap();
         assert_eq!(c.get(), CpuState::Online);
         assert_eq!(c.mark_failed(), Err(SmpError::BadState));
+        assert_eq!(c.get(), CpuState::Online);
+        c.mark_offline().unwrap();
+        assert_eq!(c.get(), CpuState::Offline);
+        assert_eq!(c.mark_offline(), Err(SmpError::BadState));
+        c.begin_start().unwrap();
+        c.mark_online().unwrap();
         assert_eq!(c.get(), CpuState::Online);
 
         // 超时判失败后，迟到的报到被拒

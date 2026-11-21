@@ -54,6 +54,12 @@ bitmap；MSI 每核向量表和 IRQ 每核计数、quota 也在 IRQ 路径前按
 通用 `kernel-core::cpu_table::CpuTable` 与 scheduler 使用同一实现；宿主测试覆盖
 bootstrap→129→256 行扩展、CPU 128/255 边界，以及超额预留失败时已发布表保持不变。
 x86_64 `no_std` production/lifecycle-health 检查通过。
+调度器的候选扫描、任务重列、队列审计、分组记账、启动扩容和 `cpu_online` 已改用
+实际准入宽度，不再把逻辑 CPU ≥128 静默映射到 CPU0 或从调度集合中丢弃。
+`CpuStateCell` 增加显式 Offline→Starting 重启迁移，AP 只有在 runtime registry
+成功后才发布 per-CPU Online，调度成员仍最后发布。CPU offline 的 IRQ drain、
+route handoff、quota demote、硬件停核与真实热插拔矩阵仍是
+`CPU-DYNAMIC-CONSUMERS-1` 的剩余门。
 
 `kernel/src/irq.rs` 的 MSI 状态、设备中断计数和每核配额已改为
 `CpuTailLayout` 驱动的 bootstrap 区加准入数量堆后备尾部；读取、重置和越界

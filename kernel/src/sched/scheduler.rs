@@ -596,14 +596,15 @@ const fn is_worker(slot: usize) -> bool {
 /// `CoreQueue`; the leaf's local RunLists table therefore remains constant-size.
 const LEAF_QUEUE: usize = 0;
 
-/// 执行本代码的处理器下标（平台保证小于 `MAX_CPUS`；越界属平台缺陷，按引导处理器处理而不越界访问）。
+/// 执行本代码的处理器下标。An unadmitted platform identity falls back to the
+/// boot stream instead of aliasing writable CPU 0 scheduler state as a valid CPU.
 fn this_cpu() -> usize {
     let c = crate::arch::cpu_index();
-    if c < MAX_CPUS {
-        c
-    } else {
-        0
+    if !crate::smp::cpu_index_admitted(c) {
+        crate::kprintln!("[JSR-SMP] reject=scheduler_cpu_identity cpu={}", c);
+        crate::arch::halt_forever();
     }
+    c
 }
 
 /// 处理器 `c` 没有工作可做时的落脚点：引导处理器回到引导线程，其他处理器回到各自的空闲执行流。
@@ -1562,9 +1563,10 @@ impl Scheduler {
     /// This is a boot-time transaction: only the boot thread may be active,
     /// only the boot CPU may be online, and no runnable task may be queued.
     pub fn reconfigure_qos(&mut self, qos: kernel_core::sched::QosParams) -> bool {
+        let cpus = self.cpu_stats.len();
         let quiescent = self.online.len() == 1
             && leaf_current(0) == BOOT_SLOT
-            && (0..MAX_CPUS).all(|cpu| {
+            && (0..cpus).all(|cpu| {
                 with_leaf(cpu, |leaf| {
                     leaf.queue.queued() == 0
                         && leaf.current == if cpu == 0 {
@@ -1579,7 +1581,7 @@ impl Scheduler {
         }
         // The scheduler lock keeps every leaf quiescent between the complete
         // preflight above and this commit pass, so no leaf may fail midway.
-        (0..MAX_CPUS).all(|cpu| {
+        (0..cpus).all(|cpu| {
             with_leaf(cpu, |leaf| {
                 leaf.queue
                     .replace_policy_if_idle(super::policy::kernel_policy_with_qos(qos))
@@ -1598,10 +1600,11 @@ impl Scheduler {
         if slots < self.tasks.len() || slots < INLINE_SLOTS {
             return Err(GrowError::Shrink);
         }
+        let cpus = self.cpu_stats.len();
         let quiescent = self.online.len() == 1
             && leaf_current(0) == BOOT_SLOT
-            && (0..MAX_CPUS).all(|cpu| leaf_run_state(cpu).3.is_none())
-            && (0..MAX_CPUS).all(|cpu| !leaf_has_completion(cpu))
+            && (0..cpus).all(|cpu| leaf_run_state(cpu).3.is_none())
+            && (0..cpus).all(|cpu| !leaf_has_completion(cpu))
             && self.tasks.iter().enumerate().all(|(i, t)| {
                 i == BOOT_SLOT || t.as_ref().is_none_or(|t| t.state == TaskState::Exited && t.on_cpu.is_none())
             });
@@ -1655,8 +1658,16 @@ impl Scheduler {
         let eff = self.scratch_eff.prepare(slots, || None).ok_or_else(|| oom(self))?;
         let waits = self.scratch_waits.prepare(slots, || None).ok_or_else(|| oom(self))?;
         let wants = self.scratch_wants.prepare(slots, || false).ok_or_else(|| oom(self))?;
-        let mut leaf_links: [Option<Box<[Link]>>; MAX_CPUS] = core::array::from_fn(|_| None);
-        let mut leaf_hot: [Option<Box<[HotSlot<LeafTaskHot>]>>; MAX_CPUS] = core::array::from_fn(|_| None);
+        let mut leaf_links = Vec::new();
+        leaf_links
+            .try_reserve_exact(cpus)
+            .map_err(|_| oom(self))?;
+        leaf_links.resize_with(cpus, || None);
+        let mut leaf_hot = Vec::new();
+        leaf_hot
+            .try_reserve_exact(cpus)
+            .map_err(|_| oom(self))?;
+        leaf_hot.resize_with(cpus, || None);
         for (cpu, prepared) in leaf_links.iter_mut().enumerate() {
             *prepared = Some(with_leaf(cpu, |leaf| leaf.links.prepare(slots, || Link::EMPTY))
                 .ok_or_else(|| oom(self))?);
@@ -1667,7 +1678,7 @@ impl Scheduler {
                 value
             })).ok_or_else(|| oom(self))?);
         }
-        let deadline_count = slots.checked_mul(MAX_CPUS).ok_or_else(|| oom(self))?;
+        let deadline_count = slots.checked_mul(cpus).ok_or_else(|| oom(self))?;
         let mut wake_entries = self.wake_entries.prepare(deadline_count, || Deadline::EMPTY).ok_or_else(|| oom(self))?;
         let mut wake_positions = self.wake_positions.prepare(slots, || NO_DEADLINE).ok_or_else(|| oom(self))?;
         let mut rt_entries = self.rt_entries.prepare(deadline_count, || Deadline::EMPTY).ok_or_else(|| oom(self))?;
@@ -1675,7 +1686,7 @@ impl Scheduler {
         let mut wake_owners = self.wake_owners.prepare(slots, || NO_DEADLINE).ok_or_else(|| oom(self))?;
         let mut wake_heap = DeadlineForest::<MAX_CPUS>::new();
         // New CPU strides differ: rebuild all live nodes before any commit.
-        for c in 0..MAX_CPUS {
+        for c in 0..cpus {
             for n in 0..self.wake_heap.len(c).unwrap() {
                 let event = self.wake_entries[c*self.tasks.len()+n];
                 wake_heap.set(&mut wake_entries, &mut wake_positions, &mut wake_owners, c, event)
@@ -1685,7 +1696,7 @@ impl Scheduler {
         let mut rt_owners = self.rt_owners.prepare(slots, || NO_DEADLINE).ok_or_else(|| oom(self))?;
         let mut rt_heap = DeadlineForest::<MAX_CPUS>::new();
         // New CPU strides differ: rebuild all live nodes before any commit.
-        for c in 0..MAX_CPUS {
+        for c in 0..cpus {
             for n in 0..self.rt_heap.len(c).unwrap() {
                 let event = self.rt_entries[c*self.tasks.len()+n];
                 rt_heap.set(&mut rt_entries, &mut rt_positions, &mut rt_owners, c, event)
@@ -1707,7 +1718,7 @@ impl Scheduler {
         let mut ns_heap=DeadlineForest::<MAX_CPUS>::new();
         // The forest stride follows the task-slot count. Rebuilding preserves
         // every live timer identity when startup capacity changes.
-        for c in 0..MAX_CPUS {
+        for c in 0..cpus {
             for n in 0..self.ns_heap.len(c).unwrap() {
                 let event=self.ns_entries[c*self.tasks.len()+n];
                 ns_heap.set(&mut ns_entries,&mut ns_positions,&mut ns_owners,c,event)
@@ -2612,7 +2623,9 @@ impl Scheduler {
     /// 让槽位 `i` 的运行列表成员关系与它的实体队列字段一致（每次运行队列成员关系改变后调用）。
     fn relist(&mut self, i: usize) {
         let want = self.tasks.get(i).and_then(|t| t.as_ref()).and_then(|t| t.sched.queue());
-        let have = (0..MAX_CPUS).find(|&cpu| with_leaf(cpu, |leaf| leaf.links.get(i).and_then(Link::queue).is_some()));
+        let have = (0..self.cpu_stats.len()).find(|&cpu| {
+            with_leaf(cpu, |leaf| leaf.links.get(i).and_then(Link::queue).is_some())
+        });
         let result = match (have, want) {
             (a, b) if a == b => Ok(false),
             (Some(from), Some(to)) => with_leaf_pair(from, to, |src, dst| {
@@ -2712,13 +2725,17 @@ impl Scheduler {
     /// 工作任务数，每个这样的任务是否恰好记在它归属的队列上；以及累计被拒绝的钩子调用次数。
     /// Cross-check the task table against the per-CPU run queues.
     pub fn queue_audit(&self) -> QueueAudit {
-        let mut expect = [0u32; MAX_CPUS];
+        let mut expect = Vec::new();
+        expect
+            .try_reserve_exact(self.cpu_stats.len())
+            .expect("CPU audit scratch allocation");
+        expect.resize(self.cpu_stats.len(), 0u32);
         let mut misplaced = 0u32;
         for (i, t) in self.tasks.iter().enumerate() {
             let Some(t) = t.as_ref().filter(|_| is_worker(i)) else { continue };
             let live = matches!(t.state, TaskState::Runnable | TaskState::Running);
             match (live, t.sched.queue()) {
-                (true, Some(q)) if q == t.home && q < MAX_CPUS => expect[q] += 1,
+                (true, Some(q)) if q == t.home && q < expect.len() => expect[q] += 1,
                 (false, None) => {}
                 _ => misplaced += 1,
             }
@@ -2737,7 +2754,9 @@ impl Scheduler {
             }
         }
         for (i, t) in self.tasks.iter().enumerate() {
-            let listed = (0..MAX_CPUS).find(|&cpu| with_leaf(cpu, |leaf| leaf.links.get(i).and_then(Link::queue).is_some()));
+            let listed = (0..self.cpu_stats.len()).find(|&cpu| {
+                with_leaf(cpu, |leaf| leaf.links.get(i).and_then(Link::queue).is_some())
+            });
             if t.as_ref().and_then(|t| t.sched.queue()) != listed {
                 list_mismatch += 1;
             }
@@ -2760,7 +2779,7 @@ impl Scheduler {
             });
             let mut owners = 0;
             let mut exact = false;
-            for cpu in 0..MAX_CPUS {
+            for cpu in 0..self.cpu_stats.len() {
                 let found = with_leaf(cpu, |leaf| {
                     leaf.hot.get(i).and_then(|slot| {
                         slot.generation().map(|_| {
@@ -3085,11 +3104,9 @@ impl Scheduler {
     }
     pub fn note_fast_yield(&mut self, c: usize) {
         let wd = self.watchdog;
-        if c < MAX_CPUS {
-            let slot = leaf_current(c);
-            if let Some(t) = self.tasks.get_mut(slot).and_then(|t| t.as_mut()) {
-                wd.yielded(&mut t.streak);
-            }
+        let slot = leaf_current(c);
+        if let Some(t) = self.tasks.get_mut(slot).and_then(|t| t.as_mut()) {
+            wd.yielded(&mut t.streak);
         }
     }
 
@@ -3119,7 +3136,8 @@ impl Scheduler {
 
     /// 可以被搬动的任务：可运行、未被任何处理器占用、未被限速（只遍历各运行列表：可运行任务一定在列表上）。
     fn candidates(&self) -> impl Iterator<Item = Candidate<'_>> + Clone + '_ {
-        (0..MAX_CPUS).flat_map(move |q| self.listed(q)).filter_map(move |(i, t)| {
+        let cpus = self.cpu_stats.len();
+        (0..cpus).flat_map(move |q| self.listed(q)).filter_map(move |(i, t)| {
             (t.rt_period == 0 && t.state == TaskState::Runnable && t.on_cpu.is_none() && self.eligible(t))
                 .then_some(())
                 .and_then(|_| self.affinity_view(i))
@@ -3164,13 +3182,21 @@ impl Scheduler {
     /// Mark processor `c` as taking part in scheduling.
     pub fn cpu_online(&mut self, c: usize) {
         assert_eq!(c, this_cpu(), "a CPU must register itself while its leaf is held");
-        if c < MAX_CPUS {
-            if !self.online.contains(c) {
-                if self.ns_active {self.ns_at[c]=self.ns_now;self.ns_credit[c]=Some(kernel_core::timer_units::CreditLedger::new(self.ns_now,crate::hrtime::tick_ns()).unwrap());}
-                self.cpu_residency[c]=kernel_core::cpu_time::Ledger::new(self.now,is_worker(leaf_current(c)));
+        if !self.online.contains(c) {
+            if self.ns_active {
+                self.ns_at[c] = self.ns_now;
+                self.ns_credit[c] = Some(
+                    kernel_core::timer_units::CreditLedger::new(
+                        self.ns_now,
+                        crate::hrtime::tick_ns(),
+                    )
+                    .unwrap(),
+                );
             }
-            self.online.insert(c);
+            self.cpu_residency[c] =
+                kernel_core::cpu_time::Ledger::new(self.now, is_worker(leaf_current(c)));
         }
+        self.online.insert(c);
     }
 
     /// 参与调度的处理器集合。
@@ -3188,7 +3214,7 @@ impl Scheduler {
     /// （记入重新调度请求），之后由新队列接手。返回任务现在是否仍可留在本处理器上运行。
     /// Change the affinity set of task `id`.
     pub fn set_affinity(&mut self, id: TaskId, set: CpuSet) -> Result<bool, AffinityError> {
-        if (0..MAX_CPUS).all(|c| !(set.contains(c) && self.online.contains(c))) {
+        if self.online.clone().intersect(set.clone()).is_empty() {
             return Err(AffinityError::NoOnlineCpu);
         }
         let i = self.live_slot(id).filter(|&i| i != BOOT_SLOT).ok_or(AffinityError::NoTask)?;
@@ -4841,7 +4867,7 @@ impl Scheduler {
             self.scratch_wants[slot] = false;
         }
         // 可运行或运行中的任务一定在某个运行列表上：只遍历列表
-        for q in 0..MAX_CPUS {
+        for q in 0..self.cpu_stats.len() {
             for i in LeafSlots::new(q) {
                 if let Some(t) = self.tasks.get(i).and_then(|t| t.as_ref()) {
                     if let (Some(g), TaskState::Runnable | TaskState::Running) = (t.cpu_group, t.state) {

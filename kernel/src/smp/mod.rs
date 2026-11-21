@@ -417,10 +417,6 @@ pub fn secondary_main(index: usize) -> ! {
     };
     me.set_current(percpu::IDLE_SLOT);
     me.set_space(None);
-    if me.state.mark_online().is_err() {
-        // 发起方已判超时：不再参与任何工作
-        arch::halt_forever();
-    }
     let Some(runtime) = CPU_RUNTIME.get() else {
         crate::kprintln!("[JSR-SMP] reject=cpu_runtime_missing cpu={}", index);
         arch::halt_forever();
@@ -433,7 +429,14 @@ pub fn secondary_main(index: usize) -> ! {
         );
         arch::halt_forever();
     }
+    if me.state.mark_online().is_err() {
+        // Do not leave the runtime registry claiming a timed-out AP is online.
+        let _ = runtime.lock().mark_offline(index);
+        arch::halt_forever();
+    }
     // 加入调度：此后本处理器从自己的运行队列取任务，队列空时窃取，仍没有则休眠
+    // `idle_loop` publishes scheduler membership last, after registry and
+    // per-CPU state are visible.
     crate::sched::idle_loop(index)
 }
 
