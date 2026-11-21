@@ -1054,6 +1054,13 @@ fn execute_root_dynamic_programs(
     #[cfg(feature = "compat-wine-verify")]
     {
         install_root_android_files(root, origin)?;
+        let stdio_argv: [&[u8]; 1] = [b"/usr/bin/jasper-file-stdio"];
+        run_root_program(
+            root,
+            origin,
+            "/usr/bin/jasper-file-stdio",
+            &stdio_argv,
+        )?;
         let wine_argv: [&[u8]; 5] = [
             b"/usr/lib/x86_64-linux-gnu/wine/wine",
             b"cmd",
@@ -1061,11 +1068,9 @@ fn execute_root_dynamic_programs(
             b"echo",
             b"WINE_CMD_OK",
         ];
-        let wine_envp: [&[u8]; 13] = [
+        let wine_envp: [&[u8]; 11] = [
             b"HOME=/data",
             b"WINEPRELOADRESERVE=100010000000-100070000000",
-            b"LD_PRELOAD=/usr/lib/x86_64-linux-gnu/wine-path-shim.so",
-            b"JASPER_WINE_NTDLL_PATH=/usr/lib/x86_64-linux-gnu/wine/x86_64-unix/ntdll.so",
             b"PATH=/usr/lib/x86_64-linux-gnu/wine:/usr/bin:/bin",
             b"WINEPREFIX=/data/wineprefix",
             b"WINEARCH=win64",

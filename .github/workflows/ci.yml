@@ -106,6 +106,10 @@ jobs:
           python3 scripts/check-issue43-support-matrix.py
           python3 scripts/check-issue43-binary-inventory.py --self-test
           python3 scripts/check-issue43-binary-inventory.py
+      - name: Issue #56 跨生态宿主治理矩阵 / host-governance matrix
+        run: |
+          python3 scripts/check-issue56-host-governance.py --self-test
+          python3 scripts/check-issue56-host-governance.py
       - name: Issue #47 CPU 固定消费者清单 / CPU consumer inventory
         run: |
           python3 scripts/check-cpu-dynamic-consumers.py --self-test

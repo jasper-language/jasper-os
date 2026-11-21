@@ -246,6 +246,7 @@ ROOT_EXEC_PROBE=""
 ROOT_FULL_USERLAND=0
 ROOT_SIGNAL_FIXTURE=""
 ROOT_PPID_FIXTURE=""
+ROOT_STDIO_FIXTURE=""
 ROOT_ANDROID_TOYBOX="${JASPER_TOYBOX_BIN:-}"
 ROOT_AOSP_BINDER_TEST="${JASPER_AOSP_BINDER_TEST:-}"
 ROOT_ANDROID_TREE="${JASPER_ANDROID_TREE:-}"
@@ -268,6 +269,11 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native
   gcc -O2 -pthread verification/fixtures/linux/getppid.c \
     "${ANDROID_FIXTURE_FLAGS[@]}" \
     -o "$ROOT_PPID_FIXTURE" >"$OUT/root-ppid-build.log" 2>&1
+  if [ "$MODE" = compat-wine ]; then
+    ROOT_STDIO_FIXTURE="$TARGET/root-file-stdio"
+    gcc -O2 -fno-stack-protector verification/fixtures/linux/file_stdio.c \
+      -o "$ROOT_STDIO_FIXTURE" >"$OUT/root-file-stdio-build.log" 2>&1
+  fi
   if [ "$MODE" = android-ecosystem ] && [ -z "$ROOT_ANDROID_TOYBOX" ]; then
     echo "issue21-uefi-boot: JASPER_TOYBOX_BIN is required for android-ecosystem mode" >&2
     exit 64
@@ -309,9 +315,9 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native
 fi
 if [ "$REUSE_ROOT" != 1 ] && [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
   bash scripts/issue21-system-root-fixture.sh \
-    "$IMAGE" "$TARGET" 1050624 A 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" "$ROOT_PPID_FIXTURE" "$ROOT_ANDROID_TOYBOX" "$ROOT_AOSP_BINDER_TEST" "$ROOT_ANDROID_TREE" "$ROOT_ANDROID_LINKER_CONFIG" >"$OUT/system-root-a.log" 2>&1
+    "$IMAGE" "$TARGET" 1050624 A 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" "$ROOT_PPID_FIXTURE" "$ROOT_ANDROID_TOYBOX" "$ROOT_AOSP_BINDER_TEST" "$ROOT_ANDROID_TREE" "$ROOT_ANDROID_LINKER_CONFIG" "$ROOT_STDIO_FIXTURE" >"$OUT/system-root-a.log" 2>&1
   bash scripts/issue21-system-root-fixture.sh \
-    "$IMAGE" "$TARGET" 17827840 B 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" "$ROOT_PPID_FIXTURE" "$ROOT_ANDROID_TOYBOX" "$ROOT_AOSP_BINDER_TEST" "$ROOT_ANDROID_TREE" "$ROOT_ANDROID_LINKER_CONFIG" >"$OUT/system-root-b.log" 2>&1
+    "$IMAGE" "$TARGET" 17827840 B 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" "$ROOT_PPID_FIXTURE" "$ROOT_ANDROID_TOYBOX" "$ROOT_AOSP_BINDER_TEST" "$ROOT_ANDROID_TREE" "$ROOT_ANDROID_LINKER_CONFIG" "$ROOT_STDIO_FIXTURE" >"$OUT/system-root-b.log" 2>&1
   run_lifecycle jasper-control-init \
     "$IMAGE" 38654705664 "$KERNEL" 1 1 1 1 1 >"$OUT/control-init.log" 2>&1
   run_lifecycle jasper-control-inspect \

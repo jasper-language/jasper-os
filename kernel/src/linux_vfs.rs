@@ -148,7 +148,6 @@ pub(crate) const ANDROID_FILE_PATHS: &[&[u8]] = &[
     b"/usr/lib/x86_64-linux-gnu/wine/x86_64-unix/ntdll.so",
     b"/usr/lib/x86_64-linux-gnu/wine/wine",
     b"/usr/lib/x86_64-linux-gnu/wine/wineserver",
-    b"/usr/lib/x86_64-linux-gnu/wine-path-shim.so",
     b"/lib64/ld-linux-x86-64.so.2",
     b"/usr/lib/x86_64-linux-gnu/libunwind.so.8",
     b"/usr/lib/x86_64-linux-gnu/liblzma.so.5",
@@ -839,24 +838,20 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         },
         DirEntry {
             name: b"libunwind.so.8",
-            node: Node::File(FileId::AndroidFile(88)),
+            node: Node::File(FileId::AndroidFile(87)),
         },
         DirEntry {
             name: b"liblzma.so.5",
-            node: Node::File(FileId::AndroidFile(89)),
+            node: Node::File(FileId::AndroidFile(88)),
         },
         DirEntry {
             name: b"wine",
             node: Node::Directory(DirectoryId::UsrLibX86Wine),
         },
-        DirEntry {
-            name: b"wine-path-shim.so",
-            node: Node::File(FileId::AndroidFile(86)),
-        },
     ];
     const LIB64: &[DirEntry] = &[DirEntry {
         name: b"ld-linux-x86-64.so.2",
-        node: Node::File(FileId::AndroidFile(87)),
+        node: Node::File(FileId::AndroidFile(86)),
     }];
     const WINE: &[DirEntry] = &[
         DirEntry {
@@ -865,7 +860,7 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         },
         DirEntry {
             name: b"wine-preloader",
-            node: Node::File(FileId::AndroidFile(93)),
+            node: Node::File(FileId::AndroidFile(92)),
         },
         DirEntry {
             name: b"wine",

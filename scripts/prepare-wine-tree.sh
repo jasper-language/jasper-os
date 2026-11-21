@@ -122,9 +122,5 @@ sha256sum \
   > "$ROOT/SHA256SUMS"
 touch "$ROOT/.complete"
 
-gcc -shared -fPIC -O2 -Wl,-z,defs \
-  -o "$ROOT/usr/lib/x86_64-linux-gnu/wine-path-shim.so" \
-  "$(dirname "$0")/wine-path-shim.c" -ldl
-
 du -sh "$ROOT"
 printf 'wine-tree: PASS version=%s root=%s\n' "$VERSION" "$ROOT"

@@ -16,6 +16,7 @@ ROOT_ANDROID_TOYBOX="${10:-}"
 ROOT_AOSP_BINDER_TEST="${11:-}"
 ROOT_ANDROID_TREE="${12:-}"
 ROOT_ANDROID_LINKER_CONFIG="${13:-}"
+ROOT_STDIO_FIXTURE="${14:-}"
 [[ "$SLOT" == A || "$SLOT" == B ]]
 [[ "$RELEASE" =~ ^[1-9][0-9]*$ ]]
 mkdir -p "$WORK"
@@ -127,6 +128,11 @@ if [ -n "$ROOT_PPID_FIXTURE" ]; then
   write_file "$ROOT_PPID_FIXTURE" /usr/bin/jasper-getppid
   debugfs -w -R 'sif /usr/bin/jasper-getppid mode 0100755' "$PARTITION" >/dev/null
 fi
+if [ -n "$ROOT_STDIO_FIXTURE" ]; then
+  [[ -x "$ROOT_STDIO_FIXTURE" ]]
+  write_file "$ROOT_STDIO_FIXTURE" /usr/bin/jasper-file-stdio
+  debugfs -w -R 'sif /usr/bin/jasper-file-stdio mode 0100755' "$PARTITION" >/dev/null
+fi
 if [ -n "$ROOT_ANDROID_TOYBOX" ]; then
   [[ -x "$ROOT_ANDROID_TOYBOX" ]]
   write_file "$ROOT_ANDROID_TOYBOX" /usr/bin/toybox
@@ -200,6 +206,9 @@ if [ -n "$ROOT_SIGNAL_FIXTURE" ]; then
 fi
 if [ -n "$ROOT_PPID_FIXTURE" ]; then
   verify_payload /usr/bin/jasper-getppid "$ROOT_PPID_FIXTURE"
+fi
+if [ -n "$ROOT_STDIO_FIXTURE" ]; then
+  verify_payload /usr/bin/jasper-file-stdio "$ROOT_STDIO_FIXTURE"
 fi
 if [ -n "$ROOT_ANDROID_TOYBOX" ]; then
   verify_payload /usr/bin/toybox "$ROOT_ANDROID_TOYBOX"

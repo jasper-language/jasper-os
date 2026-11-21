@@ -1,6 +1,6 @@
 # COMPAT-WINE-1 Status
 
-Updated: 2026-11-21
+Updated: 2026-11-22
 
 Status: **in-progress / partial groundwork**.
 
@@ -38,16 +38,26 @@ Jasper now passes the earlier path-discovery failures:
 - `/data/wineprefix` and `/tmp` are available through the bounded writable
   compatibility namespace;
 - `creat` can create temporary-prefix files, and shared fd status flags report
-  `O_WRONLY` rather than falsely reporting `O_RDONLY`.
+  `O_WRONLY` rather than falsely reporting `O_RDONLY`;
+- `MAP_FIXED_NOREPLACE` is exposed with failure-closed replacement semantics;
+- the Wine-specific `LD_PRELOAD` path shim is removed. Wine reaches the same
+  bootstrap point without it, so generic Linux `readlink`/`realpath` semantics
+  now carry the path-discovery path.
 
 The current Jasper run reaches Wine prefix creation, creates the wineserver
-temp-state file, wraps it as a `FILE *`, and then aborts in glibc with
-`free(): invalid pointer` (`code=134`). The next blocker is therefore heap or
-libc state corruption during wineserver bootstrap, not ELF path discovery.
+temp-state file, and passes `fcntl`/`fstat`, but later aborts in glibc with
+`free(): invalid pointer` (`code=134`).
+
+A generic unmodified C/POSIX fixture now performs the same
+`creat -> fdopen -> fputs -> fclose` sequence twice through Jasper and exits
+zero with resources recovered. Disabling tcache does not change the Wine
+failure, and removing the preload shim does not change it either. The current
+evidence therefore points to Wine-specific runtime state established before
+this stdio sequence, not to the stdio sequence or path shim itself.
 
 The next slices must:
 
-1. isolate the glibc heap corruption during wineserver temp-state creation;
+1. isolate the Wine-specific heap corruption before wineserver startup;
 2. complete wineserver process and socket startup;
 3. load the first Windows PE executable and produce `WINE_CMD_OK`;
 4. then stage DXVK/VKD3D-Proton and continue through Direct3D to Vulkan.

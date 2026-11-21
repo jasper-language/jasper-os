@@ -5088,6 +5088,22 @@ fn linux_user_range_valid(start: u64, end: u64) -> bool {
             && end <= crate::arch::LOW_USER_WINDOW.1)
 }
 
+/// Returns whether an exact user range contains no concrete page or reservation.
+fn linux_mapping_range_free(pid: ObjId, start: u64, end: u64) -> bool {
+    const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
+    if proc::linux_reservation_overlap(pid, start, end).is_some() {
+        return false;
+    }
+    let mut page = start;
+    while page < end {
+        if proc::page_flags(pid, page).is_some() {
+            return false;
+        }
+        page += PAGE;
+    }
+    true
+}
+
 /// Maps a bounded file-backed or anonymous private compatibility region.
 ///
 /// 支持真实 libc 文件和匿名私有映射；拒绝写执行同开、越界、未对齐文件偏移、
@@ -5102,10 +5118,21 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const MAP_DENYWRITE: u64 = 0x800;
     const MAP_NORESERVE: u64 = 0x4000;
     const MAP_STACK: u64 = 0x20000;
+    const MAP_FIXED_NOREPLACE: u64 = 0x10_0000;
     const PROT_READ: u64 = 0x1;
     const PROT_WRITE: u64 = 0x2;
     const PROT_EXEC: u64 = 0x4;
 
+    #[cfg(feature = "compat-wine-verify")]
+    if args[3] & MAP_FIXED_NOREPLACE != 0 {
+        crate::kprintln!(
+            "[JSR-WINE-MMAP] addr={:#x} bytes={:#x} prot={:#x} flags={:#x}",
+            args[0],
+            args[1],
+            args[2],
+            args[3]
+        );
+    }
     let bytes = args[1];
     if bytes == 0 || args[2] & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
         return Err(CompatErrno::Invalid);
@@ -5121,9 +5148,12 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 | MAP_32BIT
                 | MAP_DENYWRITE
                 | MAP_NORESERVE
-                | MAP_STACK)
+                | MAP_STACK
+                | MAP_FIXED_NOREPLACE)
             != 0
         || args[5] % PAGE != 0
+        || args[3] & MAP_FIXED_NOREPLACE != 0
+            && (args[3] & MAP_FIXED != 0 || args[0] == 0)
     {
         return Err(CompatErrno::Invalid);
     }
@@ -5214,6 +5244,17 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         let end = requested
             .checked_add(rounded)
             .ok_or(CompatErrno::NoMemory)?;
+        if args[3] & MAP_FIXED_NOREPLACE != 0
+            && !linux_mapping_range_free(pid, requested, end)
+        {
+            #[cfg(feature = "compat-wine-verify")]
+            crate::kprintln!(
+                "[JSR-WINE-MMAP] noreplace-conflict start={:#x} end={:#x}",
+                requested,
+                end
+            );
+            return Err(CompatErrno::Exists);
+        }
         if args[3] & MAP_FIXED != 0 {
             let _ = proc::linux_remove_reserved_range(pid, requested, end);
         }
@@ -5249,6 +5290,17 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
         return Ok(requested);
     }
+    if args[3] & MAP_FIXED_NOREPLACE != 0
+        && !linux_mapping_range_free(pid, requested, requested + rounded)
+    {
+        #[cfg(feature = "compat-wine-verify")]
+        crate::kprintln!(
+            "[JSR-WINE-MMAP] noreplace-conflict start={:#x} end={:#x}",
+            requested,
+            requested + rounded
+        );
+        return Err(CompatErrno::Exists);
+    }
     if args[3] & MAP_FIXED != 0 {
         // MAP_FIXED replaces prior mappings by contract. The source bytes remain available
         // in the immutable virtual file, so a later mapping failure cannot expose stale pages.
@@ -5278,11 +5330,19 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             }
             page += PAGE;
         }
+        if free
+            && proc::linux_reservation_overlap(pid, start, start + rounded).is_some()
+        {
+            free = false;
+        }
         if free {
             break;
         }
         if args[3] & MAP_FIXED != 0 {
             return Err(CompatErrno::NoMemory);
+        }
+        if args[3] & MAP_FIXED_NOREPLACE != 0 {
+            return Err(CompatErrno::Exists);
         }
         start = start.checked_add(rounded).ok_or(CompatErrno::NoMemory)?;
     }
