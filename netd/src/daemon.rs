@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
-use crate::service::{QuicEchoService, QuicLimits, QuicServiceStats};
+use crate::service::{QuicEchoService, QuicLimits, QuicServiceStats, ServiceState};
 use crate::{server_config, QuicProfile};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,6 +69,46 @@ impl DaemonOptions {
     }
 }
 
+pub struct RunningDaemon {
+    service: QuicEchoService,
+}
+
+impl RunningDaemon {
+    pub fn local_addr(&self) -> SocketAddr {
+        self.service.local_addr()
+    }
+
+    pub fn state(&self) -> ServiceState {
+        self.service.state()
+    }
+
+    pub fn stats(&self) -> QuicServiceStats {
+        self.service.stats()
+    }
+
+    pub async fn shutdown(self) -> Result<QuicServiceStats, DaemonError> {
+        self.service
+            .shutdown()
+            .await
+            .map_err(|_| DaemonError::Shutdown)
+    }
+}
+
+/// Load credentials, admit limits and bind the daemon.
+///
+/// No listening state is published externally until every preceding step has
+/// succeeded.
+pub fn start(options: DaemonOptions, profile: QuicProfile) -> Result<RunningDaemon, DaemonError> {
+    options.validate_credentials(profile)?;
+    let certificate = load_certificate(&options.certificate)?;
+    let private_key = load_private_key(&options.private_key)?;
+    let config =
+        server_config(certificate, private_key, profile).map_err(|_| DaemonError::ServerConfig)?;
+    let service = QuicEchoService::start(config, options.bind, options.limits)
+        .map_err(|_| DaemonError::Start)?;
+    Ok(RunningDaemon { service })
+}
+
 /// Start the daemon and drain it when the supplied shutdown future completes.
 ///
 /// Credential loading, transport admission and serving all happen in this
@@ -81,15 +121,9 @@ pub async fn run_until<F>(
 where
     F: Future<Output = ()>,
 {
-    options.validate_credentials(profile)?;
-    let certificate = load_certificate(&options.certificate)?;
-    let private_key = load_private_key(&options.private_key)?;
-    let config =
-        server_config(certificate, private_key, profile).map_err(|_| DaemonError::ServerConfig)?;
-    let service = QuicEchoService::start(config, options.bind, options.limits)
-        .map_err(|_| DaemonError::Start)?;
+    let service = start(options, profile)?;
     shutdown.await;
-    service.shutdown().await.map_err(|_| DaemonError::Shutdown)
+    service.shutdown().await
 }
 
 fn load_certificate(path: &Path) -> Result<CertificateDer<'static>, DaemonError> {
