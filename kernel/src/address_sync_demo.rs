@@ -68,7 +68,10 @@ fn wait_until_parked(expected: u32) -> bool {
         if DONE.load(Ordering::Acquire) != 0 {
             return false;
         }
-        sched::yield_with_cause("yield");
+        // Sleep rather than spin-yield on a Background task. Under a loaded TCG host,
+        // a background yield could repeatedly re-enter before the lower-id waiters
+        // completed their arm/store sequence and left the acceptance run spinning.
+        sched::sleep_ticks(1);
     }
 }
 
@@ -115,7 +118,6 @@ fn waiter(index: usize) {
             value,
         }
     };
-
     loop {
         {
             let sync = SYNC.lock();
