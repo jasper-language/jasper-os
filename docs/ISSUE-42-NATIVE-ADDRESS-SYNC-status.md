@@ -83,6 +83,15 @@ wait key。等待者重新验证 capability 并失败关闭：
 
 证据见 `evidence/issue42-m02-revoke-20261121-r3/`；页帧、对象、映射和等待登记均回基线。
 
+第四轮在等待者停车后直接退出并回收所属 Process，由进程生命周期撤销映射和能力，
+同样唤醒等待者并回到资源基线：
+
+```text
+[JSR-ADDRESS-SYNC] pass=4 phase=exit mode=exit cpus=4 distributed=true parked=1 terminal=true exited=true revoked=true resources=true failed=0
+```
+
+证据见 `evidence/issue42-m02-exit-20261121-r5/`。
+
 覆盖场景：
 
 - 两个 capability 别名连接同一条件；
@@ -95,7 +104,7 @@ wait key。等待者重新验证 capability 并失败关闭：
 
 - 已完成内核内真实 Process/MemoryObject/调度停车接线，但尚无关闭兼容层后的
   CPL3 原生调用者和经批准的用户接口；
-- 跨 CPU 等待/发布与停车后 capability 撤销已通过；尚缺运行中重映射、task exit 竞争与压力公平性矩阵；
+- 跨 CPU 等待/发布、停车后 capability 撤销和 Process 退出已通过；尚缺运行中重映射与压力公平性矩阵；
 - 用户态 Pager 仍未实现；PagerCapability、FaultEvent、处理者死亡、递归缺页、
   队列满、超时、取消与页表最终裁决都需要独立 ABI/安全设计；
 - 本切片不新增 syscall，不改变 `NO-HARDCODE-RESIDUAL-1` 或任何 DAG 节点状态。
