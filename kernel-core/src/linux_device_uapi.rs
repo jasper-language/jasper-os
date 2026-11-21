@@ -647,4 +647,80 @@ mod tests {
         assert_eq!(endpoint.pending_requests(), 0);
         assert_eq!(endpoint.mapped_buffers(), 0);
     }
+
+    #[test]
+    fn crash_recovery_rejects_old_pass_and_preserves_terminal_ownership() {
+        let (mut broker, host, pass, facts) = broker();
+        let mut old_endpoint = LinuxDeviceEndpoint::<2, 1>::open(
+            UapiVersion::CURRENT,
+            NODE,
+            OpenAccess::ReadWrite,
+            pass,
+            facts,
+        )
+        .unwrap();
+        let request = old_endpoint.poll(&mut broker).unwrap();
+        let crash = broker.crash(host, QuiesceProof::CLEAN).unwrap();
+        assert_eq!(crash.cancelled, 1);
+        assert_eq!(crash.revoked_passes, 1);
+
+        let recovered_host = broker.recover(host, QuiesceProof::CLEAN).unwrap();
+        assert_ne!(recovered_host.generation(), host.generation());
+        assert_eq!(
+            old_endpoint.ioctl(
+                &mut broker,
+                IoctlRequest {
+                    command: 1,
+                    payload_bytes: 0,
+                },
+            ),
+            Err(UapiError::DeviceGone)
+        );
+        assert_eq!(old_endpoint.complete(&mut broker, request), Err(UapiError::InvalidRequest));
+        assert_eq!(old_endpoint.close(&mut broker), 0);
+
+        let new_pass = broker
+            .admit(recovered_host, DEVICE, ALL, Policy::new(ALL, 2, 8, 2))
+            .unwrap();
+        let new_facts = broker.pass_facts(new_pass).unwrap();
+        let mut new_endpoint = LinuxDeviceEndpoint::<1, 1>::open(
+            UapiVersion::CURRENT,
+            NODE,
+            OpenAccess::ReadOnly,
+            new_pass,
+            new_facts,
+        )
+        .unwrap();
+        let new_request = new_endpoint.read(&mut broker, 1).unwrap();
+        assert_eq!(
+            new_endpoint.complete(&mut broker, new_request),
+            Ok(Terminal::Completed)
+        );
+        new_endpoint.close(&mut broker);
+        assert_eq!(broker.stats().pending_requests, 0);
+    }
+
+    #[test]
+    fn cancel_and_complete_publish_one_terminal() {
+        let (mut broker, _, pass, facts) = broker();
+        let mut endpoint = LinuxDeviceEndpoint::<1, 1>::open(
+            UapiVersion::CURRENT,
+            NODE,
+            OpenAccess::ReadWrite,
+            pass,
+            facts,
+        )
+        .unwrap();
+        let request = endpoint.write(&mut broker, 1).unwrap();
+        assert_eq!(
+            endpoint.cancel(&mut broker, request),
+            Ok(Terminal::Cancelled)
+        );
+        assert_eq!(
+            endpoint.complete(&mut broker, request),
+            Err(UapiError::InvalidRequest)
+        );
+        assert_eq!(endpoint.close(&mut broker), 0);
+        assert_eq!(broker.stats().pending_requests, 0);
+    }
 }

@@ -32,7 +32,7 @@ only mutable authority.
 
 ```text
 cargo test --locked -p kernel-core linux_device_uapi --lib
-5 passed; 0 failed
+7 passed; 0 failed
 
 cargo check --locked -p jasper-kernel --target x86_64-unknown-none
 PASS
@@ -40,8 +40,9 @@ PASS
 
 Negative coverage includes wrong UAPI major, invalid node, read/write access
 violation, missing DMA-write admission, resource capacity rejection before
-request publication, reset generation invalidation, idempotent close and full
-local request/buffer cleanup.
+request publication, reset generation invalidation, backend crash/recovery with
+old-pass rejection, cancel/complete single-terminal behavior, idempotent close
+and full local request/buffer cleanup.
 
 ## Remaining gates
 
