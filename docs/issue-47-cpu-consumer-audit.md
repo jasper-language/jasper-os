@@ -278,4 +278,9 @@ online/offline 扩展时先完成存储预留，再提交 membership。仅把
 - `kernel/src/wcet.rs` 的每核 IRQ-off 起点和嵌套深度改为 bootstrap 加堆后备
   记录，由 SMP 在任何 secondary 启动前统一预留；WCET 热路径不再直接索引固定
   CPU 数组。
+- `kernel/src/wcet.rs` 的准入检查改为使用无锁
+  `smp::cpu_index_admitted()`；该函数位于 `arch::irq_save_disable()` 的调用链内，
+  不能再通过会获取 `CPU_RUNTIME` 锁的 `smp::cpu_count()` 读取准入数量，否则会从
+  `IrqSpinLock` 经 WCET 路径递归回同一把锁。2-vCPU UEFI 生产启动已越过 SMP、IRQ
+  拓扑、用户程序执行和生命周期健康检查。
 - 其余调度器固定表、共享 CpuSet 门面、部分诊断和亲和 ABI 尚未迁移。

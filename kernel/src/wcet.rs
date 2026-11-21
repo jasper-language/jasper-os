@@ -14,9 +14,9 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use spin::Once;
 
-use kernel_core::sync::Atomic64;
-use kernel_core::smp::MAX_CPUS;
 use kernel_core::cpu_storage::CpuTailLayout;
+use kernel_core::smp::MAX_CPUS;
+use kernel_core::sync::Atomic64;
 
 // 32 位目标没有 64 位原子指令：用 kernel-core 的自旋锁模拟单元。
 static SYSCALL_MAX_CYCLES: Atomic64 = Atomic64::new(0);
@@ -42,8 +42,7 @@ impl IrqOffState {
 
 /// 每处理器「关中断起点」与嵌套深度。周期戳只取低 32 位：只比较差值，
 /// 环绕减法仍然正确；超过一秒量级的临界区本就不该存在。
-static BOOTSTRAP_IRQ_OFF: [IrqOffState; MAX_CPUS] =
-    [const { IrqOffState::new() }; MAX_CPUS];
+static BOOTSTRAP_IRQ_OFF: [IrqOffState; MAX_CPUS] = [const { IrqOffState::new() }; MAX_CPUS];
 static EXTRA_IRQ_OFF: Once<Result<Vec<IrqOffState>, ReserveError>> = Once::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,17 +81,16 @@ pub fn prepare_cpu_storage(cpus: usize) -> Result<(), ReserveError> {
 }
 
 fn irq_off_state(cpu: usize) -> Option<&'static IrqOffState> {
-    let layout = CpuTailLayout::new(MAX_CPUS, crate::smp::cpu_count());
-    if cpu >= layout.admitted() {
+    // This runs from `arch::irq_save_disable`, including while acquiring the
+    // CPU runtime lock. It must never call `smp::cpu_count()`, which takes
+    // that lock and would recurse through this same IRQ-off path.
+    if !crate::smp::cpu_index_admitted(cpu) {
         return None;
     }
     if let Some(state) = BOOTSTRAP_IRQ_OFF.get(cpu) {
         return Some(state);
     }
-    if !layout.is_tail(cpu) {
-        return None;
-    }
-    let extra = layout.tail_index(cpu)?;
+    let extra = cpu.checked_sub(MAX_CPUS)?;
     EXTRA_IRQ_OFF.get()?.as_ref().ok()?.get(extra)
 }
 
