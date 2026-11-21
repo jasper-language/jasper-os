@@ -1,0 +1,4 @@
+qemu_rc=124
+irqring_cpu_depart=ok
+smp3_detach=ok
+full_boot_acceptance=false

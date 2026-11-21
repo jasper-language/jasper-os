@@ -3203,6 +3203,21 @@ impl Scheduler {
     /// tick leases have left. This is the software membership half of CPU
     /// offline; architecture stop/start remains the caller's responsibility.
     pub fn offline_idle_cpu(&mut self, c: usize) -> Result<(), &'static str> {
+        self.ensure_can_offline_idle_cpu(c)?;
+        self.nohz.restart(c, self.now, self.local_ticks[c]);
+        self.online.remove(c);
+        self.kicks.remove(c);
+        Ok(())
+    }
+
+    /// Validate an idle-CPU departure without changing scheduler membership.
+    ///
+    /// The CPU departure coordinator runs this before interrupt teardown so
+    /// task, tick-lease, or boot-CPU rejection is discovered before quiescence.
+    ///
+    /// 在不改变调度成员集合的前提下校验空闲 CPU 离场。离场协调器会在中断
+    /// 拆除前调用，确保任务、tick lease 或 BSP 拒绝不会在静态化之后才暴露。
+    pub fn ensure_can_offline_idle_cpu(&self, c: usize) -> Result<(), &'static str> {
         if c == this_cpu() || c == 0 {
             return Err("boot-or-self");
         }
@@ -3227,15 +3242,22 @@ impl Scheduler {
         {
             return Err("tick-lease");
         }
-        self.nohz.restart(c, self.now, self.local_ticks[c]);
-        self.online.remove(c);
-        self.kicks.remove(c);
         Ok(())
     }
 
     /// Reattach a previously detached idle CPU to scheduling. The architecture
     /// must have completed any platform-side restart before this call.
     pub fn online_idle_cpu(&mut self, c: usize) -> Result<(), &'static str> {
+        self.ensure_can_online_idle_cpu(c)?;
+        self.online.insert(c);
+        self.kicks.insert(c);
+        Ok(())
+    }
+
+    /// Validate an idle-CPU reattach without changing scheduler membership.
+    ///
+    /// 在不改变调度成员集合的前提下校验空闲 CPU 重新接入。
+    pub fn ensure_can_online_idle_cpu(&self, c: usize) -> Result<(), &'static str> {
         if c == this_cpu() || self.cpu_stats.get(c).is_none() {
             return Err("bad-cpu");
         }
@@ -3249,8 +3271,6 @@ impl Scheduler {
         if is_worker(current) || self.waiting(c) != ClassMask::EMPTY {
             return Err("task-active");
         }
-        self.online.insert(c);
-        self.kicks.insert(c);
         Ok(())
     }
 

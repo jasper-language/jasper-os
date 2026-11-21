@@ -164,6 +164,35 @@ quota 迁移保留为阶段 3 的执行门，不再混入阶段 1 的固定容�
 第一版，但仍需在阶段 2 开工前逐文件确认生成代码、宏和构建期条件没有遗漏；阶段 2/3
 完成前 `CPU-DYNAMIC-ADMISSION-1` 不能标记 done。
 
+## CPU 软件离场事务
+
+本切片新增统一的 `smp::detach_cpu_membership` / `smp::attach_cpu_membership`
+软件离场事务。离场前先预检 CPU runtime generation、启动 CPU/最后一颗在线 CPU、
+调度 leaf、任务 home/on_cpu、tick lease，全部通过后才移动设备 IRQ 路由；随后依次
+退出调度成员、关闭该 CPU 的 Interrupt 对象并归还 MSI-X 绑定/向量、推进 CPU runtime
+generation、更新每核状态并降级 line-IRQ quota。重新接入时按 MSI dispatch、runtime
+generation、CPU 状态和调度成员顺序恢复。
+
+真实 `4 vCPU` KVM 的 IRQ Ring 路径已产生：
+
+```text
+[JSR-IRQRING] depart target=1 objects=1 bindings=1 vectors=1 residual=0 routes=0
+runtime_offline=true runtime_online=true generation=5/6 resumed=true
+sched_detached=true sched_resumed=true ok=true
+```
+
+同一轮汇总为 `cpu_depart=ok`、`vectors_back=true`、`frames_back=true`、
+`failed=0`；同一启动的 `SMP3` 活跃路由也得到 `rerouted=Ok(2)`、无 stale/offline
+目标且资源回基线。证据见 `evidence/cpu-membership-depart-20261121-r6/`。该次 QEMU
+在后续无关的长计时矩阵撞到 300 秒外限，因此只证明上述定向项，不冒充完整启动验收。
+
+该轮同时复现并修复了一个既有锁序缺陷：`detach_cpu_lines` 与自动均衡在持有
+`system.irq.routing` 时截断预分配 `Vec`，其未使用元素的析构会进入堆锁。现在先释放
+路由守卫再截断，所有可能释放堆存储的动作都发生在路由锁之外。
+
+这不关闭 `CPU-DYNAMIC-CONSUMERS-1`：平台侧真实停核/重启、非空 running task 的
+上下文迁移、架构 stop IPI、IRQ 在飞完成与完整 hotplug rollback 矩阵仍需独立证据。
+
 ## 消费链迁移进度
 
 - `kernel-core/src/msi.rs`：已完成生产迁移。`VectorPool` 在生产

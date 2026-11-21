@@ -141,6 +141,43 @@ pub struct StartReport {
     pub disabled: usize,
 }
 
+/// Result of removing one idle secondary CPU from software execution.
+/// 一个空闲次级 CPU 退出软件执行域后的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuMembershipReport {
+    pub routes_rerouted: usize,
+    pub interrupt_objects_closed: usize,
+    pub interrupt_bindings_removed: usize,
+    pub interrupt_vectors_returned: usize,
+    pub interrupt_residual_bindings: usize,
+    pub generation: u64,
+}
+
+/// Failure phase for a CPU membership transition.
+/// CPU 成员关系迁移失败的阶段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuMembershipError {
+    BadCpu,
+    Runtime(&'static str),
+    Routes(kernel_core::irq::IrqError),
+    Quiesce(kernel_core::msi::MsiError),
+    Scheduler(&'static str),
+    State(SmpError),
+}
+
+impl CpuMembershipError {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::BadCpu => "system.cpu.error.no_such_cpu",
+            Self::Runtime(error) => error,
+            Self::Routes(error) => error.name(),
+            Self::Quiesce(error) => error.name(),
+            Self::Scheduler(_) => "system.cpu.error.scheduler_departure",
+            Self::State(error) => error.name(),
+        }
+    }
+}
+
 /// 预留平台需要的低端启动帧（在页帧分配器初始化之后、低端内存被其他用途占满之前调用）。
 /// 平台不需要时什么也不做。返回是否满足了平台要求。
 /// Reserve the platform's low start-up frame, if it needs one.
@@ -506,6 +543,116 @@ pub fn online_set() -> CpuSet {
         }
     }
     s
+}
+
+/// Remove an idle secondary CPU from scheduler, IRQ, MSI and runtime-registry
+/// membership in one ordered software departure.
+///
+/// Runtime and scheduler preflight complete before route mutation or interrupt
+/// teardown. Device routes move while the CPU still participates in scheduling;
+/// scheduler membership is then withdrawn, MSI objects quiesced, and finally the
+/// runtime generation advances. Physical halt/start remains a hardware gate.
+///
+/// 在移动路由或拆除中断前完成 runtime 与调度器预检。设备路由先迁走，再退出调度、
+/// 关闭 MSI 对象并推进 runtime 代际；平台侧真实停核/重启仍属于独立硬件门。
+pub fn detach_cpu_membership(
+    cpu: usize,
+) -> Result<CpuMembershipReport, CpuMembershipError> {
+    if cpu == 0 || cpu == arch::cpu_index() || cpu >= cpu_count() {
+        return Err(CpuMembershipError::BadCpu);
+    }
+    let runtime = CPU_RUNTIME.get().ok_or(CpuMembershipError::BadCpu)?;
+    runtime
+        .lock()
+        .ensure_can_mark_offline(cpu)
+        .map_err(|error| CpuMembershipError::Runtime(error.name()))?;
+    crate::sched::ensure_can_offline_idle_cpu(cpu)
+        .map_err(CpuMembershipError::Scheduler)?;
+
+    crate::kprintln!("[JSR-CPU-DEPART] stage=routes cpu={}", cpu);
+    let routes_rerouted = crate::irq::device::detach_cpu_lines(cpu)
+        .map_err(CpuMembershipError::Routes)?;
+    crate::kprintln!(
+        "[JSR-CPU-DEPART] stage=scheduler cpu={} routes={}",
+        cpu,
+        routes_rerouted
+    );
+    crate::sched::offline_idle_cpu(cpu).map_err(CpuMembershipError::Scheduler)?;
+    crate::kprintln!("[JSR-CPU-DEPART] stage=msi cpu={}", cpu);
+    let quiesced = match crate::interrupt::quiesce_cpu(cpu) {
+        Ok(report) => report,
+        Err(error) => {
+            let _ = crate::sched::online_idle_cpu(cpu);
+            return Err(CpuMembershipError::Quiesce(error));
+        }
+    };
+    crate::kprintln!("[JSR-CPU-DEPART] stage=runtime cpu={}", cpu);
+    let generation = runtime
+        .lock()
+        .mark_offline(cpu)
+        .map_err(|error| CpuMembershipError::Runtime(error.name()))?;
+    let Some(percpu) = percpu::get(cpu) else {
+        return Err(CpuMembershipError::BadCpu);
+    };
+    percpu
+        .state
+        .mark_offline()
+        .map_err(CpuMembershipError::State)?;
+    crate::kprintln!("[JSR-CPU-DEPART] stage=quota cpu={}", cpu);
+    crate::irq::device::demote_cpu_quota(cpu)
+        .map_err(CpuMembershipError::Routes)?;
+    crate::kprintln!("[JSR-CPU-DEPART] stage=commit cpu={}", cpu);
+
+    Ok(CpuMembershipReport {
+        routes_rerouted,
+        interrupt_objects_closed: quiesced.objects_closed,
+        interrupt_bindings_removed: quiesced.bindings_removed,
+        interrupt_vectors_returned: quiesced.vectors_returned,
+        interrupt_residual_bindings: quiesced.residual_bindings,
+        generation,
+    })
+}
+
+/// Reattach a CPU that completed [`detach_cpu_membership`].
+///
+/// Any required platform restart must complete first. Dispatch resumes before
+/// the runtime generation, CPU state cell and scheduler membership are restored.
+///
+/// 平台侧若需要重启，必须先完成。随后依次恢复 MSI 分发、runtime 代际、每核状态
+/// 与调度成员。
+pub fn attach_cpu_membership(cpu: usize) -> Result<u64, CpuMembershipError> {
+    if cpu == 0 || cpu == arch::cpu_index() || cpu >= cpu_count() {
+        return Err(CpuMembershipError::BadCpu);
+    }
+    let runtime = CPU_RUNTIME.get().ok_or(CpuMembershipError::BadCpu)?;
+    runtime
+        .lock()
+        .ensure_can_mark_online(cpu)
+        .map_err(|error| CpuMembershipError::Runtime(error.name()))?;
+    crate::sched::ensure_can_online_idle_cpu(cpu)
+        .map_err(CpuMembershipError::Scheduler)?;
+    crate::irq::msi_resume_cpu(cpu).map_err(CpuMembershipError::Quiesce)?;
+    let generation = runtime
+        .lock()
+        .mark_online(cpu)
+        .map_err(|error| CpuMembershipError::Runtime(error.name()))?;
+    let Some(percpu) = percpu::get(cpu) else {
+        return Err(CpuMembershipError::BadCpu);
+    };
+    if let Err(error) = percpu
+        .state
+        .begin_start()
+        .and_then(|_| percpu.state.mark_online())
+    {
+        let _ = runtime.lock().mark_offline(cpu);
+        return Err(CpuMembershipError::State(error));
+    }
+    if let Err(error) = crate::sched::online_idle_cpu(cpu) {
+        let _ = percpu.state.mark_offline();
+        let _ = runtime.lock().mark_offline(cpu);
+        return Err(CpuMembershipError::Scheduler(error));
+    }
+    Ok(generation)
 }
 
 /// 目标是否可接收核间中断：存在、不是自己、在线。

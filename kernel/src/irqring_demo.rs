@@ -31,7 +31,7 @@ use crate::proc::{self, ProcState};
 use crate::syscall::{table as abi, SyscallSet};
 use crate::task::TaskId;
 use crate::virtio::{self, Queue, VirtioPci, BUFFER_BYTES};
-use crate::{arch, interrupt, irq, kobj, kprintln, mmio, pci, ring, sched};
+use crate::{arch, interrupt, irq, kobj, kprintln, mmio, pci, ring, sched, smp};
 
 /// 用户栈顶部在私有窗口内的偏移（与其它 ELF 演练一致）。
 const STACK_OFF: u64 = 0xC0_0000;
@@ -83,6 +83,11 @@ static DEPART_OBJECTS: AtomicU32 = AtomicU32::new(0);
 static DEPART_BINDINGS: AtomicU32 = AtomicU32::new(0);
 static DEPART_RETURNED: AtomicU32 = AtomicU32::new(0);
 static DEPART_RESIDUAL: AtomicU32 = AtomicU32::new(0);
+static DEPART_ROUTES: AtomicU32 = AtomicU32::new(0);
+static DEPART_RUNTIME_OFF: AtomicBool = AtomicBool::new(false);
+static DEPART_RUNTIME_ON: AtomicBool = AtomicBool::new(false);
+static DEPART_GENERATION_OFF: AtomicU64 = AtomicU64::new(0);
+static DEPART_GENERATION_ON: AtomicU64 = AtomicU64::new(0);
 static DEPART_RESUMED: AtomicBool = AtomicBool::new(false);
 static DEPART_SCHED_OFF: AtomicBool = AtomicBool::new(false);
 static DEPART_SCHED_ON: AtomicBool = AtomicBool::new(false);
@@ -237,22 +242,42 @@ fn depart_driver() {
                 .is_some_and(|view| view.waiting && view.cpu == target)
         });
         if ok {
-            match interrupt::quiesce_cpu(target) {
+            match smp::detach_cpu_membership(target) {
                 Ok(report) => {
-                    DEPART_OBJECTS.store(report.objects_closed as u32, Ordering::Relaxed);
-                    DEPART_BINDINGS.store(report.bindings_removed as u32, Ordering::Relaxed);
-                    DEPART_RETURNED.store(report.vectors_returned as u32, Ordering::Relaxed);
-                    DEPART_RESIDUAL.store(report.residual_bindings as u32, Ordering::Relaxed);
-                    DEPART_RESUMED.store(irq::msi_resume_cpu(target).is_ok(), Ordering::Release);
-                    DEPART_SCHED_OFF.store(
-                        sched::offline_idle_cpu(target).is_ok(),
-                        Ordering::Release,
+                    DEPART_OBJECTS.store(
+                        report.interrupt_objects_closed as u32,
+                        Ordering::Relaxed,
                     );
-                    DEPART_SCHED_ON.store(
-                        sched::online_idle_cpu(target).is_ok(),
-                        Ordering::Release,
+                    DEPART_BINDINGS.store(
+                        report.interrupt_bindings_removed as u32,
+                        Ordering::Relaxed,
                     );
-                    ok = report.residual_bindings == 0
+                    DEPART_RETURNED.store(
+                        report.interrupt_vectors_returned as u32,
+                        Ordering::Relaxed,
+                    );
+                    DEPART_RESIDUAL.store(
+                        report.interrupt_residual_bindings as u32,
+                        Ordering::Relaxed,
+                    );
+                    DEPART_ROUTES.store(report.routes_rerouted as u32, Ordering::Relaxed);
+                    DEPART_GENERATION_OFF.store(report.generation, Ordering::Release);
+                    DEPART_RUNTIME_OFF.store(true, Ordering::Release);
+                    DEPART_SCHED_OFF.store(true, Ordering::Release);
+                    match smp::attach_cpu_membership(target) {
+                        Ok(generation) => {
+                            DEPART_GENERATION_ON.store(generation, Ordering::Release);
+                            DEPART_RUNTIME_ON.store(true, Ordering::Release);
+                            DEPART_RESUMED.store(true, Ordering::Release);
+                            DEPART_SCHED_ON.store(true, Ordering::Release);
+                        }
+                        Err(error) => check(false, error.name()),
+                    }
+                    ok = DEPART_RESIDUAL.load(Ordering::Acquire) == 0
+                        && DEPART_RUNTIME_OFF.load(Ordering::Acquire)
+                        && DEPART_RUNTIME_ON.load(Ordering::Acquire)
+                        && DEPART_GENERATION_ON.load(Ordering::Acquire)
+                            > DEPART_GENERATION_OFF.load(Ordering::Acquire)
                         && DEPART_SCHED_OFF.load(Ordering::Acquire)
                         && DEPART_SCHED_ON.load(Ordering::Acquire);
                 }
@@ -270,12 +295,17 @@ fn depart_driver() {
     }
     DEPART_DONE.store(true, Ordering::Release);
     kprintln!(
-        "[JSR-IRQRING] depart target={} objects={} bindings={} vectors={} residual={} resumed={} sched_detached={} sched_resumed={} ok={}",
+        "[JSR-IRQRING] depart target={} objects={} bindings={} vectors={} residual={} routes={} runtime_offline={} runtime_online={} generation={}/{} resumed={} sched_detached={} sched_resumed={} ok={}",
         target,
         DEPART_OBJECTS.load(Ordering::Relaxed),
         DEPART_BINDINGS.load(Ordering::Relaxed),
         DEPART_RETURNED.load(Ordering::Relaxed),
         DEPART_RESIDUAL.load(Ordering::Relaxed),
+        DEPART_ROUTES.load(Ordering::Relaxed),
+        DEPART_RUNTIME_OFF.load(Ordering::Acquire),
+        DEPART_RUNTIME_ON.load(Ordering::Acquire),
+        DEPART_GENERATION_OFF.load(Ordering::Acquire),
+        DEPART_GENERATION_ON.load(Ordering::Acquire),
         DEPART_RESUMED.load(Ordering::Acquire),
         DEPART_SCHED_OFF.load(Ordering::Acquire),
         DEPART_SCHED_ON.load(Ordering::Acquire),
@@ -461,6 +491,10 @@ pub fn run() {
             && DEPART_BINDINGS.load(Ordering::Relaxed) >= 1
             && DEPART_RETURNED.load(Ordering::Relaxed) >= 1
             && DEPART_RESIDUAL.load(Ordering::Relaxed) == 0
+            && DEPART_RUNTIME_OFF.load(Ordering::Acquire)
+            && DEPART_RUNTIME_ON.load(Ordering::Acquire)
+            && DEPART_GENERATION_ON.load(Ordering::Acquire)
+                > DEPART_GENERATION_OFF.load(Ordering::Acquire)
             && DEPART_RESUMED.load(Ordering::Acquire)
             && DEPART_SCHED_OFF.load(Ordering::Acquire)
             && DEPART_SCHED_ON.load(Ordering::Acquire);
@@ -468,12 +502,17 @@ pub fn run() {
         check(report_ok, "CPU 离场没有关闭对象、解绑并归还向量");
         let ok = user_ok && report_ok;
         kprintln!(
-            "[JSR-IRQRING] depart target={} objects={} bindings={} vectors={} residual={} resumed={} sched_detached={} sched_resumed={} ok={}",
+            "[JSR-IRQRING] depart target={} objects={} bindings={} vectors={} residual={} routes={} runtime_offline={} runtime_online={} generation={}/{} resumed={} sched_detached={} sched_resumed={} ok={}",
             target,
             DEPART_OBJECTS.load(Ordering::Relaxed),
             DEPART_BINDINGS.load(Ordering::Relaxed),
             DEPART_RETURNED.load(Ordering::Relaxed),
             DEPART_RESIDUAL.load(Ordering::Relaxed),
+            DEPART_ROUTES.load(Ordering::Relaxed),
+            DEPART_RUNTIME_OFF.load(Ordering::Acquire),
+            DEPART_RUNTIME_ON.load(Ordering::Acquire),
+            DEPART_GENERATION_OFF.load(Ordering::Acquire),
+            DEPART_GENERATION_ON.load(Ordering::Acquire),
             DEPART_RESUMED.load(Ordering::Acquire),
             DEPART_SCHED_OFF.load(Ordering::Acquire),
             DEPART_SCHED_ON.load(Ordering::Acquire),

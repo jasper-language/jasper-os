@@ -837,9 +837,19 @@ pub fn offline_idle_cpu(c: usize) -> Result<(), &'static str> {
     with_mut(|s| s.offline_idle_cpu(c))
 }
 
+/// Preflight an idle-CPU scheduler departure without changing membership.
+pub fn ensure_can_offline_idle_cpu(c: usize) -> Result<(), &'static str> {
+    with(|s| s.ensure_can_offline_idle_cpu(c))
+}
+
 /// Reattach a quiescent secondary CPU after platform-side restart.
 pub fn online_idle_cpu(c: usize) -> Result<(), &'static str> {
     with_mut(|s| s.online_idle_cpu(c))
+}
+
+/// Preflight an idle-CPU scheduler reattach without changing membership.
+pub fn ensure_can_online_idle_cpu(c: usize) -> Result<(), &'static str> {
+    with(|s| s.ensure_can_online_idle_cpu(c))
 }
 
 /// 处理器 `c` 的调度统计（忙 / 闲 tick、空闲等待上界、窃取与均衡次数）。

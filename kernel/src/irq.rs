@@ -964,6 +964,7 @@ pub mod device {
     /// masked on a hardware routing failure rather than risking delivery to
     /// the departing processor.
     pub fn detach_cpu_lines(cpu: usize) -> Result<usize, IrqError> {
+        crate::kprintln!("[JSR-IRQ-DETACH] stage=begin cpu={}", cpu);
         let mut online_set = sched::online_cpus();
         if !online_set.contains(cpu) {
             return Err(IrqError::Offline);
@@ -974,6 +975,7 @@ pub mod device {
         }
         let online = CpuBitmap::from_cpu_set(online_set)
             .map_err(|_| IrqError::NoMemory)?;
+        crate::kprintln!("[JSR-IRQ-DETACH] stage=online cpu={}", cpu);
         let cpu_bits = ROUTING_CPU_BITS
             .load(Ordering::Relaxed)
             .max(online.capacity_bits().map_err(|_| IrqError::NoLine)?);
@@ -993,7 +995,8 @@ pub mod device {
                 load: 0,
             });
         }
-        {
+        crate::kprintln!("[JSR-IRQ-DETACH] stage=copies cpu={} lines={}", cpu, n);
+        let used = {
             let routing = ROUTING.lock();
             let mut used = 0;
             for line in 0..n {
@@ -1007,8 +1010,13 @@ pub mod device {
                     used += 1;
                 }
             }
-            lines.truncate(used);
-        }
+            used
+        };
+        // Dropping unused entries releases heap words and must happen after the
+        // routing guard is gone; heap allocation is a lower lock rank.
+        // 未使用表项的析构会释放堆存储，必须等路由守卫释放；堆锁的级别更低。
+        lines.truncate(used);
+        crate::kprintln!("[JSR-IRQ-DETACH] stage=snapshot cpu={} used={}", cpu, lines.len());
         let mut targets = Vec::new();
         targets
             .try_reserve_exact(lines.len())
@@ -1019,6 +1027,7 @@ pub mod device {
             .map_err(|_| IrqError::NoMemory)?;
         base.resize(cpu_bits, 0);
         Keep.assign(&lines, &online, &base, &mut targets)?;
+        crate::kprintln!("[JSR-IRQ-DETACH] stage=plan cpu={}", cpu);
 
         let mut rerouted = 0;
         let mut affected = Vec::new();
@@ -1030,12 +1039,17 @@ pub mod device {
                 affected.push((line, targets[index]));
             }
         }
+        crate::kprintln!("[JSR-IRQ-DETACH] stage=masking cpu={} affected={}", cpu, affected.len());
         for &(line, _) in affected.iter() {
             arch::device_irq_set_masked(line, true);
         }
+        crate::kprintln!("[JSR-IRQ-DETACH] stage=reroute cpu={}", cpu);
         for &(line, target) in affected.iter() {
             arch::device_irq_route(line, target)?;
-            ROUTING.lock().target[line] = Some(target);
+            {
+                let mut routing = ROUTING.lock();
+                routing.target[line] = Some(target);
+            }
             arch::device_irq_set_masked(line, false);
             rerouted += 1;
         }
@@ -1400,7 +1414,7 @@ pub mod device {
         base.try_reserve_exact(cpu_bits)
             .map_err(|_| IrqError::NoMemory)?;
         base.resize(cpu_bits, 0);
-        {
+        let used = {
             let r = ROUTING.lock();
             let mut used = 0;
             for line in 0..n {
@@ -1420,8 +1434,9 @@ pub mod device {
                     used += 1;
                 }
             }
-            lines.truncate(used);
-        }
+            used
+        };
+        lines.truncate(used);
         out.truncate(lines.len());
         policy.assign(&lines, &online, &base, &mut out)?;
         let mut r = ROUTING.lock();

@@ -258,15 +258,7 @@ impl CpuRuntimeRegistry {
     /// storage was allocated by `admit_complete`, so it does not allocate from
     /// an IRQ-held transition.
     pub fn mark_online(&mut self, logical: usize) -> Result<u64, CpuRuntimeError> {
-        if self.identity(logical).is_none() {
-            return Err(CpuRuntimeError::UnknownCpu { logical });
-        }
-        if !self.admitted.contains(logical) {
-            return Err(CpuRuntimeError::NotAdmitted { logical });
-        }
-        if self.online.contains(logical) {
-            return Err(CpuRuntimeError::AlreadyOnline);
-        }
+        self.ensure_can_mark_online(logical)?;
         let next_generation = self
             .generation
             .checked_add(1)
@@ -279,7 +271,42 @@ impl CpuRuntimeRegistry {
         Ok(self.generation)
     }
 
+    /// Validate an online transition without mutating lifecycle facts.
+    ///
+    /// A departure coordinator runs this before quiescing hardware so an
+    /// immutable failure cannot strand a CPU after interrupt teardown began.
+    ///
+    /// 在不改变生命周期事实的前提下校验上线迁移。离场协调器会在关闭硬件
+    /// 中断与设备对象之前调用它，避免不可恢复的拒绝发生在拆除之后。
+    pub fn ensure_can_mark_online(&self, logical: usize) -> Result<(), CpuRuntimeError> {
+        if self.identity(logical).is_none() {
+            return Err(CpuRuntimeError::UnknownCpu { logical });
+        }
+        if !self.admitted.contains(logical) {
+            return Err(CpuRuntimeError::NotAdmitted { logical });
+        }
+        if self.online.contains(logical) {
+            return Err(CpuRuntimeError::AlreadyOnline);
+        }
+        Ok(())
+    }
+
     pub fn mark_offline(&mut self, logical: usize) -> Result<u64, CpuRuntimeError> {
+        self.ensure_can_mark_offline(logical)?;
+        let next_generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(CpuRuntimeError::GenerationExhausted)?;
+        self.online.remove(logical);
+        self.generation = next_generation;
+        self.identities[logical].generation = self.generation;
+        Ok(self.generation)
+    }
+
+    /// Validate an offline transition without changing membership or generation.
+    ///
+    /// 在不修改在线集合或代际的前提下校验离线迁移。
+    pub fn ensure_can_mark_offline(&self, logical: usize) -> Result<(), CpuRuntimeError> {
         if self.identity(logical).is_none() {
             return Err(CpuRuntimeError::UnknownCpu { logical });
         }
@@ -292,14 +319,10 @@ impl CpuRuntimeRegistry {
         if logical == self.boot_logical {
             return Err(CpuRuntimeError::BootCpu);
         }
-        let next_generation = self
-            .generation
+        self.generation
             .checked_add(1)
             .ok_or(CpuRuntimeError::GenerationExhausted)?;
-        self.online.remove(logical);
-        self.generation = next_generation;
-        self.identities[logical].generation = self.generation;
-        Ok(self.generation)
+        Ok(())
     }
 }
 
@@ -376,6 +399,32 @@ mod tests {
             CpuRuntimeError::LastOnlineCpu.name(),
             "system.cpu.error.last_online_cpu"
         );
+    }
+
+    #[test]
+    fn lifecycle_preflight_does_not_publish_partial_state() {
+        let entries = [entry(0), entry(1)];
+        let mut registry = CpuRuntimeRegistry::admit_complete(&entries, 1, 2, 0).unwrap();
+        registry.mark_online(1).unwrap();
+        let before = registry.clone();
+
+        assert_eq!(registry.ensure_can_mark_offline(1), Ok(()));
+        assert_eq!(registry, before);
+        assert_eq!(
+            registry.ensure_can_mark_offline(0),
+            Err(CpuRuntimeError::BootCpu)
+        );
+        assert_eq!(registry, before);
+
+        registry.mark_offline(1).unwrap();
+        let offline = registry.clone();
+        assert_eq!(registry.ensure_can_mark_online(1), Ok(()));
+        assert_eq!(registry, offline);
+        assert_eq!(
+            registry.ensure_can_mark_online(0),
+            Err(CpuRuntimeError::AlreadyOnline)
+        );
+        assert_eq!(registry, offline);
     }
 
     #[test]
