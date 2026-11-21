@@ -204,6 +204,8 @@ pub mod trace;
 pub mod trap;
 pub mod ui_protocol;
 pub mod ui_service;
+#[cfg(any(test, feature = "display-dynamic"))]
+pub mod ui_workspace;
 pub mod ui_session;
 pub mod ui_policy;
 pub mod usi;
