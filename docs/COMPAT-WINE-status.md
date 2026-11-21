@@ -42,7 +42,12 @@ Jasper now passes the earlier path-discovery failures:
 - `MAP_FIXED_NOREPLACE` is exposed with failure-closed replacement semantics;
 - the Wine-specific `LD_PRELOAD` path shim is removed. Wine reaches the same
   bootstrap point without it, so generic Linux `readlink`/`realpath` semantics
-  now carry the path-discovery path.
+  now carry the path-discovery path;
+- the optional `WINEPRELOADRESERVE` override is removed. Its presence or absence
+  does not change the failure, so it was not the source of corruption;
+- fixed-map tracing shows Wine replacing its own ELF-load mappings as expected;
+  the official preloader still warns that its default low/high reservations lie
+  outside Jasper's bounded private user windows.
 
 The current Jasper run reaches Wine prefix creation, creates the wineserver
 temp-state file, and passes `fcntl`/`fstat`, but later aborts in glibc with

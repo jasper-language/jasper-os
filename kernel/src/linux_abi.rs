@@ -5290,6 +5290,22 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
         return Ok(requested);
     }
+    #[cfg(feature = "compat-wine-verify")]
+    if args[3] & MAP_FIXED != 0 {
+        let mut concrete = 0usize;
+        let mut page = requested;
+        while page < requested + rounded {
+            concrete += usize::from(proc::page_flags(pid, page).is_some());
+            page += PAGE;
+        }
+        crate::kprintln!(
+            "[JSR-WINE-MMAP-FIXED] addr={:#x} bytes={:#x} concrete_pages={} reserved={}",
+            requested,
+            rounded,
+            concrete,
+            proc::linux_reservation_overlap(pid, requested, requested + rounded).is_some()
+        );
+    }
     if args[3] & MAP_FIXED_NOREPLACE != 0
         && !linux_mapping_range_free(pid, requested, requested + rounded)
     {

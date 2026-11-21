@@ -1068,9 +1068,8 @@ fn execute_root_dynamic_programs(
             b"echo",
             b"WINE_CMD_OK",
         ];
-        let wine_envp: [&[u8]; 11] = [
+        let wine_envp: [&[u8]; 10] = [
             b"HOME=/data",
-            b"WINEPRELOADRESERVE=100010000000-100070000000",
             b"PATH=/usr/lib/x86_64-linux-gnu/wine:/usr/bin:/bin",
             b"WINEPREFIX=/data/wineprefix",
             b"WINEARCH=win64",
