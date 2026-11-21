@@ -10,7 +10,7 @@ TARGET="${NATIVE_INSTALL_TARGET:-$ROOT/target/native-install-block}"
 BOOT_IMAGE="$TARGET/boot.img"
 DATA_IMAGE="$TARGET/data.img"
 LIMIT="${NATIVE_INSTALL_TIMEOUT:-90}"
-QEMU_CPUS="${NATIVE_INSTALL_QEMU_CPUS:-0-1}"
+QEMU_CPUS="${NATIVE_INSTALL_QEMU_CPUS:-$("$(dirname "$0")/qemu-cpu-set.sh")}"
 mkdir -p "$OUT" "$TARGET"
 
 exec 9>/tmp/jasper-os-qemu.lock

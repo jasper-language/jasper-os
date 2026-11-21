@@ -10,7 +10,7 @@ TARGET="${LIFECYCLE_DIAG_TARGET:-$ROOT/target/lifecycle-diagnostic-block}"
 BOOT_IMAGE="$TARGET/boot.img"
 DATA_IMAGE="$TARGET/data.img"
 LIMIT="${LIFECYCLE_DIAG_TIMEOUT:-90}"
-QEMU_CPUS="${LIFECYCLE_DIAG_QEMU_CPUS:-0-1}"
+QEMU_CPUS="${LIFECYCLE_DIAG_QEMU_CPUS:-$("$(dirname "$0")/qemu-cpu-set.sh")}"
 ALLOW_VBOX="${LIFECYCLE_DIAG_ALLOW_VBOX:-0}"
 mkdir -p "$OUT" "$TARGET"
 

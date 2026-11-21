@@ -10,7 +10,7 @@ OUT="${WORKLOAD_OUT:-$ROOT/evidence/workload-runtime-$(date '+%Y%m%d-%H%M%S')}"
 CARGO_TARGET="${WORKLOAD_CARGO_TARGET:-$ROOT/target}"
 IMAGE="${WORKLOAD_IMAGE:-$ROOT/target/workload-runtime.img}"
 LIMIT="${WORKLOAD_QEMU_TIMEOUT:-90}"
-QEMU_CPUS="${WORKLOAD_QEMU_CPUS:-0-1}"
+QEMU_CPUS="${WORKLOAD_QEMU_CPUS:-$("$(dirname "$0")/qemu-cpu-set.sh")}"
 mkdir -p "$OUT"
 
 # Serialize the complete build-and-run sequence with all other Jasper VM users.

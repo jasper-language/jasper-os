@@ -63,7 +63,7 @@ if [ -z "${ISSUE21_UEFI_TIMEOUT:-}" ] &&
 fi
 PREBUILT="${ISSUE21_UEFI_PREBUILT:-0}"
 QEMU_LOCK="${ISSUE21_QEMU_LOCK:-/tmp/jasper-os-qemu.lock}"
-QEMU_CPUS="${ISSUE21_QEMU_CPUS:-0-1}"
+QEMU_CPUS="${ISSUE21_QEMU_CPUS:-$($ROOT/scripts/qemu-cpu-set.sh)}"
 QEMU_SMP="${ISSUE21_QEMU_SMP:-1}"
 QEMU_MEMORY="${ISSUE21_QEMU_MEMORY:-}"
 if [ -z "$QEMU_MEMORY" ]; then

@@ -9,7 +9,7 @@ OUT="${WORKLOAD_IO_OUT:-$ROOT/evidence/workload-io-$(date '+%Y%m%d-%H%M%S')}"
 TARGET="${WORKLOAD_IO_TARGET:-$ROOT/target/workload-io}"
 IMAGE="$OUT/workload-io.img"
 LIMIT="${WORKLOAD_IO_QEMU_TIMEOUT:-180}"
-QEMU_CPUS="${WORKLOAD_IO_QEMU_CPUS:-0-1}"
+QEMU_CPUS="${WORKLOAD_IO_QEMU_CPUS:-$("$(dirname "$0")/qemu-cpu-set.sh")}"
 case "$LIMIT" in
     ''|0|*[!0-9]*)
         echo "workload-io: WORKLOAD_IO_QEMU_TIMEOUT must be a positive integer" >&2
