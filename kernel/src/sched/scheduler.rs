@@ -1248,6 +1248,12 @@ pub struct Scheduler {
     deadline_trace: [DeadlineTrace; MAX_CPUS],
     /// 每个处理器的本地 tick 计数（周期均衡的检查点）。
     local_ticks: CpuTable<u64, MAX_CPUS>,
+    /// Reusable tick-lease publication result. Filled before any owner is
+    /// published so a failed reservation never commits a partial round.
+    tick_publication: CpuTable<Option<(kernel_core::task_index::Token, u8)>, MAX_CPUS>,
+    /// Shared-group identities touched while filling `tick_publication`.
+    /// Capacity is bounded by admitted CPUs because each CPU touches one group.
+    tick_touched: CpuTable<Option<usize>, MAX_CPUS>,
     switches: u64,
     observer: Option<SwitchObserver>,
     /// 调度器看到的当前时刻（tick；由 [`Scheduler::tick`] 推进）。
@@ -1430,6 +1436,8 @@ impl Scheduler {
             cpu_stats: CpuTable::new([CpuStats { busy_ticks: 0, idle_ticks: 0, idle_waiting: 0, max_idle_waiting: 0, steals: 0, pulls: 0, pull_hot: 0 }; MAX_CPUS]),
             cpu_residency: CpuTable::new([kernel_core::cpu_time::Ledger::new(0,false); MAX_CPUS]),
             local_ticks: CpuTable::new([0; MAX_CPUS]),
+            tick_publication: CpuTable::new([None; MAX_CPUS]),
+            tick_touched: CpuTable::new([None; MAX_CPUS]),
             switches: 0,
             observer: None,
             now: 0,
@@ -3004,52 +3012,91 @@ impl Scheduler {
     // Author: chatgpt. Publish at most one AP credit, allocating a SINGLE
     // shared-group allowance across all leaves held by StateGuard. Yield's
     // budget-free predicate remains separate and unchanged.
-    pub fn tick_lease_owners(&mut self) -> [(Option<kernel_core::task_index::Token>, u8); MAX_CPUS] {
-        if self.ns_active {return [(None, 0);MAX_CPUS];}
-        let mut owners = [(None, 0); MAX_CPUS];
-        let any_candidates = self.candidates().next().is_some();
-        let mut touched = [None; MAX_CPUS];
+    pub fn publish_tick_lease_owners(
+        &mut self,
+        mut publish: impl FnMut(usize, Option<kernel_core::task_index::Token>, u8),
+    ) {
+        self.tick_publication.fill(None);
+        self.tick_touched.fill(None);
         let mut touched_len = 0;
-        for c in self.online.iter() {
-            let (slot, _, _, switching_from) = leaf_run_state(c);
-            if c == 0 || switching_from.is_some()
-                || self.now >= self.next_wake[c] || self.now >= self.next_rt[c]
-            { continue; }
-            let Some(t) = self.task(slot).filter(|_| is_worker(slot)) else { continue };
-            let local_competition = self.waiting(c) != ClassMask::EMPTY;
-            let local_safe = local_competition && !self.arbiter_on && self.listed(c).all(|(_, task)| {
-                task.home == c && task.cpu_group.is_none() && task.rt_period == 0
-                    && task.ns_budget.is_none() && task.sched.qos == task.base_qos
-            });
-            if t.state != TaskState::Running || t.home != c
-                || (!local_safe && (any_candidates || self.decide(c).is_some()))
-                || (t.rt_period != 0 && t.rt_remaining <= 1)
-                || t.sched.qos != t.base_qos { continue; }
-            let group = t.cpu_group;
-            let batched = !local_competition && t.rt_period == 0 && group.is_none();
-            let Some(token) = self.epochs.get(slot).and_then(SlotLifecycle::history).map(|r| r.token()) else { continue };
-            if let Some(group) = group {
-                let Some(grp) = self.groups[group].as_mut() else { continue };
-                // Hierarchical groups use the locked eligibility path so the
-                // parent bucket cannot be oversubscribed by per-CPU leases.
-                if grp.parent.is_some() || grp.children != 0 {
+        if !self.ns_active {
+            let any_candidates = self.candidates().next().is_some();
+            for c in self.online.iter() {
+                let (slot, _, _, switching_from) = leaf_run_state(c);
+                if c == 0
+                    || switching_from.is_some()
+                    || self.now >= self.next_wake[c]
+                    || self.now >= self.next_rt[c]
+                {
                     continue;
                 }
-                let allowance = grp.limit.deferred_tick_credits(MAX_CPUS as u32);
-                if !grp.publication_credit.grant(allowance) { continue; }
-                if grp.publication_credit.count() == 1 {
-                    touched[touched_len] = Some(group);
-                    touched_len += 1;
+                let Some(t) = self.task(slot).filter(|_| is_worker(slot)) else {
+                    continue;
+                };
+                let local_competition = self.waiting(c) != ClassMask::EMPTY;
+                let local_safe =
+                    local_competition && !self.arbiter_on && self.listed(c).all(|(_, task)| {
+                        task.home == c
+                            && task.cpu_group.is_none()
+                            && task.rt_period == 0
+                            && task.ns_budget.is_none()
+                            && task.sched.qos == task.base_qos
+                    });
+                if t.state != TaskState::Running
+                    || t.home != c
+                    || (!local_safe && (any_candidates || self.decide(c).is_some()))
+                    || (t.rt_period != 0 && t.rt_remaining <= 1)
+                    || t.sched.qos != t.base_qos
+                {
+                    continue;
                 }
+                let group = t.cpu_group;
+                let batched = !local_competition && t.rt_period == 0 && group.is_none();
+                let Some(token) = self
+                    .epochs
+                    .get(slot)
+                    .and_then(SlotLifecycle::history)
+                    .map(|r| r.token())
+                else {
+                    continue;
+                };
+                if let Some(group) = group {
+                    let Some(grp) = self.groups[group].as_mut() else {
+                        continue;
+                    };
+                    // Hierarchical groups use the locked eligibility path so the
+                    // parent bucket cannot be oversubscribed by per-CPU leases.
+                    if grp.parent.is_some() || grp.children != 0 {
+                        continue;
+                    }
+                    let allowance = grp
+                        .limit
+                        .deferred_tick_credits(u32::try_from(self.tick_publication.len()).unwrap_or(u32::MAX));
+                    if !grp.publication_credit.grant(allowance) {
+                        continue;
+                    }
+                    if grp.publication_credit.count() == 1 {
+                        self.tick_touched[touched_len] = Some(group);
+                        touched_len += 1;
+                    }
+                }
+                self.tick_publication[c] = Some((token, if batched { 64 } else { 1 }));
             }
-            owners[c] = (Some(token), if batched { 64 } else { 1 });
+        }
+        // Commit only after every CPU/group reservation succeeded. Guards for
+        // CPUs without an owner are explicitly cleared rather than left stale.
+        for c in 0..self.tick_publication.len() {
+            let (owner, permits) = self.tick_publication[c]
+                .map(|(owner, permits)| (Some(owner), permits))
+                .unwrap_or((None, 0));
+            publish(c, owner, permits);
         }
         // At most C touched slots; no full group-table clear or hot allocation.
-        for group in touched[..touched_len].iter().flatten() {
-            self.groups[*group].as_mut().expect("publication group remains live")
+        for i in 0..touched_len {
+            let group = self.tick_touched[i].expect("touched group remains recorded");
+            self.groups[group].as_mut().expect("publication group remains live")
                 .publication_credit.reset();
         }
-        owners
     }
     /// BSP global time does not need the cold mirrors of ordinary ungrouped
     /// AP runners.  Budgeted APs remain single-tick leases and are drained on
@@ -4048,6 +4095,14 @@ impl Scheduler {
             .local_ticks
             .prepare_tail(cpus, || 0)
             .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
+        let tick_publication_tail = self
+            .tick_publication
+            .prepare_tail(cpus, || None)
+            .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
+        let tick_touched_tail = self
+            .tick_touched
+            .prepare_tail(cpus, || None)
+            .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
         let mut load_scratch = Vec::new();
         let load_capacity = cpus.max(self.cpu_stats.len());
         load_scratch
@@ -4113,6 +4168,8 @@ impl Scheduler {
         self.deadline_wakes.commit_tail(deadline_wakes_tail);
         self.deadline_refills.commit_tail(deadline_refills_tail);
         self.local_ticks.commit_tail(local_ticks_tail);
+        self.tick_publication.commit_tail(tick_publication_tail);
+        self.tick_touched.commit_tail(tick_touched_tail);
         self.load_scratch = load_scratch;
         let (wake_heap, wake_entries, wake_positions, wake_owners) = wake_layout;
         self.wake_heap = wake_heap;

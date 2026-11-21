@@ -484,7 +484,7 @@ pub fn run_fast_leaf_tick_contract() -> u32 {
     let local_switches_before = sched::leaf_local_switch_count();
     let mut cpu = CpuSet::EMPTY; cpu.insert(1);
     let spawned = quiet(|| {
-        sched::spawn_on(id, "krn3-fast-a", fast_tick_worker, None, cpu).is_ok()
+        sched::spawn_on(id, "krn3-fast-a", fast_tick_worker, None, cpu.clone()).is_ok()
             && sched::spawn_on(peer, "krn3-fast-b", fast_tick_worker, None, cpu).is_ok()
     });
     let deadline = sched::timer_ticks() + 120;

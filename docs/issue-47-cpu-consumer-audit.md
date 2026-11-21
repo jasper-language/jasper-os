@@ -35,24 +35,22 @@ fixture=11 paths
 只要这些路径仍含未完成在线/离线事务、固定诊断数组或 bootstrap 宽度门面，
 `CPU-DYNAMIC-ADMISSION-1` 就保持 in-progress。
 
-### scheduler 剩余阻塞点
+### scheduler tick-lease 事务
 
-`kernel/src/sched` 的 leaf、`CoreQueue`、task-index/lifecycle 和若干 timer/forest
-已经具备 bootstrap 内联区加堆后备尾部。当前不能把 scheduler 两行标为 verified
-的原因不是静态 `MAX_CPUS` 名称本身，而是下面两个仍只覆盖 bootstrap 区的事务：
+`kernel/src/sched` 的 leaf、`CoreQueue`、task-index/lifecycle 和 timer/forest
+已经具备 bootstrap 内联区加堆后备尾部。本轮补齐了 tick lease 的完整事务：
 
-- `lock_state_from_observed` 的 `StateGuard` 只取得
-  `TICK_LEASES[0..MAX_CPUS]`；`EXTRA_TICK_LEASES` 已能预分配，但未加入同一事务
-  的 leaf guard 集合，逻辑 CPU 超过 128 时无法同时冻结其本地 tick 状态。
-- `Scheduler::tick_lease_owners` 返回固定
-  `[(Option<Token>, u8); MAX_CPUS]`，并使用固定 `touched` 数组汇总共享组额度；
-  即使 extra leaf 被冻结，也没有发布 extra CPU 的本地 tick lease。
+- 每个 bootstrap/tail CPU 都有启动前预留的 guard 槽位；全局
+  `StateGuard` 在同一事务内冻结所有 participant 的 bootstrap 与 extra lease，
+  然后统一 drain。
+- `tick_publication` 与 `tick_touched` 是按实际准入 CPU 数预分配的
+  `CpuTable` 尾部，不再返回固定 `[...; MAX_CPUS]` owner 数组，也不在热路径分配。
+- owner 计算先填满发布表，随后才向全部已持有 leaf 发布；没有 owner 的 CPU 显式
+  清空 lease，不会留下“已冻结但不结算”的半状态。
+- 共享组额度按实际发布表容量请求，不再把 128 当作逻辑 CPU 上限。
 
-修复必须保持无堆分配、IRQ-off 的 hot path：在 AP 启动前为 extra guards 与
-owner publication 预留可复用 scratch，由全局 scheduler 锁串行访问；
-online/offline 扩展时先完成存储预留，再提交 membership。仅把
-`EXTRA_TICK_LEASES` 接入取锁但不接入 owner 发布会造成“已冻结但不结算”的
-半状态，因此本轮没有做局部接线，两个 scheduler 行继续保持 in-progress。
+2/4-vCPU UEFI 生产启动已通过 SMP、IRQ 拓扑、用户程序执行、生命周期健康检查和
+持续 tick。guard 槽位只由全局 scheduler 锁串行访问，不进入 lock-free tick 路径。
 
 `kernel/src/irq.rs` 的 MSI 状态、设备中断计数和每核配额已改为
 `CpuTailLayout` 驱动的 bootstrap 区加准入数量堆后备尾部；读取、重置和越界
@@ -281,6 +279,7 @@ online/offline 扩展时先完成存储预留，再提交 membership。仅把
 - `kernel/src/wcet.rs` 的准入检查改为使用无锁
   `smp::cpu_index_admitted()`；该函数位于 `arch::irq_save_disable()` 的调用链内，
   不能再通过会获取 `CPU_RUNTIME` 锁的 `smp::cpu_count()` 读取准入数量，否则会从
-  `IrqSpinLock` 经 WCET 路径递归回同一把锁。2-vCPU UEFI 生产启动已越过 SMP、IRQ
+  `IrqSpinLock` 经 WCET 路径递归回同一把锁。2/4-vCPU UEFI 生产启动已越过 SMP、IRQ
   拓扑、用户程序执行和生命周期健康检查。
-- 其余调度器固定表、共享 CpuSet 门面、部分诊断和亲和 ABI 尚未迁移。
+- 调度器的 tick guard、owner publication 与共享组暂存已覆盖 bootstrap 和堆后备
+  CPU；其余固定名称只保留启动内联区或诊断/验证 Profile 的显式边界。

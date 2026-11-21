@@ -153,6 +153,23 @@ static EXTRA_YIELD_GATES: CpuTail<kernel_core::yield_gate::YieldGate> = CpuTail:
 static EXTRA_TICK_LEASES: CpuTail<
     kernel_core::ticket::TicketLock<kernel_core::tick_lease::TickLease>,
 > = CpuTail::new();
+type TickGuard = kernel_core::ticket::TicketGuard<'static, kernel_core::tick_lease::TickLease>;
+struct TickGuardSlot(core::cell::UnsafeCell<Option<TickGuard>>);
+
+impl TickGuardSlot {
+    const fn new() -> Self {
+        Self(core::cell::UnsafeCell::new(None))
+    }
+}
+
+// All access is serialized by KERNEL_SCHED. These slots hold leaf guards only
+// for the duration of one scheduler transaction and are never read by the
+// lock-free tick path.
+unsafe impl Sync for TickGuardSlot {}
+
+static BOOTSTRAP_TICK_GUARDS: [TickGuardSlot; kernel_core::smp::MAX_CPUS] =
+    [const { TickGuardSlot::new() }; kernel_core::smp::MAX_CPUS];
+static EXTRA_TICK_GUARDS: CpuTail<TickGuardSlot> = CpuTail::new();
 static EXTRA_CPU_INBOXES: CpuTail<kernel_core::ticket::TicketLock<CpuInbox>> = CpuTail::new();
 static EXTRA_TIMER_PROGRESS: CpuTail<TimerProgressCell> = CpuTail::new();
 #[cfg(feature = "krn2-observe")]
@@ -170,6 +187,12 @@ fn tick_lease(
     TICK_LEASES
         .get(cpu)
         .or_else(|| EXTRA_TICK_LEASES.get(cpu))
+}
+
+fn tick_guard_slot(cpu: usize) -> Option<&'static TickGuardSlot> {
+    BOOTSTRAP_TICK_GUARDS
+        .get(cpu)
+        .or_else(|| EXTRA_TICK_GUARDS.get(cpu))
 }
 
 fn cpu_inbox(cpu: usize) -> Option<&'static kernel_core::ticket::TicketLock<CpuInbox>> {
@@ -192,6 +215,7 @@ pub fn prepare_cpu_slots(cpus: usize) -> Result<(), SchedulerCpuStorageError> {
     EXTRA_TICK_LEASES.prepare(cpus, |_| {
         kernel_core::ticket::TicketLock::new(kernel_core::tick_lease::TickLease::new())
     })?;
+    EXTRA_TICK_GUARDS.prepare(cpus, |_| TickGuardSlot::new())?;
     EXTRA_CPU_INBOXES.prepare(cpus, |_| {
         kernel_core::ticket::TicketLock::new(CpuInbox::new())
     })?;
@@ -275,9 +299,7 @@ fn take_local_inbox(cpu: usize) -> LocalInbox {
     for slot in &mut out.pi { *slot = inbox.pi.pop(); if slot.is_none() { break; } }
     out
 }
-type TickGuard = kernel_core::ticket::TicketGuard<'static, kernel_core::tick_lease::TickLease>;
-struct StateGuard(crate::sync::IrqSpinLockGuard<'static, Scheduler>,
-    [Option<TickGuard>; kernel_core::smp::MAX_CPUS], bool);
+struct StateGuard(crate::sync::IrqSpinLockGuard<'static, Scheduler>, bool);
 impl core::ops::Deref for StateGuard {
     type Target = Scheduler;
     fn deref(&self) -> &Self::Target { &self.0 }
@@ -293,19 +315,89 @@ impl Drop for StateGuard {
         // task-table scan here doubled every mutating high-resolution timer
         // transaction and amplified multi-CPU wake contention. Direct guards
         // still refresh on drop.
-        if !self.2 { self.0.refresh_ns_events(); }
+        if !self.1 { self.0.refresh_ns_events(); }
         self.0.program_ns_local();
         let allow = self.0.fast_yield_cpus();
         publish_yield_gates(&allow);
-        let owners = self.0.tick_lease_owners();
-        for (c, leaf) in self.1.iter_mut().enumerate() {
-            // A BSP tick deliberately leaves ordinary AP leases untouched.
-            // Only held leases were drained and may be republished here.
-            if let Some(leaf) = leaf { leaf.publish(owners[c].0, owners[c].1); }
+        self.0
+            .publish_tick_lease_owners(|cpu, owner, permits| {
+                publish_and_release_tick_guard(cpu, owner, permits);
+            });
+    }
+}
+
+fn hold_tick_guard(cpu: usize) -> u32 {
+    let slot = tick_guard_slot(cpu).unwrap_or_else(|| {
+        crate::kprintln!("[JSR-SMP] reject=scheduler_tick_guard_missing cpu={}", cpu);
+        crate::arch::halt_forever()
+    });
+    let lock = tick_lease(cpu).unwrap_or_else(|| {
+        crate::kprintln!("[JSR-SMP] reject=scheduler_tick_lease_missing cpu={}", cpu);
+        crate::arch::halt_forever()
+    });
+    #[cfg(feature = "krn2-observe")]
+    let (guard, spins) = lock.lock_counted();
+    #[cfg(not(feature = "krn2-observe"))]
+    let guard = lock.lock();
+    // SAFETY: KERNEL_SCHED is held for the complete transaction, serializing
+    // every access to these slots and their guards.
+    let held = unsafe { &mut *slot.0.get() };
+    assert!(held.is_none(), "tick guard slot already occupied");
+    *held = Some(guard);
+    #[cfg(feature = "krn2-observe")]
+    {
+        spins
+    }
+    #[cfg(not(feature = "krn2-observe"))]
+    {
+        0
+    }
+}
+
+fn drain_tick_guard(cpu: usize) -> Option<(kernel_core::task_index::Token, u8)> {
+    let slot = tick_guard_slot(cpu)?;
+    // SAFETY: see `hold_tick_guard`; this runs in the same protected
+    // transaction.
+    unsafe { (&mut *slot.0.get()).as_mut()?.drain() }
+}
+
+fn held_tick_guard_hits(cpu: usize) -> u32 {
+    let Some(slot) = tick_guard_slot(cpu) else {
+        return 0;
+    };
+    // SAFETY: see `hold_tick_guard`; KERNEL_SCHED serializes access to a
+    // possibly held guard.
+    unsafe { (&*slot.0.get()).as_ref().map_or(0, |guard| guard.hits()) }
+}
+
+fn publish_and_release_tick_guard(
+    cpu: usize,
+    owner: Option<kernel_core::task_index::Token>,
+    permits: u8,
+) {
+    let Some(slot) = tick_guard_slot(cpu) else {
+        return;
+    };
+    // SAFETY: see `hold_tick_guard`; KERNEL_SCHED remains held until Drop has
+    // published every owner and released every leaf.
+    let held = unsafe { &mut *slot.0.get() };
+    if let Some(leaf) = held.as_mut() {
+        leaf.publish(owner, permits);
+    }
+    drop(held.take());
+}
+
+fn for_each_tick_lease_cpu(participants: &CpuSet, mut visit: impl FnMut(usize)) {
+    for cpu in 0..kernel_core::smp::MAX_CPUS {
+        if participants.contains(cpu) {
+            visit(cpu);
         }
-        // Drop all leaves BEFORE the IRQ guard unlocks/restores interrupts.
-        // Field-drop order alone would restore IRQs while leaves were held.
-        for leaf in &mut self.1 { drop(leaf.take()); }
+    }
+    for extra in 0..EXTRA_TICK_LEASES.extras().len() {
+        let cpu = kernel_core::smp::MAX_CPUS + extra;
+        if participants.contains(cpu) {
+            visit(cpu);
+        }
     }
 }
 // Author: chatgpt. Diagnostic-only per-CPU counters. Updates, reset and snapshot
@@ -365,7 +457,6 @@ fn lock_state_from_observed(
     }
     #[cfg(feature = "krn2-observe")]
     { s.origin_total.record(_origin); s.origin_window.record(_origin); }
-    let mut leaves: [Option<TickGuard>; kernel_core::smp::MAX_CPUS] = [const { None }; kernel_core::smp::MAX_CPUS];
     // Author: chatgpt. Online membership only grows under this global lock.
     // Include the caller BEFORE its first cpu_online registration. Other offline
     // CPUs have never received permits; they cannot produce pending accounting.
@@ -376,20 +467,17 @@ fn lock_state_from_observed(
     participants.insert(crate::arch::cpu_index());
     #[cfg(feature = "krn2-observe")]
     let mut work = [1u32, 0, 0, 0];
-    for (c, lock) in TICK_LEASES.iter().enumerate() {
-        if participants.contains(c) {
-            #[cfg(feature = "krn2-observe")]
-            {
-                let (guard, spins) = lock.lock_counted();
-                work[1] += 1;
-                work[2] += (spins != 0) as u32;
-                work[3] = work[3].wrapping_add(spins);
-                leaves[c] = Some(guard);
-            }
-            #[cfg(not(feature = "krn2-observe"))]
-            { leaves[c] = Some(lock.lock()); }
+    for_each_tick_lease_cpu(&participants, |cpu| {
+        #[cfg(feature = "krn2-observe")]
+        {
+            let spins = hold_tick_guard(cpu) as u32;
+            work[1] += 1;
+            work[2] += (spins != 0) as u32;
+            work[3] = work[3].wrapping_add(spins);
         }
-    }
+        #[cfg(not(feature = "krn2-observe"))]
+        hold_tick_guard(cpu);
+    });
     #[cfg(feature = "krn2-observe")]
     if let Some(counter) = sync_work(crate::arch::cpu_index()) {
         for (counter, value) in counter.iter().zip(work) {
@@ -399,14 +487,16 @@ fn lock_state_from_observed(
     // A pending voluntary yield forbids a new fast tick. Therefore a deferred
     // tick always precedes any still-pending yield; charge first, then reset the
     // Watchdog streak. This preserves order instead of treating resets as sums.
-    for (c, leaf) in leaves.iter_mut().enumerate() {
-        if let Some((owner, ticks)) = leaf.as_mut().and_then(|leaf| leaf.drain()) { s.drain_local_ticks(c, owner, ticks); }
-    }
+    for_each_tick_lease_cpu(&participants, |cpu| {
+        if let Some((owner, ticks)) = drain_tick_guard(cpu) {
+            s.drain_local_ticks(cpu, owner, ticks);
+        }
+    });
     take_yielded(|c| s.note_fast_yield(c));
     for token in inbox.wakes.into_iter().flatten() { s.consume_wake_token(token); }
     for message in inbox.pi.into_iter().flatten() { s.consume_pi_message(local_cpu, message); }
     if crate::hrtime::enabled(){s.settle_highres(crate::hrtime::now().expect("high-res monotonic clock"));}
-    StateGuard(s, leaves, false)
+    StateGuard(s, false)
 }
 
 /// 以共享借用访问调度器（持锁、关中断执行：时钟中断与其他处理器也会访问调度器状态）。
@@ -444,7 +534,7 @@ fn with_mut_from_observed<R>(
             });
         }
         s.refresh_ns_events();
-        s.2 = true;
+        s.1 = true;
         (r, s.take_kicks())
     };
     // Observed with_mut interval: includes global-lock waiting, leaf drain, callback,
@@ -537,7 +627,11 @@ pub fn remote_pi_stats() -> (u32, u32) {
 
 pub fn local_tick_bypasses() -> u32 {
     let state = lock_state();
-    state.1.iter().flatten().fold(0u32, |n, leaf| n.wrapping_add(leaf.hits()))
+    let mut total = 0u32;
+    for_each_tick_lease_cpu(&state.online(), |cpu| {
+        total = total.wrapping_add(held_tick_guard_hits(cpu));
+    });
+    total
 }
 
 #[cfg(feature = "krn3-fast-tick-verify")]
