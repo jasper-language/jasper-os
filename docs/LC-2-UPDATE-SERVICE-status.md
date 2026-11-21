@@ -1,6 +1,6 @@
 # LC-2 Update Service Lifecycle
 
-更新日期：2026-11-17。
+更新日期：2026-11-21。
 
 状态：**core service implemented; LC-2 remains core-passed**。`UpdateService` 已成为
 一个持有单一 `UpdateCoordinator` 和 `FileControlStore` 的有状态服务门面；
@@ -177,14 +177,17 @@ scope 或路径；真机/UEFI 证据见
 
 ```text
 jasper-update-recovery status <control-root>
+jasper-update-recovery audit <control-root> <ledger-root>
 jasper-update-recovery recover <control-root> <staging-root> <manifest-sha256-hex>
 jasper-update-recovery cleanup <control-root> <staging-root> <manifest-sha256-hex> <archive-root>
 ```
 
 `status` 只恢复并报告双副本控制记录；`recover` 根据 journal 与 control 修复
 一个已存在的更新事务；`cleanup` 只对恢复后的 Complete/RolledBack 事务执行
-归档与清理。该入口不能创建新事务、不能跳过签名，也没有注入任意 manifest 或
-执行路径的参数。
+归档与清理；`audit` 通过运维配置的受信 ledger 读取最新归档收据。`UpdateService`
+将该查询封装为 `last_archive_receipt`，服务释放并重新打开后仍返回同一收据；
+未配置 ledger 时稳定失败关闭。该入口不能创建新事务、不能跳过签名，也没有注入
+任意 manifest 或执行路径的参数。
 
 按照 Issue #34，**该工具不是 Jasper 原生 Shell 的正常用户命令**。正式原生入口
 必须是无前缀的 `system update status`，通过 JUCS 命令发现、Schema、调用者身份
@@ -388,7 +391,7 @@ digest=68d00296644483d365ecb17f4163588c5f1b27944a56f26f73556507a9c2bd3a
 
 ```text
 cargo test --locked -p jasper-lifecycle-staging
-31 passed; 0 failed
+49 passed; 0 failed
 
 cargo test --locked -p kernel-core jucs::tests
 2 passed; 0 failed
@@ -501,6 +504,8 @@ PASS (3.21.0)
 - `system update list` 的 human/JSON/schema/help 在真实 OVMF guest 中通过，CLI
   的机器结果绑定 ABI request ID，首程序退出 0 且资源回收。
 - archive-audit request/response 的零 ID、错误 scope、空/可用记录与路径泄漏负例；
+- `UpdateService` 的 ledger 未配置负例，以及服务释放/控制存储重新打开后的最新
+  归档收据一致性；
 - 第二次真实 OVMF 启动仍返回相同 archive sequence、transaction、digest 和
   terminal stage。
 

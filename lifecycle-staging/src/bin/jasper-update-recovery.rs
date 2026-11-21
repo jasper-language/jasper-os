@@ -46,6 +46,29 @@ fn run(args: Vec<String>) -> Result<(), String> {
             );
             Ok(())
         }
+        [command, control_root, ledger_root] if command == "audit" => {
+            let mut service =
+                UpdateService::open(control_root).map_err(|error| error.to_string())?;
+            service
+                .configure_archive_ledger(ledger_root)
+                .map_err(|error| error.to_string())?;
+            if let Some(receipt) = service
+                .last_archive_receipt()
+                .map_err(|error| error.to_string())?
+            {
+                println!(
+                    "archive_sequence={} transaction={} manifest={} previous={} terminal={:?}",
+                    receipt.archive_sequence(),
+                    receipt.transaction_id(),
+                    encode_digest(receipt.manifest_sha256()),
+                    encode_digest(receipt.previous_sha256()),
+                    receipt.terminal_stage()
+                );
+            } else {
+                println!("archive=none");
+            }
+            Ok(())
+        }
         [command, control_root, staging_root, digest] if command == "recover" => {
             let digest = parse_digest(digest)?;
             let mut service =
@@ -89,6 +112,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             Ok(())
         }
         _ => Err("usage: jasper-update-recovery status <control-root> | \
+             audit <control-root> <ledger-root> | \
              recover <control-root> <staging-root> <manifest-sha256-hex> | \
              cleanup <control-root> <staging-root> <manifest-sha256-hex> <archive-root>"
             .into()),

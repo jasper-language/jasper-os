@@ -26,7 +26,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use jasper_lifecycle_model::archive::ArchiveError;
+use jasper_lifecycle_model::archive::{ArchiveError, ArchiveReceipt};
 use jasper_lifecycle_model::boot::{
     BootControlError, BootDecision, BootReason, Candidate, ControlBlock, Slot, SlotState,
 };
@@ -1631,6 +1631,8 @@ pub enum ServiceError {
     RecoveryTargetMismatch,
     /// No trusted archive root was configured for this service instance.
     ArchiveRootUnavailable,
+    /// No trusted archive-ledger root was configured for this service instance.
+    ArchiveLedgerUnavailable,
     /// The durable terminal-archive receipt store failed.
     Archive(ArchiveError),
     /// Underlying coordinator operation failed.
@@ -1665,6 +1667,12 @@ impl fmt::Display for ServiceError {
             }
             Self::ArchiveRootUnavailable => {
                 write!(formatter, "no archive root is configured for this service")
+            }
+            Self::ArchiveLedgerUnavailable => {
+                write!(
+                    formatter,
+                    "no archive-receipt ledger root is configured for this service"
+                )
             }
             Self::Archive(error) => write!(formatter, "terminal archive receipt failed: {error:?}"),
             Self::Coordinator(error) => write!(formatter, "{error}"),
@@ -1751,6 +1759,18 @@ impl UpdateService {
         FileArchiveStore::open(&root).map_err(ServiceError::Archive)?;
         self.archive_ledger_root = Some(root);
         Ok(())
+    }
+
+    /// Query the latest durable terminal receipt through the configured trusted
+    /// archive ledger. This read survives service restart and control-store reopen.
+    pub fn last_archive_receipt(&self) -> Result<Option<ArchiveReceipt>, ServiceError> {
+        let root = self
+            .archive_ledger_root
+            .as_ref()
+            .ok_or(ServiceError::ArchiveLedgerUnavailable)?;
+        FileArchiveStore::open(root)
+            .and_then(|store| store.load())
+            .map_err(ServiceError::Archive)
     }
 
     /// Return a stable snapshot of the active transaction and control state.
@@ -4315,6 +4335,10 @@ server.serve_forever()
     fn managed_binding_archives_without_caller_paths() {
         let temp = TestDir::new("service-bound-archive");
         let (mut service, generation, _) = prepared_service(&temp, "bound-archive");
+        assert!(matches!(
+            service.last_archive_receipt(),
+            Err(ServiceError::ArchiveLedgerUnavailable)
+        ));
         service.commit(generation, Slot::B, 2).unwrap();
         service.begin_trial(generation).unwrap();
         service.report_health(generation, true).unwrap();
@@ -4349,7 +4373,13 @@ server.serve_forever()
         assert_eq!(receipt.transaction_id(), binding.transaction_id);
         assert_eq!(receipt.manifest_sha256(), binding.manifest_sha256);
         assert_eq!(receipt.terminal_stage(), UpdateStage::Complete);
+        assert_eq!(service.last_archive_receipt().unwrap(), Some(receipt));
         assert_eq!(service.status().stage, None);
+
+        drop(service);
+        let mut restarted = UpdateService::open(temp.path().join("bound-archive-control")).unwrap();
+        restarted.configure_archive_ledger(&ledger_root).unwrap();
+        assert_eq!(restarted.last_archive_receipt().unwrap(), Some(receipt));
     }
 
     #[test]
