@@ -230,6 +230,7 @@ pub fn quiesce_cpu(cpu: usize) -> Result<CpuQuiesceReport, MsiError> {
         }));
     }
     let objects_closed = entries.iter().filter(|entry| entry.2.is_some()).count();
+    let vectors_returned = pool().map_or(0, |pool| pool.allocated(cpu));
     kobj::with(|table| {
         for (_, _, object) in entries.iter().copied() {
             if let Some(object) = object {
@@ -240,7 +241,6 @@ pub fn quiesce_cpu(cpu: usize) -> Result<CpuQuiesceReport, MsiError> {
     for (bdf, entry, _) in entries {
         unbind_hw(bdf, entry);
     }
-    let vectors_returned = pool().map_or(0, |pool| pool.allocated(cpu));
     if let Some(pool) = pool() {
         let _ = pool.free_all(cpu);
     }

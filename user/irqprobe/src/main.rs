@@ -70,14 +70,19 @@ const EXIT_FAILED: u64 = 1 << 26;
 
 /// 风暴模式的参数与退出码字段（与内核演练一致）。
 const ARG_STORM: u64 = 1 << 40;
+const ARG_DEPART: u64 = 1 << 41;
 const ARG_TARGET_SHIFT: u32 = 32;
 const ARG_BDF_MASK: u64 = 0xFFFF_FFFF;
 const STORM_SUM_MASK: u64 = 0xFFFF_FFFF;
 const STORM_SETUP_OK: u64 = 1 << 32;
 const STORM_FAILED: u64 = 1 << 33;
+const DEPART_OK: u64 = 1 << 34;
+const DEPART_FAILED: u64 = 1 << 35;
 /// 风暴模式中的请求标签。
 const TAG_IRQ: u64 = 500;
 const TAG_END: u64 = 501;
+const TAG_DEPART_WAIT: u64 = 600;
+const TAG_DEPART_RETRY: u64 = 601;
 
 /// 断言计数（单线程程序，只在本文件的宏与函数里修改）。
 static mut CHECKS: u32 = 0;
@@ -441,6 +446,68 @@ fn storm(bdf: u64, target: u64) -> ! {
     exit(code)
 }
 
+/// 真实硬件中断对象在 CPU 离场期间必须以 closed 终态完成等待。
+fn depart(bdf: u64, target: u64) -> ! {
+    let device = open(bdf, Rights::READ.union(Rights::CONTROL));
+    let ring = ring_create(RING_CAPACITY);
+    let h = if device >= 0 { bind(device, ENTRY, target) } else { device };
+    let setup = emit!(
+        device >= 0 && ring >= 0 && h >= 0,
+        "case=depart_setup device={} ring={} bind={} target={}",
+        device,
+        ring,
+        h,
+        target
+    );
+    let mut closed = false;
+    if setup {
+        let waiting = {
+            let parked = enter(ring, &[wait_sqe(h, TAG_DEPART_WAIT)], 0);
+            emit!(
+                parked.ret == 0 && parked.args.submitted == 1 && parked.args.reaped == 0,
+                "case=depart_park"
+            )
+        };
+        if waiting {
+            closed = {
+                let done = enter(ring, &[], 1);
+                emit!(
+                    done.one(TAG_DEPART_WAIT, INTERRUPT_CLOSED),
+                    "case=depart_closed result={} reaped={}",
+                    done.cqes[0].result,
+                    done.args.reaped
+                )
+            };
+            let retry = enter(ring, &[wait_sqe(h, TAG_DEPART_RETRY)], 0);
+            emit!(
+                retry.args.submitted == 0 && retry.args.first_error == INTERRUPT_CLOSED,
+                "case=depart_retry rejected submitted={} error={}",
+                retry.args.submitted,
+                retry.args.first_error
+            );
+        }
+    }
+    emit!(
+        close(h) == 0 && close(device) == 0 && close(ring) == 0,
+        "case=depart_close_all"
+    );
+    let (checks, failed, _, _) = counters();
+    log(format_args!(
+        "[JSR-IRQPROBE] depart summary checks={} failed={} closed={} target={}",
+        checks,
+        failed,
+        closed,
+        target
+    ));
+    let mut code = 0;
+    if setup && closed && failed == 0 {
+        code |= DEPART_OK;
+    } else {
+        code |= DEPART_FAILED;
+    }
+    exit(code)
+}
+
 fn counters() -> (u32, u32, u32, u32) {
     // SAFETY：只读取单线程写入的计数器。
     unsafe { (CHECKS, FAILED, REJECTS_OK, REJECTS_TOTAL) }
@@ -454,6 +521,9 @@ pub extern "C" fn _start(cpu_mask: usize, bdf: usize) -> ! {
     let arg = bdf as u64;
     if arg & ARG_STORM != 0 {
         storm(arg & ARG_BDF_MASK, (arg >> ARG_TARGET_SHIFT) & 0xFF);
+    }
+    if arg & ARG_DEPART != 0 {
+        depart(arg & ARG_BDF_MASK, (arg >> ARG_TARGET_SHIFT) & 0xFF);
     }
     let mask = cpu_mask as u64;
     let first = nth_cpu(mask, 0);

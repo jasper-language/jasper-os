@@ -2502,7 +2502,7 @@ check_drv2c1() { # DRV-2C-1：设备中断对象 + ring 投递——用户程序
   for pair in "${pairs[@]}"; do
     IFS=: read -r f name c <<< "$pair"
     if [ ! -s "$f" ]; then spot_skip "$f" "$name" || miss="$miss $name:缺日志"; continue; fi
-    s=$(grep -aoE "^\[JSR-IRQRING\] summary cpus=$c rounds=[0-9]+ delivered=[0-9]+/[0-9]+ rejects=[0-9]+/[0-9]+ cancel=ok close_cancels_wait=ok vectors_back=true frames_back=true failed=0" "$f" | head -1)
+    s=$(grep -aoE "^\[JSR-IRQRING\] summary cpus=$c rounds=[0-9]+ delivered=[0-9]+/[0-9]+ rejects=[0-9]+/[0-9]+ cancel=ok close_cancels_wait=ok cpu_depart=(ok|skipped) vectors_back=true frames_back=true failed=0" "$f" | head -1)
     if [ -z "$s" ]; then
       miss="$miss $name:汇总(cpus=$c)"
     else
@@ -2513,6 +2513,10 @@ check_drv2c1() { # DRV-2C-1：设备中断对象 + ring 投递——用户程序
       [ "$rounds" -ge "$need" ] || miss="$miss $name:轮数($rounds<$need)"
       [ "${d%%/*}" -eq "${d##*/}" ] && [ "${d##*/}" -eq "$rounds" ] || miss="$miss $name:送达($d)"
       [ "${k%%/*}" -eq "${k##*/}" ] && [ "${k##*/}" -ge 6 ] || miss="$miss $name:拒绝路径($k)"
+      if [ "$c" -gt 1 ]; then
+        grep -qaE '^\[JSR-IRQRING\] depart target=[1-9][0-9]* objects=1 bindings=1 vectors=1 residual=0 resumed=true ok=true' "$f" \
+          || miss="$miss $name:活跃中断对象离场"
+      fi
     fi
     grep -qa '^\[JSR-IRQRING-FAIL\]' "$f" 2>/dev/null && miss="$miss $name:失败断言"
   done
@@ -2524,7 +2528,7 @@ check_drv2c1() { # DRV-2C-1：设备中断对象 + ring 投递——用户程序
     d4=$(grep -aoE '^\[JSR-IRQRING\] summary cpus=4 .*' "$SERIAL_SMP4" | head -1 | sed -E 's/.* delivered=([^ ]+).*/4 核 \1/')
     d8=$(grep -aoE '^\[JSR-IRQRING\] summary cpus=8 .*' "$SERIAL_SMP8" | head -1 | sed -E 's/.* delivered=([^ ]+).*/8 核 \1/')
     dq=$(grep -aoE '^\[JSR-IRQRING\] summary cpus=4 .*' "$SERIAL_Q35" | head -1 | sed -E 's/.* delivered=([^ ]+).*/q35 \1/')
-    record DRV2C1 PASS "设备中断对象：真实 virtio-rng 的 MSI-X 中断经中断对象成为用户 Ring 上恰好一条完成（$d1、$d4、$d8、$dq），拒绝路径全部被拒，取消保留已到达、关闭以已关闭终态完成等待，向量与页帧回到基线（$ARCH_SCOPE）"
+    record DRV2C1 PASS "设备中断对象：真实 virtio-rng 的 MSI-X 中断经中断对象成为用户 Ring 上恰好一条完成（$d1、$d4、$d8、$dq），拒绝路径全部被拒，取消保留已到达、关闭以已关闭终态完成等待；非 BSP CPU 离场时活动中断等待以 closed 完成、对象/绑定/向量各回收 1 个且残留 0，随后 dispatch 可恢复；向量与页帧回到基线（$ARCH_SCOPE）"
   else
     record DRV2C1 FAIL "缺少/不符：$miss"
   fi

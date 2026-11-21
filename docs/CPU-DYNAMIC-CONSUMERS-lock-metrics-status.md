@@ -76,6 +76,10 @@ CPU departure:
 - `interrupt::quiesce_cpu(cpu)` composes the dispatch stop with Interrupt-object
   teardown: affected objects are closed and completed as closed, MSI-X entries
   are masked/unbound, vectors are returned, and residual bindings are reported.
+  The real `irqprobe-depart` mode keeps one hardware MSI-X interrupt object
+  parked on a non-BSP CPU, then quiesces that CPU. The user wait completes with
+  `INTERRUPT_CLOSED`, a later wait is rejected, and the kernel reports
+  `objects=1 bindings=1 vectors=1 residual=0 resumed=true`.
 
 The existing CPL3 SMP-3 drill now routes both device lines to a secondary CPU,
 detaches that CPU, verifies no stale or offline target remains, demotes its
@@ -92,11 +96,9 @@ The complete x86_64 `accept.sh` run with 240-second per-guest limits reports
 `accept: ALL PASS`; 4-vCPU, 8-vCPU and q35 4-vCPU guests exit 37 for timing-only
 overruns while all functional SMP-3 checks pass.
 
-This is an IRQ/MSI dispatch and object-teardown milestone, not complete CPU
-offline: a real guest currently exercises the zero-object/race path, so a
-hardware-bound Interrupt-object migration matrix still needs to be added.
-Scheduler task migration, architecture stop IPIs, CPU runtime generation
-publication and hotplug rollback also remain before
+This is an IRQ/MSI dispatch and active-object teardown milestone, not complete
+CPU offline: scheduler task migration, architecture stop IPIs, CPU runtime
+generation publication and hotplug rollback remain before
 `CPU-DYNAMIC-CONSUMERS-1` can become done.
 
 The runtime registry also rejects `mark_offline(boot_logical)` while another

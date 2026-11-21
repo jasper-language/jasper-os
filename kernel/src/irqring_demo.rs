@@ -37,6 +37,7 @@ use crate::{arch, interrupt, irq, kobj, kprintln, mmio, pci, ring, sched};
 const STACK_OFF: u64 = 0xC0_0000;
 /// 驱动任务的任务号。
 const DRIVER_TASK: u64 = 12_000;
+const DEPART_DRIVER_TASK: u64 = 12_001;
 /// 驱动任务等待单个条件的 tick 上界（定时器 100 Hz 时约 10 秒）。
 const WAIT_TICKS: u64 = 1_000;
 /// virtio-rng 队列 0 使用的 MSI-X 表项。
@@ -48,6 +49,10 @@ const EXIT_ROUNDS_SHIFT: u32 = 16;
 const EXIT_CANCEL_OK: i64 = 1 << 24;
 const EXIT_CLOSE_OK: i64 = 1 << 25;
 const EXIT_FAILED: i64 = 1 << 26;
+const ARG_DEPART: u64 = 1 << 41;
+const ARG_TARGET_SHIFT: u32 = 32;
+const EXIT_DEPART_OK: i64 = 1 << 34;
+const EXIT_DEPART_FAILED: i64 = 1 << 35;
 
 /// 内嵌的用户程序 `user-irqprobe`（由 `kernel/build.rs` 在 x86_64 上构建）。
 static USER_IRQPROBE: &[u8] = include_bytes!(env!("JSR_USER_IRQPROBE"));
@@ -72,6 +77,13 @@ static USER_PID: AtomicU64 = AtomicU64::new(0);
 static ROUNDS_OK: AtomicU32 = AtomicU32::new(0);
 static CANCEL_OK: AtomicBool = AtomicBool::new(false);
 static DRIVER_DONE: AtomicBool = AtomicBool::new(false);
+static DEPART_TARGET: AtomicU32 = AtomicU32::new(0);
+static DEPART_DONE: AtomicBool = AtomicBool::new(false);
+static DEPART_OBJECTS: AtomicU32 = AtomicU32::new(0);
+static DEPART_BINDINGS: AtomicU32 = AtomicU32::new(0);
+static DEPART_RETURNED: AtomicU32 = AtomicU32::new(0);
+static DEPART_RESIDUAL: AtomicU32 = AtomicU32::new(0);
+static DEPART_RESUMED: AtomicBool = AtomicBool::new(false);
 
 fn check(ok: bool, what: &str) {
     CHECKS.fetch_add(1, Ordering::Relaxed);
@@ -212,6 +224,51 @@ fn driver() {
     DRIVER_DONE.store(true, Ordering::Release);
 }
 
+fn depart_driver() {
+    let target = DEPART_TARGET.load(Ordering::Relaxed) as usize;
+    let bdf = target_bdf();
+    let mut ok = false;
+    if let Some(bdf) = bdf {
+        ok = wait_ticks(|| {
+            interrupt::bound_object(bdf, QUEUE_ENTRY)
+                .and_then(interrupt::view)
+                .is_some_and(|view| view.waiting && view.cpu == target)
+        });
+        if ok {
+            match interrupt::quiesce_cpu(target) {
+                Ok(report) => {
+                    DEPART_OBJECTS.store(report.objects_closed as u32, Ordering::Relaxed);
+                    DEPART_BINDINGS.store(report.bindings_removed as u32, Ordering::Relaxed);
+                    DEPART_RETURNED.store(report.vectors_returned as u32, Ordering::Relaxed);
+                    DEPART_RESIDUAL.store(report.residual_bindings as u32, Ordering::Relaxed);
+                    DEPART_RESUMED.store(irq::msi_resume_cpu(target).is_ok(), Ordering::Release);
+                    ok = report.residual_bindings == 0;
+                }
+                Err(error) => {
+                    check(false, error.name());
+                    ok = false;
+                }
+            }
+        } else {
+            check(false, "用户没有建立目标 CPU 上的活动中断等待");
+        }
+    }
+    if !ok {
+        abort_user();
+    }
+    DEPART_DONE.store(true, Ordering::Release);
+    kprintln!(
+        "[JSR-IRQRING] depart target={} objects={} bindings={} vectors={} residual={} resumed={} ok={}",
+        target,
+        DEPART_OBJECTS.load(Ordering::Relaxed),
+        DEPART_BINDINGS.load(Ordering::Relaxed),
+        DEPART_RETURNED.load(Ordering::Relaxed),
+        DEPART_RESIDUAL.load(Ordering::Relaxed),
+        DEPART_RESUMED.load(Ordering::Acquire),
+        ok
+    );
+}
+
 /// 一轮：等到一个新绑定上有未完成的等待 → 产生中断 → 核对送达。返回该绑定的序号；等不到绑定或没有送达返回 `None`。
 fn drive_round(rig: &mut Rig, bdf: Bdf, round: u32, last_serial: u64) -> Option<u64> {
     let mut found = None;
@@ -336,12 +393,25 @@ pub fn run() {
     let vectors_before = interrupt::vectors_allocated();
 
     let mut exit_code = None;
+    let mut depart_code = None;
+    let mut depart_target = None;
     match Rig::new(device) {
         Ok(rig) => {
             RIG.lock().0 = Some(rig);
             TARGET_BDF.store(kernel_core::device::pack_bdf(bdf), Ordering::Relaxed);
             ROUNDS.store(rounds, Ordering::Relaxed);
             exit_code = run_user(mask, kernel_core::device::pack_bdf(bdf));
+            if let Some(target) = online.iter().find(|&cpu| cpu != 0) {
+                DEPART_TARGET.store(target as u32, Ordering::Relaxed);
+                DEPART_DONE.store(false, Ordering::Release);
+                DEPART_OBJECTS.store(0, Ordering::Relaxed);
+                DEPART_BINDINGS.store(0, Ordering::Relaxed);
+                DEPART_RETURNED.store(0, Ordering::Relaxed);
+                DEPART_RESIDUAL.store(0, Ordering::Relaxed);
+                DEPART_RESUMED.store(false, Ordering::Release);
+                depart_target = Some(target);
+                depart_code = run_depart_user(mask, target, kernel_core::device::pack_bdf(bdf));
+            }
             // 设备在这里复位、队列页归还
             drop(RIG.lock().0.take());
         }
@@ -362,6 +432,38 @@ pub fn run() {
     let cancel_ok = user_cancel && CANCEL_OK.load(Ordering::Relaxed);
     check(cancel_ok, "取消后到达的中断没有交给下一次等待");
     let delivered = ROUNDS_OK.load(Ordering::Relaxed).min(user_rounds);
+    let depart_ok = if let (Some(code), Some(target)) = (depart_code, depart_target) {
+        let user_ok = code >= 0
+            && code & EXIT_DEPART_OK != 0
+            && code & EXIT_DEPART_FAILED == 0;
+        let report_ok = DEPART_DONE.load(Ordering::Acquire)
+            && DEPART_OBJECTS.load(Ordering::Relaxed) >= 1
+            && DEPART_BINDINGS.load(Ordering::Relaxed) >= 1
+            && DEPART_RETURNED.load(Ordering::Relaxed) >= 1
+            && DEPART_RESIDUAL.load(Ordering::Relaxed) == 0
+            && DEPART_RESUMED.load(Ordering::Acquire);
+        check(user_ok, "CPU 离场时用户等待没有以 closed 完成");
+        check(report_ok, "CPU 离场没有关闭对象、解绑并归还向量");
+        let ok = user_ok && report_ok;
+        kprintln!(
+            "[JSR-IRQRING] depart target={} objects={} bindings={} vectors={} residual={} resumed={} ok={}",
+            target,
+            DEPART_OBJECTS.load(Ordering::Relaxed),
+            DEPART_BINDINGS.load(Ordering::Relaxed),
+            DEPART_RETURNED.load(Ordering::Relaxed),
+            DEPART_RESIDUAL.load(Ordering::Relaxed),
+            DEPART_RESUMED.load(Ordering::Acquire),
+            ok
+        );
+        ok
+    } else {
+        true
+    };
+    let depart_state = if depart_target.is_some() {
+        if depart_ok { "ok" } else { "failed" }
+    } else {
+        "skipped"
+    };
 
     kobj::run_cleanup(usize::MAX);
     let vectors_back = interrupt::vectors_allocated() == vectors_before;
@@ -375,7 +477,7 @@ pub fn run() {
     arch::irq_restore(was_enabled);
 
     kprintln!(
-        "[JSR-IRQRING] summary cpus={} rounds={} delivered={}/{} rejects={}/{} cancel={} close_cancels_wait={} vectors_back={} frames_back={} failed={}",
+        "[JSR-IRQRING] summary cpus={} rounds={} delivered={}/{} rejects={}/{} cancel={} close_cancels_wait={} cpu_depart={} vectors_back={} frames_back={} failed={}",
         cpus,
         rounds,
         delivered,
@@ -384,6 +486,7 @@ pub fn run() {
         rejects_total,
         if cancel_ok { "ok" } else { "failed" },
         if close_ok { "ok" } else { "failed" },
+        depart_state,
         vectors_back,
         frames_back,
         failed()
@@ -416,8 +519,16 @@ fn run_user(cpu_mask: u64, bdf: u32) -> Option<i64> {
         None
     };
     let Ok(entry) = proc::load_elf(pid, USER_IRQPROBE) else { return fail("load") };
-    if proc::map_new(pid, base + STACK_OFF - FRAME_SIZE, MapFlags::USER | MapFlags::WRITE).is_err() {
-        return fail("stack");
+    for depth in 1..=2 {
+        if proc::map_new(
+            pid,
+            base + STACK_OFF - depth * FRAME_SIZE,
+            MapFlags::USER | MapFlags::WRITE,
+        )
+        .is_err()
+        {
+            return fail("stack");
+        }
     }
     USER_PID.store(pid.raw(), Ordering::Relaxed);
     if proc::spawn_thread(pid, "irqprobe", entry, base + STACK_OFF, cpu_mask, bdf as u64).is_err() {
@@ -428,6 +539,71 @@ fn run_user(cpu_mask: u64, bdf: u32) -> Option<i64> {
         check(false, "无法创建驱动任务");
         abort_user();
         DRIVER_DONE.store(true, Ordering::Release);
+    }
+    sched::run();
+    let code = match proc::state(pid) {
+        Some(ProcState::Exited { code }) => Some(code),
+        _ => None,
+    };
+    proc::reap(pid);
+    kobj::run_cleanup(usize::MAX);
+    code
+}
+
+fn run_depart_user(cpu_mask: u64, target: usize, bdf: u32) -> Option<i64> {
+    let allowed = SyscallSet::of(&[
+        abi::SYSTEM_CONSOLE_WRITE,
+        abi::SYSTEM_DEVICE_OPEN,
+        abi::SYSTEM_DEVICE_INTERRUPT_CREATE,
+        abi::SYSTEM_DEVICE_INTERRUPT_WAIT,
+        abi::SYSTEM_ASYNC_RING_CREATE,
+        abi::SYSTEM_ASYNC_RING_ENTER,
+        abi::SYSTEM_ASYNC_CANCEL,
+        abi::SYSTEM_TIME_WAIT,
+        abi::SYSTEM_HANDLE_RESTRICT,
+        abi::SYSTEM_HANDLE_CLOSE,
+        abi::SYSTEM_TASK_EXIT,
+    ]);
+    let base = arch::USER_WINDOW.0;
+    let pid = proc::create("irqprobe-depart", allowed).ok()?;
+    let fail = |stage: &str| {
+        kprintln!("[JSR-IRQRING-FAIL] stage=depart-{}", stage);
+        FAILED.fetch_add(1, Ordering::Relaxed);
+        proc::exit_idle(pid, -1);
+        proc::reap(pid);
+        kobj::run_cleanup(usize::MAX);
+        None
+    };
+    let Ok(entry) = proc::load_elf(pid, USER_IRQPROBE) else { return fail("load") };
+    for depth in 1..=2 {
+        if proc::map_new(
+            pid,
+            base + STACK_OFF - depth * FRAME_SIZE,
+            MapFlags::USER | MapFlags::WRITE,
+        )
+        .is_err()
+        {
+            return fail("stack");
+        }
+    }
+    USER_PID.store(pid.raw(), Ordering::Relaxed);
+    let arg = u64::from(bdf) | ARG_DEPART | (target as u64) << ARG_TARGET_SHIFT;
+    if proc::spawn_thread(
+        pid,
+        "irqprobe-depart",
+        entry,
+        base + STACK_OFF,
+        cpu_mask,
+        arg,
+    )
+    .is_err()
+    {
+        return fail("thread");
+    }
+    if sched::spawn(TaskId(DEPART_DRIVER_TASK), "irqring-depart", depart_driver).is_err() {
+        check(false, "无法创建 CPU 离场驱动任务");
+        abort_user();
+        DEPART_DONE.store(true, Ordering::Release);
     }
     sched::run();
     let code = match proc::state(pid) {
