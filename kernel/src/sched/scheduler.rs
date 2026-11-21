@@ -68,7 +68,7 @@ use spin::Once;
 
 /// 堆就绪之前的内联槽位数（与静态内核栈数一致：那时只有这些槽位有栈）。
 pub const INLINE_SLOTS: usize = STATIC_STACKS;
-pub const WAKE_MAILBOX_CAPACITY: usize = 16;
+pub const WAKE_MAILBOX_CAPACITY: usize = 16; // JASPER-HARDCODE-REVIEW: issue=35 source=scheduler-mailbox-backpressure reason=interrupt-safe-wake-mailbox-full-is-not-overwrite
 /// 统一身份表的编译期上界；实际任务容量不得超过它。
 /// Compile-time upper bound of the unified timer table.
 pub const TIMER_SLOTS: usize = kernel_core::config::bounds::MAX_TASKS;

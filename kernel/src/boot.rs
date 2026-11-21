@@ -11,7 +11,7 @@ use kernel_core::psci::Conduit;
 use spin::Once;
 
 /// 最多记录的物理内存区域数（超出部分计入 `dropped_regions`，不静默丢弃）。
-pub const MAX_REGIONS: usize = 256;
+pub const MAX_REGIONS: usize = 256; // JASPER-HARDCODE-REVIEW: issue=35 source=boot-memory-region-policy reason=preheap-region-table-overflow-counted-and-incomplete-map-fails-closed
 
 /// Runtime frame-bitmap metadata physically reserved during hand-off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

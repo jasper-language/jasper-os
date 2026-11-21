@@ -25,7 +25,7 @@ const TIMER_HZ: u32 = config::ACTIVE.clock.timer_hz;
 /// 启动自检至少等到的 tick 数（取自配置档）。
 const BOOT_TICKS: u64 = config::ACTIVE.clock.boot_ticks;
 /// 等 tick 的兜底次数：定时器没配好时必须报错退出，而不是永远睡下去。
-const MAX_WAITS: u64 = 20_000_000;
+const MAX_WAITS: u64 = 20_000_000; // JASPER-HARDCODE-REVIEW: issue=35 source=boot-progress-watchdog reason=bounded-wait-count-to-detect-unconfigured-timer
 
 /// 计划的一步。计划是静态数据，执行体取得启动上下文。A plan step; the body gets the boot context.
 pub type Step = PlanItem<fn(&mut BootCtx)>;

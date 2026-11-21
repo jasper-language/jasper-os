@@ -60,3 +60,8 @@ scheduler-class-taxonomy	35	policy	built-in-scheduling-class-id-space
 scheduler-burst-policy	35	policy	CPU-limit-burst-and-long-term-starvation-bound
 trace-tag-envelope-policy	35	policy	trace-event-fixed-tag-envelope-visible-truncation
 heap-structural-alignment	35	policy	allocator-free-node-and-SIMD-safe-alignment
+linux-sysv-uapi-v1	35	spec	Linux-compat-SysV-IPC-public-profile-quotas
+subscription-backpressure-policy	35	policy	bounded-subscription-queue-with-authoritative-resync
+scheduler-mailbox-backpressure	35	policy	wake-and-PI-mailboxes-full-is-not-overwrite
+boot-memory-region-policy	35	policy	preheap-memory-region-overflow-counted-incomplete-map-fails-closed
+boot-progress-watchdog	35	policy	startup-timer-wait-bounded-against-unconfigured-clock

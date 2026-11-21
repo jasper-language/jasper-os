@@ -5,8 +5,8 @@ use alloc::{boxed::Box,vec::Vec};
 use kernel_core::{object::{HandleId,ObjectType,Rights},objtable::ObjId,
  subscription::{Snapshot,Queue,Policy,Delivery}};
 use crate::{kobj::{self,KObject,Table},proc::{self,ProcError}};
-pub const QUEUE_SLOTS:usize=16;
-const MAX_SUBSCRIPTIONS:u64=64;
+pub const QUEUE_SLOTS:usize=16; // JASPER-HARDCODE-REVIEW: issue=35 source=subscription-backpressure-policy reason=bounded-per-subscription-event-queue-with-authoritative-resync
+const MAX_SUBSCRIPTIONS:u64=64; // JASPER-HARDCODE-REVIEW: issue=35 source=subscription-backpressure-policy reason=bounded-source-subscriber-table-with-fail-closed-quota
 pub(crate) const PROCESS_SUBSCRIPTIONS:u64=32;
 pub(crate) const PROCESS_QUEUE_SLOTS:u64=QUEUE_SLOTS as u64*PROCESS_SUBSCRIPTIONS;
 

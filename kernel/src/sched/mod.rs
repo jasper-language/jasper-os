@@ -78,7 +78,7 @@ static YIELD_GATES: [kernel_core::yield_gate::YieldGate; kernel_core::smp::MAX_C
 static TICK_LEASES: [kernel_core::ticket::TicketLock<kernel_core::tick_lease::TickLease>; kernel_core::smp::MAX_CPUS] =
     [const { kernel_core::ticket::TicketLock::new(kernel_core::tick_lease::TickLease::new()) }; kernel_core::smp::MAX_CPUS];
 
-const PI_MAILBOX_CAPACITY: usize = 16;
+const PI_MAILBOX_CAPACITY: usize = 16; // JASPER-HARDCODE-REVIEW: issue=35 source=scheduler-mailbox-backpressure reason=interrupt-safe-fixed-mailbox-rejects-full-without-overwrite
 struct CpuInbox {
     wake: kernel_core::wake_mailbox::WakeMailbox<{ scheduler::WAKE_MAILBOX_CAPACITY }>,
     pi: kernel_core::percpu_migration::PiMailbox<PI_MAILBOX_CAPACITY>,

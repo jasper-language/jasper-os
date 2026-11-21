@@ -49,15 +49,15 @@ static ART_TLS_TRACE_REMAINING: AtomicU32 = AtomicU32::new(0);
 const LINUX_PROC_MAPS_HANDLE: u64 = 0x4a53_5052_4f43_4d50;
 const LINUX_PROC_STAT_HANDLE: u64 = 0x4a53_5052_4f43_5354;
 
-const MAX_SYSV_MESSAGE_QUEUES: usize = 16;
-const SYSV_MSGMAX: usize = 8192;
-const SYSV_MSGMNB: usize = 16384;
-const MAX_SYSV_SEM_SETS: usize = 16;
-const MAX_SYSV_SEMS_PER_SET: usize = 16;
-const MAX_SYSV_SEM_OPS: usize = 32;
-const MAX_SYSV_SEM_UNDOS: usize = 64;
-const SYSV_SEMVMX: i32 = 32767;
-const MAX_SYSV_SHARED_SEGMENTS: usize = 16;
+const MAX_SYSV_MESSAGE_QUEUES: usize = 16; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-sysv-uapi-v1 reason=compat-profile-public-msgmni-quota
+const SYSV_MSGMAX: usize = 8192; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-sysv-uapi-v1 reason=compat-profile-public-msgmax-quota
+const SYSV_MSGMNB: usize = 16384; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-sysv-uapi-v1 reason=compat-profile-public-msgmnb-quota
+const MAX_SYSV_SEM_SETS: usize = 16; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-sysv-uapi-v1 reason=compat-profile-public-semmni-quota
+const MAX_SYSV_SEMS_PER_SET: usize = 16; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-sysv-uapi-v1 reason=compat-profile-public-semmsl-quota
+const MAX_SYSV_SEM_OPS: usize = 32; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-sysv-uapi-v1 reason=compat-profile-public-semopm-limit
+const MAX_SYSV_SEM_UNDOS: usize = 64; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-sysv-uapi-v1 reason=compat-profile-public-semume-quota
+const SYSV_SEMVMX: i32 = 32767; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-sysv-uapi-v1 reason=compat-profile-public-semvmx-value-bound
+const MAX_SYSV_SHARED_SEGMENTS: usize = 16; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-sysv-uapi-v1 reason=compat-profile-public-shmmni-quota
 static NEXT_LINUX_TID: AtomicU32 = AtomicU32::new(0x10_0000);
 static NEXT_POSIX_TIMER_ID: AtomicU64 = AtomicU64::new(0x7000_0000_0000_0001);
 

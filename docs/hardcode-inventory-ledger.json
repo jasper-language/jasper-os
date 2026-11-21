@@ -1,5 +1,5 @@
 {
-  "baseline_total": 145,
+  "baseline_total": 133,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,7 +10,7 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 90,
+    "explicit-safety-policy": 78,
     "protocol-abi": 42,
     "test-demo-fixture": 11
   },
@@ -908,16 +908,6 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "8ef38c328065b40f0be7b47b7efe55d96bec5e2bb2880c1188746f2c673858d8",
-      "line": 14,
-      "path": "kernel/src/boot.rs",
-      "reason": "pre-heap bootloader handoff staging bound; overflow is counted and frame allocation fails closed until the complete memory map is retained",
-      "rules": "HC-G1",
-      "source": "pub const MAX_REGIONS: usize = 256;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
       "fingerprint": "768eca4dbb06e2e691db31e107d7f23a5ec6945567777a3c169024571f69291b",
       "line": 18,
       "path": "kernel/src/compat_rng.rs",
@@ -964,16 +954,6 @@
       "reason": "PCI configuration limit, architecture address width, wire handle count, or internal bit field",
       "rules": "HC-G1",
       "source": "pub const MAX_MSG_HANDLES: usize = 8;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "b28991f9a5f727b2d90f6c7cca2c44aa894a4781fb97d21abb3c77f1d1b77313",
-      "line": 28,
-      "path": "kernel/src/kmain.rs",
-      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
-      "rules": "HC-G1",
-      "source": "const MAX_WAITS: u64 = 20_000_000;"
     },
     {
       "category": "explicit-safety-policy",
@@ -1038,26 +1018,6 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "1e7b2a413d70770b79f11fd7f94b35b7a7a756a561eda33ca3f6f370cc31c7a9",
-      "line": 57,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "bounded vector or operation batch; excess work must fail explicitly without silently truncating results",
-      "rules": "HC-G1",
-      "source": "const MAX_SYSV_SEM_OPS: usize = 32;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "51f6e980fe03b82254f11d5cd47f60402ff7c92abd0bdb4f048db1dcd385d623",
-      "line": 58,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "advertised SysV IPC compatibility quota reported through IPC_INFO; excess creation/undo registration is rejected rather than silently truncated",
-      "rules": "HC-G1",
-      "source": "const MAX_SYSV_SEM_UNDOS: usize = 64;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
       "fingerprint": "5e1964903cacf96b08e4e754de99ca1ec2f08a4f2acf7fe03e9fd4874beb4cda",
       "line": 2209,
       "path": "kernel/src/linux_abi.rs",
@@ -1076,16 +1036,6 @@
       "source": "const MAX_GETDENTS: usize = 64 * 1024;"
     },
     {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "7974b100708df3825667efb6f73e504619d2c8f4ca3567153d02e50ac3967d42",
-      "line": 60,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_SYSV_SHARED_SEGMENTS: usize = 16;"
-    },
-    {
       "category": "protocol-abi",
       "count": 1,
       "fingerprint": "b60d795393e6efde352a53baec1d3e14454a6e302eda16fd92c6e6669f122037",
@@ -1094,36 +1044,6 @@
       "reason": "identifier is a Linux UAPI width or semantic boundary; preserve the documented Linux value",
       "rules": "HC-G1",
       "source": "const MAX_COUNTER: u64 = u64::MAX - 1;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "ceefeba142a26bdd5eb3a0fa92e7f1b64ead37d3b69dfc32b59a061553e24585",
-      "line": 56,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "advertised SysV IPC compatibility quota reported through IPC_INFO; excess creation/undo registration is rejected rather than silently truncated",
-      "rules": "HC-G1",
-      "source": "const MAX_SYSV_SEMS_PER_SET: usize = 16;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "db74dad77645f81c70953abc18f40e06ef73a30a8f729bab8822575780769e42",
-      "line": 55,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "advertised SysV IPC compatibility quota reported through IPC_INFO; excess creation/undo registration is rejected rather than silently truncated",
-      "rules": "HC-G1",
-      "source": "const MAX_SYSV_SEM_SETS: usize = 16;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "e88ea9e19b783c9b7138309565e91b4309327bcbdfa7de85cda0f5898e81db59",
-      "line": 52,
-      "path": "kernel/src/linux_abi.rs",
-      "reason": "advertised SysV IPC compatibility quota reported through IPC_INFO; excess creation/undo registration is rejected rather than silently truncated",
-      "rules": "HC-G1",
-      "source": "const MAX_SYSV_MESSAGE_QUEUES: usize = 16;"
     },
     {
       "category": "protocol-abi",
@@ -1196,16 +1116,6 @@
       "source": "const MAX_WORKERS: usize = 8;"
     },
     {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "97f8dc4d80936b0ff31ad604e79241fb61041039323badef968e219a3bb008b6",
-      "line": 81,
-      "path": "kernel/src/sched/mod.rs",
-      "reason": "per-CPU interrupt-safe delivery mailbox: full returns to the caller for synchronous completion or retry and never overwrites or drops a wake/PI request",
-      "rules": "HC-G8",
-      "source": "const PI_MAILBOX_CAPACITY: usize = 16;"
-    },
-    {
       "category": "test-demo-fixture",
       "count": 1,
       "fingerprint": "0eb30cf967644c25f717d65faad48794a94db67ba6c5db72bd145b95df39fc9f",
@@ -1234,36 +1144,6 @@
       "reason": "bounded benchmark or probe fixture, not a production hardware fact",
       "rules": "HC-G1",
       "source": "static MAX_CANDIDATES: AtomicU32 = AtomicU32::new(0);"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "4db2dbeba27264cc51d8af78754fa3683e735df010f65b2d599f349dea0efcd6",
-      "line": 71,
-      "path": "kernel/src/sched/scheduler.rs",
-      "reason": "per-CPU interrupt-safe delivery mailbox: full returns to the caller for synchronous completion or retry and never overwrites or drops a wake/PI request",
-      "rules": "HC-G8",
-      "source": "pub const WAKE_MAILBOX_CAPACITY: usize = 16;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "1fab4168ad16d1ae91704a94d0c1e3aec9f96bfb6b84dc88a7e1a669ec540335",
-      "line": 9,
-      "path": "kernel/src/subscription.rs",
-      "reason": "bounded subscription delivery policy: queue overflow becomes one authoritative Resync and per-process count/slot admission rejects excess subscriptions atomically",
-      "rules": "HC-G1",
-      "source": "const MAX_SUBSCRIPTIONS:u64=64;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "280f8c8e0f5ab6f64a405e6aa0000202517b7f45b8bec16d086a613e89cb7444",
-      "line": 8,
-      "path": "kernel/src/subscription.rs",
-      "reason": "bounded subscription delivery policy: queue overflow becomes one authoritative Resync and per-process count/slot admission rejects excess subscriptions atomically",
-      "rules": "HC-G8",
-      "source": "pub const QUEUE_SLOTS:usize=16;"
     },
     {
       "category": "explicit-safety-policy",
@@ -1448,7 +1328,7 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 91,
+    "explicit-safety-policy": 79,
     "protocol-abi": 43,
     "test-demo-fixture": 11
   }

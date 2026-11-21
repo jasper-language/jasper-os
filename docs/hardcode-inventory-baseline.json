@@ -62,20 +62,8 @@
     },
     {
       "count": 1,
-      "fingerprint": "1e7b2a413d70770b79f11fd7f94b35b7a7a756a561eda33ca3f6f370cc31c7a9",
-      "path": "kernel/src/linux_abi.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "1e974547ae3112698121432fb62307c9ec215d9996e5840b79743331a803e387",
       "path": "jaso/src/wire.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "1fab4168ad16d1ae91704a94d0c1e3aec9f96bfb6b84dc88a7e1a669ec540335",
-      "path": "kernel/src/subscription.rs",
       "rules": "HC-G1"
     },
     {
@@ -107,12 +95,6 @@
       "fingerprint": "2509ec6038804e6968fa79ac05287ee2da8b0b281176dee6b433baf266e5aa63",
       "path": "kernel/src/ipc.rs",
       "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "280f8c8e0f5ab6f64a405e6aa0000202517b7f45b8bec16d086a613e89cb7444",
-      "path": "kernel/src/subscription.rs",
-      "rules": "HC-G8"
     },
     {
       "count": 1,
@@ -212,12 +194,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "4db2dbeba27264cc51d8af78754fa3683e735df010f65b2d599f349dea0efcd6",
-      "path": "kernel/src/sched/scheduler.rs",
-      "rules": "HC-G8"
-    },
-    {
-      "count": 1,
       "fingerprint": "4dcd8af41c414ca64c473727d3b48b16bbbfcf5630ef3dcff23cc482e9a8078d",
       "path": "kernel/src/lifecycle_health.rs",
       "rules": "HC-G1"
@@ -238,12 +214,6 @@
       "count": 1,
       "fingerprint": "50d9cb71db165eac086bc6061bf06ddc45452703cf8418a9900ec867e0f47a48",
       "path": "kernel-core/src/hwvirt_vcpu.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "51f6e980fe03b82254f11d5cd47f60402ff7c92abd0bdb4f048db1dcd385d623",
-      "path": "kernel/src/linux_abi.rs",
       "rules": "HC-G1"
     },
     {
@@ -392,12 +362,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "7974b100708df3825667efb6f73e504619d2c8f4ca3567153d02e50ac3967d42",
-      "path": "kernel/src/linux_abi.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "7bfc1f8490d1ea29829cfc20db7c40cc8c8a22a5744a6c1e7060622ff796d1ea",
       "path": "lifecycle-model/src/manifest.rs",
       "rules": "HC-G1"
@@ -470,21 +434,9 @@
     },
     {
       "count": 1,
-      "fingerprint": "8ef38c328065b40f0be7b47b7efe55d96bec5e2bb2880c1188746f2c673858d8",
-      "path": "kernel/src/boot.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "8f0758e13414b04ffd8b78548bbad32e8baffdb158fdc9f57f5600c65d3e2bfe",
       "path": "kernel/src/arch/aarch64/devirq.rs",
       "rules": "HC-G7"
-    },
-    {
-      "count": 1,
-      "fingerprint": "97f8dc4d80936b0ff31ad604e79241fb61041039323badef968e219a3bb008b6",
-      "path": "kernel/src/sched/mod.rs",
-      "rules": "HC-G8"
     },
     {
       "count": 1,
@@ -562,12 +514,6 @@
       "count": 1,
       "fingerprint": "ac8fafb6face5d8af97284754c9fef8bccef459017105a0ff9e7776d0f2343ab",
       "path": "kernel-core/src/image_header.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "b28991f9a5f727b2d90f6c7cca2c44aa894a4781fb97d21abb3c77f1d1b77313",
-      "path": "kernel/src/kmain.rs",
       "rules": "HC-G1"
     },
     {
@@ -668,12 +614,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "ceefeba142a26bdd5eb3a0fa92e7f1b64ead37d3b69dfc32b59a061553e24585",
-      "path": "kernel/src/linux_abi.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "cf25aabad896359a31be302a2e0064116f7dc428640d0ed06c99020823a16943",
       "path": "kernel/src/sched/pex4_probe.rs",
       "rules": "HC-G1"
@@ -728,12 +668,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "db74dad77645f81c70953abc18f40e06ef73a30a8f729bab8822575780769e42",
-      "path": "kernel/src/linux_abi.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "dc47e8a510d8d2864bcd2701c3145e3ba16501ffb1a6223fbebc95e541fe53bb",
       "path": "user/isohost/src/main.rs",
       "rules": "HC-G1"
@@ -760,12 +694,6 @@
       "count": 1,
       "fingerprint": "e5f69ab4bd842a80a16c9180a8a9b783a7249a930bc42c4d6514aaae635017c7",
       "path": "jaso/src/lib.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "e88ea9e19b783c9b7138309565e91b4309327bcbdfa7de85cda0f5898e81db59",
-      "path": "kernel/src/linux_abi.rs",
       "rules": "HC-G1"
     },
     {
@@ -879,5 +807,5 @@
     "user",
     "xtask"
   ],
-  "total": 145
+  "total": 133
 }
