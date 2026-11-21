@@ -1035,6 +1035,49 @@ fn execute_root_dynamic_programs(
         return Err(HealthError::RootExecute);
     }
     install_root_libraries(root)?;
+    #[cfg(feature = "compat-wine-verify")]
+    {
+        install_root_android_files(root, origin)?;
+        let wine_argv: [&[u8]; 5] = [
+            b"/usr/lib/x86_64-linux-gnu/wine/wine",
+            b"cmd",
+            b"/c",
+            b"echo",
+            b"WINE_CMD_OK",
+        ];
+        let wine_envp: [&[u8]; 10] = [
+            b"HOME=/data",
+            b"PATH=/usr/lib/x86_64-linux-gnu/wine:/usr/bin:/bin",
+            b"WINEPREFIX=/data/wineprefix",
+            b"WINEARCH=win64",
+            b"WINEDEBUG=-all",
+            b"WINEDLLPATH=/usr/lib/x86_64-linux-gnu/wine/x86_64-windows:/usr/lib/x86_64-linux-gnu/wine/i386-windows",
+            b"WINEDLLOVERRIDES=winemenubuilder.exe=d;mscoree=d;mshtml=d",
+            b"LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/wine/x86_64-unix",
+            b"TMPDIR=/tmp",
+            b"LANG=C.UTF-8",
+        ];
+        let executable = root
+            .read_file("/usr/lib/x86_64-linux-gnu/wine/wine", 4 * 1024 * 1024)
+            .map_err(|_| HealthError::RootExecute)?;
+        let interpreter = root
+            .read_file("/lib64/ld-linux-x86-64.so.2", 4 * 1024 * 1024)
+            .map_err(|_| HealthError::RootExecute)?;
+        if !crate::compat_dynamic_demo::run_root_dynamic_program(
+            "compat-wine-cmd",
+            "/usr/lib/x86_64-linux-gnu/wine/wine",
+            &executable,
+            &interpreter,
+            "/lib64/ld-linux-x86-64.so.2",
+            &wine_argv,
+            &wine_envp,
+            crate::mm::frame::free_frames(),
+            true,
+        ) {
+            return Err(HealthError::RootExecute);
+        }
+        return Ok(());
+    }
     #[cfg(feature = "android-apk-verify")]
     {
         install_root_android_files(root, origin)?;

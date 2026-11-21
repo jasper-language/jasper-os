@@ -230,6 +230,9 @@ android-apk-verify = ["lifecycle-root-exec-verify"]
 # an unmodified SwiftShader Vulkan ICD.
 vulkan-metal2vulkan-verify = ["lifecycle-root-exec-verify"]
 vulkan-compute-only = []
+# Run the unmodified Ubuntu Wine 10.0 Linux build and its built-in cmd.exe
+# through the same root-backed Linux ABI.
+compat-wine-verify = ["lifecycle-root-exec-verify"]
 # Dedicated negative acceptance: lose the first virtio-blk completion and require
 # the hardware-counter timeout to fail the health gate without hanging silently.
 lifecycle-block-timeout-verify = ["lifecycle-root-exec-verify", "fault-inject"]
