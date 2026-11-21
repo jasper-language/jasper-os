@@ -861,4 +861,42 @@ mod tests {
             RecoveryError::InvalidCandidate
         );
     }
+
+    #[test]
+    fn sixty_four_workload_orphans_restart_with_generation_isolation() {
+        let mut table = WorkloadTable::new();
+        let mut members = WorkloadMembers::new();
+        let usage = ResourceUsage {
+            memory_bytes: 256,
+            threads: 1,
+            ring_entries: 0,
+        };
+
+        for index in 0..64u64 {
+            let old = running(&mut table, DOMAIN);
+            let member = 10_000 + index;
+            members.attach(&table, old, member).unwrap();
+            table.charge(old, usage).unwrap();
+            table.transition(old, WorkloadState::Failed).unwrap();
+            let replacement = running(&mut table, DOMAIN);
+
+            let blocked = recovery_snapshot(&table, &members, old, Some(replacement)).unwrap();
+            assert!(!blocked.publishable);
+            assert_eq!(blocked.remaining_members, 1);
+
+            let progress = note_member_exit(&table, &mut members, old, member).unwrap();
+            assert_eq!(progress.remaining_members, 0);
+            assert!(!progress.resources_drained);
+            table.release(old, usage).unwrap();
+            let recovered = recovery_snapshot(&table, &members, old, Some(replacement)).unwrap();
+            assert!(recovered.publishable);
+            assert!(recovered.resources_drained);
+            assert!(recovered.children_drained);
+            assert!(recovered.replacement_running);
+            assert_ne!(old, replacement);
+        }
+
+        assert_eq!(members.count_for(running(&mut table, DOMAIN)), 0);
+        assert_eq!(table.len(), 129);
+    }
 }
