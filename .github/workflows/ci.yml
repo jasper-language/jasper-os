@@ -108,6 +108,10 @@ jobs:
         run: |
           python3 scripts/check-cpu-dynamic-consumers.py --self-test
           python3 scripts/check-cpu-dynamic-consumers.py
+      - name: Issue #46 Trust Framework v1 规范边界 / trust protocol specification
+        run: |
+          python3 scripts/check-trust-framework-spec.py --self-test
+          python3 scripts/check-trust-framework-spec.py
       - name: 原生 Profile 与兼容依赖隔离 / native profile isolation
         run: python3 scripts/check-native-ecosystem.py --dependency-tree
       - name: Issue #36/#37 GPU 与 UI ABI 边界 / GPU-UI boundary

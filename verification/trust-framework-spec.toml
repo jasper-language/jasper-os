@@ -1,0 +1,45 @@
+schema = 1
+stage = "TRUST-FRAMEWORK-SPEC-1"
+status = "spec-defined"
+updated = "2026-11-21"
+evidence = "docs/TRUST-FRAMEWORK-SPEC.md; trust/schema/v1/trust.cddl; docs/issue-46-trust-framework-spec-status.md"
+
+[[acceptance]]
+id = "roles-and-authority"
+statement = "Attester, Collector, Broker, Verifier, Provider Registry, Policy Evaluator and Relying Party have distinct responsibilities; SEC remains the only kernel authority."
+state = "passed"
+
+[[acceptance]]
+id = "versioned-evidence-protocol"
+statement = "Challenge, Evidence, Result, Provider Catalog, Policy Result and Error are versioned with explicit subject/object/provider generations."
+state = "passed"
+
+[[acceptance]]
+id = "freshness-replay-revocation"
+statement = "Audience, nonce, validity window, boot identity, policy epoch and revocation invalidate stale or cross-generation evidence."
+state = "passed"
+
+[[acceptance]]
+id = "privacy-and-bounded-input"
+statement = "Minimum disclosure and receiver-owned resource admission bound malformed input, scopes and Provider negotiation."
+state = "passed"
+
+[[acceptance]]
+id = "rats-eat-mapping"
+statement = "RATS roles and EAT claims preserve evidence level, scope, gaps, audience, freshness and provider trust without upgrading software claims."
+state = "passed"
+
+[[acceptance]]
+id = "kernel-abi-boundary"
+statement = "Protocol v1 adds no system ABI and requires a separate minimal-primitive review before protected measurement or hardware evidence can enter Core."
+state = "passed"
+
+[[acceptance]]
+id = "software-evidence-vertical"
+statement = "A real measured application, collector, broker, verifier and policy result are implemented with replay, crash and resource tests."
+state = "pending"
+
+[[acceptance]]
+id = "hardware-attestation"
+statement = "A production TPM/TEE provider is provisioned and validated on physical approved hardware."
+state = "pending"
