@@ -287,48 +287,6 @@ fn msi_prepared_count() -> usize {
             .map_or(0, |states| states.len().min(layout.tail_len()))
 }
 
-fn has_bootstrap_msi_state(cpu: usize) -> bool {
-    let layout = CpuTailLayout::new(MAX_CPUS, crate::smp::cpu_count());
-    cpu < layout.bootstrap_len()
-}
-
-fn has_extra_msi_state(cpu: usize) -> bool {
-    let layout = CpuTailLayout::new(MAX_CPUS, crate::smp::cpu_count());
-    if !layout.is_tail(cpu) {
-        return false;
-    }
-    let Some(extra) = layout.tail_index(cpu) else {
-        return false;
-    };
-    EXTRA_MSI_CPUS
-        .get()
-        .and_then(|states| states.as_ref().ok())
-        .is_some_and(|states| extra < states.len())
-}
-
-fn bootstrap_msi_state(cpu: usize) -> Option<&'static MsiCpuState> {
-    if !has_bootstrap_msi_state(cpu) {
-        return None;
-    }
-    BOOTSTRAP_MSI_CPUS.get(cpu)
-}
-
-fn extra_msi_state(cpu: usize) -> Option<&'static MsiCpuState> {
-    if !has_extra_msi_state(cpu) {
-        return None;
-    }
-    let layout = CpuTailLayout::new(MAX_CPUS, crate::smp::cpu_count());
-    let extra = layout.tail_index(cpu)?;
-    EXTRA_MSI_CPUS.get()?.as_ref().ok()?.get(extra)
-}
-
-fn msi_state(cpu: usize) -> Option<&'static MsiCpuState> {
-    if let Some(state) = bootstrap_msi_state(cpu) {
-        return Some(state);
-    }
-    extra_msi_state(cpu)
-}
-
 /// Reserve MSI dispatch state before AP startup. Calling twice is idempotent.
 pub fn prepare_msi_storage(cpus: usize) -> Result<(), MsiStorageError> {
     let layout = CpuTailLayout::new(MAX_CPUS, cpus);
