@@ -154,6 +154,12 @@ RT/pressure、IRQ quota、lock rank、page-table depth、Spawn/subscription ABI�
 user window、virtio-fs/GPU、XSAVE 和 network loopback 策略绑定到来源和边界
 测试。存量降至 45/43，explicit policy 权重 17。
 
+最终 kernel/src、用户运行时、协议和测试夹具批次将 Binder/robust-list/rng
+等待、diagnostic response、IPC/Channel 消息边界、Linux batch、Profile
+渲染、用户布局、JASO wire、Linux guest/PSCI 和显式 probe 容量绑定到来源。
+所有保留项均有冻结 wire、地址布局、显式 fail-closed 策略或测试 Profile 证明，
+当前存量扫描为 **0/0**。
+
 Linux robust-list 的 64 节点上限属于故障进程退出时的有界遍历与环检测保护；该路径
 不能依赖堆分配成功，因此按显式安全策略登记。
 
