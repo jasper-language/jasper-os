@@ -368,6 +368,14 @@ pub fn primary_surface() -> Option<(u32, u32)> {
         .map(|runtime| (runtime.surface.width, runtime.surface.height))
 }
 
+/// Current display/keyboard facts for UI capability-event construction.
+pub fn ui_capability_facts() -> Option<(SurfaceSpec, bool)> {
+    DISPLAY
+        .lock()
+        .as_ref()
+        .map(|runtime| (runtime.surface, runtime.session.keyboard_available()))
+}
+
 /// Register one Engine-produced Surface as a native compositor layer, then
 /// present the updated framebuffer. Returns the layer's top-left position.
 ///

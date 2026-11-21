@@ -150,10 +150,10 @@ fn test_surface() -> SurfaceSpec {
     }
 }
 
-fn ui_capabilities() -> UiDeviceCapabilities {
+fn ui_capabilities(keyboard: bool) -> UiDeviceCapabilities {
     UiDeviceCapabilities {
         display: true,
-        keyboard: true,
+        keyboard,
         pointer: false,
         touch: false,
         split_layouts: false,
@@ -162,10 +162,10 @@ fn ui_capabilities() -> UiDeviceCapabilities {
     }
 }
 
-fn workspace_capabilities() -> UiDeviceCapabilities {
+fn workspace_capabilities(keyboard: bool) -> UiDeviceCapabilities {
     UiDeviceCapabilities {
         display: true,
-        keyboard: true,
+        keyboard,
         pointer: false,
         touch: true,
         split_layouts: true,
@@ -272,6 +272,18 @@ fn run_round(round: u32) -> bool {
         );
         return false;
     };
+    let Some((display_surface, keyboard)) = crate::display::ui_capability_facts() else {
+        check(false, "actual display capability facts were unavailable");
+        return false;
+    };
+    let Some(workspace_memory_budget) = display_surface
+        .validate()
+        .ok()
+        .and_then(|bytes| bytes.checked_mul(2))
+    else {
+        check(false, "actual display surface byte budget was invalid");
+        return false;
+    };
 
     let subject = service.raw();
     let peer_subject = peer.raw();
@@ -287,7 +299,7 @@ fn run_round(round: u32) -> bool {
         subject,
         scope,
         UiSessionKind::Remote,
-        ui_capabilities(),
+        ui_capabilities(keyboard),
         Some(test_surface()),
         create_capability,
     ) else {
@@ -347,7 +359,7 @@ fn run_round(round: u32) -> bool {
         peer_subject,
         peer_scope,
         UiSessionKind::Remote,
-        ui_capabilities(),
+        ui_capabilities(keyboard),
         Some(test_surface()),
         peer_create_capability,
     ) else {
@@ -389,18 +401,13 @@ fn run_round(round: u32) -> bool {
     let mut workspace = UiWorkspace::<2>::new(
         subject,
         policy_scope,
-        workspace_capabilities(),
+        workspace_capabilities(keyboard),
         test_surface(),
         160,
         160,
         &[1, 1],
     )
     .expect("bounded two-Scene workspace");
-    let migrated_surface = SurfaceSpec {
-        width: 80,
-        stride: 80,
-        ..test_surface()
-    };
     let Some(layout_capability) =
         pep_capability_at(subject, scope, Operation::ServiceUiFramePresent, 2, 2)
     else {
@@ -415,14 +422,14 @@ fn run_round(round: u32) -> bool {
             capability_epoch: 2,
             policy_epoch: 2,
             revocation_epoch: 2,
-            capabilities: workspace_capabilities(),
-            surface: migrated_surface,
+            capabilities: workspace_capabilities(keyboard),
+            surface: display_surface,
             dpi_x: 180,
             dpi_y: 180,
         },
         InteractionProfile::MultiWindow,
         600,
-        1024 * 1024,
+        workspace_memory_budget,
         layout_capability,
     );
     let old_frame_rejected = workspace.frame(0, 1, 1, 71, 2).is_err();
@@ -439,9 +446,10 @@ fn run_round(round: u32) -> bool {
         && new_input_ok;
     check(multiwindow_ok, "multi-window migration contract failed");
     kprintln!(
-        "[JSR-UI-MULTIWINDOW] round={} layout={:?} pending_canceled={} old_frame_rejected={} old_input_rejected={} new_surface_generation={} new_input_generation={} failed={}",
+        "[JSR-UI-MULTIWINDOW] round={} layout={:?} source=framebuffer keyboard={} pending_canceled={} old_frame_rejected={} old_input_rejected={} new_surface_generation={} new_input_generation={} failed={}",
         round,
         layout_mode,
+        keyboard,
         old_frame_rejected,
         old_frame_rejected,
         old_input_rejected,
