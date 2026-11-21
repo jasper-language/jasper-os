@@ -153,15 +153,16 @@ impl WireGuardService {
         self.active
     }
 
-    /// 向当前 socket 投递一个外部接收报文，验证来源后才进入队列。
+    /// 向当前 socket 投递一个外部接收报文。
     ///
-    /// Delivers one externally received datagram to the bound socket after checking its peer.
+    /// Source admission is deferred to authenticated decapsulation so NAT rebinding
+    /// can update the peer endpoint without trusting an unauthenticated datagram.
+    ///
+    /// 来源准入延后到认证解封装阶段，使 NAT 重绑定只有在 WireGuard 报文认证
+    /// 成功后才能更新 peer endpoint，未认证来源不能成为新的对端地址。
     pub fn deliver(&mut self, source: UdpAddress, datagram: &[u8]) -> Result<(), NetServiceError> {
         if !self.active {
             return Err(NetServiceError::Inactive);
-        }
-        if source != self.remote {
-            return Err(NetServiceError::UnexpectedPeer);
         }
         self.runtime.receive(source, self.local, datagram)?;
         Ok(())
@@ -207,27 +208,27 @@ impl WireGuardService {
             .map_err(|_| NetServiceError::Udp(UdpRuntimeError::Capacity))?;
         wire.resize(self.runtime.limits().max_datagram_bytes, 0);
         let (source, wire_len) = self.runtime.recv(self.socket, &mut wire)?;
-        if source != self.remote {
-            return Err(NetServiceError::UnexpectedPeer);
-        }
-        let received: Result<WireGuardReceive<'a>, NetServiceError> = match self.tunnel.decapsulate(
+        let decapsulated = self.tunnel.decapsulate(
             now,
-            &self.remote.ip,
+            &source.ip,
             false,
             &wire[..wire_len],
             plaintext,
             rng,
-        )? {
-            Received::Data(data) => Ok(WireGuardReceive::Data(data.len())),
-            Received::Keepalive => Ok(WireGuardReceive::Keepalive),
+        )?;
+        if source != self.remote {
+            self.remote = source;
+        }
+        let received = match decapsulated {
+            Received::Data(data) => WireGuardReceive::Data(data.len()),
+            Received::Keepalive => WireGuardReceive::Keepalive,
             Received::Reply(reply) => {
                 self.runtime.send(self.socket, self.remote, reply)?;
-                Ok(WireGuardReceive::Reply(reply))
+                WireGuardReceive::Reply(reply)
             }
-            Received::HandshakeComplete => Ok(WireGuardReceive::HandshakeComplete),
-            Received::CookieStored => Ok(WireGuardReceive::CookieStored),
+            Received::HandshakeComplete => WireGuardReceive::HandshakeComplete,
+            Received::CookieStored => WireGuardReceive::CookieStored,
         };
-        let received = received?;
         if let Some(events) = self.events.as_mut() {
             let value = match received {
                 WireGuardReceive::Data(bytes) => bytes as u64,
@@ -403,13 +404,15 @@ mod tests {
             .encapsulate(now, &packet[..packet_len], &mut a_wire, &mut rng)
             .unwrap();
         assert_eq!(action, WireGuardEmit::Transport);
-        b.deliver(a.local(), transport).unwrap();
+        let rebound = address(3);
+        b.deliver(rebound, transport).unwrap();
         let data_len = match b.receive(now, &mut plaintext, &mut rng).unwrap() {
             WireGuardReceive::Data(len) => len,
             other => panic!("expected WireGuard data, got {other:?}"),
         };
         assert_eq!(&plaintext[..packet_len], &packet[..packet_len]);
         assert!(data_len >= packet_len);
+        assert_eq!(b.remote(), rebound);
         assert_eq!(a.udp_stats().sent_datagrams, 2);
         assert_eq!(b.udp_stats().received_datagrams, 2);
 
@@ -433,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn unexpected_peer_and_inactive_service_fail_without_queueing() {
+    fn unauthenticated_source_cannot_rebind_and_inactive_service_fails() {
         let mut key_rng = DeterministicRng::new(0x4e45_5434_5045_4552);
         let local_key = StaticSecret::generate(&mut key_rng).unwrap();
         let peer_key = StaticSecret::generate(&mut key_rng).unwrap();
@@ -445,11 +448,15 @@ mod tests {
             UdpLimits::new(1, 1, 1200),
         )
         .unwrap();
-        assert_eq!(
-            service.deliver(address(3), b"rejected"),
-            Err(NetServiceError::UnexpectedPeer)
-        );
-        assert_eq!(service.udp_stats().received_datagrams, 0);
+        service.deliver(address(3), b"rejected").unwrap();
+        let mut plaintext = [0u8; 64];
+        let mut rng = DeterministicRng::new(10);
+        assert!(matches!(
+            service.receive(Now::new(0, 1, 0), &mut plaintext, &mut rng),
+            Err(NetServiceError::Protocol(_))
+        ));
+        assert_eq!(service.remote(), address(2));
+        assert_eq!(service.udp_stats().received_datagrams, 1);
         service.close().unwrap();
         assert_eq!(
             service.deliver(address(2), b"closed"),
