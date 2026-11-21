@@ -243,7 +243,7 @@ fn run_round(round: u32) -> bool {
         check(false, "UI session create capability was not admitted");
         return false;
     };
-    let Ok((session_key, _)) = sessions.open(
+    let Ok((initial_key, _)) = sessions.open(
         subject,
         scope,
         UiSessionKind::Remote,
@@ -254,6 +254,26 @@ fn run_round(round: u32) -> bool {
         check(false, "UI session was not admitted");
         return false;
     };
+    check(
+        sessions.disconnect(subject, initial_key).is_ok(),
+        "remote UI session did not disconnect",
+    );
+    let Some(recovery_capability) =
+        pep_capability(subject, scope, Operation::ServiceUiSessionCreate)
+    else {
+        check(false, "UI recovery capability was not admitted");
+        return false;
+    };
+    let Ok((session_key, input_generation)) =
+        sessions.recover(subject, scope, initial_key, recovery_capability)
+    else {
+        check(false, "remote UI session did not recover explicitly");
+        return false;
+    };
+    check(
+        sessions.surface_for(subject, initial_key).is_err(),
+        "old remote UI session generation survived recovery",
+    );
     let scene_ok = sessions
         .set_scene(
             subject,
@@ -372,7 +392,7 @@ fn run_round(round: u32) -> bool {
     );
     let input_envelope = UiInputEnvelope {
         key: session_key,
-        input_generation: 1,
+        input_generation,
         sequence: 1,
         code: JSUI_ENTER_CODE,
         pressed: true,
@@ -530,7 +550,7 @@ fn run_round(round: u32) -> bool {
         "CPL3 UI session isolation did not complete",
     );
     kprintln!(
-        "[JSR-UI-SESSION-ISOLATION] round={} remote_channel=true session_key=true scope=true scene=true focus=true input_capability=true replay_rejected={} failed={}",
+        "[JSR-UI-SESSION-ISOLATION] round={} remote_channel=true session_key=true scope=true recovered=true scene=true focus=true input_capability=true replay_rejected={} failed={}",
         round,
         replay_rejected,
         failed()
