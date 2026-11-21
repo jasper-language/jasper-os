@@ -2,8 +2,9 @@
 
 更新时间：2026-11-21。
 
-状态：**native mechanism slice passed**。新增 `kernel-core::address_sync` 的
-受权地址条件状态机；该项不是新 ABI，也不表示 Issue #42 或用户态 Pager 已完成。
+状态：**M02 implemented-tested**。新增 `kernel-core::address_sync` 的受权地址
+条件状态机，并通过多 Process/MemoryObject/多 CPU 的停车、撤销、退出和 remap
+矩阵。该项不是新 ABI；futex/futex2/rseq 永久由兼容层翻译。
 
 ## 边界
 
@@ -38,8 +39,8 @@
 cargo test -p kernel-core address_sync --lib
 7 passed; 0 failed
 
-cargo test -p kernel-core
-1105 unit tests passed, including address_sync 7/7
+cargo test -p kernel-core --features runtime-registries,network-dynamic
+1137 unit/integration tests passed, including address_sync 7/7
 
 cargo check -p kernel-core --target x86_64-unknown-none
 PASS
@@ -136,12 +137,12 @@ publisher_distributed=true` 仍被误判。改为 `grep -qaE` 后，4/8/q35 的�
 - 64 个独立任务代次同时登记同一地址条件，单次广播唤醒全部 64 个 waiter；
   逐项消费后重复发布不产生额外唤醒。
 
-## 尚未完成
+## 最终裁决边界
 
 - 已完成内核内真实 Process/MemoryObject/调度停车接线，但尚无关闭兼容层后的
-  CPL3 原生调用者和经批准的用户接口；
+  CPL3 原生调用者；由于目前没有独立于兼容层的消费者，不批准新的 CPL3 ABI；
 - 跨 CPU 等待/发布、停车后 capability 撤销、Process 退出和重映射已通过；
-  宿主侧已有 64 waiter 广播压力；尚缺原生 CPL3 调用决策；
-- 用户态 Pager 仍未实现；PagerCapability、FaultEvent、处理者死亡、递归缺页、
-  队列满、超时、取消与页表最终裁决都需要独立 ABI/安全设计；
+  宿主侧已有 64 waiter 广播压力；
+- userfaultfd/Mach pager 在 M08 永久保留兼容；`fault_pager` 仅为 proof-only，
+  不把处理者死亡、递归缺页、超时、取消等状态机冒充生产 ABI；
 - 本切片不新增 syscall，不改变 `NO-HARDCODE-RESIDUAL-1` 或任何 DAG 节点状态。

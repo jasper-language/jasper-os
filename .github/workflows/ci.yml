@@ -97,7 +97,7 @@ jobs:
       - name: Issue #42 25 类机制审计台账 / mechanism-family ledger
         run: |
           python3 scripts/check-issue42-mechanism-ledger.py --self-test
-          python3 scripts/check-issue42-mechanism-ledger.py
+          python3 scripts/check-issue42-mechanism-ledger.py --final
       - name: Issue #43 驱动兼容域退出门 / compatibility driver-domain ledger
         run: |
           python3 scripts/check-issue43-driver-ledger.py --self-test

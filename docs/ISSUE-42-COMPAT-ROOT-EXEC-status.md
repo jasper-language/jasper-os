@@ -2,7 +2,8 @@
 
 更新时间：2026-11-19。
 
-状态：**真实 UEFI root-exec 与 LC-2 default-stack 回归恢复；Issue #42 仍保持 open。**
+状态：**真实 UEFI root-exec 与 LC-2 default-stack 回归证据；作为 Issue #42
+兼容入口和原生依赖隔离的支撑证据。**
 
 ## 本切片
 
@@ -52,7 +53,7 @@ hardcode gate self-test + inventory-baseline: no new finding
 
 ## 边界
 
-本切片不关闭 Issue #42。Native address synchronization、受权用户态 Pager、
-AsyncRing backend quiescence、完整 385 项 syscall native disposition（其中含
-Jasper `RseqSliceYield`/`Uprobe` 扩展）以及关闭兼容层
-后的原生 Profile 仍需独立实现和证据。
+本切片不是单独的 Issue #42 关闭门。最终 25 族裁决见
+`docs/ISSUE-42-FINAL-DISPOSITION.md`：地址同步由 M02 关闭，userfaultfd/Pager
+由 M08 永久保留兼容，AsyncRing backend quiescence 由 M09 关闭，385 项 syscall
+只证明分发表完整性，兼容关闭后的依赖隔离由 M17/M20/M21 的边界约束。

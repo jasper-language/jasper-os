@@ -24,5 +24,6 @@
 ## 边界
 
 本状态不新增 syscall 或用户 ABI，也不把 Linux futex、userfaultfd、PID 或 fd
-语义写入内核。M02 的独立 CPL3 调用/ABI 裁决、M08 Pager 真实页表接线和物理
-设备 DMA 仍由各自机制族追踪。
+语义写入内核。M02 已按“没有独立非兼容消费者则不批准 CPL3 ABI”完成裁决；
+M08 userfaultfd/Mach pager 永久保留兼容，`fault_pager` 状态机只作为 proof-only；
+物理设备 DMA 属于 #43 硬件验收。
