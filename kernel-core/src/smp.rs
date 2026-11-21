@@ -1325,7 +1325,7 @@ mod tests {
     #[test]
     fn cpu_set_covers_issue_35_topologies_without_silent_32_cpu_cap() {
         #[cfg(feature = "cpu-dynamic")]
-        let counts = [1, 32, 33, 64, 128, 129, 256, 1024];
+        let counts = [1, 32, 33, 64, 128, 129, 256, 1024, 4096];
         #[cfg(not(feature = "cpu-dynamic"))]
         let counts = [1, 32, 33, 64, 128];
         for count in counts {
@@ -1345,6 +1345,13 @@ mod tests {
         let high = CpuSet::first(65);
         assert_eq!(high.bits_u64(), None);
         assert_eq!(high.word(1), 1);
+        #[cfg(feature = "cpu-dynamic")]
+        for count in [129, 256, 1024, 4096] {
+            let set = CpuSet::first(count);
+            assert!(matches!(set, CpuSet::Heap(_)));
+            assert!(set.contains(count - 1));
+            assert_eq!(set.iter().last(), Some(count - 1));
+        }
     }
 
     #[test]

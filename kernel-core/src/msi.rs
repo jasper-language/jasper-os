@@ -323,11 +323,16 @@ mod tests {
 
     #[test]
     fn msi_vector_pool_supports_sparse_cpu_above_legacy_bitmap_width() {
-        let p = pool(0x60, 2, &[0, 129]);
-        assert_eq!(p.alloc(129), Ok(Vector::new(0x60)));
-        assert_eq!(p.allocated(129), 1);
+        let p = pool(0x60, 2, &[0, 129, 256, 1024]);
+        for cpu in [129, 256, 1024] {
+            assert_eq!(p.alloc(cpu), Ok(Vector::new(0x60)));
+            assert_eq!(p.allocated(cpu), 1);
+            assert!(p.is_allocated(cpu, Vector::new(0x60)).unwrap());
+            assert_eq!(p.free(cpu, Vector::new(0x60)), Ok(()));
+            assert_eq!(p.allocated(cpu), 0);
+        }
         assert_eq!(p.alloc(0), Ok(Vector::new(0x60)));
-        assert!(p.is_allocated(129, Vector::new(0x60)).unwrap());
+        assert!(p.is_allocated(0, Vector::new(0x60)).unwrap());
     }
 
     #[test]

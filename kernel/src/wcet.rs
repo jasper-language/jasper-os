@@ -16,6 +16,7 @@ use spin::Once;
 
 use kernel_core::sync::Atomic64;
 use kernel_core::smp::MAX_CPUS;
+use kernel_core::cpu_storage::CpuTailLayout;
 
 // 32 位目标没有 64 位原子指令：用 kernel-core 的自旋锁模拟单元。
 static SYSCALL_MAX_CYCLES: Atomic64 = Atomic64::new(0);
@@ -62,7 +63,7 @@ impl ReserveError {
 
 /// Reserve the complete per-CPU WCET IRQ-off state before any AP starts.
 pub fn prepare_cpu_storage(cpus: usize) -> Result<(), ReserveError> {
-    let needed = cpus.saturating_sub(MAX_CPUS);
+    let needed = CpuTailLayout::new(MAX_CPUS, cpus).tail_len();
     let states = EXTRA_IRQ_OFF.call_once(|| {
         let mut states = Vec::new();
         states
@@ -81,10 +82,17 @@ pub fn prepare_cpu_storage(cpus: usize) -> Result<(), ReserveError> {
 }
 
 fn irq_off_state(cpu: usize) -> Option<&'static IrqOffState> {
+    let layout = CpuTailLayout::new(MAX_CPUS, crate::smp::cpu_count());
+    if cpu >= layout.admitted() {
+        return None;
+    }
     if let Some(state) = BOOTSTRAP_IRQ_OFF.get(cpu) {
         return Some(state);
     }
-    let extra = cpu.checked_sub(MAX_CPUS)?;
+    if !layout.is_tail(cpu) {
+        return None;
+    }
+    let extra = layout.tail_index(cpu)?;
     EXTRA_IRQ_OFF.get()?.as_ref().ok()?.get(extra)
 }
 

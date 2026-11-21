@@ -2,16 +2,16 @@
 
 更新时间：2026-11-21。
 
-状态：**阶段 1 消费链已冻结为机器可查清单；6 个生产路径仍需迁移，阶段 2/3 尚未完成。**
+状态：**阶段 1 消费链已冻结为机器可查清单；3 个生产路径仍需迁移，阶段 2/3 尚未完成。**
 
 ## 已知固定事实
 
 | 位置 | 当前事实 | 性质 |
 | --- | --- | --- |
 | `kernel-core/src/smp.rs` | `BOOTSTRAP_CPUS = 128` | 堆就绪前的 bootstrap 暂存容量；不得成为最终运行期上限 |
-| `kernel-core/src/smp.rs` | `MAX_CPUS = BOOTSTRAP_CPUS` | 过渡期位图容量，当前仍限制生产拓扑 |
-| `kernel-core/src/smp.rs` | `CpuSet([u64; CPU_SET_WORDS])` | 固定 128 位集合，需迁移到动态/分段结构 |
-| `Topology` (`cpu-dynamic`) | 128 项 bootstrap + `Vec<u32>` overflow | 固件库存可超过 128，但最终调度集合仍无法表达 |
+| `kernel-core/src/smp.rs` | `MAX_CPUS = BOOTSTRAP_CPUS` | 仅供 bootstrap/兼容路径命名；动态 `CpuSet` 不以它拒绝最终逻辑 CPU |
+| `kernel-core/src/smp.rs` | `CpuSet::Inline(u128)` + heap `CpuBitmap` | 128 位内联 staging，超过 bootstrap 宽度后使用堆后备成员集合 |
+| `Topology` (`cpu-dynamic`) | 128 项 bootstrap + `Vec<u32>` overflow | 固件身份和最终逻辑集合均可超过 128 |
 | 旧原生亲和 ABI | 固定宽度字 | 高位 CPU 必须显式拒绝或由新可变长 ABI 替代 |
 
 `discovered`、`supported`、`admitted`、`online` 和 `rejected` 必须保持独立；
@@ -24,12 +24,14 @@
 当前冻结结果：
 
 ```text
-verified=14 paths
-in-progress=6 paths
+verified=16 paths
+in-progress=3 paths
 fixture=11 paths
 ```
 
-`in-progress` 路径包括调度器、调度门面、IRQ、WCET、核心 `CpuSet` 门面和 MSI。
+`in-progress` 路径包括调度器、调度门面和 IRQ。核心 `CpuSet`
+128 位仅用于堆前 staging，最终集合采用堆后备 bitmap；MSI 每核向量表也在 IRQ
+路径前按动态 CPU 集合预分配，二者已移出未迁移列表。
 只要这些路径仍含未完成在线/离线事务、固定诊断数组或 bootstrap 宽度门面，
 `CPU-DYNAMIC-ADMISSION-1` 就保持 in-progress。
 
@@ -37,11 +39,11 @@ fixture=11 paths
 
 | 消费域 | 生产文件 | 当前依赖 | 迁移归属 |
 | --- | --- | --- | --- |
-| CPU 集合/拓扑/击落/IPI | `kernel-core/src/smp.rs` | 33 处固定集合引用；固定 bitmap、定时数组、CallSlot 测试边界 | 阶段 2 核心 |
+| CPU 集合/拓扑/击落/IPI | `kernel-core/src/smp.rs` | 动态 `CpuSet` 已覆盖 heap tail；剩余固定项来自 bootstrap 生命周期和测试/协议边界 | 阶段 2 核心 |
 | 环境/亲和策略 | `kernel-core/src/environment.rs` | 用 `MAX_CPUS` 校验 demand CPU | 阶段 2/3 |
 | FDT/IOMMU CPU 校验 | `kernel-core/src/fdt.rs`, `iommu.rs` | 固定 CPU 上限校验 target CPU | 阶段 2/3 |
 | IRQ 路由/配额 | `kernel-core/src/irq.rs`, `kernel/src/irq.rs` | 每核 MSI handler/count/quota、固定行投影数组 | 阶段 3 |
-| MSI 向量池 | `kernel-core/src/msi.rs` | 每核固定向量位图 | 阶段 3 |
+| MSI 向量池 | `kernel-core/src/msi.rs` | `CpuBitmap` 在线集合 + IRQ 前预分配 heap 向量表；无 CPU 128 最终上限 | 已验证 |
 | sharding/tickless | `kernel-core/src/shard.rs`, `tickless.rs` | shard 数量、每核 stop 时间数组 | 阶段 3 |
 | per-CPU 数据/IPI/AOK | `kernel/src/smp/percpu.rs`, `kernel/src/smp/mod.rs` | `[PerCpu; MAX_CPUS]`、固定 board 初始化 | 阶段 2/3 |
 | x86 SMP/GDT/TSS/syscall/user | `kernel/src/arch/x86_64/{smp,gdt,syscall,user}.rs` | 每核 HW ID、TSS/GDT、syscall 返回帧 | 阶段 3 |
@@ -56,6 +58,19 @@ fixture=11 paths
 
 未纳入迁移的生产宏/生成代码必须在阶段 1 结束前补充；演示代码可以继续使用固定夹具，
 但只能作为软件测试夹具，不能定义生产容量。
+
+机器清单位于 `verification/cpu-dynamic-consumers.tsv`，由
+`scripts/check-cpu-dynamic-consumers.py` 在 CI 中校验。每一行必须显式归类为：
+
+- `bootstrap`：仅作为堆就绪前暂存或 bootstrap 身份，运行期消费者已有堆后备路径；
+- `dynamic`：生产消费者已由准入 CPU 数驱动的堆后备状态承载；
+- `fixed-unmigrated`：生产路径仍存在固定 CPU 容量或只覆盖引导区，不能标为完成；
+- `test-only`：只在测试代码中出现，不参与生产容量；
+- `excluded`：demo 或专用验证 Profile，不属于生产运行路径。
+
+校验器同时拒绝数量漂移、遗漏路径、把 `in-progress` 伪装成 bootstrap、未知分类，
+以及 test-only 路径残留生产命中。该清单冻结的是审计事实，不表示
+`fixed-unmigrated` 条目已经完成。
 
 ## 启动生命周期与分配约束
 
@@ -119,9 +134,13 @@ fixture=11 paths
 
 ## 消费链迁移进度
 
-- `kernel-core/src/msi.rs`：已完成首个生产迁移。`VectorPool` 在生产
+- `kernel-core/src/msi.rs`：已完成生产迁移。`VectorPool` 在生产
   `cpu-dynamic` 构建中使用 `CpuBitmap` 在线集合和堆后备每核向量位图；CPU 129 的
-  稀疏分配已有宿主测试。无该 feature 的用户运行时轻量构建继续使用固定兼容路径。
+  129/256/1024 稀疏分配、独立释放和预分配已有宿主测试。无该 feature 的
+  用户运行时轻量构建继续使用固定兼容路径。
+- `kernel-core/src/smp.rs`：动态 `CpuSet` 使用 128 位 inline staging 和堆后备
+  `CpuBitmap` tail，最终逻辑集合不经过 bootstrap 宽度拒绝；1/32/33/64/128/
+  129/256/1024/4096 成员与最大成员测试通过。
 - `kernel/src/interrupt.rs` 将当前 legacy `CpuSet` 在线集合适配为动态 MSI 集合；
   分配失败时 MSI 池构造失败关闭。
 - `kernel-core/src/shard.rs`：删除 `MAX_SHARDS = MAX_CPUS * 4`。路由分片数只受

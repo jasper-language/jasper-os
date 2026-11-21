@@ -242,6 +242,7 @@ pub mod extension_abi;
 
 pub mod cpu_time;
 pub mod cpu_identity;
+pub mod cpu_storage;
 #[cfg(any(test, feature = "cpu-dynamic"))]
 pub mod cpu_bitmap;
 #[cfg(any(test, feature = "cpu-dynamic"))]

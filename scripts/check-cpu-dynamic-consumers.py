@@ -21,11 +21,19 @@ HEADER = [
     "production_occurrences",
     "test_occurrences",
     "status",
+    "classification",
     "lifetime",
     "migration",
     "evidence",
 ]
 STATUSES = {"verified", "in-progress", "fixture"}
+CLASSIFICATIONS = {
+    "bootstrap",
+    "dynamic",
+    "fixed-unmigrated",
+    "test-only",
+    "excluded",
+}
 TERM = re.compile(
     r"\b(?:MAX_CPUS|BOOTSTRAP_CPUS|CPU_SET_WORDS)\b|"
     r"\[\s*[^\]]*MAX_CPUS[^\]]*\]"
@@ -83,6 +91,34 @@ def validate(rows: list[dict[str, str]], root: Path = ROOT) -> None:
             raise ValueError(f"row {index}: non-numeric count") from error
         if row["status"] not in STATUSES:
             raise ValueError(f"row {index}: invalid status {row['status']}")
+        if row["classification"] not in CLASSIFICATIONS:
+            raise ValueError(
+                f"row {index}: invalid classification {row['classification']}"
+            )
+        if row["status"] == "verified" and row["classification"] not in {
+            "bootstrap",
+            "dynamic",
+        }:
+            raise ValueError(
+                f"row {index}: verified consumer must be bootstrap or dynamic"
+            )
+        if row["status"] == "in-progress" and row["classification"] == "test-only":
+            raise ValueError(f"row {index}: production consumer cannot be test-only")
+        if row["status"] == "fixture" and row["classification"] not in {
+            "test-only",
+            "excluded",
+        }:
+            raise ValueError(
+                f"row {index}: fixture consumer must be test-only or excluded"
+            )
+        if row["classification"] == "test-only" and production:
+            raise ValueError(
+                f"row {index}: test-only consumer still appears in production code"
+            )
+        if row["classification"] == "excluded" and tests:
+            raise ValueError(
+                f"row {index}: excluded consumer unexpectedly contains test occurrences"
+            )
         listed[path] = (production, tests)
 
     missing = sorted(set(actual) - set(listed))
@@ -116,6 +152,26 @@ def self_test() -> None:
         assert "unregistered CPU consumer paths" in str(error)
     else:
         raise AssertionError("self-test accepted a missing consumer path")
+    broken = [dict(row) for row in rows]
+    broken[0]["classification"] = "unknown"
+    try:
+        validate(broken)
+    except ValueError as error:
+        assert "invalid classification" in str(error)
+    else:
+        raise AssertionError("self-test accepted an unknown CPU consumer class")
+    broken = [dict(row) for row in rows]
+    in_progress = next(row for row in broken if row["status"] == "in-progress")
+    in_progress["classification"] = "bootstrap"
+    validate(broken)
+    broken = [dict(row) for row in rows]
+    broken[0]["classification"] = "fixed-unmigrated"
+    try:
+        validate(broken)
+    except ValueError as error:
+        assert "verified consumer must be bootstrap or dynamic" in str(error)
+    else:
+        raise AssertionError("self-test marked a fixed consumer verified")
     print("cpu-dynamic-consumers: self-test PASS")
 
 
@@ -127,11 +183,17 @@ def main() -> int:
         rows = load(LEDGER)
         validate(rows)
         status = {name: 0 for name in sorted(STATUSES)}
+        classification = {name: 0 for name in sorted(CLASSIFICATIONS)}
         for row in rows:
             status[row["status"]] += 1
+            classification[row["classification"]] += 1
         print(
             "cpu-dynamic-consumers: PASS "
             + " ".join(f"{name}={count}" for name, count in status.items())
+            + " "
+            + " ".join(
+                f"{name}={count}" for name, count in classification.items()
+            )
             + f" paths={len(rows)}"
         )
     except (OSError, ValueError, csv.Error, AssertionError) as error:
