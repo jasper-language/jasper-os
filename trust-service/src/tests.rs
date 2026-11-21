@@ -421,3 +421,48 @@ fn malformed_evidence_and_tampered_result_never_succeed() {
     };
     assert!(daemon.policy.evaluate(&result, 100).is_err());
 }
+
+#[test]
+fn signed_payload_mutation_with_reused_signature_is_rejected() {
+    let package = package();
+    let digest = jaso::digest_of(&package);
+    let context = context(1, digest);
+    let expected = SubjectSnapshot::from_context(context).unwrap();
+    let mut daemon = daemon::<2>(false, 7);
+    let challenge = issue(&mut daemon, [16; NONCE_BYTES], expected, 30, 100);
+    let observation = daemon
+        .collector
+        .collect(&challenge, context, &package, 100)
+        .unwrap();
+    let evidence = daemon
+        .broker
+        .as_ref()
+        .unwrap()
+        .attest(&challenge, observation, 100)
+        .unwrap();
+
+    let mut forged = wire::decode_evidence(&evidence.bytes).unwrap();
+    let signature = forged.signature.unwrap();
+    forged.measurements[0].digest[0] ^= 1;
+    let forged_wire = forged.encode(Some(signature)).unwrap();
+    assert_eq!(
+        daemon.verifier.verify(&forged_wire, 100),
+        Err(TrustError::InvalidSignature)
+    );
+    let verified = daemon.verifier.verify(&evidence.bytes, 100).unwrap();
+
+    let mut forged_result = wire::decode_result(&verified.bytes).unwrap();
+    let signature = forged_result.signature.unwrap();
+    forged_result.status = ResultStatus::Verified;
+    let forged_result_wire = forged_result.encode(signature).unwrap();
+    let result = VerificationResult {
+        id: verified.id,
+        status: ResultStatus::Verified,
+        verifier_signer: verified.verifier_signer,
+        bytes: forged_result_wire,
+    };
+    assert_eq!(
+        daemon.policy.evaluate(&result, 100),
+        Err(TrustError::InvalidSignature)
+    );
+}
