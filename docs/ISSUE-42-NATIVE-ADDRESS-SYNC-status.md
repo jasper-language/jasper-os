@@ -101,6 +101,31 @@ wait key。等待者重新验证 capability 并失败关闭：
 
 证据见 `evidence/issue42-m02-remap-20261121-r6/`。
 
+## 单核 TCG 调度竞态
+
+完整 CI 暴露了单核 instrumented 内核中的测试调度竞态：publisher/revoker 用
+`sleep_ticks(1)` 有界等待 waiter 停车，TCG 调度顺序可让它反复自我唤醒并先退出，
+之后 waiter 在没有发布者的情况下永久停车。发布者与撤销者改为显式降到
+Background 档并使用调度器的 `yield` 让出，直到观测到全部 waiter 已停车或已有
+waiter 明确失败；不再以固定 sleep 次数推断跨任务进度。
+
+本机 TCG、CPU 份额 `4-11`、300 秒上限的完整 instrumented 矩阵：
+
+```text
+cpus=1 PASS passes=661873 audit_mismatch=0 audits=661875
+cpus=4 PASS passes=706832 audit_mismatch=0 audits=706834
+cpus=8 PASS passes=764919 audit_mismatch=0 audits=764921
+cpus=4+rt2 PASS passes=144593 audit_mismatch=0 audits=144595
+```
+
+单核五轮 address-sync、四核和八核两轮跨 CPU 标记均为 `terminal=true`、
+`resources=true`、`failed=0`；0 条 `JSR-ADDRESS-SYNC-FAIL`。
+
+同一轮还修正了 `accept.sh` 的分布证据正则：Basic Regex 把 `[0-9]+` 当作
+“一个数字后跟字面量 +”，导致串口已输出 `distributed=true
+publisher_distributed=true` 仍被误判。改为 `grep -qaE` 后，4/8/q35 的真实
+串口证据均通过。
+
 覆盖场景：
 
 - 两个 capability 别名连接同一条件；

@@ -1011,8 +1011,8 @@ check_addresssync() { # Issue #42 M02：真实共享 MemoryObject + Process + �
     actual=$(sed -E 's/.* cpus=([0-9]+).*/\1/' <<< "$line1")
     [ "$actual" -ge "$minimum" ] || miss="$miss $label:cpus($actual<$minimum)"
     if [ "$minimum" -gt 1 ]; then
-      grep -qa '^\[JSR-ADDRESS-SYNC\] pass=1 phase=warmup mode=sync cpus=[0-9]+ distributed=true publisher_distributed=true' "$log" \
-        && grep -qa '^\[JSR-ADDRESS-SYNC\] pass=2 phase=measured mode=sync cpus=[0-9]+ distributed=true publisher_distributed=true' "$log" \
+      grep -qaE '^\[JSR-ADDRESS-SYNC\] pass=1 phase=warmup mode=sync cpus=[0-9]+ distributed=true publisher_distributed=true' "$log" \
+        && grep -qaE '^\[JSR-ADDRESS-SYNC\] pass=2 phase=measured mode=sync cpus=[0-9]+ distributed=true publisher_distributed=true' "$log" \
         || miss="$miss $label:未分散到三个 CPU"
     fi
     grep -qa '\[JSR-LOCK-ORDER\]' "$log" && miss="$miss $label:锁序失败"
