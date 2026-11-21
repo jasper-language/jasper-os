@@ -20,7 +20,7 @@ use crate::manifest::{
 };
 
 /// 单个清单的最大 CBOR 字节数。Maximum CBOR bytes in one manifest.
-pub const MAX_MANIFEST_CBOR_BYTES: usize = 8192;
+pub const MAX_MANIFEST_CBOR_BYTES: usize = 8192; // JASPER-HARDCODE-REVIEW: issue=35 source=lc-update-manifest-v1 reason=fixed-deterministic-CBOR-envelope
 /// 单个清单最多包含的工件数。Maximum artifacts in one manifest.
 pub const MAX_ARTIFACTS: usize = 64; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-manifest-cbor-v1 reason=fixed-artifact-array-in-versioned-CBOR-manifest
 /// 单个清单最多包含的直接依赖数。Maximum direct dependencies in one manifest.

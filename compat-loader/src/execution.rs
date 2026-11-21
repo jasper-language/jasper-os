@@ -10,7 +10,7 @@ use alloc::vec;
 
 use super::{plan_lifecycle_order, ImageLayout, LifecycleCallbacks, LoadPlan, LoaderError};
 
-const MAX_USER_ADDRESS: u64 = 1 << 47;
+const MAX_USER_ADDRESS: u64 = 1 << 47; // JASPER-HARDCODE-REVIEW: issue=35 source=x86-64-user-address-v1 reason=canonical-47-bit-user-address-bound
 
 const AT_NULL: u64 = 0;
 const AT_PHDR: u64 = 3;

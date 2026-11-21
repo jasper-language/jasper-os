@@ -20,9 +20,9 @@ pub const COMPRESSION_NONE: u8 = 0;
 /// RFC 1950 zlib stream.
 pub const COMPRESSION_ZLIB: u8 = 1;
 /// Maximum logical source length after decompression.
-pub const MAX_LOGICAL_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_LOGICAL_BYTES: usize = 4 * 1024 * 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-source-v1 reason=fixed-logical-source-field-bound
 /// Maximum stored payload length in the extension.
-pub const MAX_STORED_BYTES: usize = 1024 * 1024;
+pub const MAX_STORED_BYTES: usize = 1024 * 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-source-v1 reason=fixed-stored-source-field-bound
 
 const MAGIC: &[u8; 4] = b"JSRC";
 const ENVELOPE_VERSION: u8 = 1;
@@ -290,6 +290,11 @@ mod tests {
                 (MAX_LOGICAL_BYTES + 1) as u32,
                 b"x"
             ),
+            Err(SourceError::Limit)
+        );
+        let stored = vec![0u8; MAX_STORED_BYTES + 1];
+        assert_eq!(
+            encode(LANGUAGE_JASPER, COMPRESSION_NONE, stored.len() as u32, &stored),
             Err(SourceError::Limit)
         );
     }

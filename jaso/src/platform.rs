@@ -4,7 +4,7 @@
 use crate::Arch;
 
 /// 平台记录长度。
-pub const PLATFORM_RECORD: usize = 64;
+pub const PLATFORM_RECORD: usize = 64; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-platform-v1 reason=fixed-platform-record-size
 /// 平台记录数上限。
 pub const MAX_PLATFORMS: u32 = 16; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-platform-v1 reason=fixed-platform-record-count-in-versioned-container
 /// `isa_ext` 字段长度。

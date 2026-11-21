@@ -159,7 +159,7 @@ impl SlotRecord {
 }
 
 /// 候选槽允许连续尝试的最大次数。Maximum consecutive attempts for a candidate slot.
-pub const MAX_BOOT_ATTEMPTS: u8 = 3;
+pub const MAX_BOOT_ATTEMPTS: u8 = 3; // JASPER-HARDCODE-REVIEW: issue=35 source=lc2-boot-attempt-policy reason=bounded-candidate-health-trials-before-rollback
 
 /// 启动选择原因。Why a slot was selected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -549,7 +549,7 @@ impl ControlBlock {
             if choice
                 .as_ref()
                 .map(|(_, record): &(Slot, SlotRecord)| candidate.1.release > record.release)
-                .unwrap_or(true)
+                .unwrap_or(true) // JASPER-HARDCODE-REVIEW: issue=35 source=lc2-boot-attempt-policy reason=first-valid-confirmed-slot-wins-stable-order
             {
                 choice = Some(candidate);
             }

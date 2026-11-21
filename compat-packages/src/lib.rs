@@ -24,8 +24,8 @@ use tar::Archive;
 const MANIFEST_NAME: &str = "component.manifest";
 const STATE_DIR: &str = ".state";
 const COMPONENT_DIR: &str = "components";
-const MAX_ARCHIVE_ENTRIES: usize = 1_000_000;
-const MAX_UNPACKED_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES: usize = 1_000_000; // JASPER-HARDCODE-REVIEW: issue=35 source=compat-package-extraction-policy reason=bounded-entry-walk-before-install
+const MAX_UNPACKED_BYTES: u64 = 64 * 1024 * 1024 * 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=compat-package-extraction-policy reason=bounded-unpacked-byte-total-before-commit
 const SUPPORTED_LICENSES: &[&str] = &[
     "0BSD",
     "Apache-2.0",

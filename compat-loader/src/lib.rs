@@ -48,7 +48,7 @@ pub use relocation::{
 // x86_64 canonical user space ends below 2^47. This is a platform-address
 // fact, not an implementation capacity. A future loader profile must replace
 // it only with the target architecture's validated address-width contract.
-const MAX_USER_ADDRESS: u64 = 1 << 47;
+const MAX_USER_ADDRESS: u64 = 1 << 47; // JASPER-HARDCODE-REVIEW: issue=35 source=x86-64-user-address-v1 reason=canonical-47-bit-user-address-bound
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// ELF 校验或存取失败的原因。

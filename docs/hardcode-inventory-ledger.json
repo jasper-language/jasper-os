@@ -1,5 +1,5 @@
 {
-  "baseline_total": 105,
+  "baseline_total": 66,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,8 +10,8 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 75,
-    "protocol-abi": 17,
+    "explicit-safety-policy": 37,
+    "protocol-abi": 16,
     "test-demo-fixture": 11
   },
   "entries": [
@@ -26,106 +26,6 @@
       "source": ".unwrap_or(false);"
     },
     {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "bf520ebc8476eee9b3ccca1af82b540ab86a22539ae3aac0c07cc87d9794cb1b",
-      "line": 16,
-      "path": "compat-core/src/executable.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_LOGICAL_PATH: usize = 256;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "5a9bf342c9b6062d6881ec10d78dd166fb314dab6a432deb255052dca3dc41fa",
-      "line": 4,
-      "path": "compat-core/src/seccomp.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_FILTER_INSNS: usize = 4096;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "6398155fb0dcb4fbfff0ad8b0feb4e3d2f591d84e8f337fe1cd193ef0916b728",
-      "line": 5,
-      "path": "compat-core/src/seccomp.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_FILTER_DEPTH: usize = 8;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "fd245c5b977cf12d8dc94ac12b40eabe38c931707c6d9c76acfd27eef4abda18",
-      "line": 13,
-      "path": "compat-loader/src/execution.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_USER_ADDRESS: u64 = 1 << 47;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "77dae7b6a34d58006c4c33e6cea644cbaabb3fdc56a5a6f803e5e05b0feaf275",
-      "line": 51,
-      "path": "compat-loader/src/lib.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_USER_ADDRESS: u64 = 1 << 47;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "aac3ae30f26782dd32fd9578c7d527a17459409d8c1cbee4eb79f2fae683dffb",
-      "line": 13,
-      "path": "compat-loader/src/memory.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_USER_ADDRESS: u64 = 1 << 47;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "50cbd944f1e8e05ea6b2629ca7ed8d514258be8e043a2b51ba1c7a74a056c104",
-      "line": 19,
-      "path": "compat-loader/src/relocation.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_USER_ADDRESS: u64 = 1 << 47;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "42594cd0d76fbf5e9894687e8df48e3061b8ead362b1c358e37f03984dd16213",
-      "line": 27,
-      "path": "compat-packages/src/lib.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_ARCHIVE_ENTRIES: usize = 1_000_000;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "d850efae33d47ceb9c5cd6581d574180cdd6e40e358e543619351c98884858f0",
-      "line": 28,
-      "path": "compat-packages/src/lib.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_UNPACKED_BYTES: u64 = 64 * 1024 * 1024 * 1024;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "58c39e4c594f7301b1a7610b4aad0c241447efb5a3a2e36b177d9e987292ea86",
-      "line": 82,
-      "path": "jaso/src/lib.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_NAME: u32 = 128;"
-    },
-    {
       "category": "protocol-abi",
       "count": 1,
       "fingerprint": "7036109aed6f1b09bd757c3b9291286ae317b398ceea2e1ac6585cdf64f9c2d4",
@@ -134,26 +34,6 @@
       "reason": "path owns a wire, loader, package, graphics, or lifecycle ABI; consumer review remains required",
       "rules": "HC-G1",
       "source": "pub const MAX_EXTENSIONS: u32 = 32;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "8b71abf46bddc770e60e1305a62c07a2d63f59622d1c3cd74b3d210af562b9fe",
-      "line": 74,
-      "path": "jaso/src/lib.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_IMAGES: u32 = 8;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "d6c2ecab74eb554dc645711d4c1a6358ce111417d15960c1499062f4dd50bd8a",
-      "line": 70,
-      "path": "jaso/src/lib.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_IMAGE: u32 = 64 << 20;"
     },
     {
       "category": "protocol-abi",
@@ -174,36 +54,6 @@
       "reason": "fixed length is a wire field width, minimum record size, or u32 publication-mask boundary in a bounded parser",
       "rules": "HC-G9",
       "source": "let n = if b.len() >= 4 { u32_at(b, 0) } else { 0 };"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "e25a494d064be05e5ce2dee5bb8c3372fa36f45e343aa2da5d6da339d8fcf338",
-      "line": 7,
-      "path": "jaso/src/platform.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const PLATFORM_RECORD: usize = 64;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "3a6969fb2d285d95b74a9718103c0a88afa1034c6339320624f875afff63c718",
-      "line": 23,
-      "path": "jaso/src/source.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_LOGICAL_BYTES: usize = 4 * 1024 * 1024;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "b2ac28fc135ea127b7d844095711d513822bd29442ca00bc1698b6686d773635",
-      "line": 25,
-      "path": "jaso/src/source.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_STORED_BYTES: usize = 1024 * 1024;"
     },
     {
       "category": "protocol-abi",
@@ -516,66 +366,6 @@
       "source": "psci.method.unwrap_or(\"none\"),"
     },
     {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "2e7ac114b628fc8c037774e4a4219e4ce2fdb5210fcb9b791d8059156486322a",
-      "line": 33,
-      "path": "kernel/src/arch/aarch64/devirq.rs",
-      "reason": "absent-device sentinel or diagnostic-only display; control paths reject zero/unknown ids",
-      "rules": "HC-G7",
-      "source": "IDS[1].store(rtc.unwrap_or(0), Ordering::Relaxed);"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "69dd62b09c98c6ff10ca7e75895f6413a57b8ef1c5be30b5a305a1864da95424",
-      "line": 32,
-      "path": "kernel/src/arch/aarch64/devirq.rs",
-      "reason": "absent-device sentinel or diagnostic-only display; control paths reject zero/unknown ids",
-      "rules": "HC-G7",
-      "source": "IDS[0].store(uart.unwrap_or(0), Ordering::Relaxed);"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "8f0758e13414b04ffd8b78548bbad32e8baffdb158fdc9f57f5600c65d3e2bfe",
-      "line": 57,
-      "path": "kernel/src/arch/aarch64/devirq.rs",
-      "reason": "absent-device sentinel or diagnostic-only display; control paths reject zero/unknown ids",
-      "rules": "HC-G7",
-      "source": "NAMES.get(line).copied().unwrap_or(\"none\")"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "6210c62d63e658095cc2530f13d274e3115e27e60583e45fed169e826059853e",
-      "line": 119,
-      "path": "kernel/src/arch/riscv/devirq.rs",
-      "reason": "absent-device sentinel or diagnostic-only display; control paths reject zero/unknown ids",
-      "rules": "HC-G7",
-      "source": "NAMES.get(line).copied().unwrap_or(\"none\")"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "bb88822899e66cd67de92b552efa1f98e1bb17ea7b7db164fbd10140bd88fafb",
-      "line": 92,
-      "path": "kernel/src/arch/riscv/devirq.rs",
-      "reason": "absent-device sentinel or diagnostic-only display; control paths reject zero/unknown ids",
-      "rules": "HC-G7",
-      "source": "let uart_src = uart::interrupt().unwrap_or(0);"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "851d07bef48da61dd28029fb24cdf5f4e6913e256a9fa3cd4e18ed1f9c9ea3e2",
-      "line": 192,
-      "path": "kernel/src/arch/riscv/smp.rs",
-      "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
-      "rules": "HC-G7",
-      "source": "Err(e) => return Err(sbi::decode(e).err().unwrap_or(SbiError::Failed).to_smp()),"
-    },
-    {
       "category": "test-demo-fixture",
       "count": 1,
       "fingerprint": "f867c16208d540069d383b9d5ad73d0a5a7411230d336b265be77a50d0d6b1f3",
@@ -596,26 +386,6 @@
       "source": "const CAPACITY: usize = 8 * 1024 * 1024;"
     },
     {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "f83fc8de7fbc4dee4e0195efcd4c51cf3d33cf3f82e1cba51195d907e23903c9",
-      "line": 270,
-      "path": "kernel/src/arch/x86_64/ioapic.rs",
-      "reason": "absent-device sentinel or diagnostic-only display; control paths reject zero/unknown ids",
-      "rules": "HC-G7",
-      "source": "PINS.lock().get(line).map(|pin| pin.name).unwrap_or(\"none\")"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "1708818adfaf77b7cab57126a4a97e4d5b5339efb1546bd4c151090d443cace6",
-      "line": 153,
-      "path": "kernel/src/arch/x86_64/keyboard.rs",
-      "reason": "absent-device sentinel or diagnostic-only display; control paths reject zero/unknown ids",
-      "rules": "HC-G7",
-      "source": "MAP.get(make as usize).copied().unwrap_or(b'?')"
-    },
-    {
       "category": "protocol-abi",
       "count": 1,
       "fingerprint": "23b01768504abc42992b32800f4456d59042dcf23108d7625031d1a5e4f5f63e",
@@ -624,26 +394,6 @@
       "reason": "fixed length is a wire field width, minimum record size, or u32 publication-mask boundary in a bounded parser",
       "rules": "HC-G9",
       "source": "Err(_) if request.len() >= 16 => {"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "836de41f2cf1e48ad94a8e0a9985bf4e1135e22a851b042d90e549b7a583702f",
-      "line": 1290,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "architecture or wire protocol reset/default value, not a runtime inventory fact",
-      "rules": "HC-G7",
-      "source": "self.msr_read(index).unwrap_or(0)"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "c92999fd79f301867386db0aedc058e5867b96e83cac1188b3c3557fcbc564cd",
-      "line": 2557,
-      "path": "kernel/src/arch/x86_64/vmx.rs",
-      "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
-      "rules": "HC-G7",
-      "source": ".unwrap_or(0);"
     },
     {
       "category": "explicit-safety-policy",
@@ -688,16 +438,6 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "d912c37f0a391b18b2ae0cf932e3132df01bf6d77bdda042582e5273a61f18a1",
-      "line": 26,
-      "path": "kernel/src/fscrypt.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub(crate) const MAX_KEY_BYTES: usize = 64;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
       "fingerprint": "2509ec6038804e6968fa79ac05287ee2da8b0b281176dee6b433baf266e5aa63",
       "line": 48,
       "path": "kernel/src/ipc.rs",
@@ -714,56 +454,6 @@
       "reason": "PCI configuration limit, architecture address width, wire handle count, or internal bit field",
       "rules": "HC-G1",
       "source": "pub const MAX_MSG_HANDLES: usize = 8;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "21e830bd7f518f4e7c2e1a374bfded1478f87c987f2bd2357811bb54bf2766e4",
-      "line": 692,
-      "path": "kernel/src/lifecycle_health.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_PROBE_BYTES: usize = 1024 * 1024;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "36f6aa541078460f1b6f26835fb1824378036b4d19aef0555272587f014af751",
-      "line": 799,
-      "path": "kernel/src/lifecycle_health.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_LIBRARY_BYTES: usize = 16 * 1024 * 1024;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "4dcd8af41c414ca64c473727d3b48b16bbbfcf5630ef3dcff23cc482e9a8078d",
-      "line": 969,
-      "path": "kernel/src/lifecycle_health.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "a1a54674879fa4fc250cc3a1bd19735addc786068a16d85008644209a96a1c8b",
-      "line": 852,
-      "path": "kernel/src/lifecycle_health.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_INTERPRETER_BYTES: usize = 16 * 1024 * 1024;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "bd8f1a6aa1ef1f5693f91af914b7541dda8ca7242ba60678448bf5588ffad3c2",
-      "line": 851,
-      "path": "kernel/src/lifecycle_health.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "const MAX_EXECUTABLE_BYTES: usize = 16 * 1024 * 1024;"
     },
     {
       "category": "protocol-abi",
@@ -818,46 +508,6 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "da5ce7c398c47043ba405f574aad6713e5873666860d41c7aec9793c3ce38f07",
-      "line": 216,
-      "path": "kernel/src/pci.rs",
-      "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
-      "rules": "HC-G7",
-      "source": "TABLE.get().unwrap_or(&EMPTY)"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "31d89f59164cf0673104a51f1eb83d231dff829277b8f148abca06f067bce301",
-      "line": 7320,
-      "path": "kernel/src/proc/mod.rs",
-      "reason": "compile-time alias of the validated active KernelConfig memory budget; it introduces no independent runtime capacity",
-      "rules": "HC-G1",
-      "source": "pub const MAX_VM_GUEST_FRAMES: u64 = crate::config::ACTIVE.memory.max_vm_guest_frames as u64;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "8924df2d3ba1e375c3503b27c11ef90cdb9383f4a50855c5ca845e6946eb3a0e",
-      "line": 7311,
-      "path": "kernel/src/proc/mod.rs",
-      "reason": "compile-time alias of the validated active KernelConfig memory budget; it introduces no independent runtime capacity",
-      "rules": "HC-G1",
-      "source": "pub const MAX_PROCESS_FRAMES: usize = {"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "8b4963bc42113bc3597ce0def7515acb7cead8d718b416e7a6584ba4dce5ce4a",
-      "line": 7322,
-      "path": "kernel/src/proc/mod.rs",
-      "reason": "compile-time alias of the validated active KernelConfig memory budget; it introduces no independent runtime capacity",
-      "rules": "HC-G1",
-      "source": "pub const MAX_MAP_PAGES: u64 = crate::config::ACTIVE.memory.max_map_pages;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
       "fingerprint": "d1d6be1af9fc5ebd02721a14d248199e32601132b6e48479389f8426627f1913",
       "line": 45,
       "path": "kernel/src/profile.rs",
@@ -904,46 +554,6 @@
       "reason": "bounded benchmark or probe fixture, not a production hardware fact",
       "rules": "HC-G1",
       "source": "static MAX_CANDIDATES: AtomicU32 = AtomicU32::new(0);"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "17c894b4492c3ce98ab7be8944b29cc2a67562fca856f7ba9ed093b9e42444ab",
-      "line": 162,
-      "path": "lifecycle-boot/src/lib.rs",
-      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_BOOT_ATTEMPTS: u8 = 3;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "ac4f9c55a3e50e2d149c6912c6a9378d8f4952f4530c8e2b18609cd9267037ce",
-      "line": 552,
-      "path": "lifecycle-boot/src/lib.rs",
-      "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
-      "rules": "HC-G7",
-      "source": ".unwrap_or(true)"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "7bfc1f8490d1ea29829cfc20db7c40cc8c8a22a5744a6c1e7060622ff796d1ea",
-      "line": 17,
-      "path": "lifecycle-model/src/manifest.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_CANONICAL_MANIFEST_BYTES: usize = 8192;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "815620110b19b29d7048fea90d8bdf5f42efe4df61462f3ff6b2b8c09d2d34a3",
-      "line": 23,
-      "path": "lifecycle-model/src/manifest_cbor.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_MANIFEST_CBOR_BYTES: usize = 8192;"
     },
     {
       "category": "explicit-safety-policy",
@@ -1048,8 +658,8 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 76,
-    "protocol-abi": 18,
+    "explicit-safety-policy": 38,
+    "protocol-abi": 17,
     "test-demo-fixture": 11
   }
 }

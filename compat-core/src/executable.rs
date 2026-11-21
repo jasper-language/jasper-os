@@ -13,7 +13,7 @@ extern crate alloc;
 use core::fmt;
 
 /// Maximum normalized logical path, including the leading slash.
-pub const MAX_LOGICAL_PATH: usize = 256;
+pub const MAX_LOGICAL_PATH: usize = 256; // JASPER-HARDCODE-REVIEW: issue=35 source=compat-executable-registry-v1 reason=fixed-logical-discovery-path-record
 
 /// System root that supplied an image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -308,6 +308,13 @@ mod tests {
         assert!(LogicalPath::parse(b"/usr/../bin/printf").is_err());
         assert!(LogicalPath::parse(b"/").is_err());
         assert!(LogicalPath::parse(&[b'/', 0]).is_err());
+
+        let mut full = [b'a'; MAX_LOGICAL_PATH];
+        full[0] = b'/';
+        assert_eq!(LogicalPath::parse(&full).unwrap().as_bytes().len(), full.len());
+        let mut oversized = vec![b'a'; MAX_LOGICAL_PATH + 1];
+        oversized[0] = b'/';
+        assert_eq!(LogicalPath::parse(&oversized), Err(RegistryError::InvalidPath));
     }
 
     #[test]

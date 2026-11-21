@@ -14,7 +14,7 @@ pub const SIGNATURE_DOMAIN: &[u8] = b"JASPER-UPDATE-V1\0";
 /// 支持的清单 Schema。Supported manifest schema.
 pub const MANIFEST_SCHEMA_VERSION: u16 = 1;
 /// 单个确定性 CBOR 清单的最大长度。Maximum length of one deterministic CBOR manifest.
-pub const MAX_CANONICAL_MANIFEST_BYTES: usize = 8192;
+pub const MAX_CANONICAL_MANIFEST_BYTES: usize = 8192; // JASPER-HARDCODE-REVIEW: issue=35 source=lc-update-manifest-v1 reason=fixed-signed-manifest-byte-envelope
 /// Maximum signatures admitted in one threshold set.
 pub const MAX_THRESHOLD_SIGNATURES: usize = 3; // JASPER-HARDCODE-REVIEW: issue=21 source=release-threshold-policy-v1 reason=policy-bound
 /// Domain separator for a canonical threshold signature set.

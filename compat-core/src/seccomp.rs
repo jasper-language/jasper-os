@@ -1,8 +1,8 @@
 //! Bounded classic-BPF evaluation for Linux seccomp filters.
 
 pub const SECCOMP_DATA_BYTES: usize = 64;
-pub const MAX_FILTER_INSNS: usize = 4096;
-pub const MAX_FILTER_DEPTH: usize = 8;
+pub const MAX_FILTER_INSNS: usize = 4096; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-classic-bpf-v1 reason=Linux-BPF-MAXINSNS-wire-bound
+pub const MAX_FILTER_DEPTH: usize = 8; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-classic-bpf-v1 reason=Linux-classic-BPF-nesting-bound
 
 const BPF_CLASS_MASK: u16 = 0x07;
 const BPF_LD: u16 = 0x00;
@@ -386,6 +386,11 @@ mod tests {
             instruction(BPF_RET | BPF_W, 0, 0, SECCOMP_RET_ALLOW),
         ])
         .is_err());
+
+        let exact = vec![instruction(BPF_RET | BPF_W, 0, 0, SECCOMP_RET_ALLOW); MAX_FILTER_INSNS];
+        assert!(validate(&exact).is_ok());
+        let oversized = vec![instruction(BPF_RET | BPF_W, 0, 0, SECCOMP_RET_ALLOW); MAX_FILTER_INSNS + 1];
+        assert!(validate(&oversized).is_err());
     }
 
     #[test]

@@ -16,7 +16,7 @@ use goblin::elf::Elf;
 use super::memory::{validate_layout, with_transaction, LoaderMemory, RuntimeRange};
 use super::{ImageLayout, LoadPlan, LoaderError, Relocation, RelocationKind, SymbolBinding};
 
-const MAX_USER_ADDRESS: u64 = 1 << 47;
+const MAX_USER_ADDRESS: u64 = 1 << 47; // JASPER-HARDCODE-REVIEW: issue=35 source=x86-64-user-address-v1 reason=canonical-47-bit-user-address-bound
 
 /// 已解析符号在目标进程中的值。
 ///

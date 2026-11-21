@@ -689,7 +689,7 @@ fn validate_elf_payload(
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
 fn execute_root_linux_probe(root: &Ext4Reader, enforce_resources: bool) -> Result<(), HealthError> {
-    const MAX_PROBE_BYTES: usize = 1024 * 1024;
+    const MAX_PROBE_BYTES: usize = 1024 * 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=verify-only-root-probe-artifact-bound
     const ROOT_PROBE_APP_ID: u64 = 0x4a53_5201;
     let image = root
         .read_file(ROOT_EXEC_PROBE_PATH, MAX_PROBE_BYTES)
@@ -796,7 +796,7 @@ fn execute_root_linux_probe(root: &Ext4Reader, enforce_resources: bool) -> Resul
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
 fn install_root_libraries(root: &Ext4Reader) -> Result<(), HealthError> {
-    const MAX_LIBRARY_BYTES: usize = 16 * 1024 * 1024;
+    const MAX_LIBRARY_BYTES: usize = 16 * 1024 * 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=verify-only-root-library-artifact-bound
     let libraries = [
         (
             "/usr/lib/x86_64-linux-gnu/libc.so.6",
@@ -848,8 +848,8 @@ fn run_root_program(
     path: &'static str,
     argv: &[&[u8]],
 ) -> Result<(), HealthError> {
-    const MAX_EXECUTABLE_BYTES: usize = 16 * 1024 * 1024;
-    const MAX_INTERPRETER_BYTES: usize = 16 * 1024 * 1024;
+    const MAX_EXECUTABLE_BYTES: usize = 16 * 1024 * 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=verify-only-root-executable-bound
+    const MAX_INTERPRETER_BYTES: usize = 16 * 1024 * 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=verify-only-root-interpreter-bound
     let executable = root
         .read_file(path, MAX_EXECUTABLE_BYTES)
         .map_err(|_| HealthError::RootExecute)?;
@@ -966,7 +966,7 @@ fn run_root_android_program(
     argv: &[&[u8]],
     envp: &[&[u8]],
 ) -> Result<(), HealthError> {
-    const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+    const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=verify-only-Android-ecosystem-artifact-bound
     let executable = root.read_file(path, MAX_IMAGE_BYTES).map_err(|error| {
         crate::kprintln!(
             "[JSR-ROOT-DYNAMIC-READ] fail=executable path={} error={:?}",

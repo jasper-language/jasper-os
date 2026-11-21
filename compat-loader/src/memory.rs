@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 
 use super::{LoadPlan, LoadSegment, LoaderError, VirtualRange};
 
-const MAX_USER_ADDRESS: u64 = 1 << 47;
+const MAX_USER_ADDRESS: u64 = 1 << 47; // JASPER-HARDCODE-REVIEW: issue=35 source=x86-64-user-address-v1 reason=canonical-47-bit-user-address-bound
 
 /// 一页的最终访问权限。
 ///

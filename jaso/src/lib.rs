@@ -67,11 +67,11 @@ pub const PAGE: u32 = 4096;
 /// digest 字段在头部中的偏移。
 pub const DIGEST_OFFSET: usize = 40;
 /// 映像大小上限（64 MiB）。
-pub const MAX_IMAGE: u32 = 64 << 20;
+pub const MAX_IMAGE: u32 = 64 << 20; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-container-v1 reason=fixed-image-size-field-in-versioned-container
 /// 段目录项数上限。
 pub const MAX_SECTIONS: u32 = 64; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-container-v1 reason=fixed-section-directory-capacity-in-versioned-container
 /// 镜像数上限。
-pub const MAX_IMAGES: u32 = 8;
+pub const MAX_IMAGES: u32 = 8; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-container-v1 reason=fixed-image-directory-capacity-in-versioned-container
 /// 扩展段数上限。
 pub const MAX_EXTENSIONS: u32 = 32;
 /// 扩展名长度上限。
@@ -79,7 +79,7 @@ pub const MAX_EXTENSION_NAME: usize = 64; // JASPER-HARDCODE-REVIEW: issue=35 so
 /// 导出项数上限。
 pub const MAX_EXPORTS: u32 = 1024;
 /// 导出名长度上限。
-pub const MAX_NAME: u32 = 128;
+pub const MAX_NAME: u32 = 128; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-container-v1 reason=fixed-export-name-field-in-versioned-container
 /// 签名段长度：scheme(4) + 保留(4) + 发布者公钥(32) + 签名值(64)。
 /// Size of the signature section.
 pub const SIGNATURE_SIZE: usize = 104;
