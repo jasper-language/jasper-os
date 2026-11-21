@@ -9,11 +9,11 @@ use crate::manifest::{symbol_ok, Manifest};
 use crate::{Jaso, EXT_JASPER_IMPORT, INIT_SYMBOL, START_SYMBOL, STOP_SYMBOL};
 
 /// 绑定内容的字节数上限。
-pub const MAX_BINDING_BYTES: usize = 64 * 1024;
+pub const MAX_BINDING_BYTES: usize = 64 * 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-import-v1 reason=versioned-binding-extension-byte-bound
 /// 绑定的有效行数上限。
-pub const MAX_BINDING_LINES: usize = 1024;
+pub const MAX_BINDING_LINES: usize = 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-import-v1 reason=versioned-binding-extension-line-bound
 /// 类型参数的嵌套深度上限。
-pub const MAX_TYPE_DEPTH: u32 = 8;
+pub const MAX_TYPE_DEPTH: u32 = 8; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-import-v1 reason=bounded-parser-recursion-for-versioned-binding
 
 /// 绑定错误（行号从 1 起）；稳定错误码都是 `extension.binding`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

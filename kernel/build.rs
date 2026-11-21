@@ -237,10 +237,10 @@ fn main() {
             if std::env::var_os("CARGO_FEATURE_PIXEL6A_PE").is_some()
                 || std::env::var_os("CARGO_FEATURE_PIXEL6A_FULL").is_some() =>
         {
-            Some("kernel/link-pixel6a-pe.ld")
+            Some("kernel/link-pixel6a-pe.ld") // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=explicit-pixel-verification-link-profile
         }
         Ok("aarch64") if std::env::var_os("CARGO_FEATURE_PIXEL6A_SMOKE").is_some() => {
-            Some("kernel/link-pixel6a.ld")
+            Some("kernel/link-pixel6a.ld") // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=explicit-pixel-smoke-link-profile
         }
         Ok("aarch64") => Some("kernel/link-aarch64.ld"),
         Ok("loongarch64") => Some("kernel/link-loongarch64.ld"),

@@ -84,6 +84,8 @@ jobs:
           python3 scripts/check-hardcode-inventory-ledger.py --self-test
           python3 scripts/check-hardcode-inventory-ledger.py \
             --check docs/hardcode-inventory-ledger.json
+          python3 scripts/check-hardcode-platform-profiles.py --self-test
+          python3 scripts/check-hardcode-platform-profiles.py
       - name: Android Framework namespace 前置门 / Android framework preflight
         run: python3 scripts/android-framework-preflight.py --self-test
       - name: Issue #42 syscall 枚举与分发表完整性 / syscall disposition inventory

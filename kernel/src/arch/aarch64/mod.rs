@@ -31,7 +31,7 @@ mod gic;
 mod mmu;
 mod paging;
 mod platform;
-#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
+#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-profile-only-samsung-console
 mod samsung_uart;
 mod semihost;
 mod smp;
@@ -82,9 +82,9 @@ impl Platform for Aarch64 {
     const INVALID_VA: u64 = 0x0000_8000_0000_0000;
 
     fn console_init() {
-        #[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
+        #[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-profile-only-samsung-console
         samsung_uart::init();
-        #[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))]
+        #[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=generic-aarch64-console-path
         uart::init();
     }
 
@@ -106,7 +106,7 @@ impl Platform for Aarch64 {
             crate::console::write_str("[JSR-IRQ] interrupt controller or timer interrupt unavailable\n");
             Self::exit_emulator(ExitStatus::Failure);
         }
-        #[cfg(feature = "pixel6a-gic-init-probe")]
+        #[cfg(feature = "pixel6a-gic-init-probe")] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-gic-init-probe-only
         boot::pixel6a_power_off();
         devirq::configure();
         if !timer::init(timer_hz) {
@@ -128,9 +128,9 @@ impl Platform for Aarch64 {
     }
 
     fn console_write_byte(byte: u8) {
-        #[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
+        #[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-profile-only-samsung-console-write
         samsung_uart::write_byte(byte);
-        #[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))]
+        #[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=generic-aarch64-console-write-path
         uart::write_byte(byte);
     }
 

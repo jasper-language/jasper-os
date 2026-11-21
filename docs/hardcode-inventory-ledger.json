@@ -1,5 +1,5 @@
 {
-  "baseline_total": 202,
+  "baseline_total": 154,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,8 +10,7 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 103,
-    "platform-adapter": 28,
+    "explicit-safety-policy": 99,
     "protocol-abi": 42,
     "test-demo-fixture": 11
   },
@@ -119,36 +118,6 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "42c352653c0b96527d2dea0aaae80ceddecf84138a431d753a08a9eededeb7f2",
-      "line": 12,
-      "path": "jaso/src/binding.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_BINDING_BYTES: usize = 64 * 1024;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "4e0172befbb4ce86beaf24de6c8168c6fade5b8bd0157cdd7412dd36611c917a",
-      "line": 16,
-      "path": "jaso/src/binding.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_TYPE_DEPTH: u32 = 8;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "9c296579b9b9876d1d4f9e21968b81fd287169a92ebf790eb5e682f262930b3c",
-      "line": 14,
-      "path": "jaso/src/binding.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1,HC-G8",
-      "source": "pub const MAX_BINDING_LINES: usize = 1024;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
       "fingerprint": "0230a1d28f5a2f2361cb9b62926295139b984ac9dfdd27652698107aa9335d61",
       "line": 72,
       "path": "jaso/src/lib.rs",
@@ -225,16 +194,6 @@
       "reason": "fixed length is a wire field width, minimum record size, or u32 publication-mask boundary in a bounded parser",
       "rules": "HC-G9",
       "source": "let n = if b.len() >= 4 { u32_at(b, 0) } else { 0 };"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "0cc686476f25d3ba306772ad78012c365fb66cca72d91e5d96aaaf0d437663af",
-      "line": 68,
-      "path": "jaso/src/manifest.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_EXPORT_NAMES: usize = 256;"
     },
     {
       "category": "protocol-abi",
@@ -857,156 +816,6 @@
       "source": "pub const MIN_STANDARD_IMAGE_BYTES: usize = LEGACY_AREA_BYTES + STANDARD_HEADER_BYTES;"
     },
     {
-      "category": "platform-adapter",
-      "count": 1,
-      "fingerprint": "112c4f82d776b49d7cb696b0b85bff7a962188ed4c2a18b89d2c55ccab35f890",
-      "line": 240,
-      "path": "kernel/build.rs",
-      "reason": "explicit Pixel verification linker layout selected only by the verification build",
-      "rules": "HC-G3",
-      "source": "Some(\"kernel/link-pixel6a-pe.ld\")"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
-      "fingerprint": "f794ce74d1fd4798d055dc234438c3b97e2863495b8c392e268932c92a2781ca",
-      "line": 243,
-      "path": "kernel/build.rs",
-      "reason": "explicit Pixel verification linker layout selected only by the verification build",
-      "rules": "HC-G3",
-      "source": "Some(\"kernel/link-pixel6a.ld\")"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
-      "fingerprint": "0cea368b9bd7cd52a5020e91353fb8a87fae379b32cea0a46d7e4f984f28062c",
-      "line": 370,
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "feature = \"pixel6a-gic-init-probe\","
-    },
-    {
-      "category": "platform-adapter",
-      "count": 5,
-      "fingerprint": "3f6a2adbc19a548a6cc0f663fab6db7c7f7753496daf1ee19a3b87c32ed96720",
-      "line": 17,
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "#[cfg(not(any(feature = \"pixel6a-smoke\", feature = \"pixel6a-full\")))]"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
-      "fingerprint": "48d1a7c796bc4541288d6a2b18e0e77ff70d2f42187ce23709d49c6ca23cb621",
-      "line": 2036,
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "crate::kprintln!(\"[JSR-PIXEL6A] probe=complete action=psci-reset\");"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
-      "fingerprint": "5cd11148499d83a8addbb77b81249ce603db9702abf141f63cfb191790d890ad",
-      "line": 1871,
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "#[cfg(feature = \"pixel6a-entry-probe\")]"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 3,
-      "fingerprint": "64edf197e056e2afe89c15915116c7be995afe9a8eb344669c7e98a3b1f6b12a",
-      "line": 410,
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "#[cfg(feature = \"pixel6a-full\")]"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 2,
-      "fingerprint": "692b00c5f12764b5c340ee266d83fd5ca6bcafe982bc8a6b6445d5aa02f83de9",
-      "line": 315,
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "#[cfg(any(feature = \"pixel6a-smoke\", feature = \"pixel6a-full-probe\"))]"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
-      "fingerprint": "6a22e63e2cac653a9d292827cd43534383bc1363d0d550dfe796e74e1251ca4a",
-      "line": 1875,
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "crate::kprintln!(\"[JSR-PIXEL6A] entry=reached stage=after-mmu\");"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
-      "fingerprint": "785d327057a9ebc7bc6d551ff343ca04dd187dbfe67aece88f1b706a46a1617e",
-      "line": 369,
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "feature = \"pixel6a-full-probe\","
-    },
-    {
-      "category": "platform-adapter",
-      "count": 2,
-      "fingerprint": "9f1736c3ef19f749a7beebc1dec869212027735899dc8933babb7517042885b8",
-      "line": 1574,
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "#[cfg(feature = \"pixel6a-smoke\")]"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
-      "fingerprint": "a815f11890dc5e2e067a36e88ca343863f4786586dda452031f446ba209b03e6",
-      "line": 2032,
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "\"[JSR-PIXEL6A] smoke=entered dtb=0x{:x} memory_regions={}\","
-    },
-    {
-      "category": "platform-adapter",
-      "count": 6,
-      "fingerprint": "d77cc829c1822579b8de7af2eb64604cc1fff075319b6269bfd7634626c85382",
-      "line": 27,
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "#[cfg(any(feature = \"pixel6a-smoke\", feature = \"pixel6a-full\"))]"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
-      "fingerprint": "e3d4b22c145fbc57fbd4fc38a92233eb9613452f4404e0b6b2409c1347dbfdf6",
-      "line": 1840,
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "b\"[JSR-PIXEL6A] Jasper-OS code entered\\r\\n\","
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
-      "fingerprint": "ea6baf6b41e06584f0efe580f810faf77cd4ce27100cd549f275c163e04546b0",
-      "line": 371,
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "feature = \"pixel6a-before-kmain-probe\","
-    },
-    {
       "category": "protocol-abi",
       "count": 1,
       "fingerprint": "7290df3d0cfc785ea4d76bb50b7f9456a883a4bc9f7eaa963a9817395dbe2f27",
@@ -1055,116 +864,6 @@
       "reason": "absent-device sentinel or diagnostic-only display; control paths reject zero/unknown ids",
       "rules": "HC-G7",
       "source": "NAMES.get(line).copied().unwrap_or(\"none\")"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 2,
-      "fingerprint": "10366c3eddf1cd516f40c5a347cdd15f2d5543efaa05064b4f2d7f4515ac828d",
-      "line": 87,
-      "path": "kernel/src/arch/aarch64/mod.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "#[cfg(not(any(feature = \"pixel6a-smoke\", feature = \"pixel6a-full\")))]"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
-      "fingerprint": "8e344c79fc7333f4a65872595a5478f246bab004ec845c3880ad4f424fed434e",
-      "line": 109,
-      "path": "kernel/src/arch/aarch64/mod.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "#[cfg(feature = \"pixel6a-gic-init-probe\")]"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 3,
-      "fingerprint": "b1ea071445b87e98e8e58761cfc59762c7985bb31b9bab7b17642c8fbcf68d73",
-      "line": 34,
-      "path": "kernel/src/arch/aarch64/mod.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "#[cfg(any(feature = \"pixel6a-smoke\", feature = \"pixel6a-full\"))]"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
-      "fingerprint": "1763bf38f8b78c11a328a1c3f229f7cf4027c957ccfc7b627d5a29a99e2544da",
-      "line": 198,
-      "path": "kernel/src/arch/aarch64/vectors.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "crate::kprintln!(\"[JSR-PIXEL6A] full=alive ticks={} action=psci-off\", crate::clock::ticks());"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
-      "fingerprint": "f46db2ee91c404b94ffebe4f1394f4c47476ec3a2ec46bdc04c71ca1526aee5b",
-      "line": 196,
-      "path": "kernel/src/arch/aarch64/vectors.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "#[cfg(feature = \"pixel6a-full-probe\")]"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
-      "fingerprint": "66232241a8116729353b3738dbbf6581d5c1aea488dfd99a8056df72e92a0677",
-      "line": 85,
-      "path": "kernel/src/arch/loongarch64/boot.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "Ok(_) => \"qemu-fdt-cpu-map\","
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
-      "fingerprint": "8e6e0c825af533857ca517158639741373861beb6a1aa50455285a3e5414b91e",
-      "line": 66,
-      "path": "kernel/src/arch/loongarch64/boot.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "\"[JSR-ARCH] loongarch64 entry=physical console=uart16550 qemu=virt\\n\","
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
-      "fingerprint": "04ec57a2fc944f41fc3ad27795c72b2c1c949d56600b108ffc553e35a0e2b512",
-      "line": 192,
-      "path": "kernel/src/arch/loongarch64/smp.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "return Err(\"qemu-platform-unverified\");"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
-      "fingerprint": "50439cff51e58600c84598fd317009b536a6e1d4161521cc99b9eb939ba9e631",
-      "line": 184,
-      "path": "kernel/src/arch/loongarch64/smp.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "return Err(\"qemu-fdt-invalid\");"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
-      "fingerprint": "633d4b3e1dd9609927e0abcb039cc71c886f6f599c87f8dde63c8cf7787feb65",
-      "line": 178,
-      "path": "kernel/src/arch/loongarch64/smp.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "return Err(\"qemu-fdt-too-large\");"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
-      "fingerprint": "b43e20246a77b5db2c53925bb18b236ed6f6e4ddbba01f26d08349a1aa1a8851",
-      "line": 175,
-      "path": "kernel/src/arch/loongarch64/smp.rs",
-      "reason": "architecture-specific selector or probe; verify it remains behind an explicit platform profile",
-      "rules": "HC-G3",
-      "source": "return Err(\"qemu-fdt-missing\");"
     },
     {
       "category": "explicit-safety-policy",
@@ -1355,26 +1054,6 @@
       "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "const MAX_WAITS: u64 = 20_000_000;"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
-      "fingerprint": "6b9a993248aaf75aed50ad81fab010949508619a332e265273ae4b4d7e06c706",
-      "line": 364,
-      "path": "kernel/src/kmain.rs",
-      "reason": "explicit physical-device verification probe branch",
-      "rules": "HC-G3",
-      "source": "#[cfg(feature = \"pixel6a-smp-probe\")]"
-    },
-    {
-      "category": "platform-adapter",
-      "count": 1,
-      "fingerprint": "a3d8da1b930c9da626155e388b6ed92ab58f12af723289e5f189678cd0ddabc2",
-      "line": 366,
-      "path": "kernel/src/kmain.rs",
-      "reason": "explicit physical-device verification status output",
-      "rules": "HC-G3",
-      "source": "kprintln!(\"[JSR-PIXEL6A] smp=8 online=8 action=psci-off\");"
     },
     {
       "category": "explicit-safety-policy",
@@ -1709,12 +1388,12 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "cfa5ec699aaa03077d4a2aecdcab6a34122bf815165ee5689fe81f7a47a24fd0",
+      "fingerprint": "d6cd36675c2873d7c44647218f3af748cdab839bee82fdf6c403b3424b46b6d3",
       "line": 14,
       "path": "lifecycle-model/src/diagnostics.rs",
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
-      "source": "pub const MAX_CAUSES: usize = 8;"
+      "source": "pub const MAX_CAUSES: usize = 8; // JASPER-HARDCODE-REVIEW: issue=35 source=diagnostic-usi-v1-contract reason=fixed-cause-id-array-in-versioned-diagnostic-record"
     },
     {
       "category": "explicit-safety-policy",
@@ -1859,8 +1538,7 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 104,
-    "platform-adapter": 44,
+    "explicit-safety-policy": 100,
     "protocol-abi": 43,
     "test-demo-fixture": 11
   }

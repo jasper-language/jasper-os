@@ -1,0 +1,29 @@
+profile	source	path	fragment	evidence
+pixel6a-pe	pixel-verification-platform	kernel/build.rs	Some("kernel/link-pixel6a-pe.ld")	pixel runtime ELF CI build
+pixel6a-smoke	pixel-verification-platform	kernel/build.rs	Some("kernel/link-pixel6a.ld")	pixel smoke link profile
+pixel6a-generic-exclusion	pixel-verification-platform	kernel/src/arch/aarch64/boot.rs	#[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))]	generic aarch64 boot excludes pixel profiles
+pixel6a-console	pixel-verification-platform	kernel/src/arch/aarch64/boot.rs	#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]	pixel console profile
+pixel6a-timer-reset	pixel-verification-platform	kernel/src/arch/aarch64/boot.rs	#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full-probe"))]	pixel timer/reset probe
+pixel6a-entry	pixel-verification-platform	kernel/src/arch/aarch64/boot.rs	#[cfg(feature = "pixel6a-entry-probe")]	pixel entry probe
+pixel6a-full	pixel-verification-platform	kernel/src/arch/aarch64/boot.rs	#[cfg(feature = "pixel6a-full")]	pixel full profile
+pixel6a-smoke	pixel-verification-platform	kernel/src/arch/aarch64/boot.rs	#[cfg(feature = "pixel6a-smoke")]	pixel smoke diagnostic
+pixel6a-full-probe	pixel-verification-platform	kernel/src/arch/aarch64/boot.rs	feature = "pixel6a-full-probe"	pixel full poweroff cfg
+pixel6a-gic	pixel-verification-platform	kernel/src/arch/aarch64/boot.rs	feature = "pixel6a-gic-init-probe"	pixel GIC init cfg
+pixel6a-entry	pixel-verification-platform	kernel/src/arch/aarch64/boot.rs	feature = "pixel6a-before-kmain-probe"	pixel entry poweroff cfg
+pixel6a-entry	pixel-verification-platform	kernel/src/arch/aarch64/boot.rs	b"[JSR-PIXEL6A] Jasper-OS code entered\r\n"	pixel EL1 entry marker
+pixel6a-entry	pixel-verification-platform	kernel/src/arch/aarch64/boot.rs	crate::kprintln!("[JSR-PIXEL6A] entry=reached stage=after-mmu")	pixel post-MMU marker
+pixel6a-smoke	pixel-verification-platform	kernel/src/arch/aarch64/boot.rs	"[JSR-PIXEL6A] smoke=entered dtb=0x{:x} memory_regions={}"	pixel smoke marker
+pixel6a-smoke	pixel-verification-platform	kernel/src/arch/aarch64/boot.rs	crate::kprintln!("[JSR-PIXEL6A] probe=complete action=psci-reset")	pixel smoke terminal marker
+pixel6a-console	pixel-verification-platform	kernel/src/arch/aarch64/mod.rs	#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]	pixel console module profile
+pixel6a-generic-exclusion	pixel-verification-platform	kernel/src/arch/aarch64/mod.rs	#[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))]	generic console exclusion
+pixel6a-gic	pixel-verification-platform	kernel/src/arch/aarch64/mod.rs	#[cfg(feature = "pixel6a-gic-init-probe")]	pixel GIC probe gate
+pixel6a-full-probe	pixel-verification-platform	kernel/src/arch/aarch64/vectors.rs	#[cfg(feature = "pixel6a-full-probe")]	pixel full alive probe gate
+pixel6a-full-probe	pixel-verification-platform	kernel/src/arch/aarch64/vectors.rs	crate::kprintln!("[JSR-PIXEL6A] full=alive ticks={} action=psci-off"	pixel full terminal marker
+pixel6a-smp	pixel-verification-platform	kernel/src/kmain.rs	#[cfg(feature = "pixel6a-smp-probe")]	pixel SMP probe gate
+pixel6a-smp	pixel-verification-platform	kernel/src/kmain.rs	kprintln!("[JSR-PIXEL6A] smp=8 online=8 action=psci-off")	pixel SMP terminal marker
+loongarch64-qemu-virt	loongarch-qemu-verification-platform	kernel/src/arch/loongarch64/boot.rs	"[JSR-ARCH] loongarch64 entry=physical console=uart16550 qemu=virt\n"	QEMU virt boot marker
+loongarch64-qemu-virt	loongarch-qemu-verification-platform	kernel/src/arch/loongarch64/boot.rs	Ok(_) => "qemu-fdt-cpu-map"	QEMU FDT CPU map marker
+loongarch64-qemu-virt	loongarch-qemu-verification-platform	kernel/src/arch/loongarch64/smp.rs	return Err("qemu-fdt-missing")	missing FDT fail closed
+loongarch64-qemu-virt	loongarch-qemu-verification-platform	kernel/src/arch/loongarch64/smp.rs	return Err("qemu-fdt-too-large")	oversized FDT fail closed
+loongarch64-qemu-virt	loongarch-qemu-verification-platform	kernel/src/arch/loongarch64/smp.rs	return Err("qemu-fdt-invalid")	invalid FDT fail closed
+loongarch64-qemu-virt	loongarch-qemu-verification-platform	kernel/src/arch/loongarch64/smp.rs	return Err("qemu-platform-unverified")	platform mismatch fail closed

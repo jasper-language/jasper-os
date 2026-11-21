@@ -16,6 +16,8 @@ diagnostic-usi-v1-contract	21	spec	diagnostic-USI-v1-wire-contract
 diagnostic-source-panic-ring	35	policy	panic-and-boot-failure-no-allocation-emergency-ring
 smp-shootdown-batch-policy	35	policy	larger-page-ranges-promote-to-one-whole-table-flush
 jaso-wire-v1	33	spec	JASO-isolated-wire-v1-fixed-handle-array
+jaso-import-v1	35	spec	JASO-import-v1-versioned-binding-extension
+jaso-manifest-v1	35	spec	JASO-manifest-v1-versioned-core-metadata
 channel-abi-v1	33	spec	Jasper-Channel-v1-fixed-message-handle-array
 network-object-v1	33	spec	NET-v1-fixed-endpoint-name-field
 mac-audit-backpressure-policy	39	policy	MAC-audit-full-denies-authorization-without-silent-loss
@@ -26,6 +28,7 @@ linux-poll-scan-policy	35	policy	Issue-35-bounded-Linux-poll-scan
 linux-batch-partial-policy	35	policy	Issue-35-bounded-Linux-batches-return-partial-progress
 linux-mmap-batch-budget	35	runtime	KernelConfig-memory-max-map-pages
 linux-pipe-uapi-v1	35	spec	Linux-pipe2-compat-default-capacity-not-runtime-maximum
+loongarch-qemu-verification-platform	35	build	LoongArch-QEMU-virt-explicit-verification-platform
 native-install-verification-stack	21	policy	LC-2-native-install-QEMU-acceptance-stack-policy
 persistent-install-format-v4	35	spec	persistent-install-FORMAT_VERSION-4-blob-slot-map
 physical-runtime-plan	33	build	verification-feature-platform-plan

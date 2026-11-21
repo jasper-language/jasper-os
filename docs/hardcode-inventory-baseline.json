@@ -20,27 +20,9 @@
     },
     {
       "count": 1,
-      "fingerprint": "04ec57a2fc944f41fc3ad27795c72b2c1c949d56600b108ffc553e35a0e2b512",
-      "path": "kernel/src/arch/loongarch64/smp.rs",
-      "rules": "HC-G3"
-    },
-    {
-      "count": 1,
       "fingerprint": "09b04a6531fd72854c727efe19a3e18aedbd2cafde8d4d279e46acbc4fa4a8cf",
       "path": "kernel-core/src/pci.rs",
       "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "0cc686476f25d3ba306772ad78012c365fb66cca72d91e5d96aaaf0d437663af",
-      "path": "jaso/src/manifest.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "0cea368b9bd7cd52a5020e91353fb8a87fae379b32cea0a46d7e4f984f28062c",
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "rules": "HC-G3"
     },
     {
       "count": 1,
@@ -61,18 +43,6 @@
       "rules": "HC-G1"
     },
     {
-      "count": 2,
-      "fingerprint": "10366c3eddf1cd516f40c5a347cdd15f2d5543efaa05064b4f2d7f4515ac828d",
-      "path": "kernel/src/arch/aarch64/mod.rs",
-      "rules": "HC-G3"
-    },
-    {
-      "count": 1,
-      "fingerprint": "112c4f82d776b49d7cb696b0b85bff7a962188ed4c2a18b89d2c55ccab35f890",
-      "path": "kernel/build.rs",
-      "rules": "HC-G3"
-    },
-    {
       "count": 1,
       "fingerprint": "160c8449cea97db7e0ece328347a382a1ffa885dd9f186c429d047f53b2a3edb",
       "path": "kernel-core/src/sched/limit.rs",
@@ -83,12 +53,6 @@
       "fingerprint": "1708818adfaf77b7cab57126a4a97e4d5b5339efb1546bd4c151090d443cace6",
       "path": "kernel/src/arch/x86_64/keyboard.rs",
       "rules": "HC-G7"
-    },
-    {
-      "count": 1,
-      "fingerprint": "1763bf38f8b78c11a328a1c3f229f7cf4027c957ccfc7b627d5a29a99e2544da",
-      "path": "kernel/src/arch/aarch64/vectors.rs",
-      "rules": "HC-G3"
     },
     {
       "count": 1,
@@ -223,12 +187,6 @@
       "rules": "HC-G1"
     },
     {
-      "count": 5,
-      "fingerprint": "3f6a2adbc19a548a6cc0f663fab6db7c7f7753496daf1ee19a3b87c32ed96720",
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "rules": "HC-G3"
-    },
-    {
       "count": 1,
       "fingerprint": "42479b8d26ecb5226a033c83956e43716e7b898200b1ef5274d9902c9bb76053",
       "path": "kernel-core/src/capacity/tests.rs",
@@ -238,12 +196,6 @@
       "count": 1,
       "fingerprint": "42594cd0d76fbf5e9894687e8df48e3061b8ead362b1c358e37f03984dd16213",
       "path": "compat-packages/src/lib.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "42c352653c0b96527d2dea0aaae80ceddecf84138a431d753a08a9eededeb7f2",
-      "path": "jaso/src/binding.rs",
       "rules": "HC-G1"
     },
     {
@@ -263,12 +215,6 @@
       "fingerprint": "487918563738a9d008dd39c6600714250c1f50175980fefbc6bbf8a2dcabe0e7",
       "path": "kernel-core/src/fdt.rs",
       "rules": "HC-G7"
-    },
-    {
-      "count": 1,
-      "fingerprint": "48d1a7c796bc4541288d6a2b18e0e77ff70d2f42187ce23709d49c6ca23cb621",
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "rules": "HC-G3"
     },
     {
       "count": 1,
@@ -293,18 +239,6 @@
       "fingerprint": "4dcd8af41c414ca64c473727d3b48b16bbbfcf5630ef3dcff23cc482e9a8078d",
       "path": "kernel/src/lifecycle_health.rs",
       "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "4e0172befbb4ce86beaf24de6c8168c6fade5b8bd0157cdd7412dd36611c917a",
-      "path": "jaso/src/binding.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "50439cff51e58600c84598fd317009b536a6e1d4161521cc99b9eb939ba9e631",
-      "path": "kernel/src/arch/loongarch64/smp.rs",
-      "rules": "HC-G3"
     },
     {
       "count": 1,
@@ -362,12 +296,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "5cd11148499d83a8addbb77b81249ce603db9702abf141f63cfb191790d890ad",
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "rules": "HC-G3"
-    },
-    {
-      "count": 1,
       "fingerprint": "5e1964903cacf96b08e4e754de99ca1ec2f08a4f2acf7fe03e9fd4874beb4cda",
       "path": "kernel/src/linux_abi.rs",
       "rules": "HC-G1"
@@ -377,12 +305,6 @@
       "fingerprint": "6210c62d63e658095cc2530f13d274e3115e27e60583e45fed169e826059853e",
       "path": "kernel/src/arch/riscv/devirq.rs",
       "rules": "HC-G7"
-    },
-    {
-      "count": 1,
-      "fingerprint": "633d4b3e1dd9609927e0abcb039cc71c886f6f599c87f8dde63c8cf7787feb65",
-      "path": "kernel/src/arch/loongarch64/smp.rs",
-      "rules": "HC-G3"
     },
     {
       "count": 1,
@@ -397,22 +319,10 @@
       "rules": "HC-G1"
     },
     {
-      "count": 3,
-      "fingerprint": "64edf197e056e2afe89c15915116c7be995afe9a8eb344669c7e98a3b1f6b12a",
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "rules": "HC-G3"
-    },
-    {
       "count": 1,
       "fingerprint": "6551cadcc1900a91dd8bbd088c5bee9afbd3191c31a60165b804ac358b3bc2e7",
       "path": "user/rt/src/channel.rs",
       "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "66232241a8116729353b3738dbbf6581d5c1aea488dfd99a8056df72e92a0677",
-      "path": "kernel/src/arch/loongarch64/boot.rs",
-      "rules": "HC-G3"
     },
     {
       "count": 1,
@@ -439,28 +349,10 @@
       "rules": "HC-G1"
     },
     {
-      "count": 2,
-      "fingerprint": "692b00c5f12764b5c340ee266d83fd5ca6bcafe982bc8a6b6445d5aa02f83de9",
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "rules": "HC-G3"
-    },
-    {
       "count": 1,
       "fingerprint": "69dd62b09c98c6ff10ca7e75895f6413a57b8ef1c5be30b5a305a1864da95424",
       "path": "kernel/src/arch/aarch64/devirq.rs",
       "rules": "HC-G7"
-    },
-    {
-      "count": 1,
-      "fingerprint": "6a22e63e2cac653a9d292827cd43534383bc1363d0d550dfe796e74e1251ca4a",
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "rules": "HC-G3"
-    },
-    {
-      "count": 1,
-      "fingerprint": "6b9a993248aaf75aed50ad81fab010949508619a332e265273ae4b4d7e06c706",
-      "path": "kernel/src/kmain.rs",
-      "rules": "HC-G3"
     },
     {
       "count": 1,
@@ -515,12 +407,6 @@
       "fingerprint": "77dae7b6a34d58006c4c33e6cea644cbaabb3fdc56a5a6f803e5e05b0feaf275",
       "path": "compat-loader/src/lib.rs",
       "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "785d327057a9ebc7bc6d551ff343ca04dd187dbfe67aece88f1b706a46a1617e",
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "rules": "HC-G3"
     },
     {
       "count": 1,
@@ -602,18 +488,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "8e344c79fc7333f4a65872595a5478f246bab004ec845c3880ad4f424fed434e",
-      "path": "kernel/src/arch/aarch64/mod.rs",
-      "rules": "HC-G3"
-    },
-    {
-      "count": 1,
-      "fingerprint": "8e6e0c825af533857ca517158639741373861beb6a1aa50455285a3e5414b91e",
-      "path": "kernel/src/arch/loongarch64/boot.rs",
-      "rules": "HC-G3"
-    },
-    {
-      "count": 1,
       "fingerprint": "8ef38c328065b40f0be7b47b7efe55d96bec5e2bb2880c1188746f2c673858d8",
       "path": "kernel/src/boot.rs",
       "rules": "HC-G1"
@@ -650,12 +524,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "9c296579b9b9876d1d4f9e21968b81fd287169a92ebf790eb5e682f262930b3c",
-      "path": "jaso/src/binding.rs",
-      "rules": "HC-G1,HC-G8"
-    },
-    {
-      "count": 1,
       "fingerprint": "9cbc0e38fb69b72a0dcf092263fa367eaae0ccf758db25199a45a06cac85109b",
       "path": "kernel-core/src/trap.rs",
       "rules": "HC-G1"
@@ -671,12 +539,6 @@
       "fingerprint": "9e6536c25d735f4f29c9763dbb2a18fba438ae9826b7949ad4a34366e8ab5161",
       "path": "kernel-core/src/heap.rs",
       "rules": "HC-G1"
-    },
-    {
-      "count": 2,
-      "fingerprint": "9f1736c3ef19f749a7beebc1dec869212027735899dc8933babb7517042885b8",
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "rules": "HC-G3"
     },
     {
       "count": 1,
@@ -695,18 +557,6 @@
       "fingerprint": "a26645371b1cb69467fb21b79eddcb7523b5da7c6c24d9ab79a5571bca729da0",
       "path": "kernel-core/src/virtio_fs.rs",
       "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "a3d8da1b930c9da626155e388b6ed92ab58f12af723289e5f189678cd0ddabc2",
-      "path": "kernel/src/kmain.rs",
-      "rules": "HC-G3"
-    },
-    {
-      "count": 1,
-      "fingerprint": "a815f11890dc5e2e067a36e88ca343863f4786586dda452031f446ba209b03e6",
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "rules": "HC-G3"
     },
     {
       "count": 1,
@@ -751,12 +601,6 @@
       "rules": "HC-G1"
     },
     {
-      "count": 3,
-      "fingerprint": "b1ea071445b87e98e8e58761cfc59762c7985bb31b9bab7b17642c8fbcf68d73",
-      "path": "kernel/src/arch/aarch64/mod.rs",
-      "rules": "HC-G3"
-    },
-    {
       "count": 1,
       "fingerprint": "b28991f9a5f727b2d90f6c7cca2c44aa894a4781fb97d21abb3c77f1d1b77313",
       "path": "kernel/src/kmain.rs",
@@ -773,12 +617,6 @@
       "fingerprint": "b2c228d01e31aa50e5a49b3f1ac45e61c8e11b99301f27535d73b6e41226889c",
       "path": "modules/net/src/main.rs",
       "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "b43e20246a77b5db2c53925bb18b236ed6f6e4ddbba01f26d08349a1aa1a8851",
-      "path": "kernel/src/arch/loongarch64/smp.rs",
-      "rules": "HC-G3"
     },
     {
       "count": 1,
@@ -878,12 +716,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "cfa5ec699aaa03077d4a2aecdcab6a34122bf815165ee5689fe81f7a47a24fd0",
-      "path": "lifecycle-model/src/diagnostics.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "d1b71786c73f89c137ecc3495a9e742d33a429c0318b0f2b757c43cd516c7c89",
       "path": "kernel/src/sched/pex4_probe.rs",
       "rules": "HC-G1"
@@ -913,10 +745,10 @@
       "rules": "HC-G1"
     },
     {
-      "count": 6,
-      "fingerprint": "d77cc829c1822579b8de7af2eb64604cc1fff075319b6269bfd7634626c85382",
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "rules": "HC-G3"
+      "count": 1,
+      "fingerprint": "d6cd36675c2873d7c44647218f3af748cdab839bee82fdf6c403b3424b46b6d3",
+      "path": "lifecycle-model/src/diagnostics.rs",
+      "rules": "HC-G1"
     },
     {
       "count": 1,
@@ -974,12 +806,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "e3d4b22c145fbc57fbd4fc38a92233eb9613452f4404e0b6b2409c1347dbfdf6",
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "rules": "HC-G3"
-    },
-    {
-      "count": 1,
       "fingerprint": "e5f69ab4bd842a80a16c9180a8a9b783a7249a930bc42c4d6514aaae635017c7",
       "path": "jaso/src/lib.rs",
       "rules": "HC-G1"
@@ -995,12 +821,6 @@
       "fingerprint": "ea30624594f426a8901d731e1991f5dd7ebc6b9c7a97d6b34dec6c6206c4bc6d",
       "path": "kernel-core/src/fdt.rs",
       "rules": "HC-G7"
-    },
-    {
-      "count": 1,
-      "fingerprint": "ea6baf6b41e06584f0efe580f810faf77cd4ce27100cd549f275c163e04546b0",
-      "path": "kernel/src/arch/aarch64/boot.rs",
-      "rules": "HC-G3"
     },
     {
       "count": 1,
@@ -1043,18 +863,6 @@
       "fingerprint": "f3c0f4591922a34a473a4b6ed3a7e71f81fafe9d1d5d9ab73da0f2e10d3d5d4f",
       "path": "kernel-core/src/user_layout.rs",
       "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "f46db2ee91c404b94ffebe4f1394f4c47476ec3a2ec46bdc04c71ca1526aee5b",
-      "path": "kernel/src/arch/aarch64/vectors.rs",
-      "rules": "HC-G3"
-    },
-    {
-      "count": 1,
-      "fingerprint": "f794ce74d1fd4798d055dc234438c3b97e2863495b8c392e268932c92a2781ca",
-      "path": "kernel/build.rs",
-      "rules": "HC-G3"
     },
     {
       "count": 1,
@@ -1125,5 +933,5 @@
     "user",
     "xtask"
   ],
-  "total": 202
+  "total": 154
 }

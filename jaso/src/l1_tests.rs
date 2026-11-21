@@ -91,6 +91,21 @@ fn binding_must_agree_with_the_manifest() {
 
 #[test]
 fn binding_limits() {
+    let mut exact = std::format!("{FULL}{}", "#".repeat(MAX_BINDING_BYTES - FULL.len()));
+    assert_eq!(exact.len(), MAX_BINDING_BYTES);
+    run(&exact).unwrap();
+    exact.push('#');
+    assert_eq!(run(&exact), Err(BindingError::TooLong));
+
+    let mut exact_lines = std::string::String::from(FULL);
+    for i in 0..(MAX_BINDING_LINES - 2) {
+        exact_lines.push_str(&std::format!("type T{i}\n"));
+    }
+    assert_eq!(exact_lines.lines().filter(|line| !line.trim().is_empty()).count(), MAX_BINDING_LINES);
+    run(&exact_lines).unwrap();
+    exact_lines.push_str("type Overflow\n");
+    assert_eq!(run(&exact_lines), Err(BindingError::TooLong));
+
     let big = std::format!("{FULL}{}", "#".repeat(MAX_BINDING_BYTES));
     assert_eq!(run(&big), Err(BindingError::TooLong));
     let mut many = std::string::String::from(FULL);

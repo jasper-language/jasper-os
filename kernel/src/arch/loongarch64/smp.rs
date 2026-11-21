@@ -172,16 +172,16 @@ pub fn discover_fdt(efi_boot: bool, system_table: u64) -> Result<FirmwareFdt, &'
     // readable. Header length is capped before constructing the parser view.
     let first8 = unsafe { core::ptr::read_volatile(fdt_physical as *const [u8; 8]) };
     let Some(total) = kernel_core::fdt::total_size(&first8) else {
-        return Err("qemu-fdt-missing");
+        return Err("qemu-fdt-missing"); // JASPER-HARDCODE-REVIEW: issue=35 source=loongarch-qemu-verification-platform reason=qemu-virt-fdt-failure-marker
     };
     if total > FDT_LIMIT {
-        return Err("qemu-fdt-too-large");
+        return Err("qemu-fdt-too-large"); // JASPER-HARDCODE-REVIEW: issue=35 source=loongarch-qemu-verification-platform reason=qemu-virt-fdt-failure-marker
     }
     // SAFETY: the first eight bytes declared an in-budget blob at the firmware
     // supplied physical address. Strict validation happens before use.
     let bytes = unsafe { core::slice::from_raw_parts(fdt_physical as *const u8, total) };
     let Ok(fdt) = Fdt::parse(bytes) else {
-        return Err("qemu-fdt-invalid");
+        return Err("qemu-fdt-invalid"); // JASPER-HARDCODE-REVIEW: issue=35 source=loongarch-qemu-verification-platform reason=qemu-virt-fdt-failure-marker
     };
     let root_matches = fdt
         .find_named("")
@@ -189,7 +189,7 @@ pub fn discover_fdt(efi_boot: bool, system_table: u64) -> Result<FirmwareFdt, &'
         .flatten()
         .is_some_and(|root| root.is_compatible(MACHINE_COMPATIBLE));
     if !root_matches {
-        return Err("qemu-platform-unverified");
+        return Err("qemu-platform-unverified"); // JASPER-HARDCODE-REVIEW: issue=35 source=loongarch-qemu-verification-platform reason=qemu-virt-platform-failure-marker
     }
     Ok(FirmwareFdt {
         physical: fdt_physical,

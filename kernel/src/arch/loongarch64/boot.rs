@@ -63,7 +63,7 @@ _start:
 extern "C" fn jsr_loongarch64_boot() -> ! {
     uart::init_physical();
     crate::console::write_str(
-        "[JSR-ARCH] loongarch64 entry=physical console=uart16550 qemu=virt\n",
+        "[JSR-ARCH] loongarch64 entry=physical console=uart16550 qemu=virt\n", // JASPER-HARDCODE-REVIEW: issue=35 source=loongarch-qemu-verification-platform reason=qemu-virt-verification-marker
     );
     let euen = cpu::disable_extended_units();
     if euen != 0 {
@@ -82,7 +82,7 @@ extern "C" fn jsr_loongarch64_boot() -> ! {
     crate::console::_print(format_args!(
         "[JSR-SMP-FDT] source={}\n",
         match fdt_discovery {
-            Ok(_) => "qemu-fdt-cpu-map",
+            Ok(_) => "qemu-fdt-cpu-map", // JASPER-HARDCODE-REVIEW: issue=35 source=loongarch-qemu-verification-platform reason=qemu-virt-fdt-diagnostic
             Err(reason) => reason,
         }
     ));

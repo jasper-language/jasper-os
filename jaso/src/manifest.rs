@@ -65,7 +65,7 @@ impl ManifestError {
 /// 单个清单的能力数上限。
 pub const MAX_REQUIRES: usize = 32;
 /// 单个清单的导出名数上限。
-pub const MAX_EXPORT_NAMES: usize = 256;
+pub const MAX_EXPORT_NAMES: usize = 256; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-manifest-v1 reason=versioned-manifest-export-list-bound
 /// 单个清单的依赖数上限。
 pub const MAX_DEPENDS: usize = 32;
 /// 一个版本区间的比较式个数上限。

@@ -361,9 +361,9 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
                 report.disabled
             );
             irq::device::admit_topology("smp_ready");
-            #[cfg(feature = "pixel6a-smp-probe")]
+            #[cfg(feature = "pixel6a-smp-probe")] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-smp-probe-only
             if report.present == 8 && report.online == 8 && report.failed == 0 {
-                kprintln!("[JSR-PIXEL6A] smp=8 online=8 action=psci-off");
+                kprintln!("[JSR-PIXEL6A] smp=8 online=8 action=psci-off"); // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-smp-terminal-marker
                 crate::arch::aarch64::boot::pixel6a_power_off();
             }
             ctx.smp = Some(report);

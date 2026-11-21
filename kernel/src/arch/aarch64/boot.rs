@@ -14,7 +14,7 @@ use core::arch::global_asm;
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use kernel_core::fdt::{self, BootSummary, Fdt, PixelFormat};
-#[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))]
+#[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=generic-aarch64-boot-excludes-pixel-verification-profiles
 use kernel_core::fdt::Node;
 use kernel_core::frame::{PhysRegion, RegionKind};
 use kernel_core::image_header;
@@ -24,10 +24,10 @@ use kernel_core::driver_host::{
     DeviceIdentity, DriverHostBroker, Needs, Policy, RequestKind, Terminal,
 };
 
-#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
+#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-profile-only-samsung-console
 use super::samsung_uart;
 use super::{devirq, gic, mmu, semihost, smp, timer};
-#[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))]
+#[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=generic-aarch64-console-path
 use super::uart;
 use super::platform::direct_boot_normal;
 use crate::boot::{self, BootSpec, FrameBufferFormat, FrameBufferInfo, PsciBoot, SerialBoot};
@@ -312,7 +312,7 @@ pub(crate) fn guest_stack_range() -> (u64, u64) {
 /// 找不到设备树或必需设备时的退出码（与 x86_64 的失败码相同）。
 const EXIT_FAILURE: u32 = 35;
 
-#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full-probe"))]
+#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full-probe"))] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-profile-only-timer-reset-helper
 fn pixel6a_timer_frequency(fdt: Option<&Fdt<'_>>) -> Option<u64> {
     let frequency: u64;
     unsafe { core::arch::asm!("mrs {}, cntfrq_el0", out(reg) frequency) };
@@ -323,7 +323,7 @@ fn pixel6a_timer_frequency(fdt: Option<&Fdt<'_>>) -> Option<u64> {
     node.cell("clock-frequency", 0).filter(|frequency| *frequency != 0).map(u64::from)
 }
 
-#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full-probe"))]
+#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full-probe"))] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-profile-only-timer-reset-helper
 pub(super) fn pixel6a_reset_after(seconds: u64, fdt: Option<&Fdt<'_>>) -> ! {
     let start: u64;
     unsafe { core::arch::asm!("mrs {}, cntvct_el0", out(reg) start) };
@@ -366,9 +366,9 @@ pub(crate) fn pixel6a_reset_now() -> ! {
 }
 
 #[cfg(any(
-    feature = "pixel6a-full-probe",
-    feature = "pixel6a-gic-init-probe",
-    feature = "pixel6a-before-kmain-probe",
+    feature = "pixel6a-full-probe", // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-full-probe-poweroff-only
+    feature = "pixel6a-gic-init-probe", // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-gic-probe-poweroff-only
+    feature = "pixel6a-before-kmain-probe", // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-entry-probe-poweroff-only
     feature = "pixel6a-smp-probe" // JASPER-HARDCODE-REVIEW: issue=33 source=physical-runtime-plan reason=success-action-is-only-compiled-for-pixel6a-verification
 ))]
 pub(crate) fn pixel6a_power_off() -> ! {
@@ -380,7 +380,7 @@ pub(crate) fn pixel6a_power_off() -> ! {
     }
 }
 
-#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
+#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-profile-only-uefi-console
 unsafe fn uefi_console_line(system_table: u64, text: &[u8]) {
     type OutputString = unsafe extern "efiapi" fn(*mut u8, *const u16) -> usize;
     const CONSOLE_OUT: u64 = 64;
@@ -407,7 +407,7 @@ unsafe fn uefi_console_line(system_table: u64, text: &[u8]) {
     }
 }
 
-#[cfg(feature = "pixel6a-full")]
+#[cfg(feature = "pixel6a-full")] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=explicit-full-profile-device-configuration
 unsafe fn disable_uefi_watchdog(system_table: u64) {
     const BOOT_SERVICES: u64 = 96;
     const SET_WATCHDOG_TIMER: u64 = 256;
@@ -1520,7 +1520,7 @@ fn find_fdt(candidate: u64, mapped_end: u64) -> Option<(u64, Fdt<'static>)> {
 /// handle, `x1` system table), not the Linux arm64 boot convention where `x0`
 /// holds the DTB. UEFI publishes the device tree as a configuration-table
 /// entry under `EFI_DEVICE_TREE_GUID`.
-#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
+#[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-profile-only-uefi-fdt-discovery
 fn find_uefi_fdt(system_table: u64, mapped_end: u64) -> Option<(u64, Fdt<'static>)> {
     const NUMBER_OF_TABLE_ENTRIES: u64 = 104;
     const CONFIGURATION_TABLE: u64 = 112;
@@ -1571,14 +1571,14 @@ fn find_uefi_fdt(system_table: u64, mapped_end: u64) -> Option<(u64, Fdt<'static
 
 /// 由已校验的设备树摘要配置串口、中断控制器与定时器；缺少任一必需设备返回其名字。
 fn configure_devices(fdt: &Fdt<'_>, summary: &BootSummary<'_>) -> Result<(), &'static str> {
-    #[cfg(feature = "pixel6a-smoke")]
+    #[cfg(feature = "pixel6a-smoke")] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-smoke-device-profile
     {
         let _ = (fdt, summary);
         samsung_uart::set_base(mmu::PHYS_OFFSET + 0x10a0_0000);
         samsung_uart::init();
         return Ok(());
     }
-    #[cfg(feature = "pixel6a-full")]
+    #[cfg(feature = "pixel6a-full")] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-full-device-profile
     {
         samsung_uart::set_base(mmu::PHYS_OFFSET + 0x10a0_0000);
         samsung_uart::init();
@@ -1597,7 +1597,7 @@ fn configure_devices(fdt: &Fdt<'_>, summary: &BootSummary<'_>) -> Result<(), &'s
         smp::configure(fdt);
         return Ok(());
     }
-    #[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))]
+    #[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=generic-aarch64-device-path
     {
     let serial = summary.serial.ok_or("arm,pl011")?;
     uart::set_base(mmu::PHYS_OFFSET + serial.base);
@@ -1833,15 +1833,15 @@ extern "C" fn jsr_aarch64_boot(
     entry_exception_level: u64,
 ) -> ! {
     ENTRY_EXCEPTION_LEVEL.store(entry_exception_level as u8, Ordering::Relaxed);
-    #[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
+    #[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-profile-only-uefi-console
     unsafe {
         uefi_console_line(
             uefi_system_table,
-            b"[JSR-PIXEL6A] Jasper-OS code entered\r\n",
+        b"[JSR-PIXEL6A] Jasper-OS code entered\r\n", // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-entry-diagnostic-marker
         );
     }
 
-    #[cfg(feature = "pixel6a-full")]
+    #[cfg(feature = "pixel6a-full")] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-full-only-uefi-watchdog
     unsafe {
         disable_uefi_watchdog(uefi_system_table);
     }
@@ -1868,21 +1868,21 @@ extern "C" fn jsr_aarch64_boot(
         mmu::enable();
     }
 
-    #[cfg(feature = "pixel6a-entry-probe")]
+    #[cfg(feature = "pixel6a-entry-probe")] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-entry-probe-only
     {
         samsung_uart::set_base(mmu::PHYS_OFFSET + 0x10a0_0000);
         samsung_uart::init();
-        crate::kprintln!("[JSR-PIXEL6A] entry=reached stage=after-mmu");
+        crate::kprintln!("[JSR-PIXEL6A] entry=reached stage=after-mmu"); // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-entry-diagnostic-marker
         pixel6a_reset_after(3, None);
     }
 
     let early_end = mmu::cover_phys(0);
     let runtime_fdt = {
-        #[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
+        #[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-profile-only-uefi-fdt-discovery
         {
             find_uefi_fdt(uefi_system_table, early_end)
         }
-        #[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))]
+        #[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=generic-aarch64-fdt-path
         {
             let _ = uefi_system_table;
             None
@@ -1895,12 +1895,12 @@ extern "C" fn jsr_aarch64_boot(
     };
 
     // 先只取串口基址，让「头/树被拒绝」也能打印结构化原因；完整设备配置在摘要之后。
-    #[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))]
+    #[cfg(any(feature = "pixel6a-smoke", feature = "pixel6a-full"))] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-profile-only-samsung-console
     {
         samsung_uart::set_base(mmu::PHYS_OFFSET + 0x10a0_0000);
         samsung_uart::init();
     }
-    #[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))]
+    #[cfg(not(any(feature = "pixel6a-smoke", feature = "pixel6a-full")))] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=generic-aarch64-console-path
     if let Ok(Some(node)) = fdt.find_compatible("arm,pl011") {
         if let Some((base, _)) = node.reg(0) {
             uart::set_base(mmu::PHYS_OFFSET + base);
@@ -2026,14 +2026,14 @@ extern "C" fn jsr_aarch64_boot(
         }
     }
 
-    #[cfg(feature = "pixel6a-smoke")]
+    #[cfg(feature = "pixel6a-smoke")] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-smoke-profile-only
     {
         crate::kprintln!(
-            "[JSR-PIXEL6A] smoke=entered dtb=0x{:x} memory_regions={}",
+            "[JSR-PIXEL6A] smoke=entered dtb=0x{:x} memory_regions={}", // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-smoke-diagnostic-marker
             dtb_pa,
             memory_count
         );
-        crate::kprintln!("[JSR-PIXEL6A] probe=complete action=psci-reset");
+        crate::kprintln!("[JSR-PIXEL6A] probe=complete action=psci-reset"); // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=pixel-smoke-terminal-marker
         pixel6a_reset_after(3, Some(&fdt));
     }
 

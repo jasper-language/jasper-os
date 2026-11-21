@@ -11,7 +11,7 @@
 pub const SCHEMA_VERSION: u16 = 1;
 /// 单个事件保存的直接原因链上限。
 /// Maximum direct cause chain stored in one event.
-pub const MAX_CAUSES: usize = 8;
+pub const MAX_CAUSES: usize = 8; // JASPER-HARDCODE-REVIEW: issue=35 source=diagnostic-usi-v1-contract reason=fixed-cause-id-array-in-versioned-diagnostic-record
 /// 组件稳定标识的最大字节数。
 /// Maximum byte length of a stable component identifier.
 pub const MAX_COMPONENT_ID: usize = 32;
@@ -1652,6 +1652,13 @@ mod tests {
         let mut input = base(EventKind::DriverHardware, Severity::Error);
         input.component = "bad component";
         assert_eq!(DiagnosticEvent::new(input), Err(SchemaError::Component));
+
+        let exact = [1u32, 2, 3, 4, 5, 6, 7, 8];
+        input = base(EventKind::DriverHardware, Severity::Error);
+        input.causes = &exact;
+        let event = DiagnosticEvent::new(input).unwrap();
+        assert_eq!(event.cause_count as usize, MAX_CAUSES);
+        assert_eq!(&event.causes[..exact.len()], &exact);
 
         let causes = [1u32, 2, 3, 4, 5, 6, 7, 8, 9];
         input = base(EventKind::DriverHardware, Severity::Error);

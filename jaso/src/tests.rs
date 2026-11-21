@@ -371,6 +371,20 @@ fn manifest_rules() {
     assert_eq!(p("core.exports = bad name\n").unwrap_err(), ManifestError::BadValue(1));
     let many: String = (0..33).map(|i| std::format!("core.requires = cap{}\n", i)).collect();
     assert_eq!(p(&many).unwrap_err(), ManifestError::Limit(33));
+    let exact_exports: Vec<String> =
+        (0..crate::manifest::MAX_EXPORT_NAMES).map(|i| std::format!("e{i}")).collect();
+    let exact_export_text = std::format!("{BASE}core.exports = {}\n", exact_exports.join(","));
+    assert_eq!(
+        p(&exact_export_text).map(|_| ()),
+        Ok(())
+    );
+    let too_many_exports: Vec<String> =
+        (0..=crate::manifest::MAX_EXPORT_NAMES).map(|i| std::format!("e{i}")).collect();
+    let too_many_export_text = std::format!("{BASE}core.exports = {}\n", too_many_exports.join(","));
+    assert_eq!(
+        p(&too_many_export_text),
+        Err(ManifestError::Limit(5))
+    );
     // 先报告第一处出错的行，各行合法后才检查缺失
     assert_eq!(p("core.name = A\njunk\n").unwrap_err(), ManifestError::BadValue(1));
     let text = std::format!("{}core.lifecycle = system\nx.k = v\n", BASE);
