@@ -14,14 +14,19 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use kernel_core::authz::{AccessScope, Decision, Effect, Operation, Reason, AUTHZ_FORMAT_VERSION};
 use kernel_core::display_input::{KeyInput, PixelLayout, SurfaceSpec};
 use kernel_core::frame::FRAME_SIZE;
 use kernel_core::paging::MapFlags;
+use kernel_core::ui_policy::UiDeviceCapabilities;
 use kernel_core::ui_protocol::{
     decode_ui_frame, encode_ui_frame, UiFrameHeader, UiFrameKind, UiInputRecord,
     UI_FRAME_HEADER_BYTES,
 };
-use kernel_core::ui_service::UiClientKey;
+use kernel_core::ui_service::{UiCapability, UiClientKey};
+use kernel_core::ui_session::{
+    UiInputEnvelope, UiSceneFacts, UiSessionKind, UiSessionRegistry, UiSessionScope,
+};
 
 use crate::proc::{self, ProcState};
 use crate::syscall::{table as abi, SyscallSet};
@@ -83,6 +88,66 @@ fn request_header(client: UiClientKey) -> UiFrameHeader {
 
 fn surface_argument() -> u64 {
     (u64::from(TEST_SURFACE_WIDTH) << 32) | u64::from(TEST_SURFACE_HEIGHT)
+}
+
+fn session_scope(subject: u64, round: u32) -> UiSessionScope {
+    UiSessionScope {
+        user: subject,
+        tenant: 1,
+        session: u64::from(round) + 1,
+        display_seat: 1,
+        input_seat: 1,
+    }
+}
+
+fn pep_capability(
+    subject: u64,
+    scope: UiSessionScope,
+    operation: Operation,
+) -> Option<UiCapability> {
+    let decision = Decision {
+        format_version: AUTHZ_FORMAT_VERSION,
+        issuer: kernel_core::authz::KERNEL_PEP_ISSUER,
+        subject,
+        executor_object: subject,
+        executor_generation: 1,
+        tenant: scope.tenant,
+        domain: 1,
+        operation,
+        scope: AccessScope::User(scope.user),
+        effect: if operation == Operation::ServiceUiInputRead {
+            Effect::Read
+        } else {
+            Effect::Write
+        },
+        policy_epoch: 1,
+        revocation_generation: Some(0),
+        allowed: true,
+        reason: Reason::Allowed,
+    };
+    UiCapability::from_decision(decision, operation).ok()
+}
+
+fn test_surface() -> SurfaceSpec {
+    SurfaceSpec {
+        width: TEST_SURFACE_WIDTH,
+        height: TEST_SURFACE_HEIGHT,
+        stride: TEST_SURFACE_WIDTH,
+        bytes_per_pixel: 4,
+        layout: PixelLayout::Rgba,
+    }
+}
+
+fn ui_capabilities() -> UiDeviceCapabilities {
+    UiDeviceCapabilities {
+        display: true,
+        keyboard: true,
+        pointer: false,
+        touch: false,
+        split_layouts: false,
+        multi_window: false,
+        background_grants: true,
+    }
 }
 
 fn wait_for_native_enter() -> Option<KeyInput> {
@@ -170,7 +235,53 @@ fn run_round(round: u32) -> bool {
         return false;
     };
 
-    let client = UiClientKey::from_raw((7u64 << 16) | 3).expect("nonzero UI client");
+    let subject = service.raw();
+    let scope = session_scope(subject, round);
+    let mut sessions = UiSessionRegistry::<1>::new();
+    let Some(create_capability) = pep_capability(subject, scope, Operation::ServiceUiSessionCreate)
+    else {
+        check(false, "UI session create capability was not admitted");
+        return false;
+    };
+    let Ok((session_key, _)) = sessions.open(
+        subject,
+        scope,
+        UiSessionKind::Remote,
+        ui_capabilities(),
+        Some(test_surface()),
+        create_capability,
+    ) else {
+        check(false, "UI session was not admitted");
+        return false;
+    };
+    check(
+        sessions
+            .set_scene(
+                subject,
+                scope,
+                session_key,
+                UiSceneFacts {
+                    visible: true,
+                    rendering: true,
+                },
+            )
+            .is_ok(),
+        "UI session Scene facts were not admitted",
+    );
+    let Some(focus_capability) = pep_capability(subject, scope, Operation::ServiceUiFocusSet)
+    else {
+        check(false, "UI focus capability was not admitted");
+        return false;
+    };
+    check(
+        sessions
+            .focus(subject, scope, session_key, true, focus_capability)
+            .is_ok(),
+        "UI session did not acquire focus",
+    );
+    let input_capability =
+        pep_capability(subject, scope, Operation::ServiceUiInputRead).expect("UI input capability");
+    let client = UiClientKey::from_raw(session_key.raw()).expect("nonzero UI client");
     let header = request_header(client);
     let mut request = alloc::vec![0u8; UI_FRAME_HEADER_BYTES + REQUEST_PAYLOAD.len()];
     let request_len =
@@ -263,6 +374,26 @@ fn run_round(round: u32) -> bool {
         input_sent == input_len as i64,
         "host input was not queued on the service endpoint",
     );
+    let input_envelope = UiInputEnvelope {
+        key: session_key,
+        input_generation: 1,
+        sequence: 1,
+        code: JSUI_ENTER_CODE,
+        pressed: true,
+        modifiers: u32::from(native_key.modifiers),
+    };
+    check(
+        sessions
+            .input(subject, scope, input_envelope, input_capability)
+            .is_ok(),
+        "focused UI session did not admit native input",
+    );
+    check(
+        sessions
+            .input(subject, scope, input_envelope, input_capability)
+            .is_err(),
+        "replayed UI session input was accepted",
+    );
     let close_header = UiFrameHeader {
         kind: UiFrameKind::Close,
         flags: 0,
@@ -297,6 +428,10 @@ fn run_round(round: u32) -> bool {
     if started {
         sched::run();
     }
+    check(
+        sessions.close(subject, session_key).is_ok(),
+        "UI session did not close",
+    );
     crate::display::end_ui_input_capture();
     let state = proc::state(service);
     check(
