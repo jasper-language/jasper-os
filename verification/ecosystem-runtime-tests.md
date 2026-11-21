@@ -3,6 +3,10 @@
 This report separates host baselines from execution on Jasper-OS. A host
 baseline is not evidence that the Jasper kernel supports the same program.
 
+JVM, .NET/CoreCLR and Android Framework are external user-space frameworks.
+They may run only under the Linux compatibility stack and never imply a native
+Jasper framework ABI. See `docs/native-ecosystem-independence.md`.
+
 ## Jasper-OS UEFI
 
 ### Upstream Toybox
@@ -136,6 +140,13 @@ not required by modern Android. The static preflight follows the stock
 passwd file, so `container_ready=true` with no static omissions. Activity
 startup cannot be claimed until the process chain actually runs.
 
+### .NET/CoreCLR
+
+The unmodified Microsoft Linux x64 runtime is a compatibility target only.
+Jasper-OS does not define a native .NET/CoreCLR/C# framework or ABI. No Jasper
+guest execution is claimed for .NET until the Linux VFS and ELF loader can
+start a self-contained runtime with all managed/native resources recovered.
+
 ## Remaining Jasper work
 
 - Provide a general root-image namespace for Android `/system`, `/apex` and
@@ -145,5 +156,8 @@ startup cannot be claimed until the process chain actually runs.
 - Stage Wine/DXVK/VKD3D and Metal2Vulkan in a Jasper guest with a real GPU or
   an explicit virtual Vulkan device; the current UEFI QEMU fixture has no
   virtio-gpu/Vulkan device.
+- Run unmodified JVM and .NET runtimes through the Linux compatibility path;
+  these remain external runtime acceptance tasks, never Jasper native framework
+  milestones.
 
 These are compatibility gaps, not passing results.

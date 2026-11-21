@@ -4,9 +4,18 @@
 
 ## 原则
 
-Jasper 以独立语言生态、应用框架、系统接口、设备驱动框架和运行环境为长期建设
-主体。POSIX、Linux ABI、Android、Windows 与外部驱动适配是生态迁移和互操作
-设施，不是 Jasper 原生体系的永久基础依赖。
+Jasper-OS 提供稳定、语言中立的系统执行环境。Jasper 语言生态独立开发，发行版
+负责选择和集成 Jasper 运行时及应用框架；编译器、语法、标准库、工具链和自举
+工作不进入 Jasper-OS 内核与系统机制 DAG。
+
+Jasper-OS **不会提供 JVM/Java、.NET/CoreCLR/C# 或 Android Framework 的原生
+框架 ABI**。这些框架及其运行时只能作为外部用户态组件，通过 Linux 兼容层
+（Android Framework 可在 Linux ABI 之上叠加 Android 用户态适配）运行。这里
+“可以运行”表示兼容验收，不表示 Jasper 原生生态支持该框架，也不授权为框架扩张
+内核 ABI。
+
+POSIX、Linux ABI、Android、Windows 与外部驱动适配是生态迁移和互操作设施，
+不是 Jasper 原生体系的永久基础依赖。
 
 兼容能力可以长期存在，但必须同时满足以下条件：
 
@@ -15,6 +24,22 @@ Jasper 以独立语言生态、应用框架、系统接口、设备驱动框架�
 3. 停用或卸载后，Jasper 原生应用、系统接口、服务和驱动框架仍可独立构建与运行；
 4. 不向原生 ABI 注入 fd、fork、errno、Linux syscall 编号或其他历史语义；
 5. 服从 Handle/Rights、PEP、配额、审计、撤销和资源生命周期规则。
+
+## 外部语言与应用框架边界
+
+| 外部框架/运行时 | 合法执行路径 | Jasper 原生 ABI/框架 |
+| --- | --- | --- |
+| OpenJDK/JVM、Java 应用 | Linux ABI 兼容层中的未修改 Linux 用户态运行时 | 不新增 JVM、Java 或 JNI 内核 ABI；不是原生框架 |
+| .NET Runtime/CoreCLR、C# 应用 | Linux ABI 兼容层中的未修改 Linux x64 用户态运行时 | 不新增 CLR、.NET 或 C# 内核 ABI；不是原生框架 |
+| Android Framework/Activity、ART/APK | Linux ABI 之上由可选 Android 用户态兼容组件执行 | 不新增 Android Framework、ActivityManager 或 ART 内核 ABI；不是原生框架 |
+| Win32/Direct3D 应用 | Wine 经 Linux ABI，DXVK/VKD3D 再经 Jasper Vulkan/GPU 服务 | 不新增 Win32、PE 或 Direct3D 内核 ABI；不是原生框架 |
+
+兼容层可以因为真实运行时需求修复通用 Linux 机制，但不得据此把该框架的对象、
+API、错误码、生命周期或权限模型升级成 Jasper 原生能力。只有与具体框架无关、
+经过独立 ABI 审查的通用缺口，才能进入 Jasper `system.*` 或 `service.*`。
+
+桌面、Terminal、系统设置和系统级应用使用 Jasper 技术栈；外部语言框架即使能
+通过兼容层启动，也不能把“兼容运行”记作“Jasper 原生框架已支持”。
 
 ## 当前实现边界
 

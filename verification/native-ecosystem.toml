@@ -4,6 +4,33 @@ status = "core-passed"
 updated = "2026-11-21"
 evidence = "docs/native-ecosystem-independence.md; scripts/check-native-ecosystem.py; no-default/default/production and syscall-only/ELF-only/dynamic-libc dependency trees; jasper-compat-packages install/upgrade/rollback/uninstall tests"
 
+[runtime_framework_policy]
+version = 1
+policy = "compatibility-only"
+native_frameworks = []
+kernel_abi_expansion = "forbidden"
+required_claim = "running under compatibility is not native framework support"
+
+[[runtime_framework_policy.framework]]
+id = "jvm"
+execution_path = "linux-compat"
+examples = "OpenJDK, JVM and Java applications"
+
+[[runtime_framework_policy.framework]]
+id = "dotnet"
+execution_path = "linux-compat"
+examples = ".NET Runtime, CoreCLR and C# applications"
+
+[[runtime_framework_policy.framework]]
+id = "android-framework"
+execution_path = "android-userland-over-linux-compat"
+examples = "Android Framework, ActivityManager, ART and APK lifecycle"
+
+[[runtime_framework_policy.framework]]
+id = "win32"
+execution_path = "wine-over-linux-compat"
+examples = "Win32, PE and Direct3D applications"
+
 [[acceptance]]
 id = "optional-compat-dependencies"
 statement = "Linux compatibility crates are optional kernel dependencies and are absent from the default Jasper feature set."
