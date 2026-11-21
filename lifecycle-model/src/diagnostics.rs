@@ -8,7 +8,9 @@
 
 /// 当前诊断事件 Schema 版本。
 /// Current diagnostic-event schema version.
-pub const SCHEMA_VERSION: u16 = 1;
+pub const SCHEMA_VERSION: u16 = 2;
+/// Schema v1, retained for reading existing persistent diagnostic copies.
+pub const LEGACY_SCHEMA_VERSION: u16 = 1;
 /// 单个事件保存的直接原因链上限。
 /// Maximum direct cause chain stored in one event.
 pub const MAX_CAUSES: usize = 8; // JASPER-HARDCODE-REVIEW: issue=21 source=diagnostic-usi-v1-contract reason=fixed-cause-id-array-in-versioned-diagnostic-record
@@ -171,6 +173,8 @@ pub struct EventInput<'a> {
     pub payload_digest: [u8; 32],
     /// 载荷是否经过脱敏。Whether any retained payload was redacted.
     pub redacted: bool,
+    /// Optional causal trace/span identity.
+    pub correlation: Option<TraceCorrelation>,
 }
 
 /// 事件 Schema 校验失败原因。
@@ -189,6 +193,40 @@ pub enum SchemaError {
     Privacy,
     /// 保留载荷没有经过脱敏。Retained payload was not marked redacted.
     RedactionRequired,
+    /// Optional trace correlation is malformed.
+    TraceCorrelation,
+}
+
+/// Stable optional trace correlation embedded in one diagnostic event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TraceCorrelation {
+    /// Non-zero causal trace identity.
+    pub trace_id: u64,
+    /// Non-zero current span identity.
+    pub span_id: u64,
+    /// Optional parent span identity.
+    pub parent_span_id: Option<u64>,
+}
+
+impl TraceCorrelation {
+    /// Validates non-zero identities and rejects a self-parent cycle.
+    pub const fn new(
+        trace_id: u64,
+        span_id: u64,
+        parent_span_id: Option<u64>,
+    ) -> Result<Self, SchemaError> {
+        if trace_id == 0 || span_id == 0 || matches!(parent_span_id, Some(0)) {
+            return Err(SchemaError::TraceCorrelation);
+        }
+        if matches!(parent_span_id, Some(parent) if parent == span_id) {
+            return Err(SchemaError::TraceCorrelation);
+        }
+        Ok(Self {
+            trace_id,
+            span_id,
+            parent_span_id,
+        })
+    }
 }
 
 /// 固定容量、可复制的诊断事件。
@@ -217,6 +255,7 @@ pub struct DiagnosticEvent {
     payload_len: u8,
     payload_digest: [u8; 32],
     redacted: bool,
+    correlation: Option<TraceCorrelation>,
 }
 
 impl DiagnosticEvent {
@@ -267,6 +306,13 @@ impl DiagnosticEvent {
         {
             return Err(SchemaError::RedactionRequired);
         }
+        if let Some(correlation) = input.correlation {
+            TraceCorrelation::new(
+                correlation.trace_id,
+                correlation.span_id,
+                correlation.parent_span_id,
+            )?;
+        }
 
         let mut causes = [0; MAX_CAUSES];
         causes[..input.causes.len()].copy_from_slice(input.causes);
@@ -297,6 +343,7 @@ impl DiagnosticEvent {
             payload_len: input.payload_reference.len() as u8,
             payload_digest: input.payload_digest,
             redacted: input.redacted,
+            correlation: input.correlation,
         })
     }
 
@@ -376,6 +423,10 @@ impl DiagnosticEvent {
     /// 保留载荷是否已经脱敏。Whether retained payload was redacted.
     pub const fn redacted(self) -> bool {
         self.redacted
+    }
+    /// Optional causal trace correlation.
+    pub const fn correlation(self) -> Option<TraceCorrelation> {
+        self.correlation
     }
 }
 
@@ -573,18 +624,23 @@ impl<const N: usize> Default for DiagnosticRing<N> {
 pub const PERSISTED_EVENTS: usize = 16;
 /// 一条持久化诊断事件的固定长度。
 /// Fixed encoded length of one persisted diagnostic event.
-pub const PERSISTED_EVENT_BYTES: usize = 256;
+pub const PERSISTED_EVENT_BYTES: usize = 288;
+/// Schema v1 persisted-event width, accepted for read-only migration.
+pub const LEGACY_PERSISTED_EVENT_BYTES: usize = 256;
 /// 每份诊断快照的固定长度。
 /// Fixed size of one diagnostic snapshot copy.
 pub const DIAGNOSTIC_COPY_BYTES: usize =
     DIAGNOSTIC_HEADER_BYTES + PERSISTED_EVENTS * PERSISTED_EVENT_BYTES;
+const LEGACY_DIAGNOSTIC_COPY_BYTES: usize =
+    DIAGNOSTIC_HEADER_BYTES + PERSISTED_EVENTS * LEGACY_PERSISTED_EVENT_BYTES;
 /// 两份诊断副本之间的固定存储跨度。
 /// Fixed storage stride between the two diagnostic copies.
 pub const DIAGNOSTIC_COPY_STRIDE: usize = 8192;
 
 const DIAGNOSTIC_HEADER_BYTES: usize = 64;
 const DIAGNOSTIC_MAGIC: [u8; 8] = *b"JLC1DIAG";
-const DIAGNOSTIC_VERSION: u16 = 1;
+const DIAGNOSTIC_VERSION: u16 = 2;
+const LEGACY_DIAGNOSTIC_VERSION: u16 = 1;
 
 /// 诊断持久化宿主错误。
 /// Host failure while reading, writing, or flushing diagnostics.
@@ -1224,10 +1280,31 @@ fn encode_snapshot(
 }
 
 fn decode_snapshot(bytes: &[u8; DIAGNOSTIC_COPY_BYTES]) -> Option<Snapshot> {
+    match diag_read_u16(bytes, 8)? {
+        DIAGNOSTIC_VERSION => {
+            decode_snapshot_layout(bytes, DIAGNOSTIC_VERSION, PERSISTED_EVENT_BYTES)
+        }
+        LEGACY_DIAGNOSTIC_VERSION => decode_snapshot_layout(
+            bytes.get(..LEGACY_DIAGNOSTIC_COPY_BYTES)?,
+            LEGACY_DIAGNOSTIC_VERSION,
+            LEGACY_PERSISTED_EVENT_BYTES,
+        ),
+        _ => None,
+    }
+}
+
+fn decode_snapshot_layout(
+    bytes: &[u8],
+    version: u16,
+    event_bytes: usize,
+) -> Option<Snapshot> {
     if bytes[..8] != DIAGNOSTIC_MAGIC
-        || diag_read_u16(bytes, 8)? != DIAGNOSTIC_VERSION
+        || diag_read_u16(bytes, 8)? != version
         || diag_read_u16(bytes, 10)? as usize != DIAGNOSTIC_HEADER_BYTES
         || diag_read_u16(bytes, 12)? as usize != PERSISTED_EVENTS
+        || bytes.len()
+            != DIAGNOSTIC_HEADER_BYTES
+                .checked_add(PERSISTED_EVENTS.checked_mul(event_bytes)?)?
         || bytes[48..60].iter().any(|byte| *byte != 0)
     {
         return None;
@@ -1244,17 +1321,12 @@ fn decode_snapshot(bytes: &[u8; DIAGNOSTIC_COPY_BYTES]) -> Option<Snapshot> {
     }
     let mut events = [None; PERSISTED_EVENTS];
     for (slot, event_slot) in events[..event_count].iter_mut().enumerate() {
-        let start = DIAGNOSTIC_HEADER_BYTES + slot * PERSISTED_EVENT_BYTES;
-        let event_bytes: &[u8; PERSISTED_EVENT_BYTES] = bytes[start..start + PERSISTED_EVENT_BYTES]
-            .try_into()
-            .ok()?;
-        *event_slot = Some(decode_event(event_bytes)?);
+        let start = DIAGNOSTIC_HEADER_BYTES + slot * event_bytes;
+        *event_slot = Some(decode_event(bytes.get(start..start + event_bytes)?)?);
     }
     for slot in event_count..PERSISTED_EVENTS {
-        let start = DIAGNOSTIC_HEADER_BYTES + slot * PERSISTED_EVENT_BYTES;
-        if bytes[start..start + PERSISTED_EVENT_BYTES]
-            .iter()
-            .any(|byte| *byte != 0)
+        let start = DIAGNOSTIC_HEADER_BYTES + slot * event_bytes;
+        if bytes.get(start..start + event_bytes)?.iter().any(|byte| *byte != 0)
         {
             return None;
         }
@@ -1270,7 +1342,8 @@ fn decode_snapshot(bytes: &[u8; DIAGNOSTIC_COPY_BYTES]) -> Option<Snapshot> {
 }
 
 pub(crate) fn encode_event(event: &DiagnosticEvent, out: &mut [u8; PERSISTED_EVENT_BYTES]) {
-    out[..4].copy_from_slice(b"DGE1");
+    out.fill(0);
+    out[..4].copy_from_slice(b"DGE2");
     out[4..6].copy_from_slice(&event.schema_version.to_le_bytes());
     out[8..16].copy_from_slice(&event.id.to_le_bytes());
     out[16] = event.kind as u8;
@@ -1299,11 +1372,46 @@ pub(crate) fn encode_event(event: &DiagnosticEvent, out: &mut [u8; PERSISTED_EVE
     out[157] = event.payload_kind as u8;
     out[160..224].copy_from_slice(&event.payload_reference);
     out[224..256].copy_from_slice(&event.payload_digest);
+    if let Some(correlation) = event.correlation {
+        out[256] = 1;
+        out[264..272].copy_from_slice(&correlation.trace_id.to_le_bytes());
+        out[272..280].copy_from_slice(&correlation.span_id.to_le_bytes());
+        out[280..288].copy_from_slice(
+            &correlation
+                .parent_span_id
+                .unwrap_or_default()
+                .to_le_bytes(),
+        );
+    }
 }
 
-pub(crate) fn decode_event(bytes: &[u8; PERSISTED_EVENT_BYTES]) -> Option<DiagnosticEvent> {
-    if bytes[..4] != *b"DGE1"
-        || diag_read_u16(bytes, 4)? != SCHEMA_VERSION
+pub(crate) fn decode_event(bytes: &[u8]) -> Option<DiagnosticEvent> {
+    let (schema_version, correlation) = match (bytes.get(..4)?, bytes.len()) {
+        (b"DGE2", PERSISTED_EVENT_BYTES) => {
+            if bytes[257..264].iter().any(|byte| *byte != 0) || bytes[256] > 1 {
+                return None;
+            }
+            let correlation = match bytes[256] {
+                0 if bytes[264..].iter().all(|byte| *byte == 0) => None,
+                1 => Some(
+                    TraceCorrelation::new(
+                        diag_read_u64(bytes, 264)?,
+                        diag_read_u64(bytes, 272)?,
+                        match diag_read_u64(bytes, 280)? {
+                            0 => None,
+                            parent => Some(parent),
+                        },
+                    )
+                    .ok()?,
+                ),
+                _ => return None,
+            };
+            (SCHEMA_VERSION, correlation)
+        }
+        (b"DGE1", LEGACY_PERSISTED_EVENT_BYTES) => (LEGACY_SCHEMA_VERSION, None),
+        _ => return None,
+    };
+    if diag_read_u16(bytes, 4)? != schema_version
         || bytes[6..8].iter().any(|byte| *byte != 0)
         || bytes[158..160].iter().any(|byte| *byte != 0)
     {
@@ -1361,9 +1469,11 @@ pub(crate) fn decode_event(bytes: &[u8; PERSISTED_EVENT_BYTES]) -> Option<Diagno
         payload_reference: &bytes[160..160 + payload_len],
         payload_digest,
         redacted: bytes[31] != 0,
+        correlation,
     })
     .ok()?;
     event.id = id;
+    event.schema_version = SCHEMA_VERSION;
     Some(event)
 }
 
@@ -1467,7 +1577,56 @@ mod tests {
             payload_reference: &[],
             payload_digest: [0; 32],
             redacted: false,
+            correlation: None,
         }
+    }
+
+    fn legacy_snapshot(event: &DiagnosticEvent) -> [u8; LEGACY_DIAGNOSTIC_COPY_BYTES] {
+        let mut bytes = [0u8; LEGACY_DIAGNOSTIC_COPY_BYTES];
+        bytes[..8].copy_from_slice(&DIAGNOSTIC_MAGIC);
+        bytes[8..10].copy_from_slice(&LEGACY_DIAGNOSTIC_VERSION.to_le_bytes());
+        bytes[10..12].copy_from_slice(&(DIAGNOSTIC_HEADER_BYTES as u16).to_le_bytes());
+        bytes[12..14].copy_from_slice(&(PERSISTED_EVENTS as u16).to_le_bytes());
+        bytes[14..16].copy_from_slice(&1u16.to_le_bytes());
+        bytes[16..24].copy_from_slice(&1u64.to_le_bytes());
+        bytes[24..32].copy_from_slice(&2u64.to_le_bytes());
+        bytes[32..40].copy_from_slice(&1u64.to_le_bytes());
+        let start = DIAGNOSTIC_HEADER_BYTES;
+        let out = &mut bytes[start..start + LEGACY_PERSISTED_EVENT_BYTES];
+        out[..4].copy_from_slice(b"DGE1");
+        out[4..6].copy_from_slice(&LEGACY_SCHEMA_VERSION.to_le_bytes());
+        out[8..16].copy_from_slice(&event.id.to_le_bytes());
+        out[16] = event.kind as u8;
+        out[17] = event.severity as u8;
+        out[18] = event.privacy as u8;
+        out[19] = event.clock_quality as u8;
+        out[20..28].copy_from_slice(&event.observed_at.to_le_bytes());
+        out[28] = event.cause_count;
+        out[29] = event.component_len;
+        out[30] = event.payload_len;
+        out[31] = u8::from(event.redacted);
+        for (index, cause) in event.causes.iter().enumerate() {
+            let start = 32 + index * 4;
+            out[start..start + 4].copy_from_slice(&cause.to_le_bytes());
+        }
+        out[64..96].copy_from_slice(&event.component);
+        out[96..100].copy_from_slice(&event.component_version.to_le_bytes());
+        out[100..108].copy_from_slice(&event.transaction_id.to_le_bytes());
+        out[108..116].copy_from_slice(&event.boot_id.to_le_bytes());
+        out[116..148].copy_from_slice(&event.platform_profile);
+        for (index, pressure) in event.resource_pressure.iter().enumerate() {
+            let start = 148 + index * 2;
+            out[start..start + 2].copy_from_slice(&pressure.to_le_bytes());
+        }
+        out[156] = event.recovery as u8;
+        out[157] = event.payload_kind as u8;
+        out[160..224].copy_from_slice(&event.payload_reference);
+        out[224..256].copy_from_slice(&event.payload_digest);
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&bytes[..60]);
+        hasher.update(&bytes[DIAGNOSTIC_HEADER_BYTES..]);
+        bytes[60..64].copy_from_slice(&hasher.finalize().to_le_bytes());
+        bytes
     }
 
     #[test]
@@ -1701,6 +1860,29 @@ mod tests {
     }
 
     #[test]
+    fn trace_correlation_is_strict_and_round_trips() {
+        assert_eq!(
+            TraceCorrelation::new(0, 1, None),
+            Err(SchemaError::TraceCorrelation)
+        );
+        assert_eq!(
+            TraceCorrelation::new(1, 0, None),
+            Err(SchemaError::TraceCorrelation)
+        );
+        assert_eq!(
+            TraceCorrelation::new(1, 1, Some(1)),
+            Err(SchemaError::TraceCorrelation)
+        );
+        let correlation = TraceCorrelation::new(17, 2, Some(1)).unwrap();
+        let mut input = base(EventKind::ServiceCrash, Severity::Error);
+        input.correlation = Some(correlation);
+        assert_eq!(
+            DiagnosticEvent::new(input).unwrap().correlation(),
+            Some(correlation)
+        );
+    }
+
+    #[test]
     fn bounded_query_filters_and_pages_without_exposing_secret_events() {
         let mut ring = DiagnosticRing::<4>::new();
         let mut info = base(EventKind::Network, Severity::Info);
@@ -1818,7 +2000,10 @@ mod tests {
     fn persistent_diagnostics_survive_reopen_with_ring_statistics() {
         let disk = MemoryDisk::new();
         let mut store = PersistentDiagnosticStore::format(disk).unwrap();
-        let event = DiagnosticEvent::new(base(EventKind::ServiceCrash, Severity::Error)).unwrap();
+        let mut input = base(EventKind::ServiceCrash, Severity::Error);
+        let correlation = TraceCorrelation::new(17, 2, Some(1)).unwrap();
+        input.correlation = Some(correlation);
+        let event = DiagnosticEvent::new(input).unwrap();
         let (outcome, stats) = store.record(event).unwrap();
         assert_eq!(outcome, RecordOutcome::Stored(1));
         assert_eq!(stats.len, 1);
@@ -1830,6 +2015,33 @@ mod tests {
         assert_eq!(restored.kind(), EventKind::ServiceCrash);
         assert_eq!(restored.component(), "system.storage");
         assert_eq!(restored.resource_pressure(), [10, 20, 30, 40]);
+        assert_eq!(restored.correlation(), Some(correlation));
+    }
+
+    #[test]
+    fn schema_v1_snapshot_is_read_and_migrates_on_the_next_commit() {
+        let disk = MemoryDisk::new();
+        let legacy_event =
+            DiagnosticEvent::new(base(EventKind::Network, Severity::Warning)).unwrap();
+        let mut ring = DiagnosticRing::<PERSISTED_EVENTS>::new();
+        ring.record(legacy_event).unwrap();
+        let legacy_event = *ring.get(1).unwrap();
+        let legacy = legacy_snapshot(&legacy_event);
+        let mut disk = disk;
+        disk.bytes[..legacy.len()].copy_from_slice(&legacy);
+
+        let mut store = PersistentDiagnosticStore::open(disk).unwrap();
+        assert_eq!(store.ring().get(1).unwrap().schema_version(), SCHEMA_VERSION);
+        assert_eq!(store.ring().get(1).unwrap().correlation(), None);
+
+        let mut input = base(EventKind::StorageCorruption, Severity::Critical);
+        let correlation = TraceCorrelation::new(31, 8, Some(7)).unwrap();
+        input.correlation = Some(correlation);
+        store.record(DiagnosticEvent::new(input).unwrap()).unwrap();
+        let reopened = PersistentDiagnosticStore::open(store.into_device()).unwrap();
+        assert_eq!(reopened.ring().len(), 2);
+        assert_eq!(reopened.ring().get(1).unwrap().correlation(), None);
+        assert_eq!(reopened.ring().get(2).unwrap().correlation(), Some(correlation));
     }
 
     #[test]

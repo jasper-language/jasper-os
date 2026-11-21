@@ -2,7 +2,7 @@
 
 更新时间：2026-11-21。
 
-状态：**核心切片完成；M25 仍为 partial。**
+状态：**trace、诊断导出和持久快照关联已接线；M25 仍为 partial。**
 
 ## 边界
 
@@ -14,11 +14,40 @@
 - `Tracer::emit_correlated` 将上下文写入普通 `TraceEvent`；
 - ring 覆盖与序号耗尽分别累计到 `TraceLossStats`，不会静默消失；
 - 安全审计仍由各自 fail-closed 持久链负责，不能复用这些 best-effort 计数。
+- 诊断事件 Schema v2 携带可选 `TraceCorrelation`，零 ID、自父 span 和畸形
+  presence/保留字节失败关闭；
+- 诊断持久化事件从 256 字节扩展到 288 字节；Schema v1 快照仍可读取，首次
+  后续提交写入 v2，不需要猜测旧记录中的 correlation；
+- USI 诊断契约升级为 v2：查询请求、成功/错误响应头、每个导出事件携带同一
+  可选 trace/span/parent identity；
+- crash/panic 来源仍使用独立 no-allocate、try-lock emergency ring，和正常
+  trace 环隔离；导出阶段通过同一 v2 记录进入受授权诊断查询。
+
+验证：
+
+```text
+cargo test --locked -p jasper-lifecycle-model
+65 passed; 0 failed
+
+cargo clippy --locked -p jasper-lifecycle-model --all-targets -- -D warnings
+PASS
+
+cargo check --locked --target x86_64-unknown-none -p jasper-kernel
+PASS
+
+cargo check --locked --target x86_64-unknown-none -p user-usi
+PASS
+
+bash scripts/lifecycle-diagnostic-block-check.sh
+PASS rounds=2 evidence/lifecycle-diagnostic-block-20261121-043731
+```
+
+真实 OVMF/virtio-blk 两轮均 `failed=0 resources=true`；首轮
+`events=5 sequence=6 query=4 sources=2`，重启只读来源清零后第二轮
+`events=6 sequence=7 query=4 sources=0`，持久事件、隐私门和追加顺序保持。
 
 ## 尚未关闭
 
-- Diagnostics Service 导出/查询必须携带同一 correlation ID；
-- 受保护 panic/crash 快照与正常 trace 环的隔离和导出协议；
 - 真实多进程/多核因果重建，以及 consumer 重启后的关联完整性矩阵。
 
 因此 `verification/issue42-mechanism-ledger.tsv` 的 M25 保持 `partial`。

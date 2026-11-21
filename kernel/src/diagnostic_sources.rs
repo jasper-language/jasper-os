@@ -115,6 +115,7 @@ pub fn record_kernel_exception() -> bool {
         payload_reference: &[],
         payload_digest: [0; 32],
         redacted: true,
+        correlation: None,
     })
 }
 
@@ -143,6 +144,7 @@ pub fn record_boot_failure(reason: &str) -> bool {
         payload_reference: payload,
         payload_digest: [0; 32],
         redacted: true,
+        correlation: None,
     })
 }
 
@@ -177,6 +179,7 @@ fn event_input(event: &DiagnosticEvent) -> EventInput<'_> {
         payload_reference: event.payload_reference(),
         payload_digest: event.payload_digest(),
         redacted: event.redacted(),
+        correlation: event.correlation(),
     }
 }
 

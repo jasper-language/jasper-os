@@ -8,16 +8,17 @@
 use crate::diagnostics::{
     encode_event, DiagnosticAuthority, DiagnosticIo, DiagnosticQueryRequest, DiagnosticService,
     DiagnosticServiceError, EventKind, PrivacyClass, Severity, PERSISTED_EVENT_BYTES,
+    TraceCorrelation,
 };
 
 /// Candidate diagnostic wire-contract magic (`JLD1` little-endian).
 pub const MAGIC: u32 = u32::from_le_bytes(*b"JLD1");
 /// Candidate diagnostic wire-contract version.
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 /// Fixed request size.
-pub const REQUEST_BYTES: usize = 64;
+pub const REQUEST_BYTES: usize = 96;
 /// Fixed response-header size.
-pub const RESPONSE_HEADER_BYTES: usize = 80;
+pub const RESPONSE_HEADER_BYTES: usize = 112;
 /// One event record reuses the existing durable diagnostic schema.
 pub const EVENT_BYTES: usize = PERSISTED_EVENT_BYTES;
 /// Maximum events in one response.
@@ -87,10 +88,12 @@ pub struct QueryRequest {
     pub limit: u16,
     /// Whether cancellation may be observed before dispatch.
     pub cancelable: bool,
+    /// Optional causal trace context for the query and response.
+    pub correlation: Option<TraceCorrelation>,
 }
 
 impl QueryRequest {
-    /// Encodes one strict 64-byte request.
+    /// Encodes one strict versioned request.
     pub fn encode(self) -> Result<[u8; REQUEST_BYTES], ContractError> {
         if self.request_id == 0
             || self.limit > MAX_PAGE_EVENTS as u16
@@ -116,17 +119,40 @@ impl QueryRequest {
         out[42] = self.privacy_ceiling as u8;
         out[43] = u8::from(self.cancelable);
         put_u16(&mut out, 44, self.limit);
+        if let Some(correlation) = self.correlation {
+            out[46] = 1;
+            put_u64(&mut out, 48, correlation.trace_id);
+            put_u64(&mut out, 56, correlation.span_id);
+            put_u64(&mut out, 64, correlation.parent_span_id.unwrap_or_default());
+        }
         Ok(out)
     }
 
-    /// Decodes one strict 64-byte request.
+    /// Decodes one strict versioned request.
     pub fn decode(bytes: &[u8; REQUEST_BYTES]) -> Result<Self, ContractError> {
         if get_u32(bytes, 0) != MAGIC
             || get_u16(bytes, 4) != VERSION
-            || bytes[46..].iter().any(|byte| *byte != 0)
+            || bytes[47] != 0
+            || bytes[46] > 1
+            || bytes[72..].iter().any(|byte| *byte != 0)
         {
             return Err(ContractError::Malformed);
         }
+        let correlation = match bytes[46] {
+            0 if bytes[48..72].iter().all(|byte| *byte == 0) => None,
+            1 => Some(
+                TraceCorrelation::new(
+                    get_u64(bytes, 48),
+                    get_u64(bytes, 56),
+                    match get_u64(bytes, 64) {
+                        0 => None,
+                        parent => Some(parent),
+                    },
+                )
+                .map_err(|_| ContractError::Malformed)?,
+            ),
+            _ => return Err(ContractError::Malformed),
+        };
         let operation = match get_u16(bytes, 6) {
             1 => Operation::Query,
             2 => Operation::Status,
@@ -152,6 +178,7 @@ impl QueryRequest {
             privacy_ceiling,
             limit: get_u16(bytes, 44),
             cancelable: bytes[43] & REQUEST_FLAG_CANCELABLE != 0,
+            correlation,
         };
         // Reuse encoder validation so decode has exactly the same field rules.
         let _ = request.encode()?;
@@ -180,6 +207,8 @@ pub struct ResponseHeader {
     pub accepted: u64,
     /// Capacity-dropped count.
     pub capacity_dropped: u64,
+    /// Correlation copied from the authenticated query.
+    pub correlation: Option<TraceCorrelation>,
 }
 
 impl ResponseHeader {
@@ -196,6 +225,12 @@ impl ResponseHeader {
         put_u64(&mut out, 40, self.accepted);
         put_u64(&mut out, 48, self.capacity_dropped);
         put_u64(&mut out, 56, self.sequence);
+        if let Some(correlation) = self.correlation {
+            out[80] = 1;
+            put_u64(&mut out, 88, correlation.trace_id);
+            put_u64(&mut out, 96, correlation.span_id);
+            put_u64(&mut out, 104, correlation.parent_span_id.unwrap_or_default());
+        }
         out
     }
 
@@ -205,9 +240,26 @@ impl ResponseHeader {
             || get_u16(bytes, 4) != VERSION
             || bytes[36..40].iter().any(|byte| *byte != 0)
             || bytes[64..80].iter().any(|byte| *byte != 0)
+            || bytes[81..88].iter().any(|byte| *byte != 0)
+            || bytes[80] > 1
         {
             return Err(ContractError::Malformed);
         }
+        let correlation = match bytes[80] {
+            0 if bytes[88..112].iter().all(|byte| *byte == 0) => None,
+            1 => Some(
+                TraceCorrelation::new(
+                    get_u64(bytes, 88),
+                    get_u64(bytes, 96),
+                    match get_u64(bytes, 104) {
+                        0 => None,
+                        parent => Some(parent),
+                    },
+                )
+                .map_err(|_| ContractError::Malformed)?,
+            ),
+            _ => return Err(ContractError::Malformed),
+        };
         let operation = match get_u16(bytes, 6) {
             1 => Operation::Query,
             2 => Operation::Status,
@@ -236,6 +288,7 @@ impl ResponseHeader {
             accepted: get_u64(bytes, 40),
             capacity_dropped: get_u64(bytes, 48),
             sequence: get_u64(bytes, 56),
+            correlation,
         })
     }
 }
@@ -364,6 +417,7 @@ impl<D: DiagnosticIo, A: DiagnosticAuthority> ContractService<D, A> {
                 sequence: 0,
                 accepted: 0,
                 capacity_dropped: 0,
+                correlation: request.correlation,
             }
             .encode(),
         );
@@ -401,6 +455,7 @@ impl<D: DiagnosticIo, A: DiagnosticAuthority> ContractService<D, A> {
                 sequence: status.sequence,
                 accepted: status.stats.accepted,
                 capacity_dropped: status.stats.capacity_dropped,
+                correlation: request.correlation,
             }
             .encode(),
         );
@@ -557,6 +612,7 @@ mod tests {
             privacy_ceiling: PrivacyClass::Internal,
             limit: 8,
             cancelable: true,
+            correlation: Some(TraceCorrelation::new(31, 7, None).unwrap()),
         }
     }
 
@@ -583,6 +639,7 @@ mod tests {
             payload_reference: &[],
             payload_digest: [0; 32],
             redacted: false,
+            correlation: None,
         }
     }
 
@@ -590,7 +647,7 @@ mod tests {
     fn request_roundtrip_is_exact_and_reserved_bytes_fail_closed() {
         let encoded = request().encode().unwrap();
         assert_eq!(QueryRequest::decode(&encoded), Ok(request()));
-        for at in [46, 47, 63] {
+        for at in [47, 72, 95] {
             let mut bad = encoded;
             bad[at] = 1;
             assert_eq!(QueryRequest::decode(&bad), Err(ContractError::Malformed));
@@ -612,9 +669,10 @@ mod tests {
             },
         )
         .unwrap();
-        service
-            .collect(7, input(PrivacyClass::Public, Severity::Info, "kernel"))
-            .unwrap();
+        let correlation = TraceCorrelation::new(31, 8, Some(7)).unwrap();
+        let mut first_input = input(PrivacyClass::Public, Severity::Info, "kernel");
+        first_input.correlation = Some(correlation);
+        service.collect(7, first_input).unwrap();
         service
             .collect(
                 7,
@@ -639,11 +697,14 @@ mod tests {
         assert_eq!(header.generation, 3);
         assert_eq!(header.records, 2);
         assert_eq!(header.next_cursor, 2);
+        assert_eq!(header.correlation, request().correlation);
         let first: &[u8; EVENT_BYTES] = out
             [RESPONSE_HEADER_BYTES..RESPONSE_HEADER_BYTES + EVENT_BYTES]
             .try_into()
             .unwrap();
-        assert_eq!(decode_event(first).unwrap().privacy(), PrivacyClass::Public);
+        let first = decode_event(first).unwrap();
+        assert_eq!(first.privacy(), PrivacyClass::Public);
+        assert_eq!(first.correlation(), Some(correlation));
     }
 
     #[test]
@@ -672,7 +733,10 @@ mod tests {
 
         let mut stale = request();
         stale.expected_generation = 3;
-        assert_eq!(contract.handle::<2>(7, stale, 1, false, &mut out), Ok(80));
+        assert_eq!(
+            contract.handle::<2>(7, stale, 1, false, &mut out),
+            Ok(RESPONSE_HEADER_BYTES)
+        );
         assert_eq!(
             ResponseHeader::decode(&out).unwrap().status,
             ResponseStatus::StaleGeneration
@@ -682,7 +746,7 @@ mod tests {
         expired.deadline_ns = 20;
         assert_eq!(
             contract.handle::<2>(7, expired, 20, false, &mut out),
-            Ok(80)
+            Ok(RESPONSE_HEADER_BYTES)
         );
         assert_eq!(
             ResponseHeader::decode(&out).unwrap().status,
@@ -691,7 +755,7 @@ mod tests {
 
         assert_eq!(
             contract.handle::<2>(7, request(), 1, true, &mut out),
-            Ok(80)
+            Ok(RESPONSE_HEADER_BYTES)
         );
         assert_eq!(
             ResponseHeader::decode(&out).unwrap().status,
@@ -716,7 +780,10 @@ mod tests {
         status.operation = Operation::Status;
         status.limit = 0;
         let mut out = [0u8; RESPONSE_HEADER_BYTES];
-        assert_eq!(contract.handle::<2>(7, status, 1, false, &mut out), Ok(80));
+        assert_eq!(
+            contract.handle::<2>(7, status, 1, false, &mut out),
+            Ok(RESPONSE_HEADER_BYTES)
+        );
         let header = ResponseHeader::decode(&out).unwrap();
         assert_eq!(header.records, 0);
         assert_eq!(header.status, ResponseStatus::Ok);

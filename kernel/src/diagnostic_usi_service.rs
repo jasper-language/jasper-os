@@ -1,7 +1,7 @@
 //! Live LC-1 diagnostic service behind `system.diagnostic.query`.
 //!
 //! This module owns a bounded in-kernel diagnostic store and serializes the
-//! existing 64-byte request / 80-byte response contract into user memory. The
+//! existing versioned request / response contract into user memory. The
 //! caller is an ordinary user process; no path or component name participates
 //! in authorization.
 
@@ -108,6 +108,7 @@ fn boot_event() -> EventInput<'static> {
         payload_reference: &[],
         payload_digest: [0; 32],
         redacted: true,
+        correlation: None,
     }
 }
 

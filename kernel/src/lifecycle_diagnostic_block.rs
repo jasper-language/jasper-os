@@ -179,6 +179,7 @@ fn event(
         payload_reference: &[],
         payload_digest: [0; 32],
         redacted: true,
+        correlation: None,
     }
 }
 

@@ -380,6 +380,7 @@ fn diagnostic_query() -> i32 {
         privacy_ceiling: PrivacyClass::Internal,
         limit: MAX_PAGE_EVENTS as u16,
         cancelable: false,
+        correlation: None,
     };
     let Ok(request) = request.encode() else {
         return 11;
