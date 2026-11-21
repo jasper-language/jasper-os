@@ -868,7 +868,7 @@ mod tests {
         let mut members = WorkloadMembers::new();
         let usage = ResourceUsage {
             memory_bytes: 256,
-            threads: 1,
+            threads: 0,
             ring_entries: 0,
         };
 
@@ -898,5 +898,44 @@ mod tests {
 
         assert_eq!(members.count_for(running(&mut table, DOMAIN)), 0);
         assert_eq!(table.len(), 129);
+    }
+
+    #[test]
+    fn sixty_four_member_crash_is_ordered_and_failure_atomic() {
+        let mut table = WorkloadTable::new();
+        let root = running(&mut table, DOMAIN);
+        let mut members = WorkloadMembers::new();
+        let child_limits = ResourceLimits {
+            cpu_permille: 10,
+            memory_bytes: 128,
+            threads: 1,
+            ring_entries: 1,
+            io_bytes: 256,
+            io_ops: 1,
+        };
+        let mut children = std::vec::Vec::new();
+        for index in 0..64u64 {
+            let child = table.create_child(root, child_limits).unwrap();
+            table.transition(child, WorkloadState::Ready).unwrap();
+            table.transition(child, WorkloadState::Running).unwrap();
+            members.attach(&table, child, 20_000 + index).unwrap();
+            children.push(child);
+        }
+
+        let plan = plan_root_crash::<65>(&table, &members, root, &children).unwrap();
+        assert_eq!(plan.len(), 65);
+        assert_eq!(plan.target(64).unwrap().workload, root);
+        for index in 0..64 {
+            assert_eq!(plan.target(index).unwrap().member_count, 1);
+        }
+        apply_root_crash(&mut table, &plan).unwrap();
+        assert_eq!(table.snapshot(root).unwrap().state, WorkloadState::Failed);
+        for child in children {
+            let snapshot = table.snapshot(child).unwrap();
+            assert_eq!(snapshot.state, WorkloadState::Failed);
+            assert_eq!(snapshot.usage, ResourceUsage::default());
+            assert_eq!(members.count_for(child), 1);
+        }
+        assert_eq!(members.count_for(root), 0);
     }
 }
