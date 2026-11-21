@@ -11,6 +11,18 @@ self-attribute, `remap_file_pages`, fanotify, and userfaultfd implementations.
 - Android kernel ABI: **94/94** strict items verified
 - Native ABI contract: **3.14.0**
 
+The compatibility ABI ledger is
+`verification/linux-posix-abi-matrix.toml`. Its `mapped` count is syscall
+surface coverage, not semantic verification. Each item records positive and
+negative coverage, evidence, source commit and execution environment; semantic
+work reruns only `partial`, `missing`, `stale` and implementation-affected
+items. Validate the ledger with:
+
+```text
+python3 scripts/check-compat-abi-matrix.py --self-test
+python3 scripts/check-compat-abi-matrix.py
+```
+
 `map_shadow_stack` returns `EOPNOTSUPP` because the current Jasper kernel
 advertises no user shadow-stack feature through `ARCH_SHSTK_STATUS`. This is a
 hardware/configuration boundary, not a claim that CET shadow stacks run.

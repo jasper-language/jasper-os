@@ -53,6 +53,8 @@ const ROOT_USERLAND_MANIFEST: &[u8] =
     b"arch=x86_64\nabi=linux\nentry=/bin/true\ninterpreter=/lib64/ld-linux-x86-64.so.2\nlibrary=/usr/lib/x86_64-linux-gnu/libc.so.6\n";
 #[cfg(feature = "lifecycle-root-exec-verify")]
 const ROOT_EXEC_PROBE_PATH: &str = "/usr/libexec/jasper/health-probe";
+#[cfg(feature = "compat-wine-verify")]
+const WINE_COLD_START_DEADLINE_TICKS: u64 = 12_000; // JASPER-HARDCODE-REVIEW: issue=35 source=compat-wine-verification-profile reason=cold-prefix-and-wineserver-uefi-budget
 
 static CONTROL_DEVICE: spin::Mutex<Option<Arc<IrqSpinLock<BlockDevice>>>> = spin::Mutex::new(None);
 static CONTROL_MUTATION: AtomicBool = AtomicBool::new(false);
@@ -1068,16 +1070,18 @@ fn execute_root_dynamic_programs(
             b"echo",
             b"WINE_CMD_OK",
         ];
-        let wine_envp: [&[u8]; 10] = [
+        // Leave TMPDIR unset: Ubuntu Wine's server_tmpdir helper frees the
+        // secure_getenv() result when TMPDIR is present. Wine still defaults
+        // its temporary directory to /tmp.
+        let wine_envp: [&[u8]; 9] = [
             b"HOME=/data",
             b"PATH=/usr/lib/x86_64-linux-gnu/wine:/usr/bin:/bin",
             b"WINEPREFIX=/data/wineprefix",
             b"WINEARCH=win64",
-            b"WINEDEBUG=-all",
+            b"WINEDEBUG=+module",
             b"WINEDLLPATH=/usr/lib/x86_64-linux-gnu/wine/x86_64-unix",
             b"WINEDLLOVERRIDES=winemenubuilder.exe=d;mscoree=d;mshtml=d",
             b"LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/wine/x86_64-unix",
-            b"TMPDIR=/tmp",
             b"LANG=C.UTF-8",
         ];
         let wine = root
@@ -1116,7 +1120,8 @@ fn execute_root_dynamic_programs(
         ) {
             return Err(HealthError::RootExecute);
         }
-        if !crate::compat_dynamic_demo::run_root_dynamic_program(
+        crate::linux_abi::reset_wine_syscall_trace_budget();
+        if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
             "compat-wine-cmd",
             "/usr/lib/x86_64-linux-gnu/wine/wine",
             &wine,
@@ -1126,6 +1131,7 @@ fn execute_root_dynamic_programs(
             &wine_envp,
             crate::mm::frame::free_frames(),
             true,
+            WINE_COLD_START_DEADLINE_TICKS,
         ) {
             return Err(HealthError::RootExecute);
         }

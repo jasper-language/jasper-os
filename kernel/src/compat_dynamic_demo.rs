@@ -822,6 +822,7 @@ fn run_program(
         &[],
         frames_before,
         enforce_resources,
+        PROGRAM_DEADLINE_TICKS,
         None,
     )
 }
@@ -844,6 +845,7 @@ fn run_program_on(
         &[],
         frames_before,
         enforce_resources,
+        PROGRAM_DEADLINE_TICKS,
         Some(affinity),
     )
 }
@@ -857,6 +859,7 @@ fn run_program_with_interpreter(
     envp: &[&[u8]],
     frames_before: usize,
     enforce_resources: bool,
+    deadline_ticks: u64,
     affinity: Option<kernel_core::smp::CpuSet>,
 ) -> ProgramResult {
     let calls_before = crate::syscall::call_count();
@@ -959,7 +962,7 @@ fn run_program_with_interpreter(
         check(entered, "transfer_interpreter");
         thread = backend.task().is_some();
         check(thread, "thread");
-        let deadline = sched::timer_ticks().saturating_add(PROGRAM_DEADLINE_TICKS);
+        let deadline = sched::timer_ticks().saturating_add(deadline_ticks);
         completed = sched::run_until(deadline);
         if !completed {
             kprintln!(
@@ -1441,6 +1444,36 @@ pub(crate) fn run_root_dynamic_program(
     frames_before: usize,
     enforce_resources: bool,
 ) -> bool {
+    run_root_dynamic_program_with_deadline(
+        name,
+        path,
+        executable,
+        interpreter,
+        interpreter_path,
+        argv,
+        envp,
+        frames_before,
+        enforce_resources,
+        PROGRAM_DEADLINE_TICKS,
+    )
+}
+
+/// Executes one bounded root-backed dynamic program with an explicit tick
+/// deadline. Cold Wine prefix and wineserver initialization needs a larger
+/// profile-specific budget than the small conformance fixtures.
+#[cfg(feature = "lifecycle-root-exec-verify")]
+pub(crate) fn run_root_dynamic_program_with_deadline(
+    name: &'static str,
+    path: &'static str,
+    executable: &[u8],
+    interpreter: &[u8],
+    interpreter_path: &'static str,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    frames_before: usize,
+    enforce_resources: bool,
+    deadline_ticks: u64,
+) -> bool {
     let result = run_program_with_interpreter(
         name,
         executable,
@@ -1450,6 +1483,7 @@ pub(crate) fn run_root_dynamic_program(
         envp,
         frames_before,
         enforce_resources,
+        deadline_ticks,
         None,
     );
     let verified = result.mapped

@@ -1,0 +1,171 @@
+schema = 1
+scope = "compat-linux-posix"
+baseline = "Ubuntu Linux x86_64"
+updated = "2026-11-21"
+
+# This file is the reusable ledger for the compatibility ABI surface exposed to
+# Linux/POSIX programs. A mapped syscall is not a verified ABI item. Wine is a
+# discovery workload: it may add evidence to rows, but it cannot promote the
+# complete compatibility surface by itself.
+
+[[item]]
+id = "linux-syscall-number-dispatch"
+abi = "Linux x86_64 syscall numbers"
+positive_coverage = "all 385 entries have a mapped or explicit pre-dispatch disposition"
+negative_coverage = "removed entries fail with ENOSYS and privileged entries fail closed with EPERM where specified"
+evidence = "scripts/check-linux-syscall-disposition.py; verification/linux-android-abi-status.md"
+commit = "409c6e2"
+environment = "source-disposition"
+status = "mapped"
+
+[[item]]
+id = "linux-vfs-path-resolution"
+abi = "openat/stat/readlink/realpath pathname resolution"
+positive_coverage = "absolute, relative, dot, dot-dot, repeated separator, symlink, and writable cache paths"
+negative_coverage = "missing paths, non-link readlink EINVAL, and attempted escape above compatibility root"
+evidence = "verification/compat-abi-evidence.md"
+commit = "409c6e2"
+environment = "qemu-jasper-linux-abi"
+status = "partial"
+
+[[item]]
+id = "linux-file-status-and-mode"
+abi = "open/create/stat/umask file mode and descriptor status flags"
+positive_coverage = "regular and cache files expose Linux modes, umask, writable O_ACCMODE status, and /tmp mode 01777"
+negative_coverage = "descriptor access rights reject operations not granted by the open description"
+evidence = "verification/compat-abi-evidence.md"
+commit = "409c6e2"
+environment = "qemu-jasper-linux-abi"
+status = "partial"
+
+[[item]]
+id = "linux-positioned-io"
+abi = "pread64/pwrite64 positioned I/O"
+positive_coverage = "bounded cache and regular-file reads and writes at an explicit offset"
+negative_coverage = "bad descriptors, invalid ranges, user faults, and allocation failure remain explicit errors"
+evidence = "verification/compat-abi-evidence.md"
+commit = "409c6e2"
+environment = "qemu-jasper-linux-abi"
+status = "partial"
+
+[[item]]
+id = "linux-process-cwd"
+abi = "getcwd/chdir/fchdir and relative AT_FDCWD resolution"
+positive_coverage = "static root directories and writable cache directories become the current directory"
+negative_coverage = "deleted or unauthorized directories do not remain usable as a current directory"
+evidence = "verification/compat-abi-evidence.md"
+commit = "409c6e2"
+environment = "qemu-jasper-linux-abi"
+status = "partial"
+
+[[item]]
+id = "linux-posix-record-locks"
+abi = "fcntl F_GETLK/F_SETLK/F_SETLKW"
+positive_coverage = "read/write locks, byte ranges, blocking wait, and close/process-exit release"
+negative_coverage = "access-mode mismatch, conflicting nonblocking requests, interruption, and EBADF"
+evidence = "verification/compat-abi-evidence.md"
+commit = "409c6e2"
+environment = "qemu-jasper-linux-abi"
+status = "partial"
+
+[[item]]
+id = "linux-unix-socket-lifecycle"
+abi = "AF_UNIX socket/bind/listen/connect/accept/unlink/stat"
+positive_coverage = "abstract and pathname namespaces, canonical pathname registration, pending accept queue, and listener socket inode"
+negative_coverage = "wrong family/type, duplicate bind, connect without listener, stale name, and invalid address length"
+evidence = "verification/compat-abi-evidence.md"
+commit = "409c6e2"
+environment = "qemu-jasper-linux-abi"
+status = "partial"
+
+[[item]]
+id = "linux-unix-socket-message"
+abi = "send/recv/sendmsg/recvmsg/readv/writev and SCM_RIGHTS"
+positive_coverage = "stream bytes, credentials, descriptor transfer, and vectored socket I/O"
+negative_coverage = "invalid control messages, descriptor exhaustion, wrong buffer shape, and peer closure"
+evidence = "verification/compat-abi-evidence.md"
+commit = "409c6e2"
+environment = "qemu-jasper-linux-abi"
+status = "partial"
+
+[[item]]
+id = "linux-epoll-readiness"
+abi = "epoll_ctl/epoll_wait/epoll_pwait readiness"
+positive_coverage = "listener accept queue, accepted socket readability, level and edge delivery, and timeout expiry"
+negative_coverage = "invalid fd, invalid event size, signal interruption, and no ready registrations"
+evidence = "verification/compat-abi-evidence.md"
+commit = "409c6e2"
+environment = "qemu-jasper-linux-abi"
+status = "partial"
+
+[[item]]
+id = "linux-monotonic-time"
+abi = "clock_gettime/clock_nanosleep timeout progress"
+positive_coverage = "monotonic clock advances and blocking deadlines terminate within the declared budget"
+negative_coverage = "invalid clock IDs and negative nanos remain explicit errors"
+evidence = "verification/compat-abi-evidence.md"
+commit = "409c6e2"
+environment = "qemu-jasper-linux-abi"
+status = "partial"
+
+[[item]]
+id = "wine-wineserver-bootstrap"
+abi = "cross-process Wine runtime through Linux/POSIX ABI"
+positive_coverage = "unmodified Wine preloader, wineserver, prefix creation, Unix socket protocol, and SCM_RIGHTS exchange"
+negative_coverage = "missing Wine components, incompatible dynamic libraries, unsupported syscalls, and resource exhaustion"
+evidence = "verification/compat-abi-evidence.md"
+commit = "409c6e2"
+environment = "qemu-jasper-linux-abi"
+status = "partial"
+
+[[item]]
+id = "linux-vectored-file-descriptor-io"
+abi = "readv/writev over pipes, sockets and writable cache files"
+positive_coverage = "Wine protocol headers and payloads cross pipes and sockets with complete vectored writes"
+negative_coverage = "bad iovec ranges, short writes, user faults and descriptor access-mode mismatches"
+evidence = "verification/compat-abi-evidence.md"
+commit = "409c6e2 + compatibility ABI hardening"
+environment = "qemu-jasper-linux-abi"
+status = "partial"
+
+[[item]]
+id = "linux-open-unlink-lifetime"
+abi = "unlink while descriptors or shared mappings still reference a file"
+positive_coverage = "an unlinked cache file remains usable through imported descriptors and shared mmap"
+negative_coverage = "new path lookup fails while stale descriptors remain subject to generation-safe closure"
+evidence = "verification/compat-abi-evidence.md"
+commit = "409c6e2 + compatibility ABI hardening"
+environment = "qemu-jasper-linux-abi"
+status = "partial"
+
+[[item]]
+id = "linux-file-backed-shared-mmap"
+abi = "MAP_SHARED file-backed mmap and coherent write visibility"
+positive_coverage = "wineserver and a Wine client map the same writable cache-file pages"
+negative_coverage = "truncate, private mapping, permission mismatch, stale length and range replacement"
+evidence = "verification/compat-abi-evidence.md"
+commit = "409c6e2 + compatibility ABI hardening"
+environment = "qemu-jasper-linux-abi"
+status = "partial"
+
+[[item]]
+id = "linux-low-private-address-window"
+abi = "Linux x86_64 low user virtual address admission"
+positive_coverage = "4 GiB and 5 GiB Wine ranges and MAP_32BIT ranges are admitted without overlapping the Jasper high window"
+negative_coverage = "addresses below 128 MiB, above 512 GiB and outside Jasper windows fail closed"
+evidence = "verification/compat-abi-evidence.md"
+commit = "409c6e2 + compatibility ABI hardening"
+environment = "qemu-jasper-linux-abi"
+status = "partial"
+
+[[remaining]]
+id = "linux-abi-semantic-conformance"
+reason = "Rows above need deterministic positive and negative fixtures with archived output before they can become verified."
+
+[[remaining]]
+id = "wine-windows-pe-execution"
+reason = "start.exe loads, but ntdll.dll reports c0000017 after its vprot mmap succeeds; WINE_CMD_OK has not been observed."
+
+[[remaining]]
+id = "wine-direct3d-vulkan"
+reason = "DXVK and VKD3D-Proton execution remains blocked on Wine PE execution and has not started."

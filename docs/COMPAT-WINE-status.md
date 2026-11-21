@@ -1,6 +1,6 @@
 # COMPAT-WINE-1 Status
 
-Updated: 2026-11-22
+Updated: 2026-11-21
 
 Status: **in-progress / partial groundwork**.
 
@@ -54,23 +54,41 @@ Jasper now passes the earlier path-discovery failures:
   exposed under `/usr/share/wine/nls`; all three now open and `fstat`
   successfully instead of returning `ENOENT`.
 
-The current Jasper run reaches Wine prefix creation, creates the wineserver
-temp-state file, and passes `fcntl`/`fstat`, but later aborts in glibc with
-`free(): invalid pointer` (`code=134`).
+The earlier Jasper run aborted in glibc with `free(): invalid pointer`
+(`code=134`). The trigger was isolated to Ubuntu Wine's
+`include/wine/server_tmpdir.h`: when `TMPDIR` is present its helper frees the
+pointer returned by `secure_getenv()`. Removing the unnecessary
+`TMPDIR=/tmp` launch override avoids that invalid free; Wine already defaults
+to `/tmp`.
 
-A generic unmodified C/POSIX fixture now performs the same
+With the trigger removed, the real Wine preloader and wineserver start inside
+Jasper, create the prefix and registry state, complete the Unix-socket protocol
+handshake, transfer descriptors with `SCM_RIGHTS`, and process vectored protocol
+replies. The compatibility layer now also preserves an open file after unlink,
+maps writable cache files as coherent shared pages, and exposes the Linux low
+private address ranges used by Wine PE images.
+
+The unmodified `start.exe` PE loads and its bundled import closure is available
+from the official Wine `x86_64-windows` tree. The current stop is
+`ntdll.dll` initialization: Wine reports `c0000017` after its `vprot` mmap and
+Jasper mmap both return success. This remains `partial`; a Windows executable has
+not completed and `WINE_CMD_OK` has not been emitted.
+
+A generic unmodified C/POSIX fixture performs the same
 `creat -> fdopen -> fputs -> fclose` sequence twice through Jasper and exits
-zero with resources recovered. Disabling tcache does not change the Wine
-failure, and removing the preload shim does not change it either. The current
-evidence therefore points to Wine-specific runtime state established before
-this stdio sequence, not to the stdio sequence or path shim itself.
+zero with resources recovered. Disabling tcache did not change the earlier
+failure, and removing the preload shim did not change it either.
 
 The next slices must:
 
-1. isolate the Wine-specific heap corruption before wineserver startup;
-2. complete wineserver process and socket startup;
-3. load the first Windows PE executable and produce `WINE_CMD_OK`;
-4. then stage DXVK/VKD3D-Proton and continue through Direct3D to Vulkan.
+1. determine why Wine rejects its successfully mapped `vprot` table during
+   `ntdll.dll` initialization;
+2. load the first Windows PE executable and produce `WINE_CMD_OK`;
+3. then stage DXVK/VKD3D-Proton and continue through Direct3D to Vulkan.
+
+Every ABI discovered by this work is recorded in
+`verification/linux-posix-abi-matrix.toml`. Wine progress alone does not
+promote a row to `verified`.
 
 The physical Pixel and hardware GPU paths are not part of this first Wine
 acceptance.

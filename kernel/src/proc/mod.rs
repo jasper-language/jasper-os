@@ -150,6 +150,8 @@ struct LinuxProcessState {
     exited_cpu_ticks: u64,
     /// Authorized directory view used for relative AT_FDCWD resolution.
     cwd: crate::linux_vfs::DirectoryId,
+    /// Optional writable cache directory selected as the current directory.
+    cwd_cache: Option<u32>,
     brk: u64,
     mmap_next: u64,
     mmap32_next: u64,
@@ -1208,6 +1210,17 @@ pub(crate) fn linux_cwd(pid: ObjId) -> Option<crate::linux_vfs::DirectoryId> {
     })
 }
 
+/// Returns the writable cache directory selected as this process's cwd.
+///
+/// 返回进程当前选中的可写缓存目录；静态兼容目录返回 `None`。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_cwd_cache(pid: ObjId) -> Option<u32> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p.linux.as_ref()?.cwd_cache,
+        _ => None,
+    })
+}
+
 /// Commits a validated Linux current directory.
 ///
 /// 仅提交已解析到兼容 namespace 的目录身份；进程退出后不存在可更新状态。
@@ -1216,6 +1229,18 @@ pub(crate) fn set_linux_cwd(pid: ObjId, cwd: crate::linux_vfs::DirectoryId) -> b
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
         linux.cwd = cwd;
+        linux.cwd_cache = None;
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Commits one validated writable cache directory as the current directory.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_cwd_cache(pid: ObjId, cwd_cache: u32) -> bool {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        linux.cwd_cache = Some(cwd_cache);
         Ok(())
     })
     .is_ok()
@@ -1509,6 +1534,37 @@ pub(crate) fn linux_socket_bind(
     })
 }
 
+/// Reports whether one pathname or abstract Unix socket name is currently
+/// published by a live listening endpoint.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_name_bound(name: &compat_core::UnixSocketName) -> bool {
+    let mut listeners = UNIX_LISTENERS.lock();
+    listeners.retain(|listener| listener.strong_count() != 0);
+    listeners
+        .iter()
+        .filter_map(Weak::upgrade)
+        .any(|listener| listener.name == *name)
+}
+
+/// Removes one published pathname socket name. Existing listener objects stay
+/// alive for accepted connections, while new connects can no longer resolve it.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_name_unlink(name: &compat_core::UnixSocketName) -> bool {
+    let mut removed = false;
+    UNIX_LISTENERS.lock().retain(|listener| {
+        let Some(listener) = listener.upgrade() else {
+            return false;
+        };
+        if listener.name == *name {
+            removed = true;
+            false
+        } else {
+            true
+        }
+    });
+    removed
+}
+
 /// Enables accept processing for one bound AF_UNIX endpoint.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_socket_listen(
@@ -1735,6 +1791,43 @@ pub(crate) fn linux_socket_endpoint(
             .iter()
             .find(|socket| socket.handle == handle)
             .map(|socket| Arc::clone(&socket.endpoint)),
+        _ => None,
+    })
+}
+
+/// Reports whether one listening socket has a queued client connection.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_listener_ready(pid: ObjId, handle: u64) -> Option<bool> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => {
+            let socket = p
+                .linux
+                .as_ref()?
+                .sockets
+                .iter()
+                .find(|socket| socket.handle == handle)?;
+            Some(socket.listener.as_ref().is_some_and(|listener| {
+                listener.listening.load(Ordering::Acquire) != 0
+                    && !listener.pending.lock().is_empty()
+            }))
+        }
+        _ => None,
+    })
+}
+
+/// Reports whether one socket owns a bound listener object.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_is_listener(pid: ObjId, handle: u64) -> Option<bool> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => Some(
+            p.linux
+                .as_ref()?
+                .sockets
+                .iter()
+                .find(|socket| socket.handle == handle)?
+                .listener
+                .is_some(),
+        ),
         _ => None,
     })
 }
@@ -2547,6 +2640,95 @@ pub(crate) fn linux_create_shared_memory(
         })
     })
     .ok()
+}
+
+/// Copies one byte range into a shared-memory object without changing its
+/// declared size. The object is page backed and may be mapped by several
+/// compatibility processes at once.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_shared_memory_write_from(
+    object: &LinuxSharedMemoryObject,
+    offset: u64,
+    input: &[u8],
+) -> Result<usize, LinuxAshmemError> {
+    if input.is_empty() {
+        return Ok(0);
+    }
+    let size = object.buffer.size.load(Ordering::Acquire);
+    let end = offset
+        .checked_add(input.len() as u64)
+        .ok_or(LinuxAshmemError::Invalid)?;
+    if end > size {
+        return Err(LinuxAshmemError::Invalid);
+    }
+    let page_bytes = FRAME_SIZE as usize;
+    let pages = object.buffer.pages.lock();
+    let mut copied = 0usize;
+    while copied < input.len() {
+        let absolute = offset
+            .checked_add(copied as u64)
+            .ok_or(LinuxAshmemError::Invalid)?;
+        let index = usize::try_from(absolute / page_bytes as u64)
+            .map_err(|_| LinuxAshmemError::Invalid)?;
+        let inner = (absolute % page_bytes as u64) as usize;
+        let take = (input.len() - copied).min(page_bytes - inner);
+        let page = pages.get(index).ok_or(LinuxAshmemError::Invalid)?;
+        let pointer = crate::mm::phys_to_virt(page.frame().start() + inner as u64)
+            .ok_or(LinuxAshmemError::NoMemory)?;
+        // SAFETY: the retained Page owns this live frame and the copied range
+        // is bounded to one page.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                input[copied..].as_ptr(),
+                pointer,
+                take,
+            )
+        };
+        copied += take;
+    }
+    Ok(input.len())
+}
+
+/// Copies bytes from a shared-memory object without changing its size.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_shared_memory_read_into(
+    object: &LinuxSharedMemoryObject,
+    offset: u64,
+    output: &mut [u8],
+) -> Result<usize, LinuxAshmemError> {
+    let size = object.buffer.size.load(Ordering::Acquire);
+    if offset >= size || output.is_empty() {
+        return Ok(0);
+    }
+    let available = usize::try_from(size - offset)
+        .map_err(|_| LinuxAshmemError::Invalid)?
+        .min(output.len());
+    let page_bytes = FRAME_SIZE as usize;
+    let pages = object.buffer.pages.lock();
+    let mut copied = 0usize;
+    while copied < available {
+        let absolute = offset
+            .checked_add(copied as u64)
+            .ok_or(LinuxAshmemError::Invalid)?;
+        let index = usize::try_from(absolute / page_bytes as u64)
+            .map_err(|_| LinuxAshmemError::Invalid)?;
+        let inner = (absolute % page_bytes as u64) as usize;
+        let take = (available - copied).min(page_bytes - inner);
+        let page = pages.get(index).ok_or(LinuxAshmemError::Invalid)?;
+        let pointer = crate::mm::phys_to_virt(page.frame().start() + inner as u64)
+            .ok_or(LinuxAshmemError::NoMemory)?;
+        // SAFETY: the retained Page owns this live frame and the range is
+        // bounded to one page.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                pointer as *const u8,
+                output[copied..].as_mut_ptr(),
+                take,
+            )
+        };
+        copied += take;
+    }
+    Ok(available)
 }
 
 #[cfg(feature = "linux-abi")]
@@ -6803,6 +6985,7 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         child_cpu_ticks: 0,
         exited_cpu_ticks: 0,
         cwd: crate::linux_vfs::DirectoryId::Root,
+        cwd_cache: None,
         brk: crate::arch::USER_WINDOW.0 + 0x1000_0000,
         mmap_next: crate::arch::USER_WINDOW.0 + 0x4000_0000,
         mmap32_next: crate::arch::LOW_USER_WINDOW.0 + 0x1000_0000,

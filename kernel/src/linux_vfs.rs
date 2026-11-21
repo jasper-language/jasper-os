@@ -157,6 +157,22 @@ pub(crate) const ANDROID_FILE_PATHS: &[&[u8]] = &[
     b"/usr/share/wine/nls/c_20127.nls",
     b"/usr/share/wine/nls/locale.nls",
     b"/usr/share/wine/nls/l_intl.nls",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/advapi32.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/cmd.exe",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/gdi32.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/kernel32.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/kernelbase.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/msvcrt.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/ntdll.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/sechost.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/shcore.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/shell32.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/shlwapi.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/start.exe",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/ucrtbase.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/user32.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/win32u.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/zlib1.dll",
 ];
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
@@ -396,6 +412,7 @@ pub enum DirectoryId {
     UsrShare,
     UsrShareWine,
     UsrShareWineNls,
+    UsrLibX86WineWindows,
 }
 
 impl DirectoryId {
@@ -438,6 +455,7 @@ impl DirectoryId {
                 Self::UsrShare => 30,
                 Self::UsrShareWine => 31,
                 Self::UsrShareWineNls => 32,
+                Self::UsrLibX86WineWindows => 33,
             }
     }
 
@@ -480,6 +498,7 @@ impl DirectoryId {
                 Self::UsrShare => 31,
                 Self::UsrShareWine => 32,
                 Self::UsrShareWineNls => 33,
+                Self::UsrLibX86WineWindows => 34,
             }
     }
 
@@ -521,6 +540,9 @@ impl DirectoryId {
             value if value == (DIRECTORY_HANDLE_BASE | 31) => Some(Self::UsrShare),
             value if value == (DIRECTORY_HANDLE_BASE | 32) => Some(Self::UsrShareWine),
             value if value == (DIRECTORY_HANDLE_BASE | 33) => Some(Self::UsrShareWineNls),
+            value if value == (DIRECTORY_HANDLE_BASE | 34) => {
+                Some(Self::UsrLibX86WineWindows)
+            }
             _ => None,
         }
     }
@@ -565,6 +587,9 @@ impl DirectoryId {
             Self::UsrShare => b"/usr/share",
             Self::UsrShareWine => b"/usr/share/wine",
             Self::UsrShareWineNls => b"/usr/share/wine/nls",
+            Self::UsrLibX86WineWindows => {
+                b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows"
+            }
         }
     }
 }
@@ -627,7 +652,7 @@ pub struct DirEntry {
 /// Linux resolves `.` and `..` lexically for this bounded read-only view.
 /// Parent components clamp at `/`, so a pathname can never escape the
 /// compatibility root. Repeated separators are removed.
-fn normalize_absolute_path(path: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn normalize_absolute_path(path: &[u8]) -> Option<Vec<u8>> {
     if !path.starts_with(b"/") {
         return None;
     }
@@ -727,6 +752,9 @@ pub fn lookup_node(path: &[u8]) -> Option<Node> {
         b"/usr/lib/x86_64-linux-gnu/wine/x86_64-unix" => {
             Some(DirectoryId::UsrLibX86WineUnix)
         }
+        b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows" => {
+            Some(DirectoryId::UsrLibX86WineWindows)
+        }
         b"/usr/share" => Some(DirectoryId::UsrShare),
         b"/usr/share/wine" => Some(DirectoryId::UsrShareWine),
         b"/usr/share/wine/nls" => Some(DirectoryId::UsrShareWineNls),
@@ -777,6 +805,9 @@ pub fn lookup_node(path: &[u8]) -> Option<Node> {
         b"/usr/lib/x86_64-linux-gnu/wine" => Some(DirectoryId::UsrLibX86Wine),
         b"/usr/lib/x86_64-linux-gnu/wine/x86_64-unix" => {
             Some(DirectoryId::UsrLibX86WineUnix)
+        }
+        b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows" => {
+            Some(DirectoryId::UsrLibX86WineWindows)
         }
         b"/usr/share" => Some(DirectoryId::UsrShare),
         b"/usr/share/wine" => Some(DirectoryId::UsrShareWine),
@@ -919,6 +950,10 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
             node: Node::Directory(DirectoryId::UsrLibX86WineUnix),
         },
         DirEntry {
+            name: b"x86_64-windows",
+            node: Node::Directory(DirectoryId::UsrLibX86WineWindows),
+        },
+        DirEntry {
             name: b"wine-preloader",
             node: Node::File(FileId::AndroidFile(92)),
         },
@@ -935,6 +970,72 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         name: b"ntdll.so",
         node: Node::File(FileId::AndroidFile(83)),
     }];
+    const WINE_WINDOWS: &[DirEntry] = &[
+        DirEntry {
+            name: b"advapi32.dll",
+            node: Node::File(FileId::AndroidFile(96)),
+        },
+        DirEntry {
+            name: b"cmd.exe",
+            node: Node::File(FileId::AndroidFile(97)),
+        },
+        DirEntry {
+            name: b"gdi32.dll",
+            node: Node::File(FileId::AndroidFile(98)),
+        },
+        DirEntry {
+            name: b"kernel32.dll",
+            node: Node::File(FileId::AndroidFile(99)),
+        },
+        DirEntry {
+            name: b"kernelbase.dll",
+            node: Node::File(FileId::AndroidFile(100)),
+        },
+        DirEntry {
+            name: b"msvcrt.dll",
+            node: Node::File(FileId::AndroidFile(101)),
+        },
+        DirEntry {
+            name: b"ntdll.dll",
+            node: Node::File(FileId::AndroidFile(102)),
+        },
+        DirEntry {
+            name: b"sechost.dll",
+            node: Node::File(FileId::AndroidFile(103)),
+        },
+        DirEntry {
+            name: b"shcore.dll",
+            node: Node::File(FileId::AndroidFile(104)),
+        },
+        DirEntry {
+            name: b"shell32.dll",
+            node: Node::File(FileId::AndroidFile(105)),
+        },
+        DirEntry {
+            name: b"shlwapi.dll",
+            node: Node::File(FileId::AndroidFile(106)),
+        },
+        DirEntry {
+            name: b"start.exe",
+            node: Node::File(FileId::AndroidFile(107)),
+        },
+        DirEntry {
+            name: b"ucrtbase.dll",
+            node: Node::File(FileId::AndroidFile(108)),
+        },
+        DirEntry {
+            name: b"user32.dll",
+            node: Node::File(FileId::AndroidFile(109)),
+        },
+        DirEntry {
+            name: b"win32u.dll",
+            node: Node::File(FileId::AndroidFile(110)),
+        },
+        DirEntry {
+            name: b"zlib1.dll",
+            node: Node::File(FileId::AndroidFile(111)),
+        },
+    ];
     const USR: &[DirEntry] = &[
         DirEntry {
             name: b"bin",
@@ -1269,6 +1370,7 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         DirectoryId::UsrShare => USR_SHARE,
         DirectoryId::UsrShareWine => USR_SHARE_WINE,
         DirectoryId::UsrShareWineNls => USR_SHARE_WINE_NLS,
+        DirectoryId::UsrLibX86WineWindows => WINE_WINDOWS,
     }
 }
 

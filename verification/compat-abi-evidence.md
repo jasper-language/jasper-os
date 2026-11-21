@@ -1,0 +1,92 @@
+# Compatibility ABI evidence index
+
+This index preserves reusable evidence paths for the Linux/POSIX compatibility
+ABI. The raw serial logs remain local artifacts; the source, environment and
+result are recorded here so semantic conformance work can select affected rows
+instead of rescanning the complete ABI surface.
+
+## Path resolution
+
+- `evidence/compat-wine-path-normalize-r31`
+- `evidence/compat-wine-readlink-r4-20261121`
+- `evidence/compat-wine-symlink-r9-20261121`
+- `evidence/compat-wine-nls-r30`
+- Environment: Jasper UEFI, Linux x86_64 compatibility ABI.
+
+## File status, modes and open-file lifetime
+
+- `evidence/compat-wine-modes-r37`
+- `evidence/compat-wine-fdopen-vm-r17`
+- `evidence/compat-wine-unlink-open-file-20261121-r14`
+- The last run proves an unlinked cache file remains addressable through an
+  imported descriptor and that Wine can map it after `unlink`.
+
+## Positioned I/O
+
+- `evidence/compat-wine-pwrite-r40`
+- Environment: Jasper UEFI, Linux x86_64 compatibility ABI.
+
+## Current directory
+
+- `evidence/compat-wine-cwd-r38`
+- Environment: Jasper UEFI, Linux x86_64 compatibility ABI.
+
+## POSIX record locks
+
+- `evidence/compat-wine-fcntl-r39`
+- Environment: Jasper UEFI, Linux x86_64 compatibility ABI.
+
+## Unix sockets
+
+- `evidence/compat-wine-socket-name-r42`
+- `evidence/compat-wine-listener-r45`
+- `evidence/compat-wine-listener-poll-r46`
+- `evidence/compat-wine-protocol-io-r49`
+- `evidence/compat-wine-protocol-r50`
+- `evidence/compat-wine-read-enter-r52`
+- Environment: Jasper UEFI, Linux x86_64 compatibility ABI.
+
+## Vectored I/O
+
+- `evidence/compat-wine-writev-pipe-20261121-r5`
+- Positive evidence: unmodified wineserver returns the 64-byte reply header
+  plus its variable payload through `writev`, allowing the client to complete
+  `init_first_thread` and continue the Wine protocol.
+- Negative coverage still needs dedicated short-write, bad-iov and fault tests.
+
+## Poll and epoll readiness
+
+- `evidence/compat-wine-epoll-r47`
+- `evidence/compat-wine-epoll-pri-20261121`
+- `evidence/compat-wine-listener-ready-r53`
+- Positive evidence: `EPOLLPRI`, zero-interest `MOD`, listener queues and
+  accepted-socket readability.
+- Negative coverage still needs isolated invalid-mask and stale-generation
+  fixtures.
+
+## File-backed shared mapping
+
+- `evidence/compat-wine-mmap-cache-20261121-r7`
+- `evidence/compat-wine-cache-shared-run-20261121-r12`
+- Positive evidence: writable cache files share one page-backed object across
+  wineserver and the Wine client; `MAP_SHARED` maps `user_shared_data`.
+
+## Low private address window
+
+- `evidence/compat-wine-low-window-20261121-r19`
+- Positive evidence: the 4 GiB `vprot` allocation range is admitted in the
+  compatibility low private window.
+- Remaining failure is Wine-side `vprot` allocation after a successful mmap;
+  this prevents promoting the row to `verified`.
+
+## Wine bootstrap
+
+- `evidence/compat-wine-server-r44`
+- `evidence/compat-wine-protocol-r50`
+- `evidence/compat-wine-read-enter-r52`
+- `evidence/compat-wine-pe-imports-20261121-r15`
+- `evidence/compat-wine-module-debug-20261121-r18`
+- Positive evidence: the unmodified Wine preloader, wineserver, prefix creation,
+  protocol exchange, PE `start.exe` load, and bundled PE dependency set work.
+- Current blocker: `ntdll.dll` loading reports `c0000017` after mmap succeeds;
+  `WINE_CMD_OK` has not been observed.
