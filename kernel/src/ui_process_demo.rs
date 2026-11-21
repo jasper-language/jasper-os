@@ -788,18 +788,20 @@ fn run_round(round: u32) -> bool {
         resources,
         "UI Channel/process resources did not return to baseline",
     );
-    let display_ok = patch_response_frame.as_ref().is_some_and(|frame| {
-        let surface = SurfaceSpec {
-            width: TEST_SURFACE_WIDTH,
-            height: TEST_SURFACE_HEIGHT,
-            stride: TEST_SURFACE_WIDTH,
-            bytes_per_pixel: 4,
-            layout: PixelLayout::Rgba,
-        };
-        crate::display::present_ui_frame(surface, frame.payload)
-            .ok()
-            .is_some_and(|(x, y)| crate::display::read_pixel_rgb(x, y) == Some((0xff, 0x00, 0x00)))
-    });
+    let display_ok = match (patch_response_frame.as_ref(), peer_response_frame.as_ref()) {
+        (Some(primary), Some(peer)) => {
+            let surface = test_surface();
+            crate::display::present_ui_layers([(surface, primary.payload), (surface, peer.payload)])
+                .ok()
+                .is_some_and(|positions| {
+                    crate::display::read_pixel_rgb(positions[0].0, positions[0].1)
+                        == Some((0xff, 0x00, 0x00))
+                        && crate::display::read_pixel_rgb(positions[1].0, positions[1].1)
+                            == Some((0x00, 0xff, 0x00))
+                })
+        }
+        _ => false,
+    };
     check(
         display_ok,
         "Engine Surface was not adopted into the native framebuffer compositor",
@@ -822,15 +824,17 @@ fn run_round(round: u32) -> bool {
         && background_revoked
         && peer_error_ok
         && peer_close_ok
+        && display_ok
         && resources;
     check(mobile_ok, "two-process mobile foreground policy failed");
     kprintln!(
-        "[JSR-UI-MOBILE] round={} primary_focus=true primary_input=true peer_resident=true peer_present={} ordinary_background_rejected={} background_grant={} background_revoked={} peer_failed=true resources={} failed={}",
+        "[JSR-UI-MOBILE] round={} primary_focus=true primary_input=true peer_resident=true peer_present={} ordinary_background_rejected={} background_grant={} background_revoked={} peer_failed=true display_layers={} resources={} failed={}",
         round,
         peer_response_ok,
         peer_ordinary_background_rejected,
         peer_background_ok,
         background_revoked,
+        display_ok,
         resources,
         failed()
     );

@@ -47,11 +47,22 @@ old_frame_rejected=true \
 old_input_rejected=true new_surface_generation=true new_input_generation=true
 ```
 
+The native framebuffer compositor also accepts two Engine Surfaces in one
+transaction: it retires the decorative accent layer, validates and copies both
+pixel buffers before locking display state, then places the applications in
+independent left/right viewports. QEMU validates both pixels directly:
+
+```text
+[JSR-DISPLAY-UI] presented_layers=2 ... layers=3
+[JSR-UI-MOBILE] ... display_layers=true
+```
+
+Both rounds restore all process, Channel, Surface and frame resources.
+
 ## Remaining gates
 
 - Emit display-size/DPI/keyboard capability events from actual hardware/QEMU
   hotplug rather than the verification input.
-- Exercise the migrated compositor/framebuffer output and rollback on QEMU and
-  then on a real display hotplug matrix.
+- Exercise hotplug rollback on QEMU and then the real display matrix.
 
 `UI-MULTIWINDOW-TRANSITION-1` therefore remains in progress.

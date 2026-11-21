@@ -56,13 +56,16 @@ struct Runtime {
     overlay: [u8; OVERLAY_BYTES],
     overlay_key: LayerKey,
     accent: [u8; ACCENT_BYTES],
-    accent_key: LayerKey,
+    accent_key: Option<LayerKey>,
     overlay_damage: DamageRect,
     overlay_region_len: usize,
     overlay_base: Vec<u8>,
     ui_surface: Option<SurfaceSpec>,
     ui_key: Option<LayerKey>,
     ui_pixels: Vec<u8>,
+    ui2_surface: Option<SurfaceSpec>,
+    ui2_key: Option<LayerKey>,
+    ui2_pixels: Vec<u8>,
     pressed: u32,
     released: u32,
     text: [u8; TEXT_CELLS],
@@ -199,13 +202,16 @@ pub fn start() -> Result<(), DisplayInputError> {
         overlay,
         overlay_key,
         accent,
-        accent_key,
+        accent_key: Some(accent_key),
         overlay_damage,
         overlay_region_len,
         overlay_base: alloc::vec![0u8; overlay_region_len],
         ui_surface: None,
         ui_key: None,
         ui_pixels: Vec::new(),
+        ui2_surface: None,
+        ui2_key: None,
+        ui2_pixels: Vec::new(),
         pressed: 0,
         released: 0,
         text: [b' '; TEXT_CELLS],
@@ -439,6 +445,87 @@ pub fn present_ui_frame(
     result
 }
 
+/// Present two Engine Surfaces as independent native compositor layers.
+///
+/// This is the bounded two-window framebuffer path: the decorative accent layer
+/// is retired so the existing three-layer compositor holds the overlay plus two
+/// application Surfaces. Both frames are validated and copied before the display
+/// transaction begins.
+pub fn present_ui_layers(
+    frames: [(SurfaceSpec, &[u8]); 2],
+) -> Result<[(u32, u32); 2], DisplayInputError> {
+    for (source, pixels) in frames {
+        if source.validate()? != pixels.len() as u64 {
+            return Err(DisplayInputError::InvalidFrame);
+        }
+    }
+    let mut owned = [Vec::new(), Vec::new()];
+    for (index, (_, pixels)) in frames.iter().enumerate() {
+        owned[index]
+            .try_reserve_exact(pixels.len())
+            .map_err(|_| DisplayInputError::Failed)?;
+        owned[index].extend_from_slice(pixels);
+    }
+    let sources = [frames[0].0, frames[1].0];
+    let (positions, damage, region_len) = {
+        let guard = DISPLAY.lock();
+        let runtime = guard.as_ref().ok_or(DisplayInputError::Unsupported)?;
+        let (positions, damage) = runtime.ui_pair_layout(sources)?;
+        (positions, damage, region_bytes(damage, runtime.surface)?)
+    };
+    let mut overlay_base = Vec::new();
+    overlay_base
+        .try_reserve_exact(region_len)
+        .map_err(|_| DisplayInputError::Failed)?;
+    overlay_base.resize(region_len, 0);
+    let mut owned = owned.map(Some);
+    let (result, retired) = {
+        let mut guard = DISPLAY.lock();
+        guard.as_mut().map_or_else(
+            || {
+                (
+                    Err(DisplayInputError::Unsupported),
+                    (Vec::new(), Vec::new(), Vec::new()),
+                )
+            },
+            |runtime| {
+                let result = runtime
+                    .adopt_ui_layers(
+                        sources,
+                        positions,
+                        &mut owned,
+                        overlay_base,
+                        damage,
+                        region_len,
+                    )
+                    .and_then(|retired| {
+                        runtime.paint_text_frame()?;
+                        Ok(retired)
+                    });
+                match result {
+                    Ok(retired) => {
+                        kprintln!(
+                            "[JSR-DISPLAY-UI] presented_layers=2 width0={} height0={} x0={} y0={} x1={} y1={} layers={}",
+                            sources[0].width,
+                            sources[0].height,
+                            positions[0].0,
+                            positions[0].1,
+                            positions[1].0,
+                            positions[1].1,
+                            runtime.compositor.count()
+                        );
+                        (Ok(positions), retired)
+                    }
+                    Err(error) => (Err(error), (Vec::new(), Vec::new(), Vec::new())),
+                }
+            },
+        )
+    };
+    drop(owned);
+    drop(retired);
+    result
+}
+
 /// Read one already-presented native framebuffer pixel as RGB.
 ///
 /// 把已经提交的 framebuffer 像素读取为 RGB。
@@ -471,6 +558,116 @@ impl Runtime {
         Ok((x, y, self.overlay_damage.union(ui_damage)))
     }
 
+    fn ui_pair_layout(
+        &self,
+        sources: [SurfaceSpec; 2],
+    ) -> Result<([(u32, u32); 2], DamageRect), DisplayInputError> {
+        let gap = 4u32;
+        let total_width = sources[0]
+            .width
+            .checked_add(gap)
+            .and_then(|width| width.checked_add(sources[1].width))
+            .ok_or(DisplayInputError::InvalidSurface)?;
+        let start_x = self.surface.width.saturating_sub(total_width) / 2;
+        let x0 = start_x;
+        let x1 = start_x
+            .checked_add(sources[0].width)
+            .and_then(|x| x.checked_add(gap))
+            .ok_or(DisplayInputError::InvalidSurface)?;
+        let y0 = self.surface.height.saturating_sub(sources[0].height) / 2;
+        let y1 = self.surface.height.saturating_sub(sources[1].height) / 2;
+        let first = DamageRect::for_layer(
+            LayerSpec {
+                surface: sources[0],
+                x: x0 as i32,
+                y: y0 as i32,
+                z_order: 5,
+                visible: true,
+                opacity: 0xff,
+            },
+            self.surface,
+        )
+        .map_err(|_| DisplayInputError::Failed)?;
+        let second = DamageRect::for_layer(
+            LayerSpec {
+                surface: sources[1],
+                x: x1 as i32,
+                y: y1 as i32,
+                z_order: 6,
+                visible: true,
+                opacity: 0xff,
+            },
+            self.surface,
+        )
+        .map_err(|_| DisplayInputError::Failed)?;
+        Ok((
+            [(x0, y0), (x1, y1)],
+            self.overlay_damage.union(first).union(second),
+        ))
+    }
+
+    fn adopt_ui_layers(
+        &mut self,
+        sources: [SurfaceSpec; 2],
+        positions: [(u32, u32); 2],
+        pixels: &mut [Option<Vec<u8>>; 2],
+        overlay_base: Vec<u8>,
+        damage: DamageRect,
+        region_len: usize,
+    ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), DisplayInputError> {
+        if let Some(key) = self.accent_key.take() {
+            self.compositor
+                .destroy(key)
+                .map_err(|_| DisplayInputError::Failed)?;
+        }
+        for key in [self.ui_key.take(), self.ui2_key.take()]
+            .into_iter()
+            .flatten()
+        {
+            self.compositor
+                .destroy(key)
+                .map_err(|_| DisplayInputError::Failed)?;
+        }
+        let first = self
+            .compositor
+            .create(LayerSpec {
+                surface: sources[0],
+                x: positions[0].0 as i32,
+                y: positions[0].1 as i32,
+                z_order: 5,
+                visible: true,
+                opacity: 0xff,
+            })
+            .map_err(|_| DisplayInputError::Failed)?;
+        let second = self
+            .compositor
+            .create(LayerSpec {
+                surface: sources[1],
+                x: positions[1].0 as i32,
+                y: positions[1].1 as i32,
+                z_order: 6,
+                visible: true,
+                opacity: 0xff,
+            })
+            .map_err(|_| DisplayInputError::Failed)?;
+        let first_pixels = core::mem::replace(
+            &mut self.ui_pixels,
+            pixels[0].take().ok_or(DisplayInputError::InvalidFrame)?,
+        );
+        let second_pixels = core::mem::replace(
+            &mut self.ui2_pixels,
+            pixels[1].take().ok_or(DisplayInputError::InvalidFrame)?,
+        );
+        let old_base = core::mem::replace(&mut self.overlay_base, overlay_base);
+        self.ui_surface = Some(sources[0]);
+        self.ui2_surface = Some(sources[1]);
+        self.ui_key = Some(first);
+        self.ui2_key = Some(second);
+        self.overlay_damage = damage;
+        self.overlay_region_len = region_len;
+        Ok((first_pixels, second_pixels, old_base))
+    }
+
     fn adopt_ui_frame(
         &mut self,
         source: SurfaceSpec,
@@ -478,6 +675,13 @@ impl Runtime {
         overlay_base: &mut Option<Vec<u8>>,
         region_len: usize,
     ) -> Result<(u32, u32, (Vec<u8>, Vec<u8>)), DisplayInputError> {
+        if let Some(key) = self.ui2_key.take() {
+            self.compositor
+                .destroy(key)
+                .map_err(|_| DisplayInputError::Failed)?;
+            self.ui2_surface = None;
+            self.ui2_pixels.clear();
+        }
         let (x, y, damage) = self.ui_layout(source)?;
         if pixels.as_ref().is_none()
             || overlay_base
@@ -751,19 +955,36 @@ impl Runtime {
                 bytes: &self.overlay,
             },
             LayerPixels {
-                key: self.accent_key,
-                bytes: &self.accent,
+                key: self.overlay_key,
+                bytes: &[],
             },
             LayerPixels {
                 key: self.overlay_key,
                 bytes: &[],
             },
         ];
-        let mut layer_count = 2;
+        let mut layer_count = 1;
+        if let Some(key) = self.accent_key {
+            layers[layer_count] = LayerPixels {
+                key,
+                bytes: &self.accent,
+            };
+            layer_count += 1;
+        }
         if let Some(key) = self.ui_key {
             layers[layer_count] = LayerPixels {
                 key,
                 bytes: &self.ui_pixels,
+            };
+            layer_count += 1;
+        }
+        if let Some(key) = self.ui2_key {
+            if layer_count >= layers.len() {
+                return Err(DisplayInputError::Failed);
+            }
+            layers[layer_count] = LayerPixels {
+                key,
+                bytes: &self.ui2_pixels,
             };
             layer_count += 1;
         }
