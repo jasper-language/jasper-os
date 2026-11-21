@@ -69,13 +69,13 @@ pub const DIGEST_OFFSET: usize = 40;
 /// 映像大小上限（64 MiB）。
 pub const MAX_IMAGE: u32 = 64 << 20;
 /// 段目录项数上限。
-pub const MAX_SECTIONS: u32 = 64;
+pub const MAX_SECTIONS: u32 = 64; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-container-v1 reason=fixed-section-directory-capacity-in-versioned-container
 /// 镜像数上限。
 pub const MAX_IMAGES: u32 = 8;
 /// 扩展段数上限。
 pub const MAX_EXTENSIONS: u32 = 32;
 /// 扩展名长度上限。
-pub const MAX_EXTENSION_NAME: usize = 64;
+pub const MAX_EXTENSION_NAME: usize = 64; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-container-v1 reason=fixed-extension-name-field-in-versioned-extension-record
 /// 导出项数上限。
 pub const MAX_EXPORTS: u32 = 1024;
 /// 导出名长度上限。

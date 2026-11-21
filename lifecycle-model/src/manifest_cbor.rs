@@ -22,9 +22,9 @@ use crate::manifest::{
 /// 单个清单的最大 CBOR 字节数。Maximum CBOR bytes in one manifest.
 pub const MAX_MANIFEST_CBOR_BYTES: usize = 8192;
 /// 单个清单最多包含的工件数。Maximum artifacts in one manifest.
-pub const MAX_ARTIFACTS: usize = 64;
+pub const MAX_ARTIFACTS: usize = 64; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-manifest-cbor-v1 reason=fixed-artifact-array-in-versioned-CBOR-manifest
 /// 单个清单最多包含的直接依赖数。Maximum direct dependencies in one manifest.
-pub const MAX_DEPENDENCIES: usize = 64;
+pub const MAX_DEPENDENCIES: usize = 64; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-manifest-cbor-v1 reason=fixed-dependency-array-in-versioned-CBOR-manifest
 
 /// 更新发布通道。
 /// Update release channel.
@@ -657,6 +657,35 @@ mod tests {
                 })
                 .collect();
         });
+
+        let exact_dependencies: Vec<String> = (0..MAX_DEPENDENCIES)
+            .map(|index| alloc::format!("dep{index}"))
+            .collect();
+        assert_eq!(validate_dependencies(&exact_dependencies), Ok(()));
+        let mut too_many_dependencies = exact_dependencies;
+        too_many_dependencies.push(String::from("overflow"));
+        assert_eq!(
+            validate_dependencies(&too_many_dependencies),
+            Err(CborManifestError::InvalidPolicy)
+        );
+    }
+
+    #[test]
+    fn artifact_array_accepts_exact_bound_and_rejects_overflow() {
+        let artifact = |index: usize| ArtifactWire {
+            kind: String::from("kernel"),
+            name: alloc::format!("artifact{index}"),
+            size: 1,
+            sha256: [(index as u8) + 1; 32],
+        };
+        let exact: Vec<_> = (0..MAX_ARTIFACTS).map(artifact).collect();
+        assert!(validate_artifacts(&exact).is_ok());
+        let mut overflow = exact;
+        overflow.push(artifact(MAX_ARTIFACTS));
+        assert_eq!(
+            validate_artifacts(&overflow),
+            Err(CborManifestError::InvalidArtifact)
+        );
     }
 
     #[test]

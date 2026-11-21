@@ -16,7 +16,7 @@ use crate::meta::InterfaceMeta;
 use crate::object::HandleError;
 
 /// 最多携带的参数个数。
-pub const MAX_ARGS: usize = 4;
+pub const MAX_ARGS: usize = 4; // JASPER-HARDCODE-REVIEW: issue=35 source=syscall-frame-abi-v1 reason=four-argument-trap-record-field
 
 /// 架构无关的系统调用帧。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

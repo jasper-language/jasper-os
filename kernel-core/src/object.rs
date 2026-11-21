@@ -391,7 +391,7 @@ const HANDLE_INDEX_MASK: HandleRaw = (1 << HANDLE_INDEX_BITS) - 1;
 pub const HANDLE_BYTES: usize = core::mem::size_of::<HandleRaw>();
 
 /// 代次可表示的最大值；达到它之后槽位永久退役。
-const MAX_GENERATION: u32 = if HANDLE_GEN_BITS >= 32 { u32::MAX } else { (1u32 << HANDLE_GEN_BITS) - 1 };
+const MAX_GENERATION: u32 = if HANDLE_GEN_BITS >= 32 { u32::MAX } else { (1u32 << HANDLE_GEN_BITS) - 1 }; // JASPER-HARDCODE-REVIEW: issue=35 source=handle-abi-v1 reason=generation-field-derived-from-wire-bit-width
 
 /// 句柄值（不透明）。用户态只看到 [`HandleId::raw`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

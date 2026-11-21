@@ -132,7 +132,7 @@ impl Madt {
             .iter()
             .find(|(src, _)| *src == irq)
             .map(|(_, r)| *r)
-            .unwrap_or(IsaRoute {
+            .unwrap_or(IsaRoute { // JASPER-HARDCODE-REVIEW: issue=35 source=ACPI-MADT-v1 reason=ISA-identity-route-default-required-by-MADT-binding
                 gsi: irq as u32,
                 active_low: false,
                 level: false,

@@ -14,10 +14,10 @@ pub const SCHEMA_VERSION: u16 = 1;
 pub const MAX_CAUSES: usize = 8; // JASPER-HARDCODE-REVIEW: issue=21 source=diagnostic-usi-v1-contract reason=fixed-cause-id-array-in-versioned-diagnostic-record
 /// 组件稳定标识的最大字节数。
 /// Maximum byte length of a stable component identifier.
-pub const MAX_COMPONENT_ID: usize = 32;
+pub const MAX_COMPONENT_ID: usize = 32; // JASPER-HARDCODE-REVIEW: issue=21 source=diagnostic-usi-v1-contract reason=fixed-component-id-field-in-versioned-diagnostic-record
 /// 本地有效载荷引用或脱敏摘要的最大字节数。
 /// Maximum byte length of a local payload reference or redacted excerpt.
-pub const MAX_PAYLOAD_REFERENCE: usize = 64;
+pub const MAX_PAYLOAD_REFERENCE: usize = 64; // JASPER-HARDCODE-REVIEW: issue=21 source=diagnostic-usi-v1-contract reason=fixed-payload-reference-field-in-versioned-diagnostic-record
 
 /// LC-1 必须区分的故障类别。
 /// Failure categories that LC-1 must distinguish.
@@ -1652,6 +1652,40 @@ mod tests {
         let mut input = base(EventKind::DriverHardware, Severity::Error);
         input.component = "bad component";
         assert_eq!(DiagnosticEvent::new(input), Err(SchemaError::Component));
+
+        let exact_component = "a".repeat(MAX_COMPONENT_ID);
+        input = base(EventKind::DriverHardware, Severity::Error);
+        input.component = &exact_component;
+        assert_eq!(
+            DiagnosticEvent::new(input)
+                .unwrap()
+                .component
+                .len(),
+            MAX_COMPONENT_ID
+        );
+        let too_long_component = "a".repeat(MAX_COMPONENT_ID + 1);
+        input = base(EventKind::DriverHardware, Severity::Error);
+        input.component = &too_long_component;
+        assert_eq!(DiagnosticEvent::new(input), Err(SchemaError::Component));
+
+        let exact_payload = [b'x'; MAX_PAYLOAD_REFERENCE];
+        input = base(EventKind::DriverHardware, Severity::Error);
+        input.payload_kind = PayloadKind::RedactedText;
+        input.payload_reference = &exact_payload;
+        input.redacted = true;
+        assert_eq!(
+            DiagnosticEvent::new(input)
+                .unwrap()
+                .payload_reference()
+                .len(),
+            MAX_PAYLOAD_REFERENCE
+        );
+        let too_long_payload = [b'x'; MAX_PAYLOAD_REFERENCE + 1];
+        input = base(EventKind::DriverHardware, Severity::Error);
+        input.payload_kind = PayloadKind::RedactedText;
+        input.payload_reference = &too_long_payload;
+        input.redacted = true;
+        assert_eq!(DiagnosticEvent::new(input), Err(SchemaError::PayloadTooLong));
 
         let exact = [1u32, 2, 3, 4, 5, 6, 7, 8];
         input = base(EventKind::DriverHardware, Severity::Error);

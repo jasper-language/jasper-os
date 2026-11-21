@@ -9,7 +9,7 @@ use crate::hwvirt::Backend;
 #[cfg(any(test, feature = "hwvirt-vcpu-dynamic"))]
 use alloc::vec::Vec;
 
-pub const MAX_GPA: u64 = 1 << 48;
+pub const MAX_GPA: u64 = 1 << 48; // JASPER-HARDCODE-REVIEW: issue=35 source=x86-gpa-width-v1 reason=architectural-48-bit-guest-physical-address-width
 
 /// Saved architectural state. Backend-specific fields may use `extended`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -493,6 +493,25 @@ mod tests {
         assert_eq!(map.map(0x3000, 1, 8, 0, 1, GuestPermissions::default()), Err(MapError::Permissions));
         assert_eq!(map.unmap_exact(0x1000, 2).unwrap().memory_id, 7);
         assert!(map.is_empty());
+    }
+
+    #[test]
+    fn guest_physical_address_width_accepts_exact_bound_and_rejects_next_page() {
+        let map = GuestMap::<1>::new();
+        assert_eq!(
+            map.validate(
+                MAX_GPA - 4096,
+                1,
+                0,
+                1,
+                GuestPermissions::READ
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            map.validate(MAX_GPA, 1, 0, 1, GuestPermissions::READ),
+            Err(MapError::OutsideGuestWindow)
+        );
     }
 
     #[test]

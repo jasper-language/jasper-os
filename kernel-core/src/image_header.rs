@@ -37,7 +37,7 @@ pub const KNOWN_FLAGS: u64 = FLAG_BIG_ENDIAN | FLAG_PLACE_ANYWHERE;
 /// 放置粒度：Linux arm64 要求映像从 2 MiB 边界开始。
 pub const IMAGE_ALIGN: u64 = 2 * 1024 * 1024;
 /// `text_offset` 的上限：超过 1 TiB 的字段没有现实意义，按损坏处理。
-pub const MAX_TEXT_OFFSET: u64 = 1 << 40;
+pub const MAX_TEXT_OFFSET: u64 = 1 << 40; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-arm64-image-v1 reason=versioned-image-header-text-offset-field
 
 /// 已通过校验的 `Image` 头。
 /// A validated arm64 Image header.

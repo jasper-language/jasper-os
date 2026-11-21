@@ -13,7 +13,7 @@ use crate::assembly::Binding;
 use crate::native_install::{Actor, OwnerScope, Subject};
 use crate::security::{IdentityClass, SecurityContext};
 
-pub const MAX_MODULE_NAME_BYTES: usize = 48;
+pub const MAX_MODULE_NAME_BYTES: usize = 48; // JASPER-HARDCODE-REVIEW: issue=35 source=native-module-wire-v1 reason=fixed-module-name-field-in-versioned-module-record
 
 /// Opaque display/identity name. It is not a path and grants no authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -819,6 +819,14 @@ mod tests {
 
     fn name(value: &str) -> ModuleName {
         ModuleName::new(value).unwrap()
+    }
+
+    #[test]
+    fn module_name_accepts_full_wire_width_and_rejects_one_more_byte() {
+        let exact = "a".repeat(MAX_MODULE_NAME_BYTES);
+        assert!(ModuleName::new(&exact).is_some());
+        let too_long = "a".repeat(MAX_MODULE_NAME_BYTES + 1);
+        assert!(ModuleName::new(&too_long).is_none());
     }
 
     fn version(major: u32, minor: u32, patch: u32) -> ModuleVersion {

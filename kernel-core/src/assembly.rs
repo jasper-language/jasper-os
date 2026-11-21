@@ -874,7 +874,7 @@ impl Assembly {
     /// English: audit a published mask against the runtime state.
     pub fn audit(&self, declared: &ResolvedProfile, mask: u32) -> Result<(), AuditError> {
         let caps = declared.capabilities();
-        let known = if caps.len() >= 32 {
+        let known = if caps.len() >= 32 { // JASPER-HARDCODE-REVIEW: issue=35 source=program-capabilities-mask-v1 reason=versioned-publication-mask-is-u32
             u32::MAX
         } else {
             (1u32 << caps.len()) - 1

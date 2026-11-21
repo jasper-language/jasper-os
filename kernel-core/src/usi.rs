@@ -10,8 +10,8 @@ pub const HEADER_BYTES: usize = 24;
 pub const INFO_BYTES: usize = 32;
 pub const PROCESS_BYTES: usize = 32;
 pub const MODULE_BYTES: usize = 48;
-pub const MAX_PROFILE_NAME: usize = 12;
-pub const MAX_MODULE_NAME: usize = 24;
+pub const MAX_PROFILE_NAME: usize = 12; // JASPER-HARDCODE-REVIEW: issue=35 source=usi-wire-v1 reason=fixed-profile-name-field-in-versioned-usi-record
+pub const MAX_MODULE_NAME: usize = 24; // JASPER-HARDCODE-REVIEW: issue=35 source=usi-wire-v1 reason=fixed-module-name-field-in-versioned-usi-record
 pub const MAX_MODULE_VERSION: usize = 8; // JASPER-HARDCODE-REVIEW: issue=35 source=usi-module-version-v1 reason=fixed-version-field-in-USI-v1-module-record
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

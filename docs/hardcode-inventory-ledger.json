@@ -1,5 +1,5 @@
 {
-  "baseline_total": 133,
+  "baseline_total": 105,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,8 +10,8 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 78,
-    "protocol-abi": 42,
+    "explicit-safety-policy": 75,
+    "protocol-abi": 17,
     "test-demo-fixture": 11
   },
   "entries": [
@@ -118,16 +118,6 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "0230a1d28f5a2f2361cb9b62926295139b984ac9dfdd27652698107aa9335d61",
-      "line": 72,
-      "path": "jaso/src/lib.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_SECTIONS: u32 = 64;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
       "fingerprint": "58c39e4c594f7301b1a7610b4aad0c241447efb5a3a2e36b177d9e987292ea86",
       "line": 82,
       "path": "jaso/src/lib.rs",
@@ -176,16 +166,6 @@
       "source": "pub const MAX_EXPORTS: u32 = 1024;"
     },
     {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "e5f69ab4bd842a80a16c9180a8a9b783a7249a930bc42c4d6514aaae635017c7",
-      "line": 78,
-      "path": "jaso/src/lib.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_EXTENSION_NAME: usize = 64;"
-    },
-    {
       "category": "protocol-abi",
       "count": 2,
       "fingerprint": "7026011b82fffc0f7f1bd9494bc79a89deeaf80c05acfa9b223e272174be9c72",
@@ -194,56 +174,6 @@
       "reason": "fixed length is a wire field width, minimum record size, or u32 publication-mask boundary in a bounded parser",
       "rules": "HC-G9",
       "source": "let n = if b.len() >= 4 { u32_at(b, 0) } else { 0 };"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "4cfbb8ff12dfdb939c16d9f1dae825ca0b42241ba777d149248cf864625c91b4",
-      "line": 70,
-      "path": "jaso/src/manifest.rs",
-      "reason": "path owns a wire, loader, package, graphics, or lifecycle ABI; consumer review remains required",
-      "rules": "HC-G1",
-      "source": "pub const MAX_DEPENDS: usize = 32;"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "5a1980627b87eda1f4889348f881d9bafeb1c38591251a0f161d2de4e84aa457",
-      "line": 72,
-      "path": "jaso/src/manifest.rs",
-      "reason": "path owns a wire, loader, package, graphics, or lifecycle ABI; consumer review remains required",
-      "rules": "HC-G1",
-      "source": "pub const MAX_COMPARATORS: usize = 4;"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "bdc9933999b484bce93009dae11e7322052224eaee1616ef8b4f96d11704ca39",
-      "line": 66,
-      "path": "jaso/src/manifest.rs",
-      "reason": "path owns a wire, loader, package, graphics, or lifecycle ABI; consumer review remains required",
-      "rules": "HC-G1",
-      "source": "pub const MAX_REQUIRES: usize = 32;"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "6de6466858e8668a5fd81e2f044ad6ffd3e2735287dc39ac55ed0acf6c6c3fd3",
-      "line": 15,
-      "path": "jaso/src/platform.rs",
-      "reason": "path owns a wire, loader, package, graphics, or lifecycle ABI; consumer review remains required",
-      "rules": "HC-G1",
-      "source": "const MAX_ISA_EXT_TOKEN: usize = 15;"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "c6aeb64178aa41064f0675dbf8396e19bc4d15aaf020ae50616dc16a06c80fdb",
-      "line": 9,
-      "path": "jaso/src/platform.rs",
-      "reason": "path owns a wire, loader, package, graphics, or lifecycle ABI; consumer review remains required",
-      "rules": "HC-G1",
-      "source": "pub const MAX_PLATFORMS: u32 = 16;"
     },
     {
       "category": "explicit-safety-policy",
@@ -316,16 +246,6 @@
       "source": "pub const MAX_CHUNK: usize = MAX_MESSAGE - 16;"
     },
     {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "9bc23add5e467d4613f09a4dc0470e86e1745f7e07bfbc22b662e59f398dfe14",
-      "line": 188,
-      "path": "kernel-core/src/abi.rs",
-      "reason": "fixed length is a wire field width, minimum record size, or u32 publication-mask boundary in a bounded parser",
-      "rules": "HC-G9",
-      "source": "if line.bytes().filter(|&b| b == b'\\t').count() >= 5 {"
-    },
-    {
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "aa2855caf44b98cce086778ab50ce6eeb5a0a8a88f703681396c0cf45e7a8d5d",
@@ -336,16 +256,6 @@
       "source": "pub const MAX_TABLE_LEN: u32 = 1 << 20;"
     },
     {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "c6e740a92bf92d4057a397480abb95dc8b1e59da102bcf5f0fa453ac107ec0cf",
-      "line": 135,
-      "path": "kernel-core/src/acpi.rs",
-      "reason": "ISA route fallback is the explicitly documented ACPI bus-default policy",
-      "rules": "HC-G7",
-      "source": ".unwrap_or(IsaRoute {"
-    },
-    {
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "ef74f75d24f966c6d77cd0e06db131fadbc496f859c7d5ba3aa2b0cd47daa3d7",
@@ -354,16 +264,6 @@
       "reason": "documented scheduling, pressure, or arbitration policy default; not a discovered hardware fact",
       "rules": "HC-G1",
       "source": "pub const DEFAULT: ArbiterParams = ArbiterParams {"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "0e533a38d2cc42353f4e838c70ef2ebc237ad81e553f47169ee49b624c431fa9",
-      "line": 877,
-      "path": "kernel-core/src/assembly.rs",
-      "reason": "fixed length is a wire field width, minimum record size, or u32 publication-mask boundary in a bounded parser",
-      "rules": "HC-G9",
-      "source": "let known = if caps.len() >= 32 {"
     },
     {
       "category": "test-demo-fixture",
@@ -416,56 +316,6 @@
       "source": "max_tasks: 64,"
     },
     {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "487918563738a9d008dd39c6600714250c1f50175980fefbc6bbf8a2dcabe0e7",
-      "line": 612,
-      "path": "kernel-core/src/fdt.rs",
-      "reason": "FDT binding default or diagnostic compatible string, not a discovered hardware value",
-      "rules": "HC-G7",
-      "source": "let redist_stride = node.cell(\"redistributor-stride\", 0).map(u64::from).unwrap_or(0x20_000);"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "66e4022e6dc4ac0a0f23bb9280b6d71c361aac52272e3d7b845d944843517015",
-      "line": 792,
-      "path": "kernel-core/src/fdt.rs",
-      "reason": "FDT binding default or diagnostic compatible string, not a discovered hardware value",
-      "rules": "HC-G7",
-      "source": "v.strip_suffix(&[0]).unwrap_or(v)"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "9d7800563cddcc4c527e60ae2291ee3112da8fc14e6c5580b9ca8d9fa391849c",
-      "line": 614,
-      "path": "kernel-core/src/fdt.rs",
-      "reason": "FDT binding default or diagnostic compatible string, not a discovered hardware value",
-      "rules": "HC-G7",
-      "source": "compatible: node.string(\"compatible\").unwrap_or(if v3 { \"arm,gic-v3\" } else { \"arm,gic\" }),"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "a9d0d5e1aed444c672196876e09cd69a22c09ecd2ec6b10d0cd521c3bb600a5a",
-      "line": 582,
-      "path": "kernel-core/src/fdt.rs",
-      "reason": "FDT binding default or diagnostic compatible string, not a discovered hardware value",
-      "rules": "HC-G7",
-      "source": "compatible: node.string(\"compatible\").unwrap_or(\"arm,psci\"),"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "ea30624594f426a8901d731e1991f5dd7ebc6b9c7a97d6b34dec6c6206c4bc6d",
-      "line": 550,
-      "path": "kernel-core/src/fdt.rs",
-      "reason": "FDT binding default or diagnostic compatible string, not a discovered hardware value",
-      "rules": "HC-G7",
-      "source": "compatible: n.string(\"compatible\").unwrap_or(\"arm,pl011\"),"
-    },
-    {
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "814d7a7565e44893ae43973063c5d559b2df0ae690264186059f667d548d5342",
@@ -474,26 +324,6 @@
       "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "const MIN_BLOCK: usize = if size_of::<Node>() > MIN_ALIGN { size_of::<Node>() } else { MIN_ALIGN };"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "50d9cb71db165eac086bc6061bf06ddc45452703cf8418a9900ec867e0f47a48",
-      "line": 12,
-      "path": "kernel-core/src/hwvirt_vcpu.rs",
-      "reason": "PCI configuration limit, architecture address width, wire handle count, or internal bit field",
-      "rules": "HC-G1",
-      "source": "pub const MAX_GPA: u64 = 1 << 48;"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "ac8fafb6face5d8af97284754c9fef8bccef459017105a0ff9e7776d0f2343ab",
-      "line": 40,
-      "path": "kernel-core/src/image_header.rs",
-      "reason": "PCI configuration limit, architecture address width, wire handle count, or internal bit field",
-      "rules": "HC-G1",
-      "source": "pub const MAX_TEXT_OFFSET: u64 = 1 << 40;"
     },
     {
       "category": "explicit-safety-policy",
@@ -518,32 +348,12 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "23a0af74db73125c6412e45c874653dabafc49f7d08750cd20884b8b22758977",
-      "line": 16,
-      "path": "kernel-core/src/native_module_lifecycle.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_MODULE_NAME_BYTES: usize = 48;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
       "fingerprint": "8df24e784e8231cc0fa231891767b2678e1c4db7dc9f09619e196b13db4f33f3",
       "line": 21,
       "path": "kernel-core/src/net4_service.rs",
       "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "const MAX_POLL_STEPS: usize = 16;"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "1aa50cdf645f6803293204998723740e37c5ad666c60f8e2bfbec7527cfa882c",
-      "line": 394,
-      "path": "kernel-core/src/object.rs",
-      "reason": "PCI configuration limit, architecture address width, wire handle count, or internal bit field",
-      "rules": "HC-G1",
-      "source": "const MAX_GENERATION: u32 = if HANDLE_GEN_BITS >= 32 { u32::MAX } else { (1u32 << HANDLE_GEN_BITS) - 1 };"
     },
     {
       "category": "explicit-safety-policy",
@@ -554,16 +364,6 @@
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
       "source": "pub const MAX_LEVELS: usize = 5;"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "09b04a6531fd72854c727efe19a3e18aedbd2cafde8d4d279e46acbc4fa4a8cf",
-      "line": 28,
-      "path": "kernel-core/src/pci.rs",
-      "reason": "PCI configuration limit, architecture address width, wire handle count, or internal bit field",
-      "rules": "HC-G1",
-      "source": "pub const MAX_BARS: usize = 6;"
     },
     {
       "category": "test-demo-fixture",
@@ -646,26 +446,6 @@
       "source": "pub const MAX_BATCH:usize=16;"
     },
     {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "fc13c4c6ffa36bbab4060a618f4004bed5ecdc7f1234723c4761476e08100cf8",
-      "line": 26,
-      "path": "kernel-core/src/syscall_set.rs",
-      "reason": "versioned SyscallSet bit width; compatibility must reject ids outside the published ABI",
-      "rules": "HC-G1",
-      "source": "pub const MAX_IDS: usize = 256;"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "9cbc0e38fb69b72a0dcf092263fa367eaae0ccf758db25199a45a06cac85109b",
-      "line": 19,
-      "path": "kernel-core/src/trap.rs",
-      "reason": "PCI configuration limit, architecture address width, wire handle count, or internal bit field",
-      "rules": "HC-G1",
-      "source": "pub const MAX_ARGS: usize = 4;"
-    },
-    {
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "f3c0f4591922a34a473a4b6ed3a7e71f81fafe9d1d5d9ab73da0f2e10d3d5d4f",
@@ -674,26 +454,6 @@
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
       "source": "pub const MIN_WINDOW_SIZE: u64 = WINDOW_END_RISCV32 - WINDOW_BASE_RISCV32;"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "37bb82019611fc48de5b5e08ac71b41c281cfbd8f12df026f1ea8c6689206ac1",
-      "line": 13,
-      "path": "kernel-core/src/usi.rs",
-      "reason": "identifier is a Linux UAPI width or semantic boundary; preserve the documented Linux value",
-      "rules": "HC-G1",
-      "source": "pub const MAX_PROFILE_NAME: usize = 12;"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "58d74023ce6d38b0dab2a8657befed96b831f0ecf86a8639ca0bf754fae2e69f",
-      "line": 14,
-      "path": "kernel-core/src/usi.rs",
-      "reason": "identifier is a Linux UAPI width or semantic boundary; preserve the documented Linux value",
-      "rules": "HC-G1",
-      "source": "pub const MAX_MODULE_NAME: usize = 24;"
     },
     {
       "category": "explicit-safety-policy",
@@ -1166,26 +926,6 @@
       "source": ".unwrap_or(true)"
     },
     {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "508ad48b7808c22455ea2a51548ba6c2509c11e1c4c90d45c2b0831a16a644ec",
-      "line": 20,
-      "path": "lifecycle-model/src/diagnostics.rs",
-      "reason": "path owns a wire, loader, package, graphics, or lifecycle ABI; consumer review remains required",
-      "rules": "HC-G1",
-      "source": "pub const MAX_PAYLOAD_REFERENCE: usize = 64;"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "67f72a3675730d6443e68c97369a735b6edb1e67174bd72bf1bb5e8af552181a",
-      "line": 17,
-      "path": "lifecycle-model/src/diagnostics.rs",
-      "reason": "path owns a wire, loader, package, graphics, or lifecycle ABI; consumer review remains required",
-      "rules": "HC-G1",
-      "source": "pub const MAX_COMPONENT_ID: usize = 32;"
-    },
-    {
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "7bfc1f8490d1ea29829cfc20db7c40cc8c8a22a5744a6c1e7060622ff796d1ea",
@@ -1196,16 +936,6 @@
       "source": "pub const MAX_CANONICAL_MANIFEST_BYTES: usize = 8192;"
     },
     {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "6446fff5571a1154756118e9d5afab428ad2e56acdd27b41808845935c551749",
-      "line": 25,
-      "path": "lifecycle-model/src/manifest_cbor.rs",
-      "reason": "path owns a wire, loader, package, graphics, or lifecycle ABI; consumer review remains required",
-      "rules": "HC-G1",
-      "source": "pub const MAX_ARTIFACTS: usize = 64;"
-    },
-    {
       "category": "explicit-safety-policy",
       "count": 1,
       "fingerprint": "815620110b19b29d7048fea90d8bdf5f42efe4df61462f3ff6b2b8c09d2d34a3",
@@ -1214,16 +944,6 @@
       "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
       "rules": "HC-G1",
       "source": "pub const MAX_MANIFEST_CBOR_BYTES: usize = 8192;"
-    },
-    {
-      "category": "protocol-abi",
-      "count": 1,
-      "fingerprint": "a878f5902a38f9c09e1f2ac79c48258d4ab5ea503759843b29cba5b6aa4e21f3",
-      "line": 27,
-      "path": "lifecycle-model/src/manifest_cbor.rs",
-      "reason": "path owns a wire, loader, package, graphics, or lifecycle ABI; consumer review remains required",
-      "rules": "HC-G1",
-      "source": "pub const MAX_DEPENDENCIES: usize = 64;"
     },
     {
       "category": "explicit-safety-policy",
@@ -1328,8 +1048,8 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 79,
-    "protocol-abi": 43,
+    "explicit-safety-policy": 76,
+    "protocol-abi": 18,
     "test-demo-fixture": 11
   }
 }

@@ -25,7 +25,7 @@ pub const ECAM_FUNCTION_SPAN: u16 = 4096;
 /// 传统端口机制可达的配置空间字节数。
 pub const LEGACY_FUNCTION_SPAN: u16 = 256;
 /// 一个功能最多的 BAR 个数（普通设备头）。
-pub const MAX_BARS: usize = 6;
+pub const MAX_BARS: usize = 6; // JASPER-HARDCODE-REVIEW: issue=35 source=PCI-local-bus-v1 reason=fixed-six-dword-normal-header-bar-fields
 /// 能力链最多跟随的跳数（配置空间头之后最多容纳 48 个 4 字节对齐的能力）。
 pub const MAX_CAPABILITY_HOPS: usize = 48; // JASPER-HARDCODE-REVIEW: issue=35 source=pci-capability-chain-policy reason=bounded-config-chain-walk-fails-closed-on-overrun-or-cycle
 /// 「不存在的功能」读到的厂商号。

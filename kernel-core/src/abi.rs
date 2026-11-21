@@ -185,7 +185,7 @@ fn display_en_problem(s: &str) -> Option<&'static str> {
 /// 旧格式（少于 6 个制表符）退回按空白切分，剩余部分为空——锁文件的 6 列旧行走这条路径。
 /// Splits a registry line into six fields plus the optional English display name.
 fn split_fields(line: &str) -> Option<([&str; 6], Option<&str>)> {
-    if line.bytes().filter(|&b| b == b'\t').count() >= 5 {
+    if line.bytes().filter(|&b| b == b'\t').count() >= 5 { // JASPER-HARDCODE-REVIEW: issue=35 source=system-ids-registry-v1 reason=versioned-registry-six-field-record-separator
         let mut it = line.splitn(7, '\t');
         let f0 = it.next()?;
         let f1 = it.next()?;

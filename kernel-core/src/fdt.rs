@@ -547,7 +547,7 @@ impl<'a> Fdt<'a> {
                 _ => None,
             };
             Some(SerialInfo {
-                compatible: n.string("compatible").unwrap_or("arm,pl011"),
+                compatible: n.string("compatible").unwrap_or("arm,pl011"), // JASPER-HARDCODE-REVIEW: issue=35 source=fdt-bindings-v1 reason=PL011-binding-compatible-fallback
                 base,
                 size,
                 irq,
@@ -579,7 +579,7 @@ impl<'a> Fdt<'a> {
 
 fn psci_info<'a>(node: Node<'a>) -> PsciInfo<'a> {
     PsciInfo {
-        compatible: node.string("compatible").unwrap_or("arm,psci"),
+        compatible: node.string("compatible").unwrap_or("arm,psci"), // JASPER-HARDCODE-REVIEW: issue=35 source=fdt-bindings-v1 reason=PSCI-binding-compatible-fallback
         method: node.string("method"),
         cpu_on: node.cell("cpu_on", 0),
     }
@@ -609,9 +609,9 @@ fn gic_info<'a>(node: Node<'a>, v3: bool) -> Option<GicInfo<'a>> {
         (0, 0)
     };
     // The GICv3 DT binding defines the optional stride default as 128 KiB.
-    let redist_stride = node.cell("redistributor-stride", 0).map(u64::from).unwrap_or(0x20_000);
+    let redist_stride = node.cell("redistributor-stride", 0).map(u64::from).unwrap_or(0x20_000); // JASPER-HARDCODE-REVIEW: issue=35 source=fdt-bindings-v1 reason=GICv3-binding-default-redistributor-stride
     Some(GicInfo {
-        compatible: node.string("compatible").unwrap_or(if v3 { "arm,gic-v3" } else { "arm,gic" }),
+        compatible: node.string("compatible").unwrap_or(if v3 { "arm,gic-v3" } else { "arm,gic" }), // JASPER-HARDCODE-REVIEW: issue=35 source=fdt-bindings-v1 reason=GIC-binding-compatible-fallback
         v3,
         dist,
         cpu,
@@ -789,7 +789,7 @@ fn skip_subtree(s: &[u8], at: &mut usize) -> Result<(), FdtError> {
 
 /// 去掉字符串属性末尾的 NUL。
 fn trim_nul(v: &[u8]) -> &[u8] {
-    v.strip_suffix(&[0]).unwrap_or(v)
+    v.strip_suffix(&[0]).unwrap_or(v) // JASPER-HARDCODE-REVIEW: issue=35 source=fdt-bindings-v1 reason=FDT-string-property-terminating-NUL
 }
 
 /// 从字符串块取属性名。

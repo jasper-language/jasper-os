@@ -225,6 +225,12 @@ fn platform_rejections() {
     let mut b = sample();
     b.platform.isa_ext = b"i,m,a,c".to_vec();
     assert!(b.finish().is_ok());
+    let mut b = sample();
+    b.platform.isa_ext = vec![b'a'; 15];
+    assert!(b.finish().is_ok());
+    let mut b = sample();
+    b.platform.isa_ext = vec![b'a'; 16];
+    assert_eq!(b.finish().unwrap_err(), JasoError::PlatformMalformed);
     // 头部 arch 与平台记录不一致
     assert_eq!(edit(&good, |b| b[12] = Arch::Aarch64 as u8), JasoError::PlatformArch);
 }
@@ -369,8 +375,19 @@ fn manifest_rules() {
     assert_eq!(p("just text\n").unwrap_err(), ManifestError::BadLine(1));
     assert_eq!(p("core.requires = ok, Not_Ok\n").unwrap_err(), ManifestError::BadValue(1));
     assert_eq!(p("core.exports = bad name\n").unwrap_err(), ManifestError::BadValue(1));
-    let many: String = (0..33).map(|i| std::format!("core.requires = cap{}\n", i)).collect();
-    assert_eq!(p(&many).unwrap_err(), ManifestError::Limit(33));
+    let exact_requires: String = (0..crate::manifest::MAX_REQUIRES)
+        .map(|i| std::format!("core.requires = cap{}\n", i))
+        .collect();
+    let exact_requires_text = std::format!("{BASE}{exact_requires}");
+    assert_eq!(p(&exact_requires_text).map(|_| ()), Ok(()));
+    let many: String = (0..=crate::manifest::MAX_REQUIRES)
+        .map(|i| std::format!("core.requires = cap{}\n", i))
+        .collect();
+    let too_many_requires = std::format!("{BASE}{many}");
+    assert!(matches!(
+        p(&too_many_requires).unwrap_err(),
+        ManifestError::Limit(_)
+    ));
     let exact_exports: Vec<String> =
         (0..crate::manifest::MAX_EXPORT_NAMES).map(|i| std::format!("e{i}")).collect();
     let exact_export_text = std::format!("{BASE}core.exports = {}\n", exact_exports.join(","));
@@ -421,8 +438,14 @@ fn version_ranges_and_dependencies() {
     }
     assert_eq!(p("core.runtime = 0.1\n").unwrap_err(), ManifestError::BadValue(5));
     assert_eq!(p("core.runtime = >=0.1\ncore.runtime = >=0.1\n").unwrap_err(), ManifestError::Duplicate(6));
-    let many: String = (0..33).map(|i| std::format!("core.depends = m{}\n", i)).collect();
-    assert_eq!(p(&many).unwrap_err(), ManifestError::Limit(37));
+    let exact_depends: String = (0..crate::manifest::MAX_DEPENDS)
+        .map(|i| std::format!("core.depends = m{}\n", i))
+        .collect();
+    assert_eq!(p(&exact_depends).map(|_| ()), Ok(()));
+    let many: String = (0..=crate::manifest::MAX_DEPENDS)
+        .map(|i| std::format!("core.depends = m{}\n", i))
+        .collect();
+    assert!(matches!(p(&many).unwrap_err(), ManifestError::Limit(_)));
     depends_uniqueness_window(&p);
 }
 
@@ -508,6 +531,25 @@ fn extensions() {
         b.extensions = vec![ExtensionIn { name: name.to_vec(), version, critical: false, content: vec![] }];
         assert_eq!(b.finish().unwrap_err(), JasoError::ExtensionMalformed, "{:?}", name);
     }
+    let mut exact_name = vec![b'a'; MAX_EXTENSION_NAME];
+    exact_name[1] = b'.';
+    let mut b = sample();
+    b.extensions = vec![ExtensionIn {
+        name: exact_name.clone(),
+        version: 1,
+        critical: false,
+        content: vec![],
+    }];
+    assert!(b.finish().is_ok());
+    exact_name.push(b'a');
+    let mut b = sample();
+    b.extensions = vec![ExtensionIn {
+        name: exact_name,
+        version: 1,
+        critical: false,
+        content: vec![],
+    }];
+    assert_eq!(b.finish().unwrap_err(), JasoError::ExtensionMalformed);
     let mut b = sample();
     b.extensions = vec![ExtensionIn { name: b"ab.c".to_vec(), version: 1, critical: false, content: vec![] }];
     let ok = b.finish().unwrap();

@@ -63,13 +63,13 @@ impl ManifestError {
 }
 
 /// 单个清单的能力数上限。
-pub const MAX_REQUIRES: usize = 32;
+pub const MAX_REQUIRES: usize = 32; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-manifest-v1 reason=fixed-capability-list-bound-in-versioned-manifest
 /// 单个清单的导出名数上限。
 pub const MAX_EXPORT_NAMES: usize = 256; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-manifest-v1 reason=versioned-manifest-export-list-bound
 /// 单个清单的依赖数上限。
-pub const MAX_DEPENDS: usize = 32;
+pub const MAX_DEPENDS: usize = 32; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-manifest-v1 reason=fixed-dependency-list-bound-in-versioned-manifest
 /// 一个版本区间的比较式个数上限。
-pub const MAX_COMPARATORS: usize = 4;
+pub const MAX_COMPARATORS: usize = 4; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-manifest-v1 reason=fixed-version-range-comparator-record-in-v1-manifest
 
 /// 导出名：字母、数字、`_`、`.`、`$`，1–128 字节（与导出表的要求一致）。
 pub(crate) fn symbol_ok(s: &str) -> bool {

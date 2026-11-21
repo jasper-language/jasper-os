@@ -23,7 +23,7 @@
 //! 的影子通道。
 
 /// 可表示的操作 ID 上限（ID 取值 `0..MAX_IDS`）。
-pub const MAX_IDS: usize = 256;
+pub const MAX_IDS: usize = 256; // JASPER-HARDCODE-REVIEW: issue=35 source=syscall-set-abi-v2 reason=fixed-versioned-256-bit-operation-set
 /// 位图字数。
 pub const WORDS: usize = MAX_IDS / 64;
 /// 序列化字节数（小端，逐字）。

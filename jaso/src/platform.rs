@@ -6,13 +6,13 @@ use crate::Arch;
 /// 平台记录长度。
 pub const PLATFORM_RECORD: usize = 64;
 /// 平台记录数上限。
-pub const MAX_PLATFORMS: u32 = 16;
+pub const MAX_PLATFORMS: u32 = 16; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-platform-v1 reason=fixed-platform-record-count-in-versioned-container
 /// `isa_ext` 字段长度。
 const ISA_EXT_FIELD: usize = 32;
 /// `abi` 字段长度。
 const ABI_FIELD: usize = 16;
 /// 单个 `isa_ext` 记号的长度上限。
-const MAX_ISA_EXT_TOKEN: usize = 15;
+const MAX_ISA_EXT_TOKEN: usize = 15; // JASPER-HARDCODE-REVIEW: issue=35 source=jaso-platform-v1 reason=fixed-isa-extension-token-field-bound-in-platform-record
 
 /// 浮点调用约定。
 /// Floating-point calling convention.
