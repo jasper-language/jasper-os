@@ -48,6 +48,11 @@ Jasper now passes the earlier path-discovery failures:
 - fixed-map tracing shows Wine replacing its own ELF-load mappings as expected;
   the official preloader still warns that its default low/high reservations lie
   outside Jasper's bounded private user windows.
+- the bounded compatibility VFS now performs standard lexical normalization of
+  `.`, `..` and repeated separators without allowing escape above `/`;
+- Wine's pinned upstream `c_20127.nls`, `locale.nls` and `l_intl.nls` are
+  exposed under `/usr/share/wine/nls`; all three now open and `fstat`
+  successfully instead of returning `ENOENT`.
 
 The current Jasper run reaches Wine prefix creation, creates the wineserver
 temp-state file, and passes `fcntl`/`fstat`, but later aborts in glibc with

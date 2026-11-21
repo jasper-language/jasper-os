@@ -5,12 +5,11 @@
 //! Responsibility: expose the exact unmodified upstream `libc.so.6` bytes and stable virtual
 //! identities needed by the real loader. This is not the production VFS.
 
+use alloc::vec::Vec;
 #[cfg(feature = "lifecycle-root-exec-verify")]
 use alloc::sync::Arc;
 #[cfg(feature = "lifecycle-root-exec-verify")]
 use alloc::string::ToString;
-#[cfg(feature = "lifecycle-root-exec-verify")]
-use alloc::vec::Vec;
 #[cfg(feature = "lifecycle-root-exec-verify")]
 use spin::{Mutex, Once};
 #[cfg(feature = "lifecycle-root-exec-verify")]
@@ -155,6 +154,9 @@ pub(crate) const ANDROID_FILE_PATHS: &[&[u8]] = &[
     b"/proc/stat",
     b"/SwiftShader.ini",
     b"/usr/lib/x86_64-linux-gnu/wine/wine-preloader",
+    b"/usr/share/wine/nls/c_20127.nls",
+    b"/usr/share/wine/nls/locale.nls",
+    b"/usr/share/wine/nls/l_intl.nls",
 ];
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
@@ -391,6 +393,9 @@ pub enum DirectoryId {
     UsrLibX86Wine,
     UsrLibX86WineUnix,
     DataWineprefix,
+    UsrShare,
+    UsrShareWine,
+    UsrShareWineNls,
 }
 
 impl DirectoryId {
@@ -430,6 +435,9 @@ impl DirectoryId {
                 Self::UsrLibX86Wine => 27,
                 Self::UsrLibX86WineUnix => 28,
                 Self::DataWineprefix => 29,
+                Self::UsrShare => 30,
+                Self::UsrShareWine => 31,
+                Self::UsrShareWineNls => 32,
             }
     }
 
@@ -469,6 +477,9 @@ impl DirectoryId {
             Self::UsrLibX86Wine => 28,
             Self::UsrLibX86WineUnix => 29,
                 Self::DataWineprefix => 30,
+                Self::UsrShare => 31,
+                Self::UsrShareWine => 32,
+                Self::UsrShareWineNls => 33,
             }
     }
 
@@ -507,6 +518,9 @@ impl DirectoryId {
             value if value == (DIRECTORY_HANDLE_BASE | 28) => Some(Self::UsrLibX86Wine),
             value if value == (DIRECTORY_HANDLE_BASE | 29) => Some(Self::UsrLibX86WineUnix),
             value if value == (DIRECTORY_HANDLE_BASE | 30) => Some(Self::DataWineprefix),
+            value if value == (DIRECTORY_HANDLE_BASE | 31) => Some(Self::UsrShare),
+            value if value == (DIRECTORY_HANDLE_BASE | 32) => Some(Self::UsrShareWine),
+            value if value == (DIRECTORY_HANDLE_BASE | 33) => Some(Self::UsrShareWineNls),
             _ => None,
         }
     }
@@ -548,6 +562,9 @@ impl DirectoryId {
                 b"/usr/lib/x86_64-linux-gnu/wine/x86_64-unix"
             }
             Self::DataWineprefix => b"/data/wineprefix",
+            Self::UsrShare => b"/usr/share",
+            Self::UsrShareWine => b"/usr/share/wine",
+            Self::UsrShareWineNls => b"/usr/share/wine/nls",
         }
     }
 }
@@ -605,6 +622,39 @@ pub struct DirEntry {
     pub node: Node,
 }
 
+/// Canonicalizes an absolute pathname without consulting the namespace.
+///
+/// Linux resolves `.` and `..` lexically for this bounded read-only view.
+/// Parent components clamp at `/`, so a pathname can never escape the
+/// compatibility root. Repeated separators are removed.
+fn normalize_absolute_path(path: &[u8]) -> Option<Vec<u8>> {
+    if !path.starts_with(b"/") {
+        return None;
+    }
+    let mut normalized = Vec::new();
+    normalized.try_reserve(path.len() + 1).ok()?;
+    normalized.push(b'/');
+    for component in path.split(|byte| *byte == b'/') {
+        match component {
+            b"" | b"." => {}
+            b".." => {
+                if normalized.len() > 1 {
+                    if let Some(separator) = normalized.iter().rposition(|byte| *byte == b'/') {
+                        normalized.truncate(separator.max(1));
+                    }
+                }
+            }
+            _ => {
+                if normalized.len() > 1 {
+                    normalized.push(b'/');
+                }
+                normalized.extend_from_slice(component);
+            }
+        }
+    }
+    Some(normalized)
+}
+
 /// Resolves one Linux-compatible absolute path to a verification file.
 ///
 /// 解析已知绝对路径；其他路径（包括 `/etc/ld.so.cache`）返回 `None`，由调用者产生
@@ -616,6 +666,8 @@ pub fn lookup(path: &[u8]) -> Option<FileId> {
     {
         return None;
     }
+    let normalized = normalize_absolute_path(path)?;
+    let path = normalized.as_slice();
     if let Some(index) = ANDROID_FILE_PATHS
         .iter()
         .position(|candidate| *candidate == path)
@@ -660,6 +712,8 @@ pub fn lookup(path: &[u8]) -> Option<FileId> {
 ///
 /// 将绝对路径解析为有界命名空间中的文件或目录；未知路径返回 `None`。
 pub fn lookup_node(path: &[u8]) -> Option<Node> {
+    let normalized = normalize_absolute_path(path)?;
+    let path = normalized.as_slice();
     let directory = match path {
         b"/" => Some(DirectoryId::Root),
         b"/lib" => Some(DirectoryId::Lib),
@@ -673,6 +727,9 @@ pub fn lookup_node(path: &[u8]) -> Option<Node> {
         b"/usr/lib/x86_64-linux-gnu/wine/x86_64-unix" => {
             Some(DirectoryId::UsrLibX86WineUnix)
         }
+        b"/usr/share" => Some(DirectoryId::UsrShare),
+        b"/usr/share/wine" => Some(DirectoryId::UsrShareWine),
+        b"/usr/share/wine/nls" => Some(DirectoryId::UsrShareWineNls),
         b"/system" => Some(DirectoryId::System),
         b"/system/bin" => Some(DirectoryId::SystemBin),
         b"/system/lib64" => Some(DirectoryId::SystemLib64),
@@ -721,6 +778,9 @@ pub fn lookup_node(path: &[u8]) -> Option<Node> {
         b"/usr/lib/x86_64-linux-gnu/wine/x86_64-unix" => {
             Some(DirectoryId::UsrLibX86WineUnix)
         }
+        b"/usr/share" => Some(DirectoryId::UsrShare),
+        b"/usr/share/wine" => Some(DirectoryId::UsrShareWine),
+        b"/usr/share/wine/nls" => Some(DirectoryId::UsrShareWineNls),
         b"/system" => Some(DirectoryId::System),
         b"/system/bin" => Some(DirectoryId::SystemBin),
         b"/system/lib64" => Some(DirectoryId::SystemLib64),
@@ -883,6 +943,10 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         DirEntry {
             name: b"lib",
             node: Node::Directory(DirectoryId::UsrLib),
+        },
+        DirEntry {
+            name: b"share",
+            node: Node::Directory(DirectoryId::UsrShare),
         },
     ];
     const USR_BIN: &[DirEntry] = &[
@@ -1150,6 +1214,28 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         name: b"metal2vulkan",
         node: Node::Directory(DirectoryId::DataCacheMetal),
     }];
+    const USR_SHARE: &[DirEntry] = &[DirEntry {
+        name: b"wine",
+        node: Node::Directory(DirectoryId::UsrShareWine),
+    }];
+    const USR_SHARE_WINE: &[DirEntry] = &[DirEntry {
+        name: b"nls",
+        node: Node::Directory(DirectoryId::UsrShareWineNls),
+    }];
+    const USR_SHARE_WINE_NLS: &[DirEntry] = &[
+        DirEntry {
+            name: b"c_20127.nls",
+            node: Node::File(FileId::AndroidFile(93)),
+        },
+        DirEntry {
+            name: b"locale.nls",
+            node: Node::File(FileId::AndroidFile(94)),
+        },
+        DirEntry {
+            name: b"l_intl.nls",
+            node: Node::File(FileId::AndroidFile(95)),
+        },
+    ];
     match directory {
         DirectoryId::Root => ROOT,
         DirectoryId::Lib => LIB,
@@ -1180,6 +1266,9 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         DirectoryId::DataWineprefix => &[],
         DirectoryId::DataCache => DATA_CACHE,
         DirectoryId::DataCacheMetal => &[],
+        DirectoryId::UsrShare => USR_SHARE,
+        DirectoryId::UsrShareWine => USR_SHARE_WINE,
+        DirectoryId::UsrShareWineNls => USR_SHARE_WINE_NLS,
     }
 }
 
