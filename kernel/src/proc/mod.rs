@@ -5055,6 +5055,14 @@ pub(crate) fn linux_install_rw_file(
                 close_on_exec,
             )
             .map_err(|_| ProcError::NoTaskSlot)?;
+        let access_mode = match (readable, writable) {
+            (true, true) => 2,
+            (false, true) => 1,
+            _ => 0,
+        };
+        if !linux.fds.set_fd_status_flags(fd.fd(), access_mode) {
+            return Err(ProcError::NoTaskSlot);
+        }
         Ok(fd.fd())
     })
     .ok()

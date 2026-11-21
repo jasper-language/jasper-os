@@ -156,6 +156,15 @@ if [ -n "$ROOT_ANDROID_TREE" ]; then
       debugfs -w -R "sif $destination mode 0100644" "$PARTITION" >/dev/null
     fi
   done < <(find "$ROOT_ANDROID_TREE" -type f -print0)
+  while IFS= read -r -d '' source; do
+    relative=${source#"$ROOT_ANDROID_TREE"/}
+    destination="/$relative"
+    target=$(readlink "$source")
+    debugfs -w -R "rm $destination" "$PARTITION" >/dev/null 2>&1 || true
+    debugfs -w -R "symlink $destination $target" "$PARTITION" >/dev/null
+    debugfs -R "stat $destination" "$PARTITION" 2>/dev/null |
+      grep -q 'Type: symlink'
+  done < <(find "$ROOT_ANDROID_TREE" -type l -print0)
 fi
 if [ -n "$ROOT_ANDROID_LINKER_CONFIG" ]; then
   [[ -f "$ROOT_ANDROID_LINKER_CONFIG" ]]

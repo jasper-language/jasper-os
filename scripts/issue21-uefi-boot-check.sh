@@ -57,6 +57,7 @@ case "$CARGO_TARGET" in
 esac
 LIMIT="${ISSUE21_UEFI_TIMEOUT:-45}"
 MODE="${ISSUE21_UEFI_MODE:-normal}"
+REUSE_ROOT="${ISSUE21_REUSE_ROOT:-0}"
 if [ -z "${ISSUE21_UEFI_TIMEOUT:-}" ] &&
   { [ "$MODE" = android-art ] || [ "$MODE" = android-apk ]; }; then
   LIMIT=900
@@ -144,7 +145,7 @@ fi
 
 # 仅清理本脚本固定命名的派生产物；证据目录必须独占，防止陈旧日志混入。
 # Remove only this script's fixed derived files; evidence output must be fresh.
-if [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
+if [ "$REUSE_ROOT" != 1 ] && [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
   rm -f -- "$IMAGE" "$ESP_IMAGE" "$UEFI_ESP" "$OVMF_VARS"
 fi
 
@@ -208,17 +209,36 @@ run_lifecycle() {
   fi
 }
 
-if [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
+if [ "$REUSE_ROOT" != 1 ] && [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
   run_lifecycle jasper-gpt-image \
     "$IMAGE" 38654705664 >"$OUT/gpt.log" 2>&1
   run_lifecycle jasper-esp-format \
     "$IMAGE" 38654705664 >"$OUT/esp-format.log" 2>&1
+fi
+if [ "$REUSE_ROOT" = 1 ] || [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
+  if [ "$REUSE_ROOT" = 1 ]; then
+    run_lifecycle jasper-esp-format \
+      "$IMAGE" 38654705664 >"$OUT/esp-format.log" 2>&1
+  fi
+  rm -f -- "$UEFI_ESP"
   "$CARGO_TARGET/release/xtask" uefi-managed-esp \
     "$KERNEL" "$KERNEL" \
     "$BOOT_MANAGER" \
     "$UEFI_ESP" >"$OUT/uefi-esp.log" 2>&1
   run_lifecycle jasper-esp-install \
     "$IMAGE" 38654705664 "$UEFI_ESP" >"$OUT/esp-install.log" 2>&1
+  if [ "$REUSE_ROOT" = 1 ]; then
+    dd if=/dev/zero of="$IMAGE" bs=512 seek=34605056 count=131072 \
+      conv=notrunc status=none
+    dd if=/dev/zero of="$IMAGE" bs=512 seek=34736128 count=131072 \
+      conv=notrunc status=none
+    run_lifecycle jasper-control-init \
+      "$IMAGE" 38654705664 "$KERNEL" 1 1 1 1 1 >"$OUT/control-init.log" 2>&1
+    run_lifecycle jasper-control-inspect \
+      "$IMAGE" 38654705664 >"$OUT/control-inspect.log" 2>&1
+  fi
+fi
+if [ "$REUSE_ROOT" != 1 ] && [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
   run_lifecycle jasper-ext4-provision \
     "$IMAGE" 38654705664 >"$OUT/ext4-provision.log" 2>&1
 fi
@@ -287,7 +307,7 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native
       | tee "$OUT/apk-preflight.log"
   fi
 fi
-if [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
+if [ "$REUSE_ROOT" != 1 ] && [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
   bash scripts/issue21-system-root-fixture.sh \
     "$IMAGE" "$TARGET" 1050624 A 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" "$ROOT_PPID_FIXTURE" "$ROOT_ANDROID_TOYBOX" "$ROOT_AOSP_BINDER_TEST" "$ROOT_ANDROID_TREE" "$ROOT_ANDROID_LINKER_CONFIG" >"$OUT/system-root-a.log" 2>&1
   bash scripts/issue21-system-root-fixture.sh \
@@ -314,7 +334,7 @@ fsck.fat -n -v -l "$ESP_IMAGE" >"$OUT/fsck-fat.log" 2>&1
 sgdisk -v "$IMAGE" >"$OUT/sgdisk.log" 2>&1
 grep -q 'No problems found' "$OUT/sgdisk.log"
 
-if [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
+if [ "$REUSE_ROOT" != 1 ] && [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
   cp /usr/share/OVMF/OVMF_VARS_4M.fd "$OVMF_VARS"
 fi
 QEMU_EXTRA=(-monitor none)

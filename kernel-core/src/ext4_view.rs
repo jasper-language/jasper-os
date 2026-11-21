@@ -161,6 +161,17 @@ impl Ext4Reader {
         })
     }
 
+    /// Read the target of a symbolic link without following the final component.
+    pub fn read_symlink(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, Ext4FsError> {
+        let target = self.fs.read_link(path).map_err(Ext4FsError::from_view)?;
+        let target_path = target.as_path();
+        let bytes: &[u8] = target_path.as_ref();
+        if bytes.len() > max_bytes {
+            return Err(Ext4FsError::TooLarge);
+        }
+        Ok(bytes.to_vec())
+    }
+
     /// Read a file only after proving its declared size fits `max_bytes`.
     pub fn read_file(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, Ext4FsError> {
         let metadata = self.fs.metadata(path).map_err(Ext4FsError::from_view)?;
@@ -315,6 +326,12 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "debugfs write failed");
+        let status = Command::new("debugfs")
+            .args(["-w", "-R", "symlink /dir/hello-link hello.txt"])
+            .arg(&image)
+            .status()
+            .unwrap();
+        assert!(status.success(), "debugfs symlink failed");
 
         let status = Command::new("e2fsck")
             .args(["-fy"])
@@ -338,6 +355,7 @@ mod tests {
         let metadata = fs.metadata("/dir/hello.txt").unwrap();
         assert_eq!(metadata.len, 22);
         assert!(!metadata.is_dir);
+        assert_eq!(fs.read_symlink("/dir/hello-link", 64).unwrap(), b"hello.txt");
         let entries = fs.read_dir("/dir", 16).unwrap();
         assert!(entries.iter().any(|entry| {
             entry.name == b"hello.txt" && entry.entry_type == Ext4EntryType::Regular

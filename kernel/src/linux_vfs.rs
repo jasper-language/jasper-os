@@ -8,6 +8,8 @@
 #[cfg(feature = "lifecycle-root-exec-verify")]
 use alloc::sync::Arc;
 #[cfg(feature = "lifecycle-root-exec-verify")]
+use alloc::string::ToString;
+#[cfg(feature = "lifecycle-root-exec-verify")]
 use alloc::vec::Vec;
 #[cfg(feature = "lifecycle-root-exec-verify")]
 use spin::{Mutex, Once};
@@ -18,7 +20,7 @@ use jasper_lifecycle_boot::P0_SYSTEM_BYTES;
 #[cfg(feature = "lifecycle-root-exec-verify")]
 use kernel_core::block::{self, Request, Terminal};
 #[cfg(feature = "lifecycle-root-exec-verify")]
-use kernel_core::ext4_view::{Ext4ByteSource, Ext4Reader, Ext4SourceError};
+use kernel_core::ext4_view::{Ext4ByteSource, Ext4FsError, Ext4Reader, Ext4SourceError};
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
 use crate::blk::BlockDevice;
@@ -153,6 +155,7 @@ pub(crate) const ANDROID_FILE_PATHS: &[&[u8]] = &[
     b"/sys/devices/system/cpu/online",
     b"/proc/stat",
     b"/SwiftShader.ini",
+    b"/usr/lib/x86_64-linux-gnu/wine/wine-preloader",
 ];
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
@@ -388,6 +391,7 @@ pub enum DirectoryId {
     Lib64,
     UsrLibX86Wine,
     UsrLibX86WineUnix,
+    DataWineprefix,
 }
 
 impl DirectoryId {
@@ -426,6 +430,7 @@ impl DirectoryId {
                 Self::Lib64 => 26,
                 Self::UsrLibX86Wine => 27,
                 Self::UsrLibX86WineUnix => 28,
+                Self::DataWineprefix => 29,
             }
     }
 
@@ -464,6 +469,7 @@ impl DirectoryId {
             Self::Lib64 => 27,
             Self::UsrLibX86Wine => 28,
             Self::UsrLibX86WineUnix => 29,
+                Self::DataWineprefix => 30,
             }
     }
 
@@ -501,6 +507,7 @@ impl DirectoryId {
             value if value == (DIRECTORY_HANDLE_BASE | 27) => Some(Self::Lib64),
             value if value == (DIRECTORY_HANDLE_BASE | 28) => Some(Self::UsrLibX86Wine),
             value if value == (DIRECTORY_HANDLE_BASE | 29) => Some(Self::UsrLibX86WineUnix),
+            value if value == (DIRECTORY_HANDLE_BASE | 30) => Some(Self::DataWineprefix),
             _ => None,
         }
     }
@@ -541,6 +548,7 @@ impl DirectoryId {
             Self::UsrLibX86WineUnix => {
                 b"/usr/lib/x86_64-linux-gnu/wine/x86_64-unix"
             }
+            Self::DataWineprefix => b"/data/wineprefix",
         }
     }
 }
@@ -683,6 +691,7 @@ pub fn lookup_node(path: &[u8]) -> Option<Node> {
         b"/data" => Some(DirectoryId::Data),
         b"/data/local" => Some(DirectoryId::DataLocal),
         b"/data/local/tmp" => Some(DirectoryId::DataLocalTmp),
+        b"/data/wineprefix" => Some(DirectoryId::DataWineprefix),
         b"/data/.cache" => Some(DirectoryId::DataCache),
         b"/data/.cache/metal2vulkan" => Some(DirectoryId::DataCacheMetal),
         _ => None,
@@ -730,6 +739,7 @@ pub fn lookup_node(path: &[u8]) -> Option<Node> {
         b"/data" => Some(DirectoryId::Data),
         b"/data/local" => Some(DirectoryId::DataLocal),
         b"/data/local/tmp" => Some(DirectoryId::DataLocalTmp),
+        b"/data/wineprefix" => Some(DirectoryId::DataWineprefix),
         b"/data/.cache" => Some(DirectoryId::DataCache),
         b"/data/.cache/metal2vulkan" => Some(DirectoryId::DataCacheMetal),
         _ => None,
@@ -852,6 +862,10 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         DirEntry {
             name: b"x86_64-unix",
             node: Node::Directory(DirectoryId::UsrLibX86WineUnix),
+        },
+        DirEntry {
+            name: b"wine-preloader",
+            node: Node::File(FileId::AndroidFile(93)),
         },
         DirEntry {
             name: b"wine",
@@ -1118,6 +1132,10 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
             node: Node::Directory(DirectoryId::DataLocal),
         },
         DirEntry {
+            name: b"wineprefix",
+            node: Node::Directory(DirectoryId::DataWineprefix),
+        },
+        DirEntry {
             name: b".cache",
             node: Node::Directory(DirectoryId::DataCache),
         },
@@ -1164,6 +1182,7 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         DirectoryId::Data => DATA,
         DirectoryId::DataLocal => DATA_LOCAL,
         DirectoryId::DataLocalTmp => DATA_LOCAL_TMP,
+        DirectoryId::DataWineprefix => &[],
         DirectoryId::DataCache => DATA_CACHE,
         DirectoryId::DataCacheMetal => &[],
     }
@@ -1202,6 +1221,39 @@ pub fn node_from_inode(inode: u64) -> Option<Node> {
     } else {
         search(root, inode)
     }
+}
+
+/// Resolve a bounded sequence of symlinks and read the final regular file.
+#[cfg(feature = "lifecycle-root-exec-verify")]
+fn read_root_file(
+    root: &Ext4Reader,
+    path: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, Ext4FsError> {
+    let mut current = path.to_string();
+    for _ in 0..8 {
+        if !root.metadata(&current)?.is_symlink {
+            return root.read_file(&current, max_bytes);
+        }
+        let target = root.read_symlink(&current, 4096)?;
+        let target = core::str::from_utf8(&target).map_err(|_| Ext4FsError::InvalidPath)?;
+        if target.is_empty()
+            || target.starts_with('/')
+            || target.split('/').any(|part| part == "..")
+        {
+            return Err(Ext4FsError::InvalidPath);
+        }
+        let parent = current
+            .rsplit_once('/')
+            .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
+            .ok_or(Ext4FsError::InvalidPath)?;
+        current = if parent == "/" {
+            alloc::format!("/{target}")
+        } else {
+            alloc::format!("{parent}/{target}")
+        };
+    }
+    Err(Ext4FsError::TooLarge)
 }
 
 /// Installs the libc bytes read from the selected System A/B root.
@@ -1343,11 +1395,9 @@ pub fn root_executable(
     let root = Ext4Reader::open(source).map_err(|_| RootExecutableError::Io)?;
     let logical_path =
         core::str::from_utf8(logical_path.as_bytes()).map_err(|_| RootExecutableError::Io)?;
-    let executable = root
-        .read_file(logical_path, executable_len)
-        .map_err(|_| RootExecutableError::Io)?;
-    let interpreter = root
-        .read_file(ROOT_INTERPRETER_PATH, interpreter_len)
+    let executable =
+        read_root_file(&root, logical_path, executable_len).map_err(|_| RootExecutableError::Io)?;
+    let interpreter = read_root_file(&root, ROOT_INTERPRETER_PATH, interpreter_len)
         .map_err(|_| RootExecutableError::Io)?;
     if executable.len() != executable_len || interpreter.len() != interpreter_len {
         return Err(RootExecutableError::Io);

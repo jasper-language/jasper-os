@@ -42,7 +42,9 @@ int dladdr(const void *address, Dl_info *info)
     const char *fallback;
 
     if (!next_dladdr) next_dladdr = dlsym(RTLD_NEXT, "dladdr");
-    if (next_dladdr && next_dladdr(address, info)) return 1;
+    if (next_dladdr && next_dladdr(address, info) &&
+        info->dli_fname && *info->dli_fname)
+        return 1;
 
     /*
      * Jasper's bounded ELF loader does not populate glibc's complete DSO
@@ -50,7 +52,7 @@ int dladdr(const void *address, Dl_info *info)
      * Wine's own binary remains unmodified; this is a Linux compatibility
      * adapter for the incomplete host loader interface.
      */
-    if (!dl_iterate_phdr(find_object, &lookup)) return 0;
+    dl_iterate_phdr(find_object, &lookup);
     fallback = lookup.name;
     if (!fallback || !*fallback) fallback = getenv("JASPER_WINE_NTDLL_PATH");
     if (!fallback || !*fallback) return 0;

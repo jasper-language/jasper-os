@@ -1082,10 +1082,19 @@ fn execute_root_dynamic_programs(
         let wineserver = root
             .read_file("/usr/lib/x86_64-linux-gnu/wine/wineserver", 4 * 1024 * 1024)
             .map_err(|_| HealthError::RootExecute)?;
+        let wine_preloader = root
+            .read_file(
+                "/usr/lib/x86_64-linux-gnu/wine/wine-preloader.static",
+                4 * 1024 * 1024,
+            )
+            .map_err(|_| HealthError::RootExecute)?;
         let interpreter = root
             .read_file("/lib64/ld-linux-x86-64.so.2", 4 * 1024 * 1024)
             .map_err(|_| HealthError::RootExecute)?;
-        if !crate::linux_vfs::install_root_program(
+        if !crate::linux_vfs::install_root_android_file(
+            b"/usr/lib/x86_64-linux-gnu/wine/wine-preloader",
+            wine_preloader.clone(),
+        ) || !crate::linux_vfs::install_root_program(
             origin,
             b"/usr/lib/x86_64-linux-gnu/wine/wine",
             wine.len(),
@@ -1094,6 +1103,11 @@ fn execute_root_dynamic_programs(
             origin,
             b"/usr/lib/x86_64-linux-gnu/wine/wineserver",
             wineserver.len(),
+            interpreter.len(),
+        ) || !crate::linux_vfs::install_root_program(
+            origin,
+            b"/usr/lib/x86_64-linux-gnu/wine/wine-preloader",
+            wine_preloader.len(),
             interpreter.len(),
         ) {
             return Err(HealthError::RootExecute);

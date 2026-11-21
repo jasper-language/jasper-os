@@ -38,6 +38,7 @@ static SYSCALL_TRACE_REMAINING: AtomicU32 = AtomicU32::new(SYSCALL_TRACE_BUDGET)
 #[cfg(any(
     feature = "compat-dynamic-libc-verify",
     feature = "android-art-verify",
+    feature = "compat-wine-verify",
     feature = "vulkan-metal2vulkan-verify"
 ))]
 static PATH_TRACE_REMAINING: AtomicU32 = AtomicU32::new(512);
@@ -393,6 +394,7 @@ static COMPAT: IrqSpinLock<CompatState> =
     IrqSpinLock::ranked(crate::lockorder::LINUX_COMPAT, CompatState::new());
 
 const LINUX_CACHE_ROOT: &[u8] = b"/data/.cache/metal2vulkan";
+const LINUX_CACHE_ROOTS: &[&[u8]] = &[LINUX_CACHE_ROOT, b"/tmp", b"/data/wineprefix"];
 const LINUX_CACHE_FILE_HANDLE_BASE: u64 = 0x4a53_4346_0000_0000;
 const LINUX_CACHE_DIR_HANDLE_BASE: u64 = 0x4a53_4344_0000_0000;
 
@@ -437,6 +439,7 @@ fn trace_request(args: &SyscallArgs) {
 #[cfg(any(
     feature = "compat-dynamic-libc-verify",
     feature = "android-art-verify",
+    feature = "compat-wine-verify",
     feature = "vulkan-metal2vulkan-verify"
 ))]
 fn trace_path(kind: &str, path: &[u8]) {
@@ -475,6 +478,7 @@ fn trace_path(kind: &str, path: &[u8]) {
 #[cfg(any(
     feature = "compat-dynamic-libc-verify",
     feature = "android-art-verify",
+    feature = "compat-wine-verify",
     feature = "vulkan-metal2vulkan-verify"
 ))]
 fn trace_path_address(pid: ObjId, kind: &str, address: u64) {
@@ -6332,6 +6336,11 @@ fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<(u64, u64), CompatErrno> {
         resolved
     };
     drop(path);
+    #[cfg(feature = "compat-wine-verify")]
+    crate::kprintln!(
+        "[JSR-WINE-EXEC] path={}",
+        core::str::from_utf8(&resolved).unwrap_or("<non-utf8>")
+    );
     #[cfg(feature = "vulkan-metal2vulkan-verify")]
     trace_path("execve", &resolved);
     let argv = linux_string_vector(args[1])?;
@@ -15093,11 +15102,17 @@ fn raise_sigpipe(pid: ObjId) {
     }
 }
 
+fn linux_cache_root(path: &[u8]) -> Option<&'static [u8]> {
+    LINUX_CACHE_ROOTS.iter().copied().find(|root| {
+        path == *root
+            || path
+                .strip_prefix(*root)
+                .is_some_and(|suffix| suffix.starts_with(b"/"))
+    })
+}
+
 fn linux_cache_path(path: &[u8]) -> bool {
-    path == LINUX_CACHE_ROOT
-        || path
-            .strip_prefix(LINUX_CACHE_ROOT)
-            .is_some_and(|suffix| suffix.starts_with(b"/"))
+    linux_cache_root(path).is_some()
 }
 
 fn linux_cache_file_id(handle: u64) -> Option<u32> {
@@ -15110,6 +15125,34 @@ fn linux_cache_dir_id(handle: u64) -> Option<u32> {
     handle
         .checked_sub(LINUX_CACHE_DIR_HANDLE_BASE)
         .and_then(|id| u32::try_from(id).ok())
+}
+
+fn linux_cache_metadata(path: &[u8]) -> Option<(u64, u64, u64, u32)> {
+    let state = COMPAT.lock();
+    if let Some(directory) = state
+        .cache_dirs
+        .iter()
+        .find(|directory| directory.path == path)
+    {
+        return Some((
+            LINUX_CACHE_DIR_HANDLE_BASE | u64::from(directory.id),
+            2,
+            4096,
+            0o040555,
+        ));
+    }
+    state
+        .cache_files
+        .iter()
+        .find(|file| file.path == path)
+        .map(|file| {
+            (
+                LINUX_CACHE_FILE_HANDLE_BASE | u64::from(file.id),
+                1,
+                file.bytes.len() as u64,
+                0o100666,
+            )
+        })
 }
 
 fn linux_cache_dir_path(handle: u64) -> Option<alloc::vec::Vec<u8>> {
@@ -15162,11 +15205,11 @@ fn linux_cache_children(
     Some(children)
 }
 
-fn linux_cache_ensure_root(state: &mut CompatState) -> Option<u32> {
+fn linux_cache_ensure_root(state: &mut CompatState, root: &[u8]) -> Option<u32> {
     if let Some(directory) = state
         .cache_dirs
         .iter()
-        .find(|directory| directory.path == LINUX_CACHE_ROOT)
+        .find(|directory| directory.path == root)
     {
         return Some(directory.id);
     }
@@ -15174,22 +15217,22 @@ fn linux_cache_ensure_root(state: &mut CompatState) -> Option<u32> {
     // workload. Metal2Vulkan creates and removes several small cache entries;
     // allowing a later Vec growth would make otherwise complete executions fail
     // the steady-state heap check.
-    state.cache_dirs.try_reserve(16).ok()?;
-    state.cache_files.try_reserve(64).ok()?;
+    state.cache_dirs.try_reserve(1).ok()?;
+    state.cache_files.try_reserve(1).ok()?;
     let id = state.next_cache_node_id;
     state.next_cache_node_id = state.next_cache_node_id.checked_add(1)?;
     state.cache_dirs.try_reserve(1).ok()?;
     state.cache_dirs.push(LinuxCacheDir {
         id,
-        path: LINUX_CACHE_ROOT.to_vec(),
+        path: root.to_vec(),
     });
     Some(id)
 }
 
-fn linux_cache_parent(path: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+fn linux_cache_parent(path: &[u8], root: &[u8]) -> Option<alloc::vec::Vec<u8>> {
     let path = path.strip_suffix(b"/").unwrap_or(path);
     let slash = path.iter().rposition(|byte| *byte == b'/')?;
-    if slash < LINUX_CACHE_ROOT.len() {
+    if slash < root.len() {
         None
     } else {
         Some(path[..slash].to_vec())
@@ -15209,9 +15252,10 @@ fn linux_cache_open(
     const O_DIRECTORY: u64 = 0x10000;
     let readable = flags & O_ACCMODE != 1;
     let writable = flags & O_ACCMODE != 0;
+    let root = linux_cache_root(path).ok_or(CompatErrno::NoEntry)?;
     let handle = {
         let mut state = COMPAT.lock();
-        linux_cache_ensure_root(&mut state).ok_or(CompatErrno::NoSpace)?;
+        linux_cache_ensure_root(&mut state, root).ok_or(CompatErrno::NoSpace)?;
         if let Some(directory) = state
             .cache_dirs
             .iter()
@@ -15238,7 +15282,7 @@ fn linux_cache_open(
                 if flags & O_DIRECTORY != 0 {
                     return Err(CompatErrno::NotDirectory);
                 }
-                let parent = linux_cache_parent(path).ok_or(CompatErrno::NoEntry)?;
+                let parent = linux_cache_parent(path, root).ok_or(CompatErrno::NoEntry)?;
                 if !state
                     .cache_dirs
                     .iter()
@@ -15273,14 +15317,15 @@ fn linux_cache_open(
 }
 
 fn linux_cache_create_dir(path: &[u8]) -> Result<(), CompatErrno> {
+    let root = linux_cache_root(path).ok_or(CompatErrno::NoEntry)?;
     let mut state = COMPAT.lock();
-    linux_cache_ensure_root(&mut state).ok_or(CompatErrno::NoSpace)?;
+    linux_cache_ensure_root(&mut state, root).ok_or(CompatErrno::NoSpace)?;
     if state.cache_dirs.iter().any(|directory| directory.path == path)
         || state.cache_files.iter().any(|file| file.path == path)
     {
         return Ok(());
     }
-    let parent = linux_cache_parent(path).ok_or(CompatErrno::NoEntry)?;
+    let parent = linux_cache_parent(path, root).ok_or(CompatErrno::NoEntry)?;
     if !state
         .cache_dirs
         .iter()
@@ -15301,7 +15346,7 @@ fn linux_cache_create_dir(path: &[u8]) -> Result<(), CompatErrno> {
 fn linux_cache_unlink(path: &[u8], remove_dir: bool) -> Result<(), CompatErrno> {
     let mut state = COMPAT.lock();
     if remove_dir {
-        if path == LINUX_CACHE_ROOT {
+        if LINUX_CACHE_ROOTS.contains(&path) {
             return Err(CompatErrno::Perm);
         }
         if state.cache_files.iter().any(|file| {
@@ -15334,6 +15379,7 @@ fn linux_cache_unlink(path: &[u8], remove_dir: bool) -> Result<(), CompatErrno> 
 }
 
 fn linux_cache_rename(old_path: &[u8], new_path: &[u8]) -> Result<(), CompatErrno> {
+    let root = linux_cache_root(new_path).ok_or(CompatErrno::NoEntry)?;
     let mut state = COMPAT.lock();
     if state
         .cache_files
@@ -15342,7 +15388,7 @@ fn linux_cache_rename(old_path: &[u8], new_path: &[u8]) -> Result<(), CompatErrn
     {
         return Err(CompatErrno::Exists);
     }
-    let parent = linux_cache_parent(new_path).ok_or(CompatErrno::NoEntry)?;
+    let parent = linux_cache_parent(new_path, root).ok_or(CompatErrno::NoEntry)?;
     if !state
         .cache_dirs
         .iter()
@@ -15455,6 +15501,7 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         feature = "vulkan-metal2vulkan-verify"
     ))]
     trace_path_address(pid, "openat-address", args[1]);
+    let path = linux_c_string(args[1], 4096)?;
     let flags = args[2];
     let path_only = flags & O_PATH != 0;
     if flags & 3 == 3
@@ -15472,9 +15519,15 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 | O_APPEND)
             != 0
     {
+        #[cfg(feature = "compat-wine-verify")]
+        trace_path("openat-denied", &path);
         return Err(CompatErrno::Perm);
     }
-    let path = linux_c_string(args[1], 4096)?;
+    #[cfg(feature = "compat-wine-verify")]
+    {
+        trace_path("openat", &path);
+        crate::kprintln!("[JSR-WINE-OPEN] flags={:#x}", args[2]);
+    }
     #[cfg(any(
         feature = "compat-dynamic-libc-verify",
         feature = "android-art-verify",
@@ -15713,6 +15766,21 @@ fn linux_creat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if args[1] & !0o7777 != 0 {
         return Err(CompatErrno::Invalid);
     }
+    let path = resolve_linux_at_path(pid, (-100i64) as u64, args[0])?;
+    #[cfg(feature = "compat-wine-verify")]
+    trace_path("creat", &path);
+    if linux_cache_path(&path) {
+        const O_WRONLY: u64 = 1;
+        const O_CREAT: u64 = 0x40;
+        const O_TRUNC: u64 = 0x200;
+        let result = linux_cache_open(pid, &path, O_WRONLY | O_CREAT | O_TRUNC, false);
+        #[cfg(feature = "compat-wine-verify")]
+        crate::kprintln!(
+            "[JSR-WINE-CREAT] result={:?}",
+            result.as_ref().map_err(|error| *error)
+        );
+        return result;
+    }
     linux_faccessat(pid, [(-100i64) as u64, args[0], 0, 0, 0, 0], false)?;
     Err(CompatErrno::ReadOnly)
 }
@@ -15897,6 +15965,8 @@ fn linux_mkdirat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::Invalid);
     }
     let path = resolve_linux_at_path(pid, args[0], args[1])?;
+    #[cfg(feature = "compat-wine-verify")]
+    trace_path("mkdirat", &path);
     if linux_cache_path(&path) {
         linux_cache_create_dir(&path)?;
         return Ok(0);
@@ -16267,6 +16337,13 @@ fn linux_c_string(address: u64, max: usize) -> Result<alloc::vec::Vec<u8>, Compa
 fn linux_fstat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    #[cfg(feature = "compat-wine-verify")]
+    crate::kprintln!(
+        "[JSR-WINE-FSTAT] fd={} kind={:?} handle={:#x}",
+        fd,
+        entry.kind,
+        entry.handle
+    );
     if entry.kind == compat_core::fd::CompatKind::Path {
         let node = proc::linux_path_node(pid, fd).ok_or(CompatErrno::BadFd)?;
         write_linux_stat(args[1], node)?;
@@ -16302,6 +16379,23 @@ fn linux_fstat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .map(|stat| stat.len() as u64)
             .unwrap_or(0);
         write_synthetic_stat(args[1], entry.handle, 1, size, 0o100444)?;
+        return Ok(0);
+    }
+    if linux_cache_dir_id(entry.handle).is_some() {
+        write_synthetic_stat(args[1], entry.handle, 2, 4096, 0o040555)?;
+        return Ok(0);
+    }
+    if let Some(id) = linux_cache_file_id(entry.handle) {
+        let size = COMPAT
+            .lock()
+            .cache_files
+            .iter()
+            .find(|file| file.id == id)
+            .map(|file| file.bytes.len() as u64)
+            .ok_or(CompatErrno::BadFd)?;
+        write_synthetic_stat(args[1], entry.handle, 1, size, 0o100666)?;
+        #[cfg(feature = "compat-wine-verify")]
+        crate::kprintln!("[JSR-WINE-FSTAT] cache-file=true size={}", size);
         return Ok(0);
     }
     let node = crate::linux_vfs::FileId::from_handle(entry.handle)
@@ -16403,6 +16497,10 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             resolved
         }
     };
+    if let Some((inode, links, size, mode)) = linux_cache_metadata(&resolved) {
+        write_synthetic_stat(args[2], inode, links, size, mode)?;
+        return Ok(0);
+    }
     let node = crate::linux_vfs::lookup_node(&resolved).ok_or(CompatErrno::NoEntry)?;
     write_linux_stat(args[2], node)?;
     Ok(0)
@@ -16475,6 +16573,10 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                     resolved
                 }
             };
+            if let Some((inode, links, size, mode)) = linux_cache_metadata(&resolved) {
+                write_synthetic_statx(args[4], inode, links as u32, size, mode)?;
+                return Ok(0);
+            }
             let node = crate::linux_vfs::lookup_node(&resolved).ok_or(CompatErrno::NoEntry)?;
             let size = if node.is_directory() {
                 4096
@@ -16715,6 +16817,8 @@ fn linux_fcntl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const O_PATH: u64 = 0x20_0000;
     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    #[cfg(feature = "compat-wine-verify")]
+    crate::kprintln!("[JSR-WINE-FCNTL] fd={} cmd={} arg={}", fd, args[1], args[2]);
     match args[1] {
         F_GETFD => Ok(u64::from(entry.close_on_exec)),
         F_GETFL => {
@@ -19499,14 +19603,19 @@ fn linux_syncfs(pid: ObjId, raw_fd: u64) -> Result<u64, CompatErrno> {
     linux_sync_fd(pid, raw_fd, false)
 }
 
-/// Implements `readlink(2)` for `/proc/self/exe`.
+/// Implements `readlink(2)` for `/proc/self/exe` and non-link VFS entries.
 ///
-/// 返回本进程真实执行路径；其他虚拟路径返回 `ENOENT`。结果按 Linux 语义不加 NUL，
+/// 返回本进程真实执行路径。存在的普通文件或目录按 Linux 语义返回 `EINVAL`，
+/// 不存在的路径返回 `ENOENT`；glibc `realpath` 依赖这一区分。结果不加 NUL，
 /// 并返回放入用户缓冲区的字节数。
 fn linux_readlink(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let path = linux_c_string(args[0], 4096)?;
     if path != b"/proc/self/exe" {
-        return Err(CompatErrno::NoEntry);
+        return Err(if crate::linux_vfs::lookup_node(&path).is_some() {
+            CompatErrno::Invalid
+        } else {
+            CompatErrno::NoEntry
+        });
     }
     let capacity = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
     if capacity > 4096 {
@@ -20330,7 +20439,7 @@ fn linux_access(path: u64) -> Result<u64, CompatErrno> {
     let bytes = linux_c_string(path, 4096)?;
     #[cfg(feature = "compat-dynamic-libc-verify")]
     trace_path("access", &bytes);
-    if crate::linux_vfs::lookup_node(&bytes).is_some() {
+    if linux_cache_metadata(&bytes).is_some() || crate::linux_vfs::lookup_node(&bytes).is_some() {
         Ok(0)
     } else {
         Err(CompatErrno::NoEntry)
@@ -20394,6 +20503,9 @@ fn linux_faccessat(
                     resolved
                 }
             };
+            if linux_cache_metadata(&resolved).is_some() {
+                return Ok(0);
+            }
             crate::linux_vfs::lookup_node(&resolved).ok_or(CompatErrno::NoEntry)?
         }
         Err(CompatErrno::NoEntry) if flags & AT_EMPTY_PATH != 0 => {

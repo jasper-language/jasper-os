@@ -2,9 +2,9 @@
 
 Updated: 2026-11-21
 
-Status: **planned / partial groundwork**.
+Status: **in-progress / partial groundwork**.
 
-The compatibility DAG node remains `planned` until the unmodified upstream
+The compatibility DAG node remains `in-progress` until the unmodified upstream
 Linux Wine build installs, starts, updates, unloads and executes a Windows
 executable through Jasper's real Linux ABI.
 
@@ -28,22 +28,29 @@ executable through Jasper's real Linux ABI.
 
 ## Remaining blocker
 
-Inside Jasper, Wine loads the executable and reaches the Unix ntdll loader, but
-`dladdr(init_paths)` cannot recover the path of the manually loaded
-`ntdll.so`. Jasper now exposes the Wine directory hierarchy, interpreter,
-`ntdll.so`, libunwind and the custom preload shim through its bounded Linux VFS;
-the shim also maps `dladdr` through `dl_iterate_phdr` and an explicit path
-environment fallback. The Jasper run still reports
-`wine: cannot get path to ntdll.so`, so glibc/Wine DSO registration remains the
-active compatibility gap. This is not a passing Wine result and the DAG node
-remains in progress.
+Jasper now passes the earlier path-discovery failures:
 
-The next slice must either:
+- `readlinkat` distinguishes existing non-links (`EINVAL`) from missing paths
+  (`ENOENT`), allowing glibc `realpath` to consume the `ntdll.so` path;
+- the root reader follows bounded relative symlinks, and the fixture preserves
+  symlink inodes;
+- Wine's `wine-preloader` is registered as a real executable;
+- `/data/wineprefix` and `/tmp` are available through the bounded writable
+  compatibility namespace;
+- `creat` can create temporary-prefix files, and shared fd status flags report
+  `O_WRONLY` rather than falsely reporting `O_RDONLY`.
 
-1. complete the Linux loader's DSO directory/link-map semantics so `dladdr`
-   reports the actual loaded `ntdll.so` path; and
-2. continue through Wine prefix bootstrap, service creation and the built-in
-   Windows command execution.
+The current Jasper run reaches Wine prefix creation, creates the wineserver
+temp-state file, wraps it as a `FILE *`, and then aborts in glibc with
+`free(): invalid pointer` (`code=134`). The next blocker is therefore heap or
+libc state corruption during wineserver bootstrap, not ELF path discovery.
+
+The next slices must:
+
+1. isolate the glibc heap corruption during wineserver temp-state creation;
+2. complete wineserver process and socket startup;
+3. load the first Windows PE executable and produce `WINE_CMD_OK`;
+4. then stage DXVK/VKD3D-Proton and continue through Direct3D to Vulkan.
 
 The physical Pixel and hardware GPU paths are not part of this first Wine
 acceptance.
