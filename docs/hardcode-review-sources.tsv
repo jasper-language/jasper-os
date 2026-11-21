@@ -52,3 +52,11 @@ vmx-diagnostic	35	runtime	VMX-diagnostic-only-unavailable-field
 fs-entry-name-v1	35	spec	FS-0-versioned-entry-name-64-byte-field
 sandbox-view-path-v1	35	spec	Sandbox-launch-v1-display-path-64-byte-field
 usi-module-version-v1	35	spec	USI-v1-module-version-8-byte-field
+fdt-parser-depth-policy	35	policy	FDT-parser-depth-bound-strict-and-walk-paths
+pci-capability-chain-policy	35	policy	PCI-config-capability-list-bounded-fail-closed
+timer-progress-batch-policy	35	policy	deferred-timer-debt-batched-without-loss
+scheduler-waitgraph-policy	35	policy	PI-wait-graph-chain-and-cycle-bound
+scheduler-class-taxonomy	35	policy	built-in-scheduling-class-id-space
+scheduler-burst-policy	35	policy	CPU-limit-burst-and-long-term-starvation-bound
+trace-tag-envelope-policy	35	policy	trace-event-fixed-tag-envelope-visible-truncation
+heap-structural-alignment	35	policy	allocator-free-node-and-SIMD-safe-alignment

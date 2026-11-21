@@ -23,7 +23,7 @@ const HEADER_LEN: usize = 40;
 /// This is a parser-owned pre-allocation safety policy, not a hardware fact.
 /// 该值是解析器在无堆、固定 cells 栈下防止恶意深度输入的显式安全策略，
 /// 不是硬件设备树事实。
-pub const MAX_DEPTH: usize = 16;
+pub const MAX_DEPTH: usize = 16; // JASPER-HARDCODE-REVIEW: issue=35 source=fdt-parser-depth-policy reason=bounded-recursion-with-strict-and-walk-path-negative-tests
 
 const TOKEN_BEGIN_NODE: u32 = 1;
 const TOKEN_END_NODE: u32 = 2;

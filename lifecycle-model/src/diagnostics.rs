@@ -11,7 +11,7 @@
 pub const SCHEMA_VERSION: u16 = 1;
 /// 单个事件保存的直接原因链上限。
 /// Maximum direct cause chain stored in one event.
-pub const MAX_CAUSES: usize = 8; // JASPER-HARDCODE-REVIEW: issue=35 source=diagnostic-usi-v1-contract reason=fixed-cause-id-array-in-versioned-diagnostic-record
+pub const MAX_CAUSES: usize = 8; // JASPER-HARDCODE-REVIEW: issue=21 source=diagnostic-usi-v1-contract reason=fixed-cause-id-array-in-versioned-diagnostic-record
 /// 组件稳定标识的最大字节数。
 /// Maximum byte length of a stable component identifier.
 pub const MAX_COMPONENT_ID: usize = 32;

@@ -10,9 +10,9 @@
 //!
 //! 时钟单位由调用方决定，这里只比较差值。时钟倒退时放行，时钟异常不能让定时器停摆。
 
-/// 一次结算最多补记的 tick 数；再多的欠账丢弃，不让补记本身变成新的长事务。
+/// 一次结算最多补记的 tick 数；剩余欠账保留到后续调用，不静默丢弃。
 /// Most deferred ticks settled at once.
-pub const MAX_SETTLE: u32 = 64;
+pub const MAX_SETTLE: u32 = 64; // JASPER-HARDCODE-REVIEW: issue=35 source=timer-progress-batch-policy reason=per-call-drain-bound-with-remaining-debt-preserved
 
 /// 允许连续多少次短窗口的完整事务。
 /// Consecutive short windows tolerated before events are deferred.
@@ -70,7 +70,7 @@ impl Progress {
     /// Take the deferred ticks (at most [`MAX_SETTLE`]).
     pub fn take_deferred(&mut self) -> u32 {
         let n = if self.deferred > MAX_SETTLE { MAX_SETTLE } else { self.deferred };
-        self.deferred = 0;
+        self.deferred -= n;
         n
     }
 }
@@ -116,10 +116,14 @@ mod tests {
 
     #[test]
     fn deferred_is_bounded_and_cleared() {
-        let mut p = Progress { deferred: u32::MAX, ..Progress::default() };
+        let mut p = Progress {
+            deferred: MAX_SETTLE + 1,
+            ..Progress::default()
+        };
         p.defer();
-        assert_eq!(p.deferred, u32::MAX);
+        assert_eq!(p.deferred, MAX_SETTLE + 2);
         assert_eq!(p.take_deferred(), MAX_SETTLE);
+        assert_eq!(p.take_deferred(), 2);
         assert_eq!(p.take_deferred(), 0);
     }
 }

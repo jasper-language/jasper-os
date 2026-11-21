@@ -1,5 +1,5 @@
 {
-  "baseline_total": 154,
+  "baseline_total": 145,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,7 +10,7 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 99,
+    "explicit-safety-policy": 90,
     "protocol-abi": 42,
     "test-demo-fixture": 11
   },
@@ -416,16 +416,6 @@
       "source": "max_tasks: 64,"
     },
     {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "f806fec0713ac1df2da2c624a3c297a8da3beff03f919db81cb45d25a6cdd95e",
-      "line": 26,
-      "path": "kernel-core/src/fdt.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_DEPTH: usize = 16;"
-    },
-    {
       "category": "protocol-abi",
       "count": 1,
       "fingerprint": "487918563738a9d008dd39c6600714250c1f50175980fefbc6bbf8a2dcabe0e7",
@@ -484,16 +474,6 @@
       "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
       "source": "const MIN_BLOCK: usize = if size_of::<Node>() > MIN_ALIGN { size_of::<Node>() } else { MIN_ALIGN };"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "9e6536c25d735f4f29c9763dbb2a18fba438ae9826b7949ad4a34366e8ab5161",
-      "line": 29,
-      "path": "kernel-core/src/heap.rs",
-      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
-      "rules": "HC-G1",
-      "source": "pub const MIN_ALIGN: usize = 16;"
     },
     {
       "category": "protocol-abi",
@@ -586,16 +566,6 @@
       "source": "pub const MAX_BARS: usize = 6;"
     },
     {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "366ad2f2c266d80e0cab03fddd9a469ddea22f490e43566d0df938fb14de6b23",
-      "line": 30,
-      "path": "kernel-core/src/pci.rs",
-      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_CAPABILITY_HOPS: usize = 48;"
-    },
-    {
       "category": "test-demo-fixture",
       "count": 1,
       "fingerprint": "4589291c12352ff73735e652a9137daac4d7cec91cf2f51a551d3ca6891a94da",
@@ -648,36 +618,6 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "19be1d8d570f80464b8d5eebe01860bf80af224e90faad2fa17e01a82840ad36",
-      "line": 14,
-      "path": "kernel-core/src/sched/class.rs",
-      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_SCHED_CLASSES: usize = 8;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "94e9f955d090ab6d505e1c139d0f61d71476abc2d5cc1d87b2aeab311c1b159e",
-      "line": 25,
-      "path": "kernel-core/src/sched/inherit.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_CHAIN: usize = 8;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "160c8449cea97db7e0ece328347a382a1ffa885dd9f186c429d047f53b2a3edb",
-      "line": 25,
-      "path": "kernel-core/src/sched/limit.rs",
-      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_BURST_TICKS: u32 = 64;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
       "fingerprint": "23fb1b21f80cd503627cd81d0837ccb7c989b1bb42758eeef042d5cabe3d25f1",
       "line": 30,
       "path": "kernel-core/src/spawn_abi.rs",
@@ -714,26 +654,6 @@
       "reason": "versioned SyscallSet bit width; compatibility must reject ids outside the published ABI",
       "rules": "HC-G1",
       "source": "pub const MAX_IDS: usize = 256;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "dd7782bb25f00ddecab642028bd4ac31d83b1227ca20920cbd188961b9c836b2",
-      "line": 15,
-      "path": "kernel-core/src/timer_progress.rs",
-      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_SETTLE: u32 = 64;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "9a03ca8e829ba6777e75b4e908ee3748ff086f2ef1ae1ebfbcb4c8736bc16035",
-      "line": 140,
-      "path": "kernel-core/src/trace.rs",
-      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_TAGS: usize = 4;"
     },
     {
       "category": "protocol-abi",
@@ -1388,16 +1308,6 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "d6cd36675c2873d7c44647218f3af748cdab839bee82fdf6c403b3424b46b6d3",
-      "line": 14,
-      "path": "lifecycle-model/src/diagnostics.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_CAUSES: usize = 8; // JASPER-HARDCODE-REVIEW: issue=35 source=diagnostic-usi-v1-contract reason=fixed-cause-id-array-in-versioned-diagnostic-record"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
       "fingerprint": "7bfc1f8490d1ea29829cfc20db7c40cc8c8a22a5744a6c1e7060622ff796d1ea",
       "line": 17,
       "path": "lifecycle-model/src/manifest.rs",
@@ -1538,7 +1448,7 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 100,
+    "explicit-safety-policy": 91,
     "protocol-abi": 43,
     "test-demo-fixture": 11
   }

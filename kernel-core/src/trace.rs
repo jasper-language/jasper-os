@@ -137,7 +137,7 @@ impl Tag {
 }
 
 /// 单个事件最多携带的标签数（超出部分被截断，并在 `truncated` 中注明）。
-pub const MAX_TAGS: usize = 4;
+pub const MAX_TAGS: usize = 4; // JASPER-HARDCODE-REVIEW: issue=35 source=trace-tag-envelope-policy reason=fixed-event-envelope-marks-visible-truncation-instead-of-silent-overwrite
 
 /// 结构化事件。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,10 +296,14 @@ mod tests {
 
     #[test]
     fn tracer_truncates_extra_tags_visibly() {
-        let mut t: Tracer<1> = Tracer::new();
+        let mut t: Tracer<2> = Tracer::new();
+        let exact = [Tag::u64("a", 1); MAX_TAGS];
+        t.emit("x.test.exact", &exact);
         let tags = [Tag::u64("a", 1); MAX_TAGS + 1];
         t.emit("x.test.happened", &tags);
-        let ev = t.iter().next().unwrap();
+        assert_eq!(t.iter().next().unwrap().tags().count(), MAX_TAGS);
+        let ev = t.iter().nth(1).unwrap();
+        assert_eq!(ev.name, "x.test.happened");
         assert!(ev.truncated);
         assert_eq!(ev.tags().count(), MAX_TAGS);
     }

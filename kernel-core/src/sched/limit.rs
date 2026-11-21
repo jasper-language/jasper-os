@@ -22,7 +22,7 @@ pub const TICK_COST: i32 = 1000;
 /// 不限速（千分之一千 = 整个处理器）。
 pub const UNLIMITED: u32 = 1000;
 /// 桶容量的上限（tick）：再大的突发会让「上限」在短窗口内失去意义。
-pub const MAX_BURST_TICKS: u32 = 64;
+pub const MAX_BURST_TICKS: u32 = 64; // JASPER-HARDCODE-REVIEW: issue=35 source=scheduler-burst-policy reason=validated-burst-ceiling-with-starvation-bound-tests
 
 /// 配置 CPU 上限失败的原因。失败时原有配置不变。
 /// Why a CPU-limit configuration was refused; the previous configuration stays.

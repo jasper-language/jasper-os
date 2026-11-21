@@ -11,7 +11,7 @@
 //! 多个类别时，机制只需把各类别的可运行集合交给仲裁器，不必改动策略接口。
 
 /// 类别数上限。
-pub const MAX_SCHED_CLASSES: usize = 8;
+pub const MAX_SCHED_CLASSES: usize = 8; // JASPER-HARDCODE-REVIEW: issue=35 source=scheduler-class-taxonomy reason=complete-built-in-class-id-space-rejected-outside-policy-table
 
 /// 调度类别标识（登记表式的小整数；不同类别的策略实例由仲裁器分派）。
 /// Scheduling-class identifier.
@@ -157,6 +157,13 @@ mod tests {
         assert_eq!(SchedClass::new(7).map(SchedClass::id), Some(7));
         assert_eq!(SchedClass::new(8), None);
         assert_eq!(SchedClass::TIME_SHARE.name(), "timeshare");
+        let all = (0..MAX_SCHED_CLASSES)
+            .map(|id| SchedClass::new(id as u8).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(StrictOrder::new(&all).unwrap().order(), all.as_slice());
+        let mut too_many = all;
+        too_many.push(SchedClass::TIME_SHARE);
+        assert_eq!(StrictOrder::new(&too_many), Err(ArbiterError::TooMany));
     }
 
     #[test]

@@ -27,7 +27,7 @@ pub const LEGACY_FUNCTION_SPAN: u16 = 256;
 /// 一个功能最多的 BAR 个数（普通设备头）。
 pub const MAX_BARS: usize = 6;
 /// 能力链最多跟随的跳数（配置空间头之后最多容纳 48 个 4 字节对齐的能力）。
-pub const MAX_CAPABILITY_HOPS: usize = 48;
+pub const MAX_CAPABILITY_HOPS: usize = 48; // JASPER-HARDCODE-REVIEW: issue=35 source=pci-capability-chain-policy reason=bounded-config-chain-walk-fails-closed-on-overrun-or-cycle
 /// 「不存在的功能」读到的厂商号。
 pub const VENDOR_NONE: u16 = 0xFFFF;
 
@@ -1425,6 +1425,40 @@ mod tests {
         assert_eq!(
             dynamic,
             chain.iter().map(|entry| entry.1).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn capability_chain_accepts_exact_bound_and_rejects_overrun() {
+        let mut m = Model::default();
+        let d = bdf(0, 1, 0);
+        m.add(d, 0x1AF4, 0x1041, 0, 0);
+        let exact: Vec<(u8, u8, u8)> = (0..MAX_CAPABILITY_HOPS)
+            .map(|index| {
+                let at = 0x40 + index * 4;
+                let next = if index + 1 == MAX_CAPABILITY_HOPS {
+                    0
+                } else {
+                    at + 4
+                };
+                (0x09, at as u8, next as u8)
+            })
+            .collect();
+        with_caps(&mut m, d, &exact);
+        let mut seen = 0;
+        for_each_capability(&mut m, d, |_, _| {
+            seen += 1;
+            true
+        })
+        .unwrap();
+        assert_eq!(seen, MAX_CAPABILITY_HOPS);
+
+        let mut overrun = exact;
+        overrun[MAX_CAPABILITY_HOPS - 1].2 = 0x40;
+        with_caps(&mut m, d, &overrun);
+        assert_eq!(
+            for_each_capability(&mut m, d, |_, _| true),
+            Err(PciError::BadCapability)
         );
     }
 

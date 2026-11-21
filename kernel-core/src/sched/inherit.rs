@@ -22,7 +22,7 @@ use super::Qos;
 
 /// 允许的最长等待链（从新的等待者算起的边数）。链再长就拒绝建立等待关系，
 /// 防止继承传播的代价与死锁检测的深度失控。
-pub const MAX_CHAIN: usize = 8;
+pub const MAX_CHAIN: usize = 8; // JASPER-HARDCODE-REVIEW: issue=35 source=scheduler-waitgraph-policy reason=bounded-pi-chain-prevents-unbounded-traversal
 
 /// 建立等待关系被拒绝的原因。
 /// Why a wait edge was refused.

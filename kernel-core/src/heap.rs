@@ -26,7 +26,7 @@ struct Node {
 }
 
 /// 最小对齐与最小块大小（16 字节，容纳 [`Node`] 且满足常见 SIMD/ABI 对齐）。
-pub const MIN_ALIGN: usize = 16;
+pub const MIN_ALIGN: usize = 16; // JASPER-HARDCODE-REVIEW: issue=35 source=heap-structural-alignment reason=free-node-placement-and-simd-compatible-alignment
 const MIN_BLOCK: usize = if size_of::<Node>() > MIN_ALIGN { size_of::<Node>() } else { MIN_ALIGN };
 
 const fn align_up(x: usize, a: usize) -> usize {
@@ -230,6 +230,10 @@ mod tests {
         assert_eq!(p as usize % 4096, 0);
         let q = unsafe { h.allocate(1 << 20, 16) };
         assert!(q.is_null(), "超出容量必须返回空指针");
+        let r = unsafe { h.allocate(1, 1) };
+        assert!(!r.is_null());
+        assert_eq!(r as usize % MIN_ALIGN, 0);
+        unsafe { h.deallocate(r, 1) };
         unsafe { h.deallocate(p, 100) };
         assert_eq!(h.free_bytes(), h.total_bytes());
     }
