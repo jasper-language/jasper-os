@@ -197,6 +197,19 @@ sched_detached=true sched_resumed=true ok=true
 运行中任务的上下文迁移、架构 stop IPI、IRQ 在飞完成与完整 hotplug rollback
 矩阵仍需独立证据。
 
+失败原子性专项进一步在目标 CPU 上保持一个真实运行中任务，完整离场事务必须在
+路由、MSI、runtime 和调度成员变更前拒绝。负例通过后释放任务，再执行同一启动内
+的成功迁移路径：
+
+```text
+running_rejected=true tasks=1
+runtime_offline=true runtime_online=true generation=5/6
+sched_detached=true sched_resumed=true ok=true
+```
+
+证据见 `evidence/cpu-running-rejection-20261121-r1/`。运行中任务的上下文迁移仍待
+架构 stop/switch 专项，不能把该拒绝路径当作已完成热插拔。
+
 ## 消费链迁移进度
 
 - `kernel-core/src/msi.rs`：已完成生产迁移。`VectorPool` 在生产

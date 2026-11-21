@@ -1,0 +1,6 @@
+[JSR-IRQRING] round=0 cpu=0 delivered=1 latency_ticks=1 ok=true
+[JSR-IRQRING] round=1 cpu=1 delivered=1 latency_ticks=1 ok=true
+[JSR-IRQRING] round=2 cpu=2 delivered=1 latency_ticks=1 ok=true
+[JSR-IRQRING] round=3 cpu=3 delivered=1 latency_ticks=1 ok=true
+[JSR-IRQRING] depart target=1 objects=1 bindings=1 vectors=1 residual=0 routes=0 tasks=1 running_rejected=true runtime_offline=true runtime_online=true generation=5/6 resumed=true sched_detached=true sched_resumed=true ok=true
+[JSR-IRQRING] summary cpus=4 rounds=4 delivered=4/4 rejects=7/7 cancel=ok close_cancels_wait=ok cpu_depart=ok vectors_back=true frames_back=true failed=0

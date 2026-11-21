@@ -1,0 +1,6 @@
+qemu_rc=124
+running_task_departure_rejected=true
+depart_tasks_migrated=1
+depart_ok=true
+irqring_summary=ok
+full_boot_acceptance=false

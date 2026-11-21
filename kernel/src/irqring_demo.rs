@@ -39,6 +39,7 @@ const STACK_OFF: u64 = 0xC0_0000;
 const DRIVER_TASK: u64 = 12_000;
 const DEPART_DRIVER_TASK: u64 = 12_001;
 const DEPART_MIGRANT_TASK: u64 = 12_002;
+const DEPART_HOG_TASK: u64 = 12_003;
 /// 驱动任务等待单个条件的 tick 上界（定时器 100 Hz 时约 10 秒）。
 const WAIT_TICKS: u64 = 1_000;
 /// virtio-rng 队列 0 使用的 MSI-X 表项。
@@ -95,6 +96,10 @@ static DEPART_SCHED_OFF: AtomicBool = AtomicBool::new(false);
 static DEPART_SCHED_ON: AtomicBool = AtomicBool::new(false);
 static MIGRANT_ARMED: AtomicBool = AtomicBool::new(false);
 static MIGRANT_DONE: AtomicBool = AtomicBool::new(false);
+static DEPART_HOG_ARMED: AtomicBool = AtomicBool::new(false);
+static DEPART_HOG_RELEASE: AtomicBool = AtomicBool::new(false);
+static DEPART_HOG_DONE: AtomicBool = AtomicBool::new(false);
+static DEPART_RUNNING_REJECTED: AtomicBool = AtomicBool::new(false);
 
 fn check(ok: bool, what: &str) {
     CHECKS.fetch_add(1, Ordering::Relaxed);
@@ -241,6 +246,14 @@ fn depart_migrant() {
     MIGRANT_DONE.store(true, Ordering::Release);
 }
 
+fn depart_hog() {
+    DEPART_HOG_ARMED.store(true, Ordering::Release);
+    while !DEPART_HOG_RELEASE.load(Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+    DEPART_HOG_DONE.store(true, Ordering::Release);
+}
+
 fn depart_driver() {
     let target = DEPART_TARGET.load(Ordering::Relaxed) as usize;
     let bdf = target_bdf();
@@ -251,6 +264,45 @@ fn depart_driver() {
                 .and_then(interrupt::view)
                 .is_some_and(|view| view.waiting && view.cpu == target)
         });
+        if ok {
+            let hog = TaskId(DEPART_HOG_TASK);
+            let mut target_only = CpuSet::EMPTY;
+            target_only.insert(target);
+            let hog_started = sched::spawn_on(
+                hog,
+                "irqring-depart-hog",
+                depart_hog,
+                None,
+                target_only,
+            )
+            .is_ok()
+                && wait_ticks(|| DEPART_HOG_ARMED.load(Ordering::Acquire));
+            if !hog_started {
+                check(false, "CPU 离场负例任务未在目标 CPU 运行");
+                ok = false;
+            } else {
+                let rejected = matches!(
+                    smp::detach_cpu_membership(target),
+                    Err(smp::CpuMembershipError::Scheduler(
+                        "task-running" | "leaf-busy" | "task-active"
+                    ))
+                );
+                DEPART_HOG_RELEASE.store(true, Ordering::Release);
+                let stopped = wait_ticks(|| DEPART_HOG_DONE.load(Ordering::Acquire));
+                let still_online = sched::online_cpus().contains(target);
+                let interrupt_waiting = interrupt::bound_object(bdf, QUEUE_ENTRY)
+                    .and_then(interrupt::view)
+                    .is_some_and(|view| view.waiting && view.cpu == target);
+                DEPART_RUNNING_REJECTED.store(
+                    rejected && stopped && still_online && interrupt_waiting,
+                    Ordering::Release,
+                );
+                if !DEPART_RUNNING_REJECTED.load(Ordering::Acquire) {
+                    check(false, "运行中 CPU 离场没有整体失败关闭");
+                    ok = false;
+                }
+            }
+        }
         if ok {
             let migrant = TaskId(DEPART_MIGRANT_TASK);
             let mut target_only = CpuSet::EMPTY;
@@ -322,7 +374,7 @@ fn depart_driver() {
     }
     DEPART_DONE.store(true, Ordering::Release);
     kprintln!(
-        "[JSR-IRQRING] depart target={} objects={} bindings={} vectors={} residual={} routes={} tasks={} runtime_offline={} runtime_online={} generation={}/{} resumed={} sched_detached={} sched_resumed={} ok={}",
+        "[JSR-IRQRING] depart target={} objects={} bindings={} vectors={} residual={} routes={} tasks={} running_rejected={} runtime_offline={} runtime_online={} generation={}/{} resumed={} sched_detached={} sched_resumed={} ok={}",
         target,
         DEPART_OBJECTS.load(Ordering::Relaxed),
         DEPART_BINDINGS.load(Ordering::Relaxed),
@@ -330,6 +382,7 @@ fn depart_driver() {
         DEPART_RESIDUAL.load(Ordering::Relaxed),
         DEPART_ROUTES.load(Ordering::Relaxed),
         DEPART_TASKS.load(Ordering::Relaxed),
+        DEPART_RUNNING_REJECTED.load(Ordering::Acquire),
         DEPART_RUNTIME_OFF.load(Ordering::Acquire),
         DEPART_RUNTIME_ON.load(Ordering::Acquire),
         DEPART_GENERATION_OFF.load(Ordering::Acquire),
@@ -521,6 +574,7 @@ pub fn run() {
             && DEPART_RETURNED.load(Ordering::Relaxed) >= 1
             && DEPART_RESIDUAL.load(Ordering::Relaxed) == 0
             && DEPART_TASKS.load(Ordering::Relaxed) >= 1
+            && DEPART_RUNNING_REJECTED.load(Ordering::Acquire)
             && migrant_done
             && DEPART_RUNTIME_OFF.load(Ordering::Acquire)
             && DEPART_RUNTIME_ON.load(Ordering::Acquire)
@@ -533,7 +587,7 @@ pub fn run() {
         check(report_ok, "CPU 离场没有关闭对象、解绑并归还向量");
         let ok = user_ok && report_ok;
         kprintln!(
-            "[JSR-IRQRING] depart target={} objects={} bindings={} vectors={} residual={} routes={} tasks={} runtime_offline={} runtime_online={} generation={}/{} resumed={} sched_detached={} sched_resumed={} ok={}",
+            "[JSR-IRQRING] depart target={} objects={} bindings={} vectors={} residual={} routes={} tasks={} running_rejected={} runtime_offline={} runtime_online={} generation={}/{} resumed={} sched_detached={} sched_resumed={} ok={}",
             target,
             DEPART_OBJECTS.load(Ordering::Relaxed),
             DEPART_BINDINGS.load(Ordering::Relaxed),
@@ -541,6 +595,7 @@ pub fn run() {
             DEPART_RESIDUAL.load(Ordering::Relaxed),
             DEPART_ROUTES.load(Ordering::Relaxed),
             DEPART_TASKS.load(Ordering::Relaxed),
+            DEPART_RUNNING_REJECTED.load(Ordering::Acquire),
             DEPART_RUNTIME_OFF.load(Ordering::Acquire),
             DEPART_RUNTIME_ON.load(Ordering::Acquire),
             DEPART_GENERATION_OFF.load(Ordering::Acquire),
