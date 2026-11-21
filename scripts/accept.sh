@@ -2538,7 +2538,7 @@ check_drv2c1() { # DRV-2C-1：设备中断对象 + ring 投递——用户程序
       [ "${d%%/*}" -eq "${d##*/}" ] && [ "${d##*/}" -eq "$rounds" ] || miss="$miss $name:送达($d)"
       [ "${k%%/*}" -eq "${k##*/}" ] && [ "${k##*/}" -ge 6 ] || miss="$miss $name:拒绝路径($k)"
       if [ "$c" -gt 1 ]; then
-        grep -qaE '^\[JSR-IRQRING\] depart target=[1-9][0-9]* objects=1 bindings=1 vectors=1 residual=0 routes=[0-9]+ tasks=[1-9][0-9]* running_rejected=true runtime_offline=true runtime_online=true generation=[0-9]+/[0-9]+ resumed=true sched_detached=true sched_resumed=true ok=true' "$f" \
+        grep -qaE '^\[JSR-IRQRING\] depart target=[1-9][0-9]* objects=1 bindings=1 vectors=1 residual=0 routes=[0-9]+ tasks=[1-9][0-9]* running_rejected=true pinned_rejected=true runtime_offline=true runtime_online=true generation=[0-9]+/[0-9]+ resumed=true sched_detached=true sched_resumed=true ok=true' "$f" \
           || miss="$miss $name:活跃中断对象离场"
       fi
     fi

@@ -40,6 +40,7 @@ const DRIVER_TASK: u64 = 12_000;
 const DEPART_DRIVER_TASK: u64 = 12_001;
 const DEPART_MIGRANT_TASK: u64 = 12_002;
 const DEPART_HOG_TASK: u64 = 12_003;
+const DEPART_PINNED_TASK: u64 = 12_004;
 /// 驱动任务等待单个条件的 tick 上界（定时器 100 Hz 时约 10 秒）。
 const WAIT_TICKS: u64 = 1_000;
 /// virtio-rng 队列 0 使用的 MSI-X 表项。
@@ -100,6 +101,9 @@ static DEPART_HOG_ARMED: AtomicBool = AtomicBool::new(false);
 static DEPART_HOG_RELEASE: AtomicBool = AtomicBool::new(false);
 static DEPART_HOG_DONE: AtomicBool = AtomicBool::new(false);
 static DEPART_RUNNING_REJECTED: AtomicBool = AtomicBool::new(false);
+static DEPART_PINNED_ARMED: AtomicBool = AtomicBool::new(false);
+static DEPART_PINNED_DONE: AtomicBool = AtomicBool::new(false);
+static DEPART_PINNED_REJECTED: AtomicBool = AtomicBool::new(false);
 
 fn check(ok: bool, what: &str) {
     CHECKS.fetch_add(1, Ordering::Relaxed);
@@ -254,6 +258,12 @@ fn depart_hog() {
     DEPART_HOG_DONE.store(true, Ordering::Release);
 }
 
+fn depart_pinned() {
+    DEPART_PINNED_ARMED.store(true, Ordering::Release);
+    sched::sleep_ticks(20);
+    DEPART_PINNED_DONE.store(true, Ordering::Release);
+}
+
 fn depart_driver() {
     let target = DEPART_TARGET.load(Ordering::Relaxed) as usize;
     let bdf = target_bdf();
@@ -299,6 +309,44 @@ fn depart_driver() {
                 );
                 if !DEPART_RUNNING_REJECTED.load(Ordering::Acquire) {
                     check(false, "运行中 CPU 离场没有整体失败关闭");
+                    ok = false;
+                }
+            }
+        }
+        if ok {
+            let pinned = TaskId(DEPART_PINNED_TASK);
+            let mut target_only = CpuSet::EMPTY;
+            target_only.insert(target);
+            if sched::spawn_on(
+                pinned,
+                "irqring-depart-pinned",
+                depart_pinned,
+                None,
+                target_only,
+            )
+            .is_err()
+                || !wait_ticks(|| DEPART_PINNED_ARMED.load(Ordering::Acquire))
+            {
+                check(false, "CPU 离场无目标任务未在目标 CPU 停车");
+                ok = false;
+            } else {
+                let rejected = matches!(
+                    smp::detach_cpu_membership(target),
+                    Err(smp::CpuMembershipError::Scheduler(
+                        "no-affinity-destination"
+                    ))
+                );
+                let stopped = wait_ticks(|| DEPART_PINNED_DONE.load(Ordering::Acquire));
+                let still_online = sched::online_cpus().contains(target);
+                let interrupt_waiting = interrupt::bound_object(bdf, QUEUE_ENTRY)
+                    .and_then(interrupt::view)
+                    .is_some_and(|view| view.waiting && view.cpu == target);
+                DEPART_PINNED_REJECTED.store(
+                    rejected && stopped && still_online && interrupt_waiting,
+                    Ordering::Release,
+                );
+                if !DEPART_PINNED_REJECTED.load(Ordering::Acquire) {
+                    check(false, "无迁移目标 CPU 没有被整体拒绝");
                     ok = false;
                 }
             }
@@ -374,7 +422,7 @@ fn depart_driver() {
     }
     DEPART_DONE.store(true, Ordering::Release);
     kprintln!(
-        "[JSR-IRQRING] depart target={} objects={} bindings={} vectors={} residual={} routes={} tasks={} running_rejected={} runtime_offline={} runtime_online={} generation={}/{} resumed={} sched_detached={} sched_resumed={} ok={}",
+        "[JSR-IRQRING] depart target={} objects={} bindings={} vectors={} residual={} routes={} tasks={} running_rejected={} pinned_rejected={} runtime_offline={} runtime_online={} generation={}/{} resumed={} sched_detached={} sched_resumed={} ok={}",
         target,
         DEPART_OBJECTS.load(Ordering::Relaxed),
         DEPART_BINDINGS.load(Ordering::Relaxed),
@@ -383,6 +431,7 @@ fn depart_driver() {
         DEPART_ROUTES.load(Ordering::Relaxed),
         DEPART_TASKS.load(Ordering::Relaxed),
         DEPART_RUNNING_REJECTED.load(Ordering::Acquire),
+        DEPART_PINNED_REJECTED.load(Ordering::Acquire),
         DEPART_RUNTIME_OFF.load(Ordering::Acquire),
         DEPART_RUNTIME_ON.load(Ordering::Acquire),
         DEPART_GENERATION_OFF.load(Ordering::Acquire),
@@ -575,6 +624,7 @@ pub fn run() {
             && DEPART_RESIDUAL.load(Ordering::Relaxed) == 0
             && DEPART_TASKS.load(Ordering::Relaxed) >= 1
             && DEPART_RUNNING_REJECTED.load(Ordering::Acquire)
+            && DEPART_PINNED_REJECTED.load(Ordering::Acquire)
             && migrant_done
             && DEPART_RUNTIME_OFF.load(Ordering::Acquire)
             && DEPART_RUNTIME_ON.load(Ordering::Acquire)
@@ -587,7 +637,7 @@ pub fn run() {
         check(report_ok, "CPU 离场没有关闭对象、解绑并归还向量");
         let ok = user_ok && report_ok;
         kprintln!(
-            "[JSR-IRQRING] depart target={} objects={} bindings={} vectors={} residual={} routes={} tasks={} running_rejected={} runtime_offline={} runtime_online={} generation={}/{} resumed={} sched_detached={} sched_resumed={} ok={}",
+            "[JSR-IRQRING] depart target={} objects={} bindings={} vectors={} residual={} routes={} tasks={} running_rejected={} pinned_rejected={} runtime_offline={} runtime_online={} generation={}/{} resumed={} sched_detached={} sched_resumed={} ok={}",
             target,
             DEPART_OBJECTS.load(Ordering::Relaxed),
             DEPART_BINDINGS.load(Ordering::Relaxed),
@@ -596,6 +646,7 @@ pub fn run() {
             DEPART_ROUTES.load(Ordering::Relaxed),
             DEPART_TASKS.load(Ordering::Relaxed),
             DEPART_RUNNING_REJECTED.load(Ordering::Acquire),
+            DEPART_PINNED_REJECTED.load(Ordering::Acquire),
             DEPART_RUNTIME_OFF.load(Ordering::Acquire),
             DEPART_RUNTIME_ON.load(Ordering::Acquire),
             DEPART_GENERATION_OFF.load(Ordering::Acquire),

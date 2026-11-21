@@ -210,6 +210,11 @@ sched_detached=true sched_resumed=true ok=true
 证据见 `evidence/cpu-running-rejection-20261121-r1/`。运行中任务的上下文迁移仍待
 架构 stop/switch 专项，不能把该拒绝路径当作已完成热插拔。
 
+第二个失败条件覆盖“没有合法迁移目标”：任务已阻塞，但亲和集合只包含正在离场的
+CPU。预检必须在任何资源拆除前返回 `no-affinity-destination`；任务结束后同一启动
+再完成正常迁移。两个负例最终在同一条成功 marker 中为
+`running_rejected=true pinned_rejected=true tasks=1`。
+
 ## 消费链迁移进度
 
 - `kernel-core/src/msi.rs`：已完成生产迁移。`VectorPool` 在生产
