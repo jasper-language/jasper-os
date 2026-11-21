@@ -57,12 +57,16 @@ Graphics 矩阵使用真实 `VirtioGpuBackend` 的 2D resource 和 backing：
 ```text
 cargo test -p kernel-core --features runtime-registries,network-dynamic \
   async_ring_runtime --lib
-7 passed; 0 failed
+8 passed; 0 failed
 ```
+
+并发压力：8 个调用者共享同一 `RuntimeAsyncRing`，各自完成 256 次
+submit→start→finish/cancel→quiesce→consume 序列；最终所有请求只有一个终态，
+credit、reserved、context 和完成队列均回到基线。
 
 ## 尚未关闭
 
 - 真实设备 DMA 仍访问、IRQ 迟到、FLR/物理 reset 失败、hot-unplug 和物理 IOMMU；
-- 多 CPU 取消/完成竞争与高负载 reclaim。
+- 真实多 CPU 内核调用方共享同一对象表锁下的取消/完成竞争与更高负载 reclaim；
 
 本切片不新增用户 ABI，不把 Driver Host 测试提升为物理设备资格。

@@ -366,6 +366,60 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_callers_preserve_one_terminal_and_reclaim() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        const CALLERS: u64 = 8;
+        const REQUESTS: u64 = 256;
+        let ring = Arc::new(Mutex::new(
+            RuntimeAsyncRing::new(2, (CALLERS * REQUESTS) as usize).unwrap(),
+        ));
+        let mut workers = Vec::new();
+        for caller in 0..CALLERS {
+            let ring = Arc::clone(&ring);
+            workers.push(thread::spawn(move || {
+                for index in 0..REQUESTS {
+                    let context = caller * REQUESTS + index + 1;
+                    let mut ring = ring.lock().unwrap();
+                    let request = ring
+                        .submit(Submission {
+                            op: 9,
+                            user_tag: context,
+                            context,
+                            uses_buffer: true,
+                        })
+                        .unwrap();
+                    ring.start(request, Exec::Abortable).unwrap();
+                    if index % 2 == 0 {
+                        assert_eq!(
+                            ring.cancel(request),
+                            Ok(Cancelled::AbortBackend { context })
+                        );
+                        ring.quiesce(request).unwrap();
+                    } else {
+                        ring.finish(request, context as i64).unwrap();
+                    }
+                    assert_eq!(ring.take_reclaimed(), Some(context));
+                    assert_eq!(ring.in_flight(), 0);
+                    assert_eq!(ring.decided_unpublished(), 0);
+                    assert_eq!(ring.consume(1), 1);
+                    assert_eq!(ring.ready(), 0);
+                    assert_eq!(ring.credits(), 2);
+                }
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let ring = ring.lock().unwrap();
+        assert_eq!(ring.in_flight(), 0);
+        assert_eq!(ring.reserved(), 0);
+        assert_eq!(ring.ready(), 0);
+        assert_eq!(ring.credits(), ring.capacity());
+    }
+
+    #[test]
     fn device_backend_completion_waits_for_clean_reset_quiescence() {
         use crate::driver_host::{
             DeviceIdentity, DriverHostBroker, Needs, Policy, QuiesceProof,
