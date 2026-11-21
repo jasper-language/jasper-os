@@ -32,6 +32,10 @@ use kernel_core::display_input::{DisplayInputError, KeyInput, SurfaceSpec};
 pub use kernel_core::ui_policy::{
     UiDeviceCapabilities, UiPolicyError, UiPolicySnapshot, InteractionProfile, ProfileDecision,
 };
+pub use kernel_core::ui_session::{
+    UiInputEnvelope, UiRenderMode, UiSceneFacts, UiSessionError, UiSessionKey, UiSessionKind,
+    UiSessionRegistry, UiSessionScope, UiSessionState,
+};
 #[cfg(feature = "native-transport")]
 use kernel_core::ui_protocol::{decode_ui_frame, encode_ui_frame, UiFrame, UiFrameHeader};
 use kernel_core::ui_service::{UI_ERROR_ENGINE_UNAVAILABLE, UI_SERVICE_PROTOCOL_VERSION};
