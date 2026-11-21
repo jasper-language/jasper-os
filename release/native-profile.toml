@@ -1,0 +1,5 @@
+schema = 1
+profile = "native"
+kernel_features = ["user-programs"]
+compatibility_components = []
+replacement_policy = "docs/native-ecosystem-independence.md"

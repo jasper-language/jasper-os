@@ -37,6 +37,7 @@ Linux fd 表、兼容 pid、Linux 调用权限和 ELF 后端模块只在对应�
 | --- | --- | --- |
 | 默认依赖隔离 | `cargo tree -p jasper-kernel --no-default-features` 不含两个兼容 crate | passed |
 | 原生构建 | `cargo check -p jasper-kernel --target x86_64-unknown-none --no-default-features` | passed |
+| Native 发行 Profile | `release/native-profile.toml` 精确使用默认内核特性且兼容组件列表为空 | passed |
 | syscall 显式启用 | 启用 `compat-syscall-verify` 后引入并编译 `jasper-compat-core` | passed |
 | ELF 后端显式启用 | 启用 `compat-elf-backend-verify` 后引入并编译 `jasper-compat-loader` | passed |
 | 发行组件卸载 | 安装、停用、卸载后原生 Profile 启动与设备服务不回退 | pending |

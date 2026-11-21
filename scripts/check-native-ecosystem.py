@@ -13,6 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MATRIX = ROOT / "verification/native-ecosystem.toml"
+PROFILE = ROOT / "release/native-profile.toml"
 KERNEL_MANIFEST = ROOT / "kernel/Cargo.toml"
 DAG = ROOT / "milestones/unified-dag.toml"
 
@@ -166,6 +167,19 @@ def main() -> int:
     default = features.get("default", [])
     if any("compat" in item or "linux" in item for item in default):
         fail("default kernel features contain a compatibility component")
+    if not PROFILE.is_file():
+        fail("release/native-profile.toml is required")
+    profile = read_toml(PROFILE)
+    if profile.get("schema") != 1 or profile.get("profile") != "native":
+        fail("native release profile has invalid schema or name")
+    profile_features = profile.get("kernel_features")
+    if profile_features != default:
+        fail("native release profile must use the exact default kernel features")
+    components = profile.get("compatibility_components")
+    if not isinstance(components, list) or components:
+        fail("native release profile must exclude compatibility components")
+    if profile.get("replacement_policy") != "docs/native-ecosystem-independence.md":
+        fail("native release profile must reference the audited replacement policy")
     build_dependencies = manifest.get("build-dependencies", {})
     for forbidden in ("goblin", "jasper-compat-core", "jasper-compat-loader"):
         if forbidden in build_dependencies:
