@@ -34,7 +34,7 @@ Issue #42 的所有外部内核经验只作为问题域来源：
 | M-07 可信系统映像 | NativeInstall、PersistentInstall、LC-2/3/5 | 部分具备 | 真实生产密钥/TPM、公开启动链、物理安装/回滚 |
 | M-08 快照/Clone/崩溃一致性 | FS production、journal、ext4 write | 部分具备 | 后端中立 Snapshot/Clone/Transaction 契约和故障一致性 |
 | M-09 内存压力协作回收 | Pressure、Workload Recovery、OOM plan | 部分具备 | 可丢弃 MemoryObject、回写/压力协同、策略替换和真实回收 |
-| M-10 事件订阅恢复 | EventSource、Subscription、WaitSet、resync | 部分具备 | FS/NET/device/graphics 语义事件统一 resync、取消和撤销 |
+| M-10 事件订阅恢复 | EventSource、Subscription、WaitSet、resync；四领域 producer 已接入 kernel EventSource Handle | 已具备 | M01 专项覆盖失败原子性、overflow Resync、订阅关闭与资源回收 |
 
 ## Windows NT 候选矩阵
 

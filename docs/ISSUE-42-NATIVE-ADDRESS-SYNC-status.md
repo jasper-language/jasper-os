@@ -1,6 +1,6 @@
 # Issue #42 原生地址条件同步状态
 
-更新时间：2026-11-20。
+更新时间：2026-11-21。
 
 状态：**native mechanism slice passed**。新增 `kernel-core::address_sync` 的
 受权地址条件状态机；该项不是新 ABI，也不表示 Issue #42 或用户态 Pager 已完成。
@@ -36,7 +36,7 @@
 
 ```text
 cargo test -p kernel-core address_sync --lib
-5 passed; 0 failed
+6 passed; 0 failed
 
 cargo test -p kernel-core
 1048 unit tests + integration suites passed, including address_sync 5/5
@@ -44,6 +44,25 @@ cargo test -p kernel-core
 cargo check -p kernel-core --target x86_64-unknown-none
 PASS
 ```
+
+真实 KVM 客户机专项：
+
+```text
+JASPER_ACCEPT=spot JASPER_CHECKS=addresssync JASPER_ACCEL=kvm \
+JASPER_CORES=4-11 JASPER_QEMU_TIMEOUT=360 bash scripts/accept.sh
+evidence/accept-20261121-011206
+```
+
+两轮结果：
+
+```text
+[JSR-ADDRESS-SYNC] pass=1 phase=warmup parked=2 terminal=true same_object=true resources=true failed=0
+[JSR-ADDRESS-SYNC] pass=2 phase=measured parked=2 terminal=true same_object=true resources=true failed=0
+```
+
+该矩阵使用两个真实 Process 对象、同一 MemoryObject 的两个映射和两个真实
+scheduler task event-wait key；单次 published condition 只产生权威终态并唤醒
+两个 waiter。对象、映射、页帧与等待登记回基线。
 
 覆盖场景：
 
@@ -55,9 +74,9 @@ PASS
 
 ## 尚未完成
 
-- 尚未接线到原生 MemoryObject/页表临界区和真实调度停车；
-- 尚无关闭兼容层后的 CPL3 原生应用、多 CPU 同时写/等待、重映射、对象撤销、
-  task exit 与压力公平性矩阵；
+- 已完成内核内真实 Process/MemoryObject/调度停车接线，但尚无关闭兼容层后的
+  CPL3 原生调用者和经批准的用户接口；
+- 尚缺多 CPU 同时写/等待、重映射、对象撤销、task exit 与压力公平性矩阵；
 - 用户态 Pager 仍未实现；PagerCapability、FaultEvent、处理者死亡、递归缺页、
   队列满、超时、取消与页表最终裁决都需要独立 ABI/安全设计；
 - 本切片不新增 syscall，不改变 `NO-HARDCODE-RESIDUAL-1` 或任何 DAG 节点状态。

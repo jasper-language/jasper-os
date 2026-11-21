@@ -9,6 +9,7 @@
 
 #[cfg(any(test, feature = "gpu-dynamic"))]
 use alloc::vec::Vec;
+#[cfg(any(test, feature = "gpu-dynamic"))]
 use crate::service_events::{self, Source as ServiceEventSource};
 
 pub const CONTROL_HEADER_BYTES: usize = 24;
@@ -270,7 +271,7 @@ impl VirtioGpuBackend {
         if let Some(events) = self.events.as_mut() {
             let _ = events.restart(
                 u64::from(self.generation),
-                self.commands ^ self.destroyed,
+                u64::from(self.generation),
             );
         }
     }

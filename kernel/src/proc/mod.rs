@@ -8610,6 +8610,23 @@ pub fn memory_capability_stats(pid: ObjId) -> Option<(usize, u64)> {
     .ok()
 }
 
+/// Resolve the live software-memory capability covering one mapped range.
+///
+/// This is a kernel-internal bridge for native mechanisms that already hold a
+/// MemoryObject mapping. It grants no new user authority and does not expose a
+/// capability table entry or raw pointer to user mode.
+pub(crate) fn memory_capability_use(
+    pid: ObjId,
+    start: u64,
+    len: u64,
+    rights: MemoryRights,
+) -> Option<kernel_core::memory_capability::MemoryCapabilityUse> {
+    kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(process)) => process.memory_caps.check(start, len, rights, None).ok(),
+        _ => None,
+    })
+}
+
 /// 在锁内固定进程 `pid` 的用户区间 `[va, va+len)`：区间须位于私有窗口、每页已映射且带用户权限（`write` 时还须可写）。
 /// 返回的范围此后只经物理映射访问；任一页不满足 ⇒ 不固定任何帧。
 /// Pins a user range of `pid` (all-or-nothing).

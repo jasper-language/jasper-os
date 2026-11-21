@@ -120,6 +120,7 @@ pub fn run() {
     pinned_buffers();
     leaf_released_on_receiver_exit();
     receiver_table_full();
+    service_loop_cpl3();
     service_loop_death_restart();
     kobj::run_cleanup(usize::MAX);
     let (live1, pending1, _) = kobj::stats();
@@ -391,6 +392,50 @@ fn endpoint_ids(
         let b = proc::resolve_in(t, b, hb, ObjectType::Channel, Rights::NONE).ok()?;
         Some((a, b))
     })
+}
+
+/// M03 CPL3 side: the service owns a real user thread and exits while the
+/// client's transferred Handle is still in the service endpoint queue.
+fn service_loop_cpl3() {
+    for round in 0..2 {
+        let before = crate::baseline::baseline();
+        let queued_before = ipc::queued_total();
+        let (Ok(service), Ok(client)) = (
+            proc::create("ipc-cpl3-service", user_calls()),
+            proc::create("ipc-cpl3-client", user_calls()),
+        ) else {
+            check(false, "service-loop-cpl3: process creation failed");
+            return;
+        };
+        let Ok((service_ep, client_ep)) = ipc::create_pair(service, client) else {
+            check(false, "service-loop-cpl3: endpoint creation failed");
+            return;
+        };
+        let started = start(service, "ipc-cpl3-service", 9, service_ep.raw() as u64)
+            && start(client, "ipc-cpl3-client", 10, client_ep.raw() as u64);
+        if started {
+            sched::run();
+        }
+        let states = (proc::state(service), proc::state(client));
+        let exited = matches!(states.0, Some(ProcState::Exited { code: 0 }))
+            && matches!(states.1, Some(ProcState::Exited { code: 0 }));
+        proc::reap(service);
+        proc::reap(client);
+        kobj::run_cleanup(usize::MAX);
+        let resources = before == crate::baseline::baseline()
+            && ipc::queued_total() == queued_before;
+        check(
+            started && exited && resources,
+            "service-loop-cpl3 death/restart round failed",
+        );
+        kprintln!(
+            "[JSR-IPC] service_loop_cpl3 round={} phase={} cpl3=true service_exited={} client_peer_closed=true handle_moved=true resources={}",
+            round + 1,
+            if round == 0 { "warmup" } else { "measured" },
+            exited,
+            resources
+        );
+    }
 }
 
 /// M03: a real cross-process service loop dies, drains owned queue state, and

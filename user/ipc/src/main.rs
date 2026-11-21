@@ -520,6 +520,30 @@ fn rt3_client(ep:i64)->! {
     check(close(ring)==0&&close(ep)==0,132);say!("rt3 client ring=true reply=true");exit(0)
 }
 
+// M03: a real CPL3 service exits without draining its endpoint queue. The
+// client has already queued a transferred Handle and blocks on its peer.
+fn service_exit(ep:i64)->! {
+    check(sys(ids::SYSTEM_TIME_WAIT,8,0)==0,140);
+    check(close(ep)==0,141);
+    say!("service_exit queued_peer=true exited=true");
+    exit(0)
+}
+
+fn service_exit_client(ep:i64)->! {
+    let worker=spawn_worker();
+    check(worker>0,142);
+    let sent=send_now(ep,&msg(b"queued",&[worker as u64]));
+    check(sent==6 && close(worker)==HANDLE_INVALID,143);
+    let mut buf=[0u8;8];
+    let mut handles=[0u64;1];
+    let mut desc=rbuf(&mut buf,&mut handles);
+    let pending=recv_now(ep,&mut desc);
+    let later=send_now(ep,&msg(b"post",&[]));
+    check(pending==PEER_CLOSED && later==PEER_CLOSED && close(ep)==0,144);
+    say!("service_exit_client peer_closed={} single_terminal=true handle_moved=true",pending);
+    exit(0)
+}
+
 // Dedicated SHM fixture role: fill a user TLB, wait for remote revoke acknowledgement,
 // then access the revoked address. Correct execution ends in a page fault, never exit(90).
 fn revoke_probe(address:u64) -> ! {
@@ -539,6 +563,8 @@ fn revoke_probe(address:u64) -> ! {
 pub extern "C" fn _start(role: usize, endpoint: usize) -> ! {
     let endpoint = endpoint as u64;
     match role {
+        9 => service_exit(endpoint as i64),
+        10 => service_exit_client(endpoint as i64),
         7 => rt3_service(endpoint as i64),
         8 => rt3_client(endpoint as i64),
         5 => s3_channel_ping(endpoint as i64),

@@ -31,14 +31,31 @@
 - `cargo test -p kernel-core driver_host --lib`：15/15；
 - `cargo test -p kernel-core --features network-dynamic net4_service --lib`：2/2；
 - `cargo test -p kernel-core virtio_gpu --lib`：10/10；
+- `cargo test -p kernel-core --lib`：1077/1077；
 - `service_events` 自测覆盖旧 generation 拒绝、终止后发布拒绝和 Resync。
+- `kernel/src/service_event_demo.rs` 把四个真实服务 snapshot 接到普通 kernel
+  EventSource Handle，验证失败操作不发布、Driver reset 队列溢出产生权威
+  Resync、订阅关闭与对象回收；`--features evt2-verify` 的 x86_64 `no_std`
+  内核构建通过。
 
 各测试把真实服务状态的 snapshot 送入现有有界订阅 Queue，而不是把四个字符串
 标签交给同一个合成 producer。
 
-## 尚未关闭
+## 真实客户机验收
 
-M01 仍为 `partial`，因为上述 source 尚未桥接为 kernel 用户态可持有的标准
-EventSource Handle，也没有四个真实订阅者跨 FS/NET/device/graphics 同时消费、
-取消、撤销和回收到基线的集成矩阵。本切片只关闭“领域状态没有 producer”缺口，
-不能替代该 Handle/订阅集成门。
+```text
+JASPER_ACCEPT=spot JASPER_CHECKS=evt2 JASPER_ACCEL=kvm \
+JASPER_CORES=4-11 JASPER_QEMU_TIMEOUT=360 bash scripts/accept.sh
+evidence/accept-20261121-004907
+qemu_rc=33
+```
+
+客户机得到：
+
+```text
+[JSR-EVT2-SERVICE] domains=4 fs=true net=true driver=true graphics=true \
+  failure_atomic=true overflow_resync=true subscriptions_closed=true \
+  resources=true failed=0
+```
+
+M01 已达到 `implemented-tested`。这不关闭其余 24 个 Issue #42 机制族。

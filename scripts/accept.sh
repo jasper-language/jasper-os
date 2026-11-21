@@ -86,6 +86,7 @@ esac
 [ "${JASPER_CHECKS:-}" = "sec4" ] && KFEAT+=(--features sec4-verify)
 [ "${JASPER_CHECKS:-}" = "sec5" ] && KFEAT+=(--features sec5-verify)
 [ "${JASPER_CHECKS:-}" = "sec6" ] && KFEAT+=(--features sec6-verify)
+[ "${JASPER_CHECKS:-}" = "evt2" ] && KFEAT+=(--features evt2-verify)
 [ "${JASPER_CHECKS:-}" = "net2" ] && KFEAT+=(--features net2-verify)
 [ "${JASPER_CHECKS:-}" = "net3" ] && KFEAT+=(--features net3-verify)
 [ "${JASPER_CHECKS:-}" = "net4runtime" ] && KFEAT+=(--features net4-runtime-verify)
@@ -968,6 +969,8 @@ check_m44() {   # IPC Channel：用户程序（单进程语义 + 跨进程往返
      && has 'delayed_backend hidden_and_pinned=true visible_and_returned_after_quiesce=true' \
      && has 'leaf_in_queue_released_on_receiver_exit=true sender_handle_moved=true' \
      && has 'receiver_table_full result_table_full=true message_kept=true released_slot=true complete_delivery=true' \
+     && has '^\[JSR-IPC\] service_loop_cpl3 round=1 phase=warmup cpl3=true service_exited=true client_peer_closed=true handle_moved=true resources=true' \
+     && has '^\[JSR-IPC\] service_loop_cpl3 round=2 phase=measured cpl3=true service_exited=true client_peer_closed=true handle_moved=true resources=true' \
      && has '^\[JSR-IPC\] service_loop round=1 phase=warmup queued=true service_exited=true queue_drain=true handle_released=true recv_terminal=true peer_closed=true old_endpoint_gone=true old_handle_rejected=true fresh_generation=true fresh_mapped=true fresh_pair=true fresh_exited=true repeated_reap=true resources=true' \
      && has '^\[JSR-IPC\] service_loop round=2 phase=measured queued=true service_exited=true queue_drain=true handle_released=true recv_terminal=true peer_closed=true old_endpoint_gone=true old_handle_rejected=true fresh_generation=true fresh_mapped=true fresh_pair=true fresh_exited=true repeated_reap=true resources=true' \
      && [ "${accepted:-0}" -gt 0 ] && [ "${rejected:-0}" -gt 0 ] && [ "${charged:-0}" -gt 0 ] \
@@ -975,6 +978,29 @@ check_m44() {   # IPC Channel：用户程序（单进程语义 + 跨进程往返
     record M4.4 PASS "send/recv 经 ring；两阶段 send；原子交付（缓冲区/句柄表不足消息保留）；取消竞争；关闭语义；跨进程句柄往返；页帧固定；回到基线"
   else
     record M4.4 FAIL "缺少 JSR-IPC / user-ipc 关键标记或 failed≠0"
+  fi
+}
+
+check_evt2() {
+  if has '^\[JSR-EVT2-OBJECTS\] snapshot=true broadcast=true overflow=true rights=true source_close=true exit=true quota_return=true resources=true failed=0' \
+     && has '^\[JSR-EVT2-RING\] immediate=true parked=true batch=3 cancel=true busy_atomic=true sub_close=true source_close=true pins=true resources=true failed=0' \
+     && has '^\[JSR-EVT2-CPL3\] source=true snapshot=true parked=true record=true late_snapshot=true rights=true exit=true resources=true failed=0' \
+     && has '^\[JSR-EVT2-SERVICE\] domains=4 fs=true net=true driver=true graphics=true failure_atomic=true overflow_resync=true subscriptions_closed=true resources=true failed=0' \
+     && ! has '\[JSR-EVT2-SERVICE-FAIL\]' \
+     && ! has '\[JSR-LOCK-ORDER\]'; then
+    record EVT2 PASS "标准 EventSource/Subscription 保留；FS/NET/Driver Host/Graphics 的真实提交状态经 EventSource 发布；失败操作不发布，overflow 产生权威 Resync，关闭与资源回收通过"
+  else
+    record EVT2 FAIL "缺少 EVT2 或四领域 service-event 关键标记，或失败/锁序证据存在"
+  fi
+}
+
+check_addresssync() { # Issue #42 M02：真实共享 MemoryObject + Process + scheduler park/wake
+  if has '^\[JSR-ADDRESS-SYNC\] pass=1 phase=warmup parked=2 terminal=true same_object=true resources=true failed=0' \
+     && has '^\[JSR-ADDRESS-SYNC\] pass=2 phase=measured parked=2 terminal=true same_object=true resources=true failed=0' \
+     && ! has '\[JSR-LOCK-ORDER\]'; then
+    record ADDRESS-SYNC PASS "两个真实 Process 映射同一 MemoryObject；两个任务经既有 Task event-wait key 停车，单次发布产生权威终态并唤醒双方；对象、映射、页帧和等待登记回基线"
+  else
+    record ADDRESS-SYNC FAIL "缺少两轮真实 MemoryObject 地址同步、调度唤醒或资源回收证据"
   fi
 }
 
@@ -3142,11 +3168,11 @@ if [ "$SPOT" -eq 1 ]; then
     if declare -F "$checker" >/dev/null; then "$checker"; else record "$c" FAIL "定点验收：没有名为 check_$c 的检查"; fi
   done
 elif [ "$SCHED_POLICY" = "rr" ]; then
-  check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_nativeecosystem; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
+  check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_addresssync; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_nativeecosystem; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
   check_pol1; check_pol2; check_asm1; check_mod1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_drv3; check_blk1; check_sec1; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_issue33capability; check_issue33assembly; check_issue33registries; check_hwv0; check_hwv1; check_hwv2; check_hwv3; check_hwv4
   check_sched1; check_sched2; check_sched3
 else
-  check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_nativeecosystem; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
+  check_m10; check_isa; check_m11; check_boot_stage; check_production; check_timer_progress; check_ns_dirty; check_m12; check_m13; check_m14; check_m14b; check_m15; check_m21; check_m22; check_m23; check_m24; check_m31; check_m32; check_m33; check_m34; check_m51pre; check_abi; check_m41; check_issue4_destroy; check_m42; check_m43; check_m44; check_addresssync; check_m51; check_s1; check_j1; check_j2; check_j3; check_j4; check_j5; check_jb_os2; check_j6; check_sched1; check_sched2; check_sched3; check_t1; check_t2; check_fix; check_isa1a; check_isa1b; check_ci1; check_nativeecosystem; check_isa2a; check_isa2b; check_isa3a; check_isa3b; check_smp1a; check_smp1b_a64; check_smp1b_rv; check_smp1c; check_smp2; check_smp3
   check_pol1; check_pol2; check_asm1; check_mod1; check_k06; check_pol3; check_harden1b; check_harden1c; check_harden1d; check_harden1e; check_drv0; check_drv1b; check_drv1c; check_drv1d; check_drv2a; check_drv2b; check_drv2c1; check_drv2c2; check_drv3; check_blk1; check_sec1; check_krn0_wrap; check_krn0_dma; check_tlb_smp; check_s2; check_l10n1; check_issue33capability; check_issue33assembly; check_issue33registries; check_hwv0; check_hwv1; check_hwv2; check_hwv3; check_hwv4
 fi
 

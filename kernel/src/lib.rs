@@ -40,6 +40,7 @@ pub mod production;
 pub use production as plan;
 
 pub mod appid_demo;
+pub mod address_sync_demo;
 #[cfg(all(feature = "arch2-verify", target_arch = "x86_64"))]
 pub mod arch2_demo;
 pub mod abi_demo;
@@ -295,6 +296,8 @@ pub mod service_catalog;
 
 #[cfg(feature="evt2-verify")]
 pub mod subscription_demo;
+#[cfg(feature="evt2-verify")]
+pub mod service_event_demo;
 
 #[cfg(feature="evt2-broadcast-verify")]
 pub mod subscription_broadcast_demo;

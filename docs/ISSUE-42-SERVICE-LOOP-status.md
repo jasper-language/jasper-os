@@ -19,6 +19,11 @@
 客户机中执行两轮，第一轮为 warmup，第二轮为 measured。每轮创建独立的
 client/service Process、Channel pair 与 Ring，并执行：
 
+此外，`service_loop_cpl3` 在同一客户机中运行两轮真实 CPL3 service/client
+ELF：CPL3 service 线程等待后退出，client 已把带转移 Handle 的消息留在
+service 队列并阻塞 recv，验证 service 退出、Handle 释放和客户端单次
+`peer_closed`，而不是只用内核构造的 Process 对象模拟服务端。
+
 1. client 通过真实 Ring 向 service 端点发送消息，消息携带一个带
    `TRANSFER` 的 Event Handle；发送后发送方不再持有该 Handle。
 2. service 队列中确实存在一条消息，发送方 IPC 字节配额已计费。
@@ -43,7 +48,7 @@ JASPER_CORES=4-11 JASPER_QEMU_TIMEOUT=360 bash scripts/accept.sh
 结果：
 
 ```text
-evidence/accept-20261121-003252
+evidence/accept-20261121-005745
 QEMU exit = 37（仅计时类退出）
 M4.4 = PASS
 ```

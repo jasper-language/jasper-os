@@ -10,6 +10,7 @@ pub fn run() {
  cpl3_exit_event();
  ring_batches();
  quota_limit();
+ crate::service_event_demo::run();
  // Same-shape warmup followed by measured resource baseline.
  for pass in 0..2 {
   let before=crate::baseline::baseline();

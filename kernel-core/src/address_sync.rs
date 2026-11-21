@@ -7,7 +7,9 @@
 //! or compatibility errno is stored here.
 
 use crate::event_wait::{Enroll, Key, Registration, SetError, WaitSet};
-use crate::memory_capability::{BackingIdentity, MemoryCapability, MemoryRights};
+use crate::memory_capability::{
+    BackingIdentity, MemoryCapability, MemoryCapabilityUse, MemoryRights,
+};
 use crate::task_index::Token;
 
 /// Identity of one fixed-width synchronization word in a MemoryObject.
@@ -97,6 +99,28 @@ impl AddressGrant {
 
     pub const fn rights(self) -> MemoryRights {
         self.rights
+    }
+
+    /// Build a grant from a just-validated capability use.
+    ///
+    /// Production callers obtain `MemoryCapabilityUse` from the live
+    /// `DynamicMemoryCapabilityTable::check`; carrying only that proof avoids
+    /// reconstructing or retaining a second capability table entry.
+    pub fn from_use(
+        capability: MemoryCapabilityUse,
+        start: u64,
+        width: u32,
+        required: MemoryRights,
+    ) -> Result<Self, AddressSyncError> {
+        if !capability.rights.contains(required) {
+            return Err(AddressSyncError::GrantRejected);
+        }
+        Ok(Self {
+            range: AddressRange::new(capability.backing, start, width)?,
+            capability: capability.capability,
+            epoch: capability.epoch,
+            rights: required,
+        })
     }
 }
 
@@ -199,6 +223,70 @@ impl<const N: usize> AddressSync<N> {
         }
     }
 
+    /// Return the current state when it already differs from `expected`.
+    ///
+    /// This is the first half of the external scheduler-key path. The caller
+    /// invokes it while serializing the MemoryObject condition, then enrolls
+    /// the scheduler and calls [`arm_key`](Self::arm_key).
+    pub fn observe(
+        &self,
+        grant: AddressGrant,
+        expected: AddressState,
+    ) -> Result<Option<AddressState>, AddressSyncError> {
+        if grant.range() != self.range {
+            return Err(AddressSyncError::WrongObject);
+        }
+        Ok((self.state != expected).then_some(self.state))
+    }
+
+    /// Arm a key already enrolled by the real task scheduler.
+    ///
+    /// The caller must hold the MemoryObject condition lock and re-check that
+    /// the state still equals the observation made before scheduler
+    /// enrollment. If this call fails, the caller must wake the scheduler key
+    /// and retry instead of leaving the task parked.
+    pub fn arm_key(&mut self, grant: AddressGrant, key: Key) -> Result<(), AddressSyncError> {
+        if grant.range() != self.range {
+            return Err(AddressSyncError::WrongObject);
+        }
+        self.armed.insert(key).map_err(|error| match error {
+            SetError::Full => AddressSyncError::Full,
+            SetError::DuplicateTask => AddressSyncError::Busy,
+        })
+    }
+
+    /// Consume an externally armed scheduler key.
+    pub fn take_key(&mut self, key: Key) -> Result<AddressWait, AddressSyncError> {
+        if self.ready.remove(key) {
+            return Ok(AddressWait::Ready(self.state));
+        }
+        if self.armed.remove(key) {
+            let _ = self.armed.insert(key);
+            return Err(AddressSyncError::Busy);
+        }
+        Err(AddressSyncError::StaleWaiter)
+    }
+
+    /// Cancel one scheduler key without a second registration object.
+    pub fn cancel_key(&mut self, key: Key) -> bool {
+        self.ready.remove(key) | self.armed.remove(key)
+    }
+
+    /// Remove all external scheduler keys after a terminal/publish failure.
+    /// The caller wakes each returned key after releasing the condition lock.
+    pub fn drain_keys(&mut self, out: &mut [Option<Key>]) -> usize {
+        out.fill(None);
+        let mut count = 0;
+        while count < out.len() {
+            let Some(key) = self.ready.pop().or_else(|| self.armed.pop()) else {
+                break;
+            };
+            out[count] = Some(key);
+            count += 1;
+        }
+        count
+    }
+
     /// Publish one new condition version and wake at most `count` waiters.
     ///
     /// Version advances even when `value` is unchanged, so a waiter observing
@@ -227,6 +315,41 @@ impl<const N: usize> AddressSync<N> {
                 let _ = self.armed.insert(key);
                 return Err(AddressSyncError::InternalSet);
             }
+            woken += 1;
+        }
+        Ok(woken)
+    }
+
+    /// Publish and return scheduler keys that must be woken after the caller
+    /// releases the MemoryObject condition lock. Unused output slots are
+    /// cleared before mutation.
+    pub fn publish_keys(
+        &mut self,
+        range: AddressRange,
+        value: u64,
+        count: usize,
+        wake: &mut [Option<Key>],
+    ) -> Result<usize, AddressSyncError> {
+        if range != self.range {
+            return Err(AddressSyncError::WrongObject);
+        }
+        let version = self
+            .state
+            .version
+            .checked_add(1)
+            .ok_or(AddressSyncError::Exhausted)?;
+        self.state = AddressState { version, value };
+        let mut woken = 0;
+        while woken < count && woken < wake.len() {
+            let Some(key) = self.armed.pop() else {
+                break;
+            };
+            if self.ready.insert(key).is_err() {
+                let _ = self.armed.insert(key);
+                wake[..woken].fill(None);
+                return Err(AddressSyncError::InternalSet);
+            }
+            wake[woken] = Some(key);
             woken += 1;
         }
         Ok(woken)
@@ -372,6 +495,33 @@ mod tests {
             Ok(AddressWait::Ready(AddressState { version: 1, value: 0 }))
         );
         assert_eq!(sync.armed(), 0);
+    }
+
+    #[test]
+    fn external_scheduler_key_is_armed_woken_and_consumed_once() {
+        let grant = grant(1);
+        let mut sync = AddressSync::<2>::new(grant.range(), AddressState::default());
+        let mut scheduler_registration = Registration::new();
+        assert_eq!(sync.observe(grant, AddressState::default()), Ok(None));
+        let key = match scheduler_registration.enroll(token(1), false, 0, None) {
+            Enroll::Armed(key) => key,
+            other => panic!("scheduler key did not arm: {other:?}"),
+        };
+        sync.arm_key(grant, key).unwrap();
+        let mut wake = [None; 2];
+        assert_eq!(
+            sync.publish_keys(grant.range(), 41, 2, &mut wake).unwrap(),
+            1
+        );
+        assert_eq!(wake[0], Some(key));
+        assert_eq!(
+            sync.take_key(key),
+            Ok(AddressWait::Ready(AddressState {
+                version: 1,
+                value: 41
+            }))
+        );
+        assert_eq!(sync.take_key(key), Err(AddressSyncError::StaleWaiter));
     }
 
     #[test]

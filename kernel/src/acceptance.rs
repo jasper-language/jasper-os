@@ -29,9 +29,9 @@ use crate::{
     robust_demo, rt_demo, uptr_demo,
 };
 use crate::{
-    appid_demo, arbiter_demo, balance_demo, counter_demo, fix_demo, irq_demo, job_demo, kprint,
-    kprintln, l10n_demo, mech_demo, mm, msi_demo, nohz_demo, pci_demo, pi_demo, profile_demo,
-    rtclass_demo, scale_demo, sched, smp, user_demo, virtio_rng_demo, wcet,
+    address_sync_demo, appid_demo, arbiter_demo, balance_demo, counter_demo, fix_demo, irq_demo,
+    job_demo, kprint, kprintln, l10n_demo, mech_demo, mm, msi_demo, nohz_demo, pci_demo, pi_demo,
+    profile_demo, rtclass_demo, scale_demo, sched, smp, user_demo, virtio_rng_demo, wcet,
 };
 
 /// 验收构建的启动失败：退出模拟器，由退出码和标记报告原因。
@@ -103,6 +103,7 @@ pub const SUMMARIES: &[Summary] = &[
     row("rtclass", rtclass_demo::failed),
     both("arbiter", arbiter_demo::failed, arbiter_demo::timing_failed),
     row("appid", appid_demo::failed),
+    row("addresssync", address_sync_demo::failed),
     row("pci", pci_demo::failed),
     row("msi", msi_demo::failed),
     row("msix", virtio_rng_demo::failed),
@@ -511,6 +512,11 @@ fn ipc_channel(_: &mut BootCtx) {
     ipc_demo::run();
 }
 
+/// Issue #42 M02：真实共享 MemoryObject 上的地址条件等待与调度唤醒。
+fn address_sync(_: &mut BootCtx) {
+    address_sync_demo::run();
+}
+
 /// M5.1：最小非特权程序（特权级 3、隔离、用户异常、坏指针、进程终止与等待、完全回收）。
 #[cfg(feature = "user-programs")]
 fn programs(_: &mut BootCtx) {
@@ -825,6 +831,7 @@ const FULL: &[Step] = &[
     case("async-ring", Stage::UserRuntime, "ring", async_ring),
     #[cfg(feature = "user-programs")]
     case("ipc-channel", Stage::UserRuntime, "ipc", ipc_channel),
+    case("address-sync", Stage::UserRuntime, "addresssync", address_sync),
     #[cfg(feature = "user-programs")]
     case("programs", Stage::UserRuntime, "prog", programs),
     #[cfg(feature = "user-programs")]
