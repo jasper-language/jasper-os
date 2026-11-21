@@ -8,11 +8,11 @@ Jasper-OS 提供稳定、语言中立的系统执行环境。Jasper 语言生态
 负责选择和集成 Jasper 运行时及应用框架；编译器、语法、标准库、工具链和自举
 工作不进入 Jasper-OS 内核与系统机制 DAG。
 
-Jasper-OS **不会提供 JVM/Java、.NET/CoreCLR/C# 或 Android Framework 的原生
-框架 ABI**。这些框架及其运行时只能作为外部用户态组件，通过 Linux 兼容层
+Jasper-OS **不会提供 JVM/Java 原生框架 ABI**，也**不会提供 .NET/CoreCLR/C#
+原生框架 ABI**。这些框架及其运行时只能作为外部用户态组件，通过 Linux 兼容层
 （Android Framework 可在 Linux ABI 之上叠加 Android 用户态适配）运行。这里
 “可以运行”表示兼容验收，不表示 Jasper 原生生态支持该框架，也不授权为框架扩张
-内核 ABI。
+内核 ABI。它们不是 Jasper 原生框架。
 
 POSIX、Linux ABI、Android、Windows 与外部驱动适配是生态迁移和互操作设施，
 不是 Jasper 原生体系的永久基础依赖。
