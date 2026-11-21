@@ -415,6 +415,13 @@ mod tests {
         assert_eq!(b.remote(), rebound);
         assert_eq!(a.udp_stats().sent_datagrams, 2);
         assert_eq!(b.udp_stats().received_datagrams, 2);
+        let mut b_wire = [0u8; 1200];
+        let (action, _) = b
+            .encapsulate(now, &packet[..packet_len], &mut b_wire, &mut rng)
+            .unwrap();
+        assert_eq!(action, WireGuardEmit::Transport);
+        assert_eq!(b.remote(), rebound);
+        assert_eq!(b.udp_stats().sent_datagrams, 2);
 
         a.close().unwrap();
         service_events::publish(a.event_source().unwrap(), observed, &mut subscriber).unwrap();
