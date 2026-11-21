@@ -43,6 +43,7 @@ const NATIVE_ENTER_CODE: u16 = 0x0103;
 const JSUI_ENTER_CODE: u32 = 28;
 const REQUEST_PAYLOAD: &[u8] = br##"{"ir_version":"0.1.0","identity_domain":"jasper-os/ui-probe","owner":"ui-host","session":"session-1","expected_revision":1,"next_revision":2,"ops":[{"op":"insert","parent":null,"index":0,"node":{"key":{"semantic_id":1,"generation":1},"element":{"kind":"container"},"semantics":{"role":"container","label":"Jasper OS","focusable":true},"style":{"box":{"width":{"unit":"px","value":64},"height":{"unit":"px","value":64}},"paint":{"background":"#0A84FFFF"}},"events":[{"event":"activate","action":"jasper.ui.activate"}],"children":[]}}]}"##;
 const PATCH_PAYLOAD: &[u8] = br##"{"ir_version":"0.1.0","identity_domain":"jasper-os/ui-probe","owner":"ui-host","session":"session-1","expected_revision":2,"next_revision":3,"ops":[{"op":"update","key":{"semantic_id":1,"generation":1},"fields":{"style":{"box":{"width":{"unit":"px","value":64},"height":{"unit":"px","value":64}},"paint":{"background":"#FF0000FF"}}}}]}"##;
+const PEER_REQUEST_PAYLOAD: &[u8] = br##"{"ir_version":"0.1.0","identity_domain":"jasper-os/ui-probe","owner":"ui-peer","session":"session-peer","expected_revision":1,"next_revision":2,"ops":[{"op":"insert","parent":null,"index":0,"node":{"key":{"semantic_id":2,"generation":1},"element":{"kind":"container"},"semantics":{"role":"container","label":"Jasper Peer","focusable":false},"style":{"box":{"width":{"unit":"px","value":64},"height":{"unit":"px","value":64}},"paint":{"background":"#00FF00FF"}},"events":[],"children":[]}}]}"##;
 
 static CHECKS: AtomicU32 = AtomicU32::new(0);
 static FAILED: AtomicU32 = AtomicU32::new(0);
@@ -90,11 +91,11 @@ fn surface_argument() -> u64 {
     (u64::from(TEST_SURFACE_WIDTH) << 32) | u64::from(TEST_SURFACE_HEIGHT)
 }
 
-fn session_scope(subject: u64, round: u32) -> UiSessionScope {
+fn session_scope(session_id: u64) -> UiSessionScope {
     UiSessionScope {
-        user: subject,
+        user: 1,
         tenant: 1,
-        session: u64::from(round) + 1,
+        session: session_id,
         display_seat: 1,
         input_seat: 1,
     }
@@ -217,16 +218,17 @@ fn run_round(round: u32) -> bool {
     let queued_before = ipc::queued_total();
     let host = proc::create("ui-process-host", host_calls());
     let service = proc::create("ui-service", service_calls());
-    let (Ok(host), Ok(service)) = (host, service) else {
+    let peer = proc::create("ui-peer", service_calls());
+    let (Ok(host), Ok(service), Ok(peer)) = (host, service, peer) else {
         check(false, "UI host/service process creation failed");
         return false;
     };
     let Ok((host_endpoint, service_endpoint)) = ipc::create_pair(host, service) else {
         check(false, "UI Channel pair creation failed");
-        let _ = proc::exit_idle(host, -1);
-        let _ = proc::exit_idle(service, -1);
-        proc::reap(host);
-        proc::reap(service);
+        for process in [host, service, peer] {
+            let _ = proc::exit_idle(process, -1);
+            proc::reap(process);
+        }
         kobj::run_cleanup(usize::MAX);
         check(
             crate::baseline::baseline() == before,
@@ -234,10 +236,25 @@ fn run_round(round: u32) -> bool {
         );
         return false;
     };
+    let Ok((peer_host_endpoint, peer_service_endpoint)) = ipc::create_pair(host, peer) else {
+        check(false, "UI peer Channel pair creation failed");
+        for process in [host, service, peer] {
+            let _ = proc::exit_idle(process, -1);
+            proc::reap(process);
+        }
+        kobj::run_cleanup(usize::MAX);
+        check(
+            crate::baseline::baseline() == before,
+            "failed peer launch leaked resources",
+        );
+        return false;
+    };
 
     let subject = service.raw();
-    let scope = session_scope(subject, round);
-    let mut sessions = UiSessionRegistry::<1>::new();
+    let peer_subject = peer.raw();
+    let scope = session_scope(u64::from(round) + 1);
+    let peer_scope = session_scope(100 + u64::from(round));
+    let mut sessions = UiSessionRegistry::<2>::new();
     let Some(create_capability) = pep_capability(subject, scope, Operation::ServiceUiSessionCreate)
     else {
         check(false, "UI session create capability was not admitted");
@@ -297,6 +314,49 @@ fn run_round(round: u32) -> bool {
     check(focus_ok, "UI session did not acquire focus");
     let input_capability =
         pep_capability(subject, scope, Operation::ServiceUiInputRead).expect("UI input capability");
+    let Some(peer_create_capability) =
+        pep_capability(peer_subject, peer_scope, Operation::ServiceUiSessionCreate)
+    else {
+        check(false, "peer UI session capability was not admitted");
+        return false;
+    };
+    let Ok((peer_key, _)) = sessions.open(
+        peer_subject,
+        peer_scope,
+        UiSessionKind::Remote,
+        ui_capabilities(),
+        Some(test_surface()),
+        peer_create_capability,
+    ) else {
+        check(false, "peer UI session was not admitted");
+        return false;
+    };
+    let hidden_scene = UiSceneFacts {
+        visible: false,
+        rendering: true,
+    };
+    let peer_ordinary_background_rejected = sessions
+        .set_scene(peer_subject, peer_scope, peer_key, hidden_scene)
+        .is_err();
+    check(
+        peer_ordinary_background_rejected,
+        "peer rendering without a background grant was accepted",
+    );
+    let Some(peer_present_capability) =
+        pep_capability(peer_subject, peer_scope, Operation::ServiceUiFramePresent)
+    else {
+        check(false, "peer background capability was not admitted");
+        return false;
+    };
+    let peer_background_ok = sessions
+        .grant_background(peer_subject, peer_scope, peer_key, peer_present_capability)
+        .and_then(|_| sessions.set_scene(peer_subject, peer_scope, peer_key, hidden_scene))
+        .is_ok();
+    check(
+        peer_background_ok,
+        "authorized peer background rendering was not admitted",
+    );
+    let peer_client = UiClientKey::from_raw(peer_key.raw()).expect("nonzero peer UI client");
     let client = UiClientKey::from_raw(session_key.raw()).expect("nonzero UI client");
     let header = request_header(client);
     let mut request = alloc::vec![0u8; UI_FRAME_HEADER_BYTES + REQUEST_PAYLOAD.len()];
@@ -342,10 +402,10 @@ fn run_round(round: u32) -> bool {
     let Some(native_key) = wait_for_native_enter() else {
         crate::display::end_ui_input_capture();
         check(false, "native keyboard Enter was not delivered");
-        let _ = proc::exit_idle(host, -1);
-        let _ = proc::exit_idle(service, -1);
-        proc::reap(host);
-        proc::reap(service);
+        for process in [host, service, peer] {
+            let _ = proc::exit_idle(process, -1);
+            proc::reap(process);
+        }
         kobj::run_cleanup(usize::MAX);
         check(
             crate::baseline::baseline() == before && ipc::queued_total() == queued_before,
@@ -430,14 +490,68 @@ fn run_round(round: u32) -> bool {
         close_sent == close_len as i64,
         "host close was not queued on the service endpoint",
     );
+    let peer_header = UiFrameHeader {
+        kind: UiFrameKind::Scene,
+        flags: 0,
+        client: peer_client,
+        request_id: 21,
+        sequence: 1,
+        payload_bytes: PEER_REQUEST_PAYLOAD.len() as u32,
+    };
+    let mut peer_request = alloc::vec![0u8; UI_FRAME_HEADER_BYTES + PEER_REQUEST_PAYLOAD.len()];
+    let peer_request_len = encode_ui_frame(peer_header, PEER_REQUEST_PAYLOAD, &mut peer_request)
+        .expect("bounded peer UI request");
+    let peer_sent = kobj::with(|table| {
+        ipc::send_in(
+            table,
+            host,
+            peer_host_endpoint,
+            peer_request[..peer_request_len].to_vec(),
+            &[],
+        )
+    });
+    check(
+        peer_sent == peer_request_len as i64,
+        "peer request was not queued",
+    );
+    let peer_failure_header = UiFrameHeader {
+        kind: UiFrameKind::Present,
+        flags: 0,
+        client: peer_client,
+        request_id: 22,
+        sequence: 2,
+        payload_bytes: 0,
+    };
+    let mut peer_failure_request = [0u8; UI_FRAME_HEADER_BYTES];
+    let peer_failure_len = encode_ui_frame(peer_failure_header, &[], &mut peer_failure_request)
+        .expect("bounded peer failure request");
+    let peer_failure_sent = kobj::with(|table| {
+        ipc::send_in(
+            table,
+            host,
+            peer_host_endpoint,
+            peer_failure_request[..peer_failure_len].to_vec(),
+            &[],
+        )
+    });
+    check(
+        peer_failure_sent == peer_failure_len as i64,
+        "peer failure request was not queued",
+    );
     check(
         ipc::queued(service, service_endpoint) == Some(4),
         "service endpoint did not receive Scene/Patch/Input/Close",
     );
+    check(
+        ipc::queued(peer, peer_service_endpoint) == Some(2),
+        "peer endpoint did not receive Scene/Close",
+    );
 
     let started = launch_service(service, service_endpoint.raw());
+    let peer_started = started && launch_service(peer, peer_service_endpoint.raw());
     check(started, "UI Service ELF did not launch");
-    if started {
+    check(peer_started, "peer UI Service ELF did not launch");
+    if peer_started {
         sched::run();
     }
     check(
@@ -449,6 +563,11 @@ fn run_round(round: u32) -> bool {
     check(
         state == Some(ProcState::Exited { code: SERVICE_EXIT }),
         "UI Service did not complete the Scene/Input/Close loop",
+    );
+    let peer_state = proc::state(peer);
+    check(
+        peer_state == Some(ProcState::Exited { code: 65 }),
+        "peer UI Service did not terminate through the protocol failure path",
     );
 
     let response_bytes = ipc::queued_body(host, host_endpoint, ipc::MAX_MSG_BYTES);
@@ -505,9 +624,57 @@ fn run_round(round: u32) -> bool {
         ipc::queued(host, host_endpoint) == Some(3),
         "host endpoint did not retain all Present responses",
     );
+    let peer_response_bytes = ipc::queued_body(host, peer_host_endpoint, ipc::MAX_MSG_BYTES);
+    let peer_response_frame = peer_response_bytes
+        .as_deref()
+        .and_then(|bytes| decode_ui_frame(bytes).ok());
+    let peer_response_ok = peer_response_frame.as_ref().is_some_and(|frame| {
+        frame.header.kind == UiFrameKind::Present
+            && frame.header.client == peer_client
+            && frame.header.request_id == peer_header.request_id
+            && frame.header.sequence == peer_header.sequence
+            && frame.payload.starts_with(&[0x00, 0xff, 0x00, 0xff])
+    });
+    check(
+        peer_response_ok,
+        "resident peer UI Service did not deliver its background Present frame",
+    );
+    let peer_error_bytes = ipc::queued_body_at(host, peer_host_endpoint, 1, ipc::MAX_MSG_BYTES);
+    let peer_error_frame = peer_error_bytes
+        .as_deref()
+        .and_then(|bytes| decode_ui_frame(bytes).ok());
+    let peer_error_ok = peer_error_frame.as_ref().is_some_and(|frame| {
+        frame.header.kind == UiFrameKind::Error
+            && frame.header.client == peer_client
+            && frame.header.request_id == peer_failure_header.request_id
+            && frame.header.sequence == peer_failure_header.sequence
+    });
+    check(
+        peer_error_ok,
+        "peer UI Service did not emit its terminal Error frame",
+    );
+    let background_revoked = sessions
+        .revoke_background(peer_subject, peer_scope, peer_key)
+        .and_then(|_| sessions.set_scene(peer_subject, peer_scope, peer_key, hidden_scene))
+        .is_err();
+    check(
+        background_revoked,
+        "revoked peer background rendering was accepted",
+    );
+    let peer_close_ok = sessions.close(peer_subject, peer_key).is_ok();
+    check(peer_close_ok, "peer UI session did not close");
+    check(
+        ipc::queued(host, peer_host_endpoint) == Some(2),
+        "peer host endpoint did not retain Present and terminal Error responses",
+    );
+    check(
+        peer_response_ok && peer_error_ok,
+        "peer UI Service did not complete present then terminal failure",
+    );
 
     let host_exit = proc::exit_idle(host, 0);
     let service_reaped = proc::reap(service).is_some();
+    let peer_reaped = proc::reap(peer).is_some();
     let host_reaped = proc::reap(host).is_some();
     kobj::run_cleanup(usize::MAX);
     let after = crate::baseline::baseline();
@@ -521,7 +688,7 @@ fn run_round(round: u32) -> bool {
     );
     check(host_exit, "UI host process did not enter exited");
     check(
-        service_reaped && host_reaped,
+        service_reaped && peer_reaped && host_reaped,
         "UI processes were not reaped",
     );
     check(
@@ -553,6 +720,25 @@ fn run_round(round: u32) -> bool {
         "[JSR-UI-SESSION-ISOLATION] round={} remote_channel=true session_key=true scope=true recovered=true scene=true focus=true input_capability=true replay_rejected={} failed={}",
         round,
         replay_rejected,
+        failed()
+    );
+    let mobile_ok = session_isolation
+        && peer_response_ok
+        && peer_ordinary_background_rejected
+        && peer_background_ok
+        && background_revoked
+        && peer_error_ok
+        && peer_close_ok
+        && resources;
+    check(mobile_ok, "two-process mobile foreground policy failed");
+    kprintln!(
+        "[JSR-UI-MOBILE] round={} primary_focus=true primary_input=true peer_resident=true peer_present={} ordinary_background_rejected={} background_grant={} background_revoked={} peer_failed=true resources={} failed={}",
+        round,
+        peer_response_ok,
+        peer_ordinary_background_rejected,
+        peer_background_ok,
+        background_revoked,
+        resources,
         failed()
     );
 

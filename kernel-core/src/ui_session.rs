@@ -160,7 +160,7 @@ impl<const N: usize> UiSessionRegistry<N> {
         if self.sessions.iter().flatten().any(|session| {
             session.state == UiSessionState::Active
                 && session.scope.same_seat(scope)
-                && session.subject != subject
+                && (session.scope.user != scope.user || session.scope.tenant != scope.tenant)
         }) {
             return Err(UiSessionError::CrossUserSeat);
         }
@@ -571,6 +571,36 @@ mod tests {
             registry.surface_for(11, first_key),
             Err(UiSessionError::CrossUserSurface)
         );
+    }
+
+    #[test]
+    fn one_user_may_open_two_subject_sessions_on_the_same_seat() {
+        let mut registry: UiSessionRegistry<2> = UiSessionRegistry::new();
+        let first = scope(10, 1, 1);
+        let second = UiSessionScope {
+            session: 2,
+            ..first
+        };
+        assert!(registry
+            .open(
+                100,
+                first,
+                UiSessionKind::Remote,
+                capabilities(true),
+                Some(SURFACE),
+                capability(100, first, Operation::ServiceUiSessionCreate),
+            )
+            .is_ok());
+        assert!(registry
+            .open(
+                101,
+                second,
+                UiSessionKind::Remote,
+                capabilities(true),
+                Some(SURFACE),
+                capability(101, second, Operation::ServiceUiSessionCreate),
+            )
+            .is_ok());
     }
 
     #[test]

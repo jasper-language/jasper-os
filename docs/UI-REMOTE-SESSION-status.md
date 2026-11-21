@@ -23,7 +23,7 @@ transport and CPL3 integration remain open.**
 
 ```text
 cargo test -p kernel-core ui_session --lib
-6 passed; 0 failed
+7 passed; 0 failed
 ```
 
 Tests cover cross-user seat/Surface rejection, focus-gated input, stale and
