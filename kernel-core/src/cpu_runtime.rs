@@ -52,6 +52,8 @@ pub enum CpuRuntimeError {
     NotAdmitted { logical: usize },
     AlreadyOnline,
     AlreadyOffline,
+    BootCpu,
+    LastOnlineCpu,
     Allocation,
     GenerationExhausted,
     Admission(CpuAdmissionError),
@@ -67,6 +69,8 @@ impl CpuRuntimeError {
             Self::NotAdmitted { .. } => "system.cpu.error.not_admitted",
             Self::AlreadyOnline => "system.cpu.error.already_online",
             Self::AlreadyOffline => "system.cpu.error.already_offline",
+            Self::BootCpu => "system.cpu.error.boot_cpu",
+            Self::LastOnlineCpu => "system.cpu.error.last_online_cpu",
             Self::Allocation => "system.cpu.error.registry_allocation",
             Self::GenerationExhausted => "system.cpu.error.generation",
             Self::Admission(error) => error.name(),
@@ -84,6 +88,7 @@ pub struct CpuRuntimeRegistry {
     online: CpuBitmap,
     rejected: CpuBitmap,
     admission: CpuAdmission,
+    boot_logical: usize,
     generation: u64,
 }
 
@@ -173,6 +178,7 @@ impl CpuRuntimeRegistry {
             online,
             rejected,
             admission,
+            boot_logical,
             generation: 1,
         })
     }
@@ -280,6 +286,12 @@ impl CpuRuntimeRegistry {
         if !self.online.contains(logical) {
             return Err(CpuRuntimeError::AlreadyOffline);
         }
+        if self.online.len() == 1 {
+            return Err(CpuRuntimeError::LastOnlineCpu);
+        }
+        if logical == self.boot_logical {
+            return Err(CpuRuntimeError::BootCpu);
+        }
         let next_generation = self
             .generation
             .checked_add(1)
@@ -331,6 +343,39 @@ mod tests {
         assert_eq!(registry.state(2), Some(CpuLifecycle::Online));
         assert_eq!(registry.mark_offline(2), Ok(3));
         assert_eq!(registry.state(2), Some(CpuLifecycle::Offline));
+    }
+
+    #[test]
+    fn boot_and_last_online_cpus_cannot_leave() {
+        let entries = [entry(0), entry(1), entry(2)];
+        let mut registry = CpuRuntimeRegistry::admit_complete(&entries, 1, 3, 0).unwrap();
+        assert_eq!(
+            registry.mark_offline(0),
+            Err(CpuRuntimeError::LastOnlineCpu)
+        );
+        assert_eq!(registry.mark_online(1), Ok(2));
+        let before = registry.clone();
+        assert_eq!(registry.mark_offline(0), Err(CpuRuntimeError::BootCpu));
+        assert_eq!(registry, before);
+
+        assert_eq!(registry.mark_online(2), Ok(3));
+        assert_eq!(registry.mark_offline(1), Ok(4));
+        assert_eq!(registry.mark_offline(2), Ok(5));
+        assert_eq!(
+            registry.mark_offline(0),
+            Err(CpuRuntimeError::LastOnlineCpu)
+        );
+        assert_eq!(registry.state(0), Some(CpuLifecycle::Online));
+        assert_eq!(registry.generation(), 5);
+        assert_eq!(registry.online().iter().collect::<Vec<_>>(), vec![0]);
+        assert_eq!(
+            CpuRuntimeError::BootCpu.name(),
+            "system.cpu.error.boot_cpu"
+        );
+        assert_eq!(
+            CpuRuntimeError::LastOnlineCpu.name(),
+            "system.cpu.error.last_online_cpu"
+        );
     }
 
     #[test]

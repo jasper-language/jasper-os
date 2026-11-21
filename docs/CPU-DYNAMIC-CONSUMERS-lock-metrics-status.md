@@ -86,6 +86,11 @@ in-flight MSI completions, scheduler task migration, architecture stop IPIs,
 CPU runtime generation publication and hotplug rollback still require the
 following transactions before `CPU-DYNAMIC-CONSUMERS-1` can become done.
 
+The runtime registry also rejects `mark_offline(boot_logical)` while another
+CPU is online and reports `LastOnlineCpu` before the final online CPU can leave.
+Both failures are transactional: the online set, per-CPU generations and the
+registry generation remain unchanged.
+
 ## 未完成
 
 - 当前主机没有 129+ CPU 的真实启动环境，因此该切片只证明软件不再以固定数组
