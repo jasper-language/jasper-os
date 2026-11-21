@@ -442,6 +442,134 @@ mod tests {
     }
 
     #[test]
+    fn fs_backend_cancel_waits_for_mapping_quiescence_and_reclaims_handle() {
+        use crate::fs::{
+            EntryName, FsCapabilities, FsContract, MountIdentity, NodeKind,
+        };
+        use crate::object::Rights;
+
+        let mount = MountIdentity::new(0x5157, 0x0909, 1);
+        let mut fs = FsContract::<4, 4>::format(
+            mount,
+            FsCapabilities::ALL,
+            FsCapabilities::NONE,
+        )
+        .unwrap();
+        let root = fs.root();
+        let file = fs
+            .create(
+                root,
+                EntryName::new(b"inflight").unwrap(),
+                NodeKind::File,
+                Rights::READ.union(Rights::WRITE),
+            )
+            .unwrap();
+        let rights = Rights::READ.union(Rights::WRITE).union(Rights::MAP);
+        let handle = fs.open(file, rights).unwrap();
+        fs.write(handle, 4096).unwrap();
+        let mapping = fs.map(handle, 0, 4096, true).unwrap();
+        assert!(fs.mapping_valid(mapping));
+
+        let context = handle.raw();
+        let mut ring = RuntimeAsyncRing::new(2, 2).unwrap();
+        let request = ring
+            .submit(Submission {
+                op: 31,
+                user_tag: 7,
+                context,
+                uses_buffer: true,
+            })
+            .unwrap();
+        ring.start(request, Exec::Abortable).unwrap();
+        assert_eq!(
+            ring.cancel(request),
+            Ok(Cancelled::AbortBackend { context })
+        );
+        assert_eq!(ring.decided_unpublished(), 1);
+        assert_eq!(ring.ready(), 0);
+        assert_eq!(fs.live_handles(), 1);
+
+        // Closing the real file handle invalidates the mapping and is the FS
+        // backend's quiescence fact for the in-flight mapped operation.
+        fs.close(handle).unwrap();
+        assert!(!fs.mapping_valid(mapping));
+        assert_eq!(fs.live_handles(), 0);
+        assert_eq!(ring.decided_unpublished(), 1);
+
+        ring.quiesce(request).unwrap();
+        assert_eq!(ring.decided_unpublished(), 0);
+        assert_eq!(ring.in_flight(), 0);
+        assert_eq!(ring.take_reclaimed(), Some(context));
+        assert_eq!(
+            ring.peek(0).map(|completion| completion.terminal),
+            Some(Terminal::Cancelled)
+        );
+        assert_eq!(ring.consume(2), 1);
+        assert_eq!(ring.consume(2), 0);
+        assert_eq!(ring.quiesce(request), Err(ProgressError::NoSuchRequest));
+        assert_eq!(fs.live_handles(), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "network-dynamic")]
+    fn net_backend_cancel_waits_for_socket_close_and_reclaims_queued_quota() {
+        use crate::net4_runtime::{
+            UdpAddress, UdpLimits, UdpQuota, UdpRights, UdpRuntimeError,
+            UdpSocketRuntime,
+        };
+
+        let local = UdpAddress::new([10, 0, 4, 2], 4433);
+        let remote = UdpAddress::new([10, 0, 4, 15], 49152);
+        let initial_quota = UdpQuota::new(1, 2, 16);
+        let mut runtime =
+            UdpSocketRuntime::new(initial_quota, UdpLimits::new(1, 2, 16)).unwrap();
+        let handle = runtime.bind(local, UdpRights::SERVICE).unwrap();
+        runtime.receive(remote, local, b"payload").unwrap();
+        assert_eq!(runtime.stats().queued_datagrams, 1);
+
+        let context = u64::from(handle.slot()) << 32 | u64::from(handle.generation());
+        let mut ring = RuntimeAsyncRing::new(2, 2).unwrap();
+        let request = ring
+            .submit(Submission {
+                op: 32,
+                user_tag: 8,
+                context,
+                uses_buffer: true,
+            })
+            .unwrap();
+        ring.start(request, Exec::Abortable).unwrap();
+        assert_eq!(
+            ring.cancel(request),
+            Ok(Cancelled::AbortBackend { context })
+        );
+        assert_eq!(ring.decided_unpublished(), 1);
+        assert_eq!(ring.ready(), 0);
+
+        runtime.close(handle).unwrap();
+        assert_eq!(runtime.quota(), initial_quota);
+        assert_eq!(runtime.stats().queued_datagrams, 0);
+        assert_eq!(ring.decided_unpublished(), 1);
+
+        ring.quiesce(request).unwrap();
+        assert_eq!(ring.decided_unpublished(), 0);
+        assert_eq!(ring.in_flight(), 0);
+        assert_eq!(ring.take_reclaimed(), Some(context));
+        assert_eq!(
+            ring.peek(0).map(|completion| completion.terminal),
+            Some(Terminal::Cancelled)
+        );
+        assert_eq!(ring.consume(2), 1);
+        assert_eq!(ring.consume(2), 0);
+        assert_eq!(ring.quiesce(request), Err(ProgressError::NoSuchRequest));
+        let mut output = [0u8; 16];
+        assert_eq!(
+            runtime.recv(handle, &mut output),
+            Err(UdpRuntimeError::Closed)
+        );
+        assert_eq!(runtime.close(handle), Err(UdpRuntimeError::Closed));
+    }
+
+    #[test]
     fn capacity_rejection_is_failure_atomic() {
         assert!(RuntimeAsyncRing::new(0, 4).is_none());
         assert!(RuntimeAsyncRing::new(5, 4).is_none());
