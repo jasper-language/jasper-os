@@ -36,10 +36,10 @@
 
 ```text
 cargo test -p kernel-core address_sync --lib
-6 passed; 0 failed
+7 passed; 0 failed
 
 cargo test -p kernel-core
-1048 unit tests + integration suites passed, including address_sync 5/5
+1105 unit tests passed, including address_sync 7/7
 
 cargo check -p kernel-core --target x86_64-unknown-none
 PASS
@@ -108,13 +108,15 @@ wait key。等待者重新验证 capability 并失败关闭：
 - 对象 generation 不同和 revoked capability 失败关闭；
 - 重复任务、容量拒绝、取消、任务退出、deadline 优先级和幂等清理；
 - version 溢出不改变条件或 waiter。
+- 64 个独立任务代次同时登记同一地址条件，单次广播唤醒全部 64 个 waiter；
+  逐项消费后重复发布不产生额外唤醒。
 
 ## 尚未完成
 
 - 已完成内核内真实 Process/MemoryObject/调度停车接线，但尚无关闭兼容层后的
   CPL3 原生调用者和经批准的用户接口；
-- 跨 CPU 等待/发布、停车后 capability 撤销、Process 退出和重映射已通过；尚缺原生 CPL3
-  调用决策与更高并发压力公平性矩阵；
+- 跨 CPU 等待/发布、停车后 capability 撤销、Process 退出和重映射已通过；
+  宿主侧已有 64 waiter 广播压力；尚缺原生 CPL3 调用决策；
 - 用户态 Pager 仍未实现；PagerCapability、FaultEvent、处理者死亡、递归缺页、
   队列满、超时、取消与页表最终裁决都需要独立 ABI/安全设计；
 - 本切片不新增 syscall，不改变 `NO-HARDCODE-RESIDUAL-1` 或任何 DAG 节点状态。

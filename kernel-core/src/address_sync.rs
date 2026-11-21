@@ -635,4 +635,48 @@ mod tests {
         );
         assert_eq!(sync.state(), initial);
     }
+
+    #[test]
+    fn sixty_four_task_generations_share_one_broadcast() {
+        let grant = grant(1);
+        let mut sync = AddressSync::<64>::new(grant.range(), AddressState::default());
+        let mut registrations = [Registration::new(); 64];
+        let mut keys = [None; 64];
+
+        for index in 0..64 {
+            let task = Token {
+                slot: index + 1,
+                generation: 1,
+            };
+            match sync
+                .wait(
+                    &mut registrations[index],
+                    grant,
+                    task,
+                    AddressState::default(),
+                    0,
+                    None,
+                )
+                .unwrap()
+            {
+                AddressWait::Armed(key) => keys[index] = Some(key),
+                other => panic!("waiter {index} did not arm: {other:?}"),
+            }
+        }
+        assert_eq!(sync.armed(), 64);
+        assert_eq!(sync.publish(grant.range(), 77, 64), Ok(64));
+        assert_eq!(sync.armed(), 0);
+
+        for (registration, key) in registrations.iter_mut().zip(keys) {
+            assert_eq!(
+                sync.take(registration, key.unwrap()),
+                Ok(AddressWait::Ready(AddressState {
+                    version: 1,
+                    value: 77
+                }))
+            );
+        }
+        assert_eq!(sync.publish(grant.range(), 78, 64), Ok(0));
+        assert_eq!(sync.state(), AddressState { version: 2, value: 78 });
+    }
 }
