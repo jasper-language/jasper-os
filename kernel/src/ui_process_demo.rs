@@ -414,9 +414,71 @@ fn run_round(round: u32) -> bool {
         check(false, "multi-window migration capability was not admitted");
         return false;
     };
-    workspace
-        .prepare_frame(0, 1, 1, 71)
-        .expect("pre-migration frame ticket");
+    let initial_surface = workspace.surface();
+    let initial_mode = workspace.mode();
+    let Some(_) = workspace.prepare_frame(0, 1, 1, 71).ok() else {
+        check(false, "pre-migration frame ticket was not admitted");
+        return false;
+    };
+    let mut degraded_capabilities = workspace_capabilities(keyboard);
+    degraded_capabilities.multi_window = false;
+    degraded_capabilities.split_layouts = false;
+    degraded_capabilities.pointer = false;
+    degraded_capabilities.touch = false;
+    let degraded_transition = workspace.reconfigure(
+        UiCapabilityEvent {
+            capability_epoch: 2,
+            policy_epoch: 2,
+            revocation_epoch: 2,
+            capabilities: degraded_capabilities,
+            surface: display_surface,
+            dpi_x: 180,
+            dpi_y: 180,
+        },
+        InteractionProfile::MultiWindow,
+        600,
+        workspace_memory_budget,
+        layout_capability,
+    );
+    let degraded_rolled_back = degraded_transition.is_err()
+        && workspace.mode() == initial_mode
+        && workspace.surface() == initial_surface
+        && workspace.frame(0, 1, 1, 71, 1).is_ok();
+    check(
+        degraded_rolled_back,
+        "failed capability migration did not preserve the old workspace",
+    );
+    let Some(_) = workspace.prepare_frame(0, 1, 1, 72).ok() else {
+        check(false, "pre-budget frame ticket was not admitted");
+        return false;
+    };
+    let budget_transition = workspace.reconfigure(
+        UiCapabilityEvent {
+            capability_epoch: 2,
+            policy_epoch: 2,
+            revocation_epoch: 2,
+            capabilities: workspace_capabilities(keyboard),
+            surface: display_surface,
+            dpi_x: 180,
+            dpi_y: 180,
+        },
+        InteractionProfile::MultiWindow,
+        600,
+        workspace_memory_budget.saturating_sub(1),
+        layout_capability,
+    );
+    let budget_rolled_back = budget_transition.is_err()
+        && workspace.mode() == initial_mode
+        && workspace.surface() == initial_surface
+        && workspace.frame(0, 1, 1, 72, 2).is_ok();
+    check(
+        budget_rolled_back,
+        "failed budget preflight did not preserve the old workspace",
+    );
+    let Some(_) = workspace.prepare_frame(0, 1, 1, 73).ok() else {
+        check(false, "pre-commit frame ticket was not admitted");
+        return false;
+    };
     let layout_mode = workspace.reconfigure(
         UiCapabilityEvent {
             capability_epoch: 2,
@@ -432,25 +494,31 @@ fn run_round(round: u32) -> bool {
         workspace_memory_budget,
         layout_capability,
     );
+    let pending_canceled = workspace.frame(0, 1, 2, 73, 2).is_err();
     let old_frame_rejected = workspace.frame(0, 1, 1, 71, 2).is_err();
     let old_input_rejected = workspace.input(0, 1, 1, 2).is_err();
     let new_frame_ok = workspace
         .prepare_frame(0, 1, 2, 72)
-        .and_then(|_| workspace.frame(0, 1, 2, 72, 1))
+        .and_then(|_| workspace.frame(0, 1, 2, 72, 3))
         .is_ok();
     let new_input_ok = workspace.input(0, 1, 2, 1).is_ok();
     let multiwindow_ok = layout_mode == Ok(UiLayoutMode::MultiWindow)
+        && degraded_rolled_back
+        && budget_rolled_back
+        && pending_canceled
         && old_frame_rejected
         && old_input_rejected
         && new_frame_ok
         && new_input_ok;
     check(multiwindow_ok, "multi-window migration contract failed");
     kprintln!(
-        "[JSR-UI-MULTIWINDOW] round={} layout={:?} source=framebuffer keyboard={} pending_canceled={} old_frame_rejected={} old_input_rejected={} new_surface_generation={} new_input_generation={} failed={}",
+        "[JSR-UI-MULTIWINDOW] round={} layout={:?} source=framebuffer keyboard={} capability_rollback={} budget_rollback={} pending_canceled={} old_frame_rejected={} old_input_rejected={} new_surface_generation={} new_input_generation={} failed={}",
         round,
         layout_mode,
         keyboard,
-        old_frame_rejected,
+        degraded_rolled_back,
+        budget_rolled_back,
+        pending_canceled,
         old_frame_rejected,
         old_input_rejected,
         new_frame_ok,

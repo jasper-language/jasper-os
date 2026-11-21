@@ -2,8 +2,9 @@
 
 Updated: 2026-11-21
 
-Status: **core-passed: layout, CPL3 migration and dual-Surface framebuffer output
-are verified; real display/DPI/keyboard hotplug remains open.**
+Status: **core-passed: layout, CPL3 migration, dual-Surface framebuffer output
+and capability/budget rollback are verified; an emitted hardware/QEMU hotplug
+event source remains open.**
 
 `kernel-core::ui_workspace` provides a bounded, allocation-fallible contract for
 the same application/Scene model under Single, Split and MultiWindow layouts:
@@ -34,15 +35,18 @@ Tests cover single/split geometry, independent generation rotation, stale frame
 and input rejection, pending-frame cancellation, capability degradation to Split,
 budget failure atomicity and authorization failure atomicity.
 
-The real CPL3 UI process drill now constructs a two-Scene workspace and submits
-a capability event with new geometry/DPI, policy and revocation epochs. It
-recomputes MultiWindow layout, applies the unified present authorization and
-memory budget, starts successful new-generation frame/input streams, and checks
-that the old generations are rejected. The real QEMU run passes with
-`qemu_rc=33`; marker:
+The real CPL3 UI process drill constructs a two-Scene workspace from the active
+framebuffer's actual geometry and keyboard availability. It first injects a
+capability-loss event and then a Surface-budget failure; both are rejected
+without changing the old mode, Surface generations or pending frame ticket,
+and the old-generation frame remains usable. A retry with the real framebuffer
+facts then commits MultiWindow migration and atomically cancels the pending
+ticket. The real QEMU run passes twice with `qemu_rc=33`, no panic and complete
+resource restoration; marker:
 
 ```text
-[JSR-UI-MULTIWINDOW] layout=Ok(MultiWindow) pending_canceled=true \
+[JSR-UI-MULTIWINDOW] layout=Ok(MultiWindow) source=framebuffer keyboard=true \
+capability_rollback=true budget_rollback=true pending_canceled=true \
 old_frame_rejected=true \
 old_input_rejected=true new_surface_generation=true new_input_generation=true
 ```
@@ -61,8 +65,8 @@ Both rounds restore all process, Channel, Surface and frame resources.
 
 ## Remaining gates
 
-- Emit display-size/DPI/keyboard capability events from actual hardware/QEMU
-  hotplug rather than the verification input.
-- Exercise hotplug rollback on QEMU and then the real display matrix.
+- Add a production/QEMU display-size/DPI/keyboard hotplug event producer and
+  route its events through the existing capability transaction.
+- Exercise that producer and the physical display matrix on Pixel 6a.
 
 `UI-MULTIWINDOW-TRANSITION-1` therefore remains in progress.
