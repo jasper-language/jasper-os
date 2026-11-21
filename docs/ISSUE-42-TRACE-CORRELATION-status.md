@@ -2,7 +2,7 @@
 
 更新时间：2026-11-21。
 
-状态：**trace、诊断导出和持久快照关联已接线；M25 仍为 partial。**
+状态：**implemented-tested；M25 退出门已通过。**
 
 ## 边界
 
@@ -58,8 +58,23 @@ usi: mode=diagnostic status=0 records=1 accepted=1 sequence=2 generation=1
 这证明请求、响应头与持久诊断页共用同一个非零 correlation；不包含物理 UI
 或安全审计语义。
 
-## 尚未关闭
+## 真实多进程因果重建
 
-- 真实多进程/多核因果重建，以及 consumer 重启后的关联完整性矩阵。
+公开 `main` 的 `scripts/ui-process-check.sh` 在真实 QEMU 2-vCPU、CPL3
+host/ui-service/ui-peer 三进程路径上记录两条独立 trace：
 
-因此 `verification/issue42-mechanism-ledger.tsv` 的 M25 保持 `partial`。
+- host 与 service 使用同一 trace，service span 以 host span 为 parent；
+- peer 与 peer service 使用独立 trace，并保留对应 parent 关系；
+- UI Service 两轮重启后，第一轮与第二轮共 4 条 trace、4 条 parent link
+  仍可同时从 trace ring 重建；
+- ring overwrite 与 sequence exhaustion 账务均为 0；
+- 串口 marker：
+
+```text
+[JSR-M25] multiprocess=true multicore=true service_restarts=2 traces=4
+  parent_links=4 retained=true ring_losses=0 sequence_losses=0 failed=0
+```
+
+因此 `verification/issue42-mechanism-ledger.tsv` 的 M25 升为
+`implemented-tested`。该机制仍是可丢弃诊断 trace，不代替安全审计；
+Linux ptrace/uprobe/ETW 协议行为继续由兼容层适配，不要求内核复制其接口。

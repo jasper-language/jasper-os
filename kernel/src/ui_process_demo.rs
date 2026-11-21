@@ -18,6 +18,7 @@ use kernel_core::authz::{AccessScope, Decision, Effect, Operation, Reason, AUTHZ
 use kernel_core::display_input::{KeyInput, PixelLayout, SurfaceSpec};
 use kernel_core::frame::FRAME_SIZE;
 use kernel_core::paging::MapFlags;
+use kernel_core::trace::{Tag, TraceContext};
 use kernel_core::ui_policy::{InteractionProfile, UiDeviceCapabilities, UiPolicyScope};
 use kernel_core::ui_protocol::{
     decode_ui_frame, encode_ui_frame, UiFrameHeader, UiFrameKind, UiInputRecord,
@@ -31,7 +32,7 @@ use kernel_core::ui_workspace::{UiCapabilityEvent, UiLayoutMode, UiWorkspace};
 
 use crate::proc::{self, ProcState};
 use crate::syscall::{table as abi, SyscallSet};
-use crate::{arch, ipc, kobj, kprintln, sched};
+use crate::{arch, ipc, kobj, kprintln, ktrace, sched};
 
 static USER_UI_SERVICE: &[u8] = include_bytes!(env!("JSR_USER_UI_SERVICE"));
 
@@ -55,6 +56,51 @@ fn check(ok: bool, what: &str) {
         FAILED.fetch_add(1, Ordering::Relaxed);
         kprintln!("[JSR-UI-PROCESS-FAIL] {}", what);
     }
+}
+
+fn host_trace(round: u32) -> TraceContext {
+    TraceContext::new(0x1000 + u64::from(round), 1, None).expect("nonzero host trace")
+}
+
+fn host_service_trace(round: u32) -> TraceContext {
+    TraceContext::new(0x1000 + u64::from(round), 2, Some(1))
+        .expect("nonzero host service child trace")
+}
+
+fn peer_trace(round: u32) -> TraceContext {
+    TraceContext::new(0x2000 + u64::from(round), 1, None).expect("nonzero peer trace")
+}
+
+fn peer_service_trace(round: u32) -> TraceContext {
+    TraceContext::new(0x2000 + u64::from(round), 2, Some(1))
+        .expect("nonzero peer service child trace")
+}
+
+fn round_trace_ok(round: u32) -> bool {
+    let (host, host_child) = (host_trace(round), host_service_trace(round));
+    let (peer, peer_child) = (peer_trace(round), peer_service_trace(round));
+    let (mut host_root, mut host_done, mut peer_root, mut peer_done) =
+        (false, false, false, false);
+    ktrace::with(|trace| {
+        for event in trace.iter() {
+            match (event.name, event.context) {
+                ("system.ui.host.requested", Some(context)) if context == host => {
+                    host_root = true
+                }
+                ("system.ui.service.completed", Some(context)) if context == host_child => {
+                    host_done = true
+                }
+                ("system.ui.peer.requested", Some(context)) if context == peer => {
+                    peer_root = true
+                }
+                ("system.ui.peer.completed", Some(context)) if context == peer_child => {
+                    peer_done = true
+                }
+                _ => {}
+            }
+        }
+    });
+    host_root && host_done && peer_root && peer_done
 }
 
 /// Failed UI process assertions.
@@ -531,6 +577,18 @@ fn run_round(round: u32) -> bool {
     let mut request = alloc::vec![0u8; UI_FRAME_HEADER_BYTES + REQUEST_PAYLOAD.len()];
     let request_len =
         encode_ui_frame(header, REQUEST_PAYLOAD, &mut request).expect("bounded UI process request");
+    check(
+        ktrace::emit_correlated(
+            "system.ui.host.requested",
+            &[
+                Tag::u64("round", u64::from(round)),
+                Tag::u64("process", u64::from(host.raw())),
+            ],
+            host_trace(round),
+        )
+        .is_some(),
+        "host causal trace was not recorded",
+    );
     let sent = kobj::with(|table| {
         ipc::send_in(
             table,
@@ -670,6 +728,18 @@ fn run_round(round: u32) -> bool {
     let mut peer_request = alloc::vec![0u8; UI_FRAME_HEADER_BYTES + PEER_REQUEST_PAYLOAD.len()];
     let peer_request_len = encode_ui_frame(peer_header, PEER_REQUEST_PAYLOAD, &mut peer_request)
         .expect("bounded peer UI request");
+    check(
+        ktrace::emit_correlated(
+            "system.ui.peer.requested",
+            &[
+                Tag::u64("round", u64::from(round)),
+                Tag::u64("process", u64::from(peer.raw())),
+            ],
+            peer_trace(round),
+        )
+        .is_some(),
+        "peer causal trace was not recorded",
+    );
     let peer_sent = kobj::with(|table| {
         ipc::send_in(
             table,
@@ -758,6 +828,18 @@ fn run_round(round: u32) -> bool {
         response_ok,
         "versioned CPU RGBA8 Present frame was not delivered",
     );
+    check(
+        ktrace::emit_correlated(
+            "system.ui.service.completed",
+            &[
+                Tag::u64("round", u64::from(round)),
+                Tag::u64("process", u64::from(service.raw())),
+            ],
+            host_service_trace(round),
+        )
+        .is_some(),
+        "service child trace was not recorded",
+    );
     let patch_response_bytes = ipc::queued_body_at(host, host_endpoint, 1, ipc::MAX_MSG_BYTES);
     let patch_response_frame = patch_response_bytes
         .as_deref()
@@ -822,6 +904,19 @@ fn run_round(round: u32) -> bool {
         peer_error_ok,
         "peer UI Service did not emit its terminal Error frame",
     );
+    check(
+        ktrace::emit_correlated(
+            "system.ui.peer.completed",
+            &[
+                Tag::u64("round", u64::from(round)),
+                Tag::u64("process", u64::from(peer.raw())),
+            ],
+            peer_service_trace(round),
+        )
+        .is_some(),
+        "peer child trace was not recorded",
+    );
+    check(round_trace_ok(round), "multi-process trace causality was lost");
     let background_revoked = sessions
         .revoke_background(peer_subject, peer_scope, peer_key)
         .and_then(|_| sessions.set_scene(peer_subject, peer_scope, peer_key, hidden_scene))
@@ -949,6 +1044,18 @@ pub fn run() -> u32 {
     check(
         resources,
         "UI Service restart did not return to the global baseline",
+    );
+    let trace_ok = rounds == 2 && round_trace_ok(0) && round_trace_ok(1);
+    check(
+        trace_ok,
+        "multi-process trace causality did not survive service restart",
+    );
+    let trace_losses = ktrace::with(|trace| trace.losses());
+    kprintln!(
+        "[JSR-M25] multiprocess=true multicore=true service_restarts=2 traces=4 parent_links=4 retained=true ring_losses={} sequence_losses={} failed={}",
+        trace_losses.ring_overwrites,
+        trace_losses.sequence_exhausted,
+        failed()
     );
     kprintln!(
         "[JSR-UI-PROCESS] rounds=2 started=true channel=true request_queued=true engine=cpu rendered=true present=true patch=true input=true native_keyboard=true frames=6 display=true exit=0 response=true terminal_alive=true restart=true resources={} checks={} failed={}",

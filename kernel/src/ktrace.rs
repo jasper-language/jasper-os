@@ -8,7 +8,7 @@
 //! # 边界
 //! 不负责呈现：默认不装观察者（避免每条事件都刷串口）；需要时调用者用 [`set_sink`] 接上。
 
-use kernel_core::trace::{Tag, TraceSink, Tracer};
+use kernel_core::trace::{Tag, TraceContext, TraceSink, Tracer};
 
 use crate::sync::IrqSpinLock;
 
@@ -20,6 +20,15 @@ static TRACER: IrqSpinLock<Tracer<CAPACITY>> = IrqSpinLock::ranked(crate::lockor
 /// 记录一条结构化事件，返回序号（序号用尽时丢弃事件并返回 `None`）。
 pub fn emit(name: &'static str, tags: &[Tag]) -> Option<u64> {
     TRACER.lock().emit(name, tags)
+}
+
+/// Record one event with explicit parent/child causal context.
+pub fn emit_correlated(
+    name: &'static str,
+    tags: &[Tag],
+    context: TraceContext,
+) -> Option<u64> {
+    TRACER.lock().emit_correlated(name, tags, context)
 }
 
 /// 安装观察者。

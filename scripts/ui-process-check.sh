@@ -85,6 +85,7 @@ grep -aFq 'primary_focus=true primary_input=true peer_resident=true peer_present
 grep -aFq 'layout=Ok(MultiWindow) source=framebuffer keyboard=true capability_rollback=true budget_rollback=true pending_canceled=true old_frame_rejected=true old_input_rejected=true new_surface_generation=true new_input_generation=true failed=0' "$OUT/serial.log"
 grep -aFq '[JSR-UI-PROCESS] rounds=2 started=true channel=true request_queued=true engine=cpu rendered=true present=true patch=true input=true native_keyboard=true frames=6 display=true exit=0 response=true terminal_alive=true restart=true resources=true' "$OUT/serial.log"
 grep -aFq '[JSR-DISPLAY-UI] presented_layers=2' "$OUT/serial.log"
+grep -aFq '[JSR-M25] multiprocess=true multicore=true service_restarts=2 traces=4 parent_links=4 retained=true' "$OUT/serial.log"
 ! grep -aEq 'panicked|JSR-PANIC|JSR-UI-PROCESS-FAIL' "$OUT/serial.log"
 printf 'PASS\n' >"$OUT/PASS"
 
