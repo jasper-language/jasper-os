@@ -38,6 +38,7 @@ const STACK_OFF: u64 = 0xC0_0000;
 /// 驱动任务的任务号。
 const DRIVER_TASK: u64 = 12_000;
 const DEPART_DRIVER_TASK: u64 = 12_001;
+const DEPART_MIGRANT_TASK: u64 = 12_002;
 /// 驱动任务等待单个条件的 tick 上界（定时器 100 Hz 时约 10 秒）。
 const WAIT_TICKS: u64 = 1_000;
 /// virtio-rng 队列 0 使用的 MSI-X 表项。
@@ -84,6 +85,7 @@ static DEPART_BINDINGS: AtomicU32 = AtomicU32::new(0);
 static DEPART_RETURNED: AtomicU32 = AtomicU32::new(0);
 static DEPART_RESIDUAL: AtomicU32 = AtomicU32::new(0);
 static DEPART_ROUTES: AtomicU32 = AtomicU32::new(0);
+static DEPART_TASKS: AtomicU32 = AtomicU32::new(0);
 static DEPART_RUNTIME_OFF: AtomicBool = AtomicBool::new(false);
 static DEPART_RUNTIME_ON: AtomicBool = AtomicBool::new(false);
 static DEPART_GENERATION_OFF: AtomicU64 = AtomicU64::new(0);
@@ -91,6 +93,8 @@ static DEPART_GENERATION_ON: AtomicU64 = AtomicU64::new(0);
 static DEPART_RESUMED: AtomicBool = AtomicBool::new(false);
 static DEPART_SCHED_OFF: AtomicBool = AtomicBool::new(false);
 static DEPART_SCHED_ON: AtomicBool = AtomicBool::new(false);
+static MIGRANT_ARMED: AtomicBool = AtomicBool::new(false);
+static MIGRANT_DONE: AtomicBool = AtomicBool::new(false);
 
 fn check(ok: bool, what: &str) {
     CHECKS.fetch_add(1, Ordering::Relaxed);
@@ -231,6 +235,12 @@ fn driver() {
     DRIVER_DONE.store(true, Ordering::Release);
 }
 
+fn depart_migrant() {
+    MIGRANT_ARMED.store(true, Ordering::Release);
+    sched::sleep_ticks(20);
+    MIGRANT_DONE.store(true, Ordering::Release);
+}
+
 fn depart_driver() {
     let target = DEPART_TARGET.load(Ordering::Relaxed) as usize;
     let bdf = target_bdf();
@@ -242,8 +252,24 @@ fn depart_driver() {
                 .is_some_and(|view| view.waiting && view.cpu == target)
         });
         if ok {
+            let migrant = TaskId(DEPART_MIGRANT_TASK);
+            let mut target_only = CpuSet::EMPTY;
+            target_only.insert(target);
+            ok = sched::spawn_on(
+                migrant,
+                "irqring-depart-migrant",
+                depart_migrant,
+                None,
+                target_only,
+            )
+            .is_ok()
+                && wait_ticks(|| MIGRANT_ARMED.load(Ordering::Acquire))
+                && sched::set_affinity(migrant, sched::online_cpus()).is_ok();
+        }
+        if ok {
             match smp::detach_cpu_membership(target) {
                 Ok(report) => {
+                    DEPART_TASKS.store(report.tasks_migrated as u32, Ordering::Relaxed);
                     DEPART_OBJECTS.store(
                         report.interrupt_objects_closed as u32,
                         Ordering::Relaxed,
@@ -274,6 +300,7 @@ fn depart_driver() {
                         Err(error) => check(false, error.name()),
                     }
                     ok = DEPART_RESIDUAL.load(Ordering::Acquire) == 0
+                        && DEPART_TASKS.load(Ordering::Relaxed) >= 1
                         && DEPART_RUNTIME_OFF.load(Ordering::Acquire)
                         && DEPART_RUNTIME_ON.load(Ordering::Acquire)
                         && DEPART_GENERATION_ON.load(Ordering::Acquire)
@@ -295,13 +322,14 @@ fn depart_driver() {
     }
     DEPART_DONE.store(true, Ordering::Release);
     kprintln!(
-        "[JSR-IRQRING] depart target={} objects={} bindings={} vectors={} residual={} routes={} runtime_offline={} runtime_online={} generation={}/{} resumed={} sched_detached={} sched_resumed={} ok={}",
+        "[JSR-IRQRING] depart target={} objects={} bindings={} vectors={} residual={} routes={} tasks={} runtime_offline={} runtime_online={} generation={}/{} resumed={} sched_detached={} sched_resumed={} ok={}",
         target,
         DEPART_OBJECTS.load(Ordering::Relaxed),
         DEPART_BINDINGS.load(Ordering::Relaxed),
         DEPART_RETURNED.load(Ordering::Relaxed),
         DEPART_RESIDUAL.load(Ordering::Relaxed),
         DEPART_ROUTES.load(Ordering::Relaxed),
+        DEPART_TASKS.load(Ordering::Relaxed),
         DEPART_RUNTIME_OFF.load(Ordering::Acquire),
         DEPART_RUNTIME_ON.load(Ordering::Acquire),
         DEPART_GENERATION_OFF.load(Ordering::Acquire),
@@ -483,6 +511,7 @@ pub fn run() {
     check(cancel_ok, "取消后到达的中断没有交给下一次等待");
     let delivered = ROUNDS_OK.load(Ordering::Relaxed).min(user_rounds);
     let depart_ok = if let (Some(code), Some(target)) = (depart_code, depart_target) {
+        let migrant_done = wait_ticks(|| MIGRANT_DONE.load(Ordering::Acquire));
         let user_ok = code >= 0
             && code & EXIT_DEPART_OK != 0
             && code & EXIT_DEPART_FAILED == 0;
@@ -491,6 +520,8 @@ pub fn run() {
             && DEPART_BINDINGS.load(Ordering::Relaxed) >= 1
             && DEPART_RETURNED.load(Ordering::Relaxed) >= 1
             && DEPART_RESIDUAL.load(Ordering::Relaxed) == 0
+            && DEPART_TASKS.load(Ordering::Relaxed) >= 1
+            && migrant_done
             && DEPART_RUNTIME_OFF.load(Ordering::Acquire)
             && DEPART_RUNTIME_ON.load(Ordering::Acquire)
             && DEPART_GENERATION_ON.load(Ordering::Acquire)
@@ -502,13 +533,14 @@ pub fn run() {
         check(report_ok, "CPU 离场没有关闭对象、解绑并归还向量");
         let ok = user_ok && report_ok;
         kprintln!(
-            "[JSR-IRQRING] depart target={} objects={} bindings={} vectors={} residual={} routes={} runtime_offline={} runtime_online={} generation={}/{} resumed={} sched_detached={} sched_resumed={} ok={}",
+            "[JSR-IRQRING] depart target={} objects={} bindings={} vectors={} residual={} routes={} tasks={} runtime_offline={} runtime_online={} generation={}/{} resumed={} sched_detached={} sched_resumed={} ok={}",
             target,
             DEPART_OBJECTS.load(Ordering::Relaxed),
             DEPART_BINDINGS.load(Ordering::Relaxed),
             DEPART_RETURNED.load(Ordering::Relaxed),
             DEPART_RESIDUAL.load(Ordering::Relaxed),
             DEPART_ROUTES.load(Ordering::Relaxed),
+            DEPART_TASKS.load(Ordering::Relaxed),
             DEPART_RUNTIME_OFF.load(Ordering::Acquire),
             DEPART_RUNTIME_ON.load(Ordering::Acquire),
             DEPART_GENERATION_OFF.load(Ordering::Acquire),

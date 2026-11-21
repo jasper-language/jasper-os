@@ -3245,6 +3245,102 @@ impl Scheduler {
         Ok(())
     }
 
+    /// Preflight migration of every non-exited task whose home is `c`.
+    ///
+    /// The check includes idle-leaf, tick-lease, affinity, and running-task
+    /// constraints so route or interrupt teardown does not begin before the
+    /// complete evacuation can succeed.
+    ///
+    /// 在路由或中断拆除前，完整校验 CPU `c` 上所有未退出任务的迁移条件，
+    /// 包括 leaf 静止、tick lease、亲和目标与运行中任务约束。
+    pub fn ensure_can_evacuate_cpu(&self, c: usize) -> Result<(), &'static str> {
+        if c == this_cpu() || c == 0 {
+            return Err("boot-or-self");
+        }
+        if !self.online.contains(c) || self.online.len() <= 1 {
+            return Err("not-online");
+        }
+        if !leaf_execution_settled(c) {
+            return Err("leaf-busy");
+        }
+        let (current, _, _, _) = leaf_run_state(c);
+        if is_worker(current) || self.waiting(c) != ClassMask::EMPTY {
+            return Err("task-active");
+        }
+        if self.tasks.iter().flatten().any(|task| task.on_cpu == Some(c)) {
+            return Err("task-running");
+        }
+        if self
+            .tick_publication
+            .get(c)
+            .is_some_and(|value| value.is_some())
+            || self
+                .tick_touched
+                .get(c)
+                .is_some_and(|value| value.is_some())
+        {
+            return Err("tick-lease");
+        }
+        for (slot, task) in self.tasks.iter().enumerate() {
+            let Some(task) = task.as_ref().filter(|task| {
+                task.state != TaskState::Exited && task.home == c
+            }) else {
+                continue;
+            };
+            if task.rt_period != 0 {
+                return Err("rt-task");
+            }
+            let Some(affinity) = self.affinity_view(slot) else {
+                return Err("affinity-missing");
+            };
+            if !(0..self.cpu_stats.len()).any(|destination| {
+                destination != c
+                    && self.online.contains(destination)
+                    && affinity.contains(destination)
+            }) {
+                return Err("no-affinity-destination");
+            }
+        }
+        Ok(())
+    }
+
+    /// Move every non-exited task homed on `c` to the first online CPU allowed
+    /// by its affinity. Running and real-time tasks reject the complete
+    /// evacuation during preflight.
+    ///
+    /// 把 home 为 `c` 的全部未退出任务迁移到亲和集合内首个在线 CPU；运行中
+    /// 与实时任务会在完整迁移预检阶段拒绝，不留下部分迁移。
+    pub fn evacuate_cpu(&mut self, c: usize) -> Result<usize, &'static str> {
+        self.ensure_can_evacuate_cpu(c)?;
+        let mut migrated = 0;
+        for slot in 0..self.tasks.len() {
+            let destination = {
+                let Some(task) = self
+                    .tasks
+                    .get(slot)
+                    .and_then(Option::as_ref)
+                    .filter(|task| task.state != TaskState::Exited && task.home == c)
+                else {
+                    continue;
+                };
+                let affinity = self
+                    .affinity_view(slot)
+                    .ok_or("affinity-missing")?;
+                let destination = (0..self.cpu_stats.len())
+                    .find(|&destination| {
+                        destination != c
+                            && self.online.contains(destination)
+                            && affinity.contains(destination)
+                    })
+                    .ok_or("no-affinity-destination")?;
+                destination
+            };
+            self.rehome(slot, destination);
+            migrated += 1;
+        }
+        Ok(migrated)
+    }
+
     /// Reattach a previously detached idle CPU to scheduling. The architecture
     /// must have completed any platform-side restart before this call.
     pub fn online_idle_cpu(&mut self, c: usize) -> Result<(), &'static str> {

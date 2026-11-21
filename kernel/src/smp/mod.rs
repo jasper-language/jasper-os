@@ -146,6 +146,9 @@ pub struct StartReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CpuMembershipReport {
     pub routes_rerouted: usize,
+    /// Tasks moved away from the departing CPU.
+    /// 从离场 CPU 迁移走的任务数。
+    pub tasks_migrated: usize,
     pub interrupt_objects_closed: usize,
     pub interrupt_bindings_removed: usize,
     pub interrupt_vectors_returned: usize,
@@ -566,16 +569,19 @@ pub fn detach_cpu_membership(
         .lock()
         .ensure_can_mark_offline(cpu)
         .map_err(|error| CpuMembershipError::Runtime(error.name()))?;
-    crate::sched::ensure_can_offline_idle_cpu(cpu)
+    crate::sched::ensure_can_evacuate_cpu(cpu)
         .map_err(CpuMembershipError::Scheduler)?;
 
     crate::kprintln!("[JSR-CPU-DEPART] stage=routes cpu={}", cpu);
     let routes_rerouted = crate::irq::device::detach_cpu_lines(cpu)
         .map_err(CpuMembershipError::Routes)?;
+    let tasks_migrated =
+        crate::sched::evacuate_cpu(cpu).map_err(CpuMembershipError::Scheduler)?;
     crate::kprintln!(
-        "[JSR-CPU-DEPART] stage=scheduler cpu={} routes={}",
+        "[JSR-CPU-DEPART] stage=scheduler cpu={} routes={} tasks={}",
         cpu,
-        routes_rerouted
+        routes_rerouted,
+        tasks_migrated
     );
     crate::sched::offline_idle_cpu(cpu).map_err(CpuMembershipError::Scheduler)?;
     crate::kprintln!("[JSR-CPU-DEPART] stage=msi cpu={}", cpu);
@@ -605,6 +611,7 @@ pub fn detach_cpu_membership(
 
     Ok(CpuMembershipReport {
         routes_rerouted,
+        tasks_migrated,
         interrupt_objects_closed: quiesced.objects_closed,
         interrupt_bindings_removed: quiesced.bindings_removed,
         interrupt_vectors_returned: quiesced.vectors_returned,

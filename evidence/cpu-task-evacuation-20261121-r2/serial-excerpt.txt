@@ -1,0 +1,8 @@
+[JSR-CPU-DEPART] stage=routes cpu=1
+[JSR-CPU-DEPART] stage=scheduler cpu=1 routes=0 tasks=1
+[JSR-CPU-DEPART] stage=msi cpu=1
+[JSR-CPU-DEPART] stage=runtime cpu=1
+[JSR-CPU-DEPART] stage=quota cpu=1
+[JSR-CPU-DEPART] stage=commit cpu=1
+[JSR-IRQRING] depart target=1 objects=1 bindings=1 vectors=1 residual=0 routes=0 tasks=1 runtime_offline=true runtime_online=true generation=5/6 resumed=true sched_detached=true sched_resumed=true ok=true
+[JSR-IRQRING] summary cpus=4 rounds=4 delivered=4/4 rejects=7/7 cancel=ok close_cancels_wait=ok cpu_depart=ok vectors_back=true frames_back=true failed=0

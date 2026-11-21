@@ -168,16 +168,17 @@ quota 迁移保留为阶段 3 的执行门，不再混入阶段 1 的固定容�
 
 本切片新增统一的 `smp::detach_cpu_membership` / `smp::attach_cpu_membership`
 软件离场事务。离场前先预检 CPU runtime generation、启动 CPU/最后一颗在线 CPU、
-调度 leaf、任务 home/on_cpu、tick lease，全部通过后才移动设备 IRQ 路由；随后依次
-退出调度成员、关闭该 CPU 的 Interrupt 对象并归还 MSI-X 绑定/向量、推进 CPU runtime
-generation、更新每核状态并降级 line-IRQ quota。重新接入时按 MSI dispatch、runtime
-generation、CPU 状态和调度成员顺序恢复。
+调度 leaf、运行中任务、实时任务、亲和目标和 tick lease，全部通过后才移动设备 IRQ
+路由；随后把目标 CPU 上其余可迁移任务改放到在线 CPU，退出调度成员、关闭该 CPU
+的 Interrupt 对象并归还 MSI-X 绑定/向量、推进 CPU runtime generation、更新每核状态
+并降级 line-IRQ quota。重新接入时按 MSI dispatch、runtime generation、CPU 状态和
+调度成员顺序恢复。
 
 真实 `4 vCPU` KVM 的 IRQ Ring 路径已产生：
 
 ```text
 [JSR-IRQRING] depart target=1 objects=1 bindings=1 vectors=1 residual=0 routes=0
-runtime_offline=true runtime_online=true generation=5/6 resumed=true
+ tasks=1 runtime_offline=true runtime_online=true generation=5/6 resumed=true
 sched_detached=true sched_resumed=true ok=true
 ```
 
@@ -190,8 +191,11 @@ sched_detached=true sched_resumed=true ok=true
 `system.irq.routing` 时截断预分配 `Vec`，其未使用元素的析构会进入堆锁。现在先释放
 路由守卫再截断，所有可能释放堆存储的动作都发生在路由锁之外。
 
-这不关闭 `CPU-DYNAMIC-CONSUMERS-1`：平台侧真实停核/重启、非空 running task 的
-上下文迁移、架构 stop IPI、IRQ 在飞完成与完整 hotplug rollback 矩阵仍需独立证据。
+任务疏散的真实 `4 vCPU` 证据见 `evidence/cpu-task-evacuation-20261121-r2/`：
+一个已阻塞且 home 为目标 CPU 的任务在离场时迁移、唤醒并完成，marker 为
+`tasks=1`。这不关闭 `CPU-DYNAMIC-CONSUMERS-1`：平台侧真实停核/重启、
+运行中任务的上下文迁移、架构 stop IPI、IRQ 在飞完成与完整 hotplug rollback
+矩阵仍需独立证据。
 
 ## 消费链迁移进度
 

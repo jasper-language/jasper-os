@@ -842,6 +842,18 @@ pub fn ensure_can_offline_idle_cpu(c: usize) -> Result<(), &'static str> {
     with(|s| s.ensure_can_offline_idle_cpu(c))
 }
 
+/// Preflight migration of all tasks homed on a departing CPU.
+/// 预检离场 CPU 上全部 home 任务是否都可迁移。
+pub fn ensure_can_evacuate_cpu(c: usize) -> Result<(), &'static str> {
+    with(|s| s.ensure_can_evacuate_cpu(c))
+}
+
+/// Move all non-exited tasks homed on a departing idle CPU.
+/// 迁移离场空闲 CPU 上全部未退出任务。
+pub fn evacuate_cpu(c: usize) -> Result<usize, &'static str> {
+    with_mut(|s| s.evacuate_cpu(c))
+}
+
 /// Reattach a quiescent secondary CPU after platform-side restart.
 pub fn online_idle_cpu(c: usize) -> Result<(), &'static str> {
     with_mut(|s| s.online_idle_cpu(c))
