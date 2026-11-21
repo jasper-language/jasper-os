@@ -310,28 +310,28 @@ pub struct ConfigError {
 /// Validation bounds for parameters.
 pub mod bounds {
     /// 定时器频率下限（Hz）：再低则时间片粒度过粗。
-    pub const MIN_TIMER_HZ: u32 = 50;
+    pub const MIN_TIMER_HZ: u32 = 50; // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=validated-lower-policy-bound
     /// 定时器频率上限（Hz）：再高则中断开销压过有效工作。
-    pub const MAX_TIMER_HZ: u32 = 1000;
+    pub const MAX_TIMER_HZ: u32 = 1000; // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=validated-upper-policy-bound
     /// 任务槽位下限：引导线程 + 至少一个工作任务 + 静态栈覆盖的槽位。
-    pub const MIN_TASKS: usize = 8;
+    pub const MIN_TASKS: usize = 8; // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=validated-lower-policy-bound
     /// 任务槽位上限：已在 256 槽位下跑通全部验收；调度机制仍按槽位线性扫描（HARDEN-1D 处理），
     /// 更大的规模未经验证。
     #[cfg(not(feature = "evt1-capacity"))]
-    pub const MAX_TASKS: usize = 256;
+    pub const MAX_TASKS: usize = 256; // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=validated-upper-policy-bound
     /// Author: chatgpt。仅EVT独立容量验收构建允许1024槽，默认上界仍256。
     #[cfg(feature = "evt1-capacity")]
-    pub const MAX_TASKS: usize = 1024;
+    pub const MAX_TASKS: usize = 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=dedicated-validated-capacity-profile
     /// 内核对象表容量下限：引导期演练与基础服务需要的对象数。
-    pub const MIN_OBJECTS: usize = 64;
+    pub const MIN_OBJECTS: usize = 64; // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=validated-lower-policy-bound
     /// 内核对象表容量上限：已在该规模下验证；对象插入目前线性找空槽（HARDEN-1D 处理）。
-    pub const MAX_OBJECTS: usize = 65536;
+    pub const MAX_OBJECTS: usize = 65536; // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=validated-upper-policy-bound
     /// 实时任务在册表容量下限。
-    pub const MIN_RT: usize = 1;
+    pub const MIN_RT: usize = 1; // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=validated-lower-policy-bound
     /// 实时任务在册表容量上限（每个实时任务还要占一个任务槽位）。
-    pub const MAX_RT: usize = 64;
+    pub const MAX_RT: usize = 64; // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=validated-upper-policy-bound
     /// 内核栈下限（字节）：系统调用路径会在栈上临时构造较大的内核对象。
-    pub const MIN_KERNEL_STACK: usize = 32 * 1024;
+    pub const MIN_KERNEL_STACK: usize = 32 * 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=validated-lower-policy-bound
     /// 单条消息体上限（字节，用户态契约）：每端点队列字节配额不得小于它。
     pub const MSG_BYTES: usize = 64 * 1024;
 }
@@ -359,15 +359,15 @@ impl KernelConfig {
             heap_budget_permille: 250,
             pressure: PressureParams::DEFAULT,
             max_process_frames: 0,
-            max_vm_guest_frames: 32 * 1024,
-            max_map_pages: 1024,
+            max_vm_guest_frames: 32 * 1024, // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=validated-standard-profile-policy
+            max_map_pages: 1024, // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=validated-mapping-policy
         },
         objects: ObjectParams {
-            max_objects: 1024,
+            max_objects: 1024, // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=validated-standard-profile-policy
             handles_per_process: 64,
         },
         ipc: IpcParams {
-            max_endpoints_per_process: 64,
+            max_endpoints_per_process: 64, // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=validated-standard-profile-policy
             max_queue_bytes: 1024 * 1024,
             max_process_bytes: 4 * 1024 * 1024,
             max_total_bytes: 16 * 1024 * 1024,
@@ -397,8 +397,8 @@ impl KernelConfig {
                 quantum: [1, 1, 2, 2],
                 ..QosParams::DEFAULT
             },
-            max_tasks: 32,
-            max_rt: 8,
+            max_tasks: 32, // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=validated-compact-profile-policy
+            max_rt: 8, // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=validated-compact-profile-policy
             kernel_stack_bytes: 128 * 1024,
             watchdog_ticks: 125,
             watchdog_log: 8,
@@ -413,15 +413,15 @@ impl KernelConfig {
                 reserve_frames: 128,
             },
             max_process_frames: 0,
-            max_vm_guest_frames: 16 * 1024,
-            max_map_pages: 1024,
+            max_vm_guest_frames: 16 * 1024, // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=validated-compact-profile-policy
+            max_map_pages: 1024, // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=validated-mapping-policy
         },
         objects: ObjectParams {
-            max_objects: 512,
+            max_objects: 512, // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=validated-compact-profile-policy
             handles_per_process: 64,
         },
         ipc: IpcParams {
-            max_endpoints_per_process: 32,
+            max_endpoints_per_process: 32, // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=validated-compact-profile-policy
             max_queue_bytes: 512 * 1024,
             max_process_bytes: 2 * 1024 * 1024,
             max_total_bytes: 8 * 1024 * 1024,

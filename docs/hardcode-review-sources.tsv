@@ -20,6 +20,7 @@ channel-abi-v1	33	spec	Jasper-Channel-v1-fixed-message-handle-array
 network-object-v1	33	spec	NET-v1-fixed-endpoint-name-field
 mac-audit-backpressure-policy	39	policy	MAC-audit-full-denies-authorization-without-silent-loss
 irq-policy	33	policy	explicit-IRQ-safety-policy
+kernel-config-policy-v1	35	policy	KernelConfig-validate-and-profile-boundary-rejection-tests
 isolation-wire-v1	35	spec	isolated-service-versioned-wire-frame
 linux-poll-scan-policy	35	policy	Issue-35-bounded-Linux-poll-scan
 linux-batch-partial-policy	35	policy	Issue-35-bounded-Linux-batches-return-partial-progress

@@ -74,12 +74,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "12ebab77e4506ca47016470d70eb063ce11e25549c58e330650b209c905f082a",
-      "path": "kernel-core/src/config.rs",
-      "rules": "HC-G5"
-    },
-    {
-      "count": 1,
       "fingerprint": "160c8449cea97db7e0ece328347a382a1ffa885dd9f186c429d047f53b2a3edb",
       "path": "kernel-core/src/sched/limit.rs",
       "rules": "HC-G1"
@@ -116,12 +110,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "1e3f364d76be6e056c0f44d52a8c9291f35a2945351af0152b0c702c68dc5a6f",
-      "path": "kernel-core/src/config.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "1e7b2a413d70770b79f11fd7f94b35b7a7a756a561eda33ca3f6f370cc31c7a9",
       "path": "kernel/src/linux_abi.rs",
       "rules": "HC-G1"
@@ -131,12 +119,6 @@
       "fingerprint": "1e974547ae3112698121432fb62307c9ec215d9996e5840b79743331a803e387",
       "path": "jaso/src/wire.rs",
       "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "1f97fc801cd396be015ab743b5ebf907a991f059fc14003afc8593a00ca4da54",
-      "path": "kernel-core/src/config.rs",
-      "rules": "HC-G5"
     },
     {
       "count": 1,
@@ -188,12 +170,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "2ed1828f9bd7d4ebdb42bca987bc558b2d4dcd5bc940dee173775fb4fe689824",
-      "path": "kernel-core/src/config.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "30bd2d01d5125fb19a562635d0eb67bb68e96f6507be89fc8567987fcefb72c0",
       "path": "user/rt/src/sys.rs",
       "rules": "HC-G8"
@@ -227,12 +203,6 @@
       "fingerprint": "37bb82019611fc48de5b5e08ac71b41c281cfbd8f12df026f1ea8c6689206ac1",
       "path": "kernel-core/src/usi.rs",
       "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "391243580a659af9f635f24a4e03661e3170c8a77341e5a973228d772e427af3",
-      "path": "kernel-core/src/config.rs",
-      "rules": "HC-G5"
     },
     {
       "count": 1,
@@ -361,22 +331,10 @@
       "rules": "HC-G1"
     },
     {
-      "count": 2,
-      "fingerprint": "53e6372220dcc8fbc898ed8e2bec0097454ac4781644197bd8006771e6871b77",
-      "path": "kernel-core/src/config.rs",
-      "rules": "HC-G5"
-    },
-    {
       "count": 1,
       "fingerprint": "57de786378b3da3d0879724bf42630e931686ed2657322e751423b008e4757e4",
       "path": "boot-manager/src/main.rs",
       "rules": "HC-G7"
-    },
-    {
-      "count": 1,
-      "fingerprint": "57e9e477b4382fee2689eb2541544b94e79aede7a324c4ab50c84f3ba6f59e5c",
-      "path": "kernel-core/src/config.rs",
-      "rules": "HC-G5"
     },
     {
       "count": 1,
@@ -412,18 +370,6 @@
       "count": 1,
       "fingerprint": "5e1964903cacf96b08e4e754de99ca1ec2f08a4f2acf7fe03e9fd4874beb4cda",
       "path": "kernel/src/linux_abi.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "5f2112d60bbefcebc339389b4a81c034b389cd09d37cbfe1aa8e20c50ebbe389",
-      "path": "kernel-core/src/config.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "608c126d6974544fbe52ee2fb8a9d19e87dd2b79a96f54bf4cd1aa4c7ab6100f",
-      "path": "kernel-core/src/config.rs",
       "rules": "HC-G1"
     },
     {
@@ -548,12 +494,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "72af3b32f4dd71b05c0e8ddeb3465da90814312e9fb502cd895c54ee53348f51",
-      "path": "kernel-core/src/config.rs",
-      "rules": "HC-G5"
-    },
-    {
-      "count": 1,
       "fingerprint": "72c33da494f11a555de1fbf9898e245409415dcf5e2ce57939719799a0d92952",
       "path": "kernel-core/src/capability.rs",
       "rules": "HC-G7"
@@ -562,12 +502,6 @@
       "count": 1,
       "fingerprint": "735d51a6974eed603bdb554467f0b5daa20ea7a6e414815a456f23565df3a6ff",
       "path": "kernel-core/src/xsave.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "764a58cfb555a741b9040970775241ed0b3ff3a17a4aa626dd3eb6436c373ccf",
-      "path": "kernel-core/src/config.rs",
       "rules": "HC-G1"
     },
     {
@@ -746,12 +680,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "a0ec60a239d63360284c2b4f68cb6191fb2e28ea42e1db1054a1de4a264619a4",
-      "path": "kernel-core/src/config.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "a1a54674879fa4fc250cc3a1bd19735addc786068a16d85008644209a96a1c8b",
       "path": "kernel/src/lifecycle_health.rs",
       "rules": "HC-G1"
@@ -773,12 +701,6 @@
       "fingerprint": "a3d8da1b930c9da626155e388b6ed92ab58f12af723289e5f189678cd0ddabc2",
       "path": "kernel/src/kmain.rs",
       "rules": "HC-G3"
-    },
-    {
-      "count": 1,
-      "fingerprint": "a3d9e372a36506e6123527e4b78589b4d933be72faa81526e02c8bf1eec9ddd6",
-      "path": "kernel-core/src/config.rs",
-      "rules": "HC-G1"
     },
     {
       "count": 1,
@@ -854,12 +776,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "b39603885ae311945d9f56e0a355b0ac931d7d6cf3a12982dfeaa075598e5f69",
-      "path": "kernel-core/src/config.rs",
-      "rules": "HC-G5"
-    },
-    {
-      "count": 1,
       "fingerprint": "b43e20246a77b5db2c53925bb18b236ed6f6e4ddbba01f26d08349a1aa1a8851",
       "path": "kernel/src/arch/loongarch64/smp.rs",
       "rules": "HC-G3"
@@ -874,12 +790,6 @@
       "count": 1,
       "fingerprint": "b81d7074a8d4eeb8305a62f8dfd23f7d716c7aac3db7d5810caf9e9e4c850ed0",
       "path": "kernel-core/src/virtio_fs.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "b845b33ad8799d691d603a20f2ef7a6870e3d447fb7e43489d6b65df4eaf6871",
-      "path": "kernel-core/src/config.rs",
       "rules": "HC-G1"
     },
     {
@@ -911,12 +821,6 @@
       "fingerprint": "bf520ebc8476eee9b3ccca1af82b540ab86a22539ae3aac0c07cc87d9794cb1b",
       "path": "compat-core/src/executable.rs",
       "rules": "HC-G1"
-    },
-    {
-      "count": 1,
-      "fingerprint": "c11f86af37cf136762e4b2ab85e97fa1a5f844b318e8da41d12e5b816056396c",
-      "path": "kernel-core/src/config.rs",
-      "rules": "HC-G5"
     },
     {
       "count": 1,
@@ -1082,12 +986,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "e6f54e086fa894e67167a5f665eb9c73d0a1b79e6187f332f17b098b60e28abc",
-      "path": "kernel-core/src/config.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "e88ea9e19b783c9b7138309565e91b4309327bcbdfa7de85cda0f5898e81db59",
       "path": "kernel/src/linux_abi.rs",
       "rules": "HC-G1"
@@ -1105,7 +1003,7 @@
       "rules": "HC-G3"
     },
     {
-      "count": 2,
+      "count": 1,
       "fingerprint": "ec71b1db6aed3226d06b5c5dd61f447b782574aac8cb7804c21061280f50a688",
       "path": "kernel-core/src/config.rs",
       "rules": "HC-G5"
@@ -1202,12 +1100,6 @@
     },
     {
       "count": 1,
-      "fingerprint": "fdb5b6ab1d85711cd8e59b6a4624149e3b5be1d4de04648604d1da86d1182e8e",
-      "path": "kernel-core/src/config.rs",
-      "rules": "HC-G1"
-    },
-    {
-      "count": 1,
       "fingerprint": "fe35f1dfe2d16376148a0509b0cf5a2f46e61b373ac5396dfa24d7ef227afaac",
       "path": "kernel-core/src/spawn_abi.rs",
       "rules": "HC-G1"
@@ -1233,5 +1125,5 @@
     "user",
     "xtask"
   ],
-  "total": 222
+  "total": 202
 }

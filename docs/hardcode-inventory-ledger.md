@@ -1,8 +1,8 @@
 # Issue #35 硬编码存量分类账
 
-更新时间：2026-11-20。
+更新时间：2026-11-21。
 
-状态：**全部 222 个基线命中已聚合为 202 个唯一指纹，并按消费者、规范或明确
+状态：**全部 202 个基线命中已聚合为 184 个唯一指纹，并按消费者、规范或明确
 安全策略完成首轮分类；`unclassified=0`。**
 
 ## 为什么不是 347 个 Bug
@@ -11,8 +11,8 @@
 协议字段宽度、安全解析上限、真实运行时预算、测试夹具或已确认缺陷。分类账要求
 每个基线指纹具有唯一类别和非空理由，但不会把启发式类别自动升级为“已修复”。
 
-分类由“路径 + 规则 + 完整规范化源码行”的 SHA-256 指纹绑定。当前 222 个命中聚合
-为 202 个唯一指纹；相同源码行出现多次时保留 `count`。此前指纹解析在源码的类型
+分类由“路径 + 规则 + 完整规范化源码行”的 SHA-256 指纹绑定。当前 202 个命中聚合
+为 184 个唯一指纹；相同源码行出现多次时保留 `count`。此前指纹解析在源码的类型
 冒号处截断，曾把不同标识符但相同尾部类型的常量错误合并；修复后独立候选全部
 重新分类，`unclassified=0`。
 
@@ -20,7 +20,7 @@
 
 | 类别 | 唯一指纹 | 基线命中 | 含义 |
 | --- | ---: | ---: | --- |
-| `explicit-safety-policy` | 121 | 124 | 有界工作、解析/等待上限、fail-closed 或诊断哨兵、明确策略默认 |
+| `explicit-safety-policy` | 103 | 104 | 有界工作、解析/等待上限、fail-closed 或诊断哨兵、明确策略默认 |
 | `runtime-resource-capacity` | 0 | 0 | 运行期集合/容量，应由资源预算和准入决定 |
 | `platform-adapter` | 28 | 44 | QEMU/Pixel 等架构特定选择，需保留显式 Profile 边界 |
 | `protocol-abi` | 42 | 43 | Wire、FDT/PCI、Linux UAPI、磁盘格式、地址宽度或内部位域契约 |
@@ -110,6 +110,12 @@ FS-0 entry name、Sandbox launch v1 display path 和 USI v1 module version 也�
 绑定到版本化记录字段和边界负例：三者分别接受完整 64/64/8 字节字段，并对
 65/65/9 字节输入失败关闭。存量因此降至 222 次 / 202 指纹。
 
+`KernelConfig` 的 20 个 bounds 与 Standard/Compact Profile 参数现已逐行绑定
+到同一 `kernel-config-policy-v1` 来源。这些值不是硬件事实：`KernelConfig::validate`
+在发布容量前按字段检查上下界、时钟/QoS/内存/IPC 一致性，失败返回具体字段；
+负例覆盖 timer、tasks、RT、objects、kernel stack、guest frames、mapping pages、
+endpoints 与 IPC 字节关系。分类账因此再降至 202 次 / 184 指纹。
+
 Linux robust-list 的 64 节点上限属于故障进程退出时的有界遍历与环检测保护；该路径
 不能依赖堆分配成功，因此按显式安全策略登记。
 
@@ -146,7 +152,7 @@ python3 scripts/check-hardcode-inventory-ledger.py --check \
 - 不允许额外指纹或缺少指纹；
 - 路径、规则、出现次数与 baseline 一致；
 - 类别属于固定集合，理由非空；
-- 声明的唯一指纹计数、基线命中权重和逐项条目一致，权重总和必须等于 222；
+- 声明的唯一指纹计数、基线命中权重和逐项条目一致，权重总和必须等于 202；
 - 当前源码扫描与 baseline 没有漂移。
 
 修改生产代码清除条目后，应先用 `--write-inventory-baseline` 更新基线，再重新生成
@@ -156,7 +162,7 @@ python3 scripts/check-hardcode-inventory-ledger.py --check \
 
 1. `runtime-resource-capacity` 已清零；后续仍以真实消费者压力补拒绝、回收和
    多实例证据；
-2. 将 121 个 `explicit-safety-policy` 指纹逐项绑定到规范、策略或负例证据；
+2. 将 103 个 `explicit-safety-policy` 指纹逐项绑定到规范、策略或负例证据；
 3. 把 28 个 `platform-adapter` 收敛到经验证的平台 Profile；
 4. 审核 42 个协议条目和 11 个夹具，确认冻结边界不会泄漏到生产；
 5. 只有调用链、负例和资源回收证据完整后才允许清除基线条目。
