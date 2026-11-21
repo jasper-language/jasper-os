@@ -19,6 +19,8 @@ the same application/Scene model under Single, Split and MultiWindow layouts:
 - all Scene generations and viewports are staged before commit, so malformed
   events, stale epochs, authorization failures and budget failures leave the old
   workspace unchanged;
+- each Scene has one prepared-frame ticket; migration atomically clears all
+  pending tickets, stale tickets cannot commit, and duplicate tickets fail;
 - frames and input using pre-migration Surface/input generations are rejected.
 
 ## Verification
@@ -29,8 +31,8 @@ cargo test -p kernel-core ui_workspace --lib
 ```
 
 Tests cover single/split geometry, independent generation rotation, stale frame
-and input rejection, capability degradation to Split, budget failure atomicity
-and authorization failure atomicity.
+and input rejection, pending-frame cancellation, capability degradation to Split,
+budget failure atomicity and authorization failure atomicity.
 
 The real CPL3 UI process drill now constructs a two-Scene workspace and submits
 a capability event with new geometry/DPI, policy and revocation epochs. It
@@ -40,7 +42,8 @@ that the old generations are rejected. The real QEMU run passes with
 `qemu_rc=33`; marker:
 
 ```text
-[JSR-UI-MULTIWINDOW] layout=Ok(MultiWindow) old_frame_rejected=true \
+[JSR-UI-MULTIWINDOW] layout=Ok(MultiWindow) pending_canceled=true \
+old_frame_rejected=true \
 old_input_rejected=true new_surface_generation=true new_input_generation=true
 ```
 
@@ -48,7 +51,7 @@ old_input_rejected=true new_surface_generation=true new_input_generation=true
 
 - Emit display-size/DPI/keyboard capability events from actual hardware/QEMU
   hotplug rather than the verification input.
-- Exercise the migrated compositor/framebuffer output, rollback and pending-frame
-  cancellation on QEMU and then on a real display hotplug matrix.
+- Exercise the migrated compositor/framebuffer output and rollback on QEMU and
+  then on a real display hotplug matrix.
 
 `UI-MULTIWINDOW-TRANSITION-1` therefore remains in progress.

@@ -46,6 +46,7 @@ struct SceneBinding {
     surface_generation: u64,
     input_generation: u64,
     frame_sequence: u64,
+    pending_frame: Option<u64>,
     input_sequence: u64,
     viewport: UiViewport,
 }
@@ -64,6 +65,7 @@ pub enum UiWorkspaceError {
     StaleSurface,
     StaleInput,
     ReplayFrame,
+    PendingFrame,
     ReplayInput,
 }
 
@@ -120,6 +122,7 @@ impl<const N: usize> UiWorkspace<N> {
                 surface_generation: 1,
                 input_generation: 1,
                 frame_sequence: 0,
+                pending_frame: None,
                 input_sequence: 0,
                 viewport: viewports[slot],
             });
@@ -228,6 +231,7 @@ impl<const N: usize> UiWorkspace<N> {
                 .input_generation
                 .checked_add(1)
                 .ok_or(UiWorkspaceError::StaleInput)?;
+            scene.pending_frame = None;
             scene.viewport = viewports[viewport];
             viewport += 1;
         }
@@ -243,11 +247,34 @@ impl<const N: usize> UiWorkspace<N> {
         Ok(mode)
     }
 
+    pub fn prepare_frame(
+        &mut self,
+        slot: u16,
+        scene_generation: u32,
+        surface_generation: u64,
+        request_id: u64,
+    ) -> Result<UiViewport, UiWorkspaceError> {
+        let scene = self
+            .scenes
+            .get_mut(slot as usize)
+            .and_then(Option::as_mut)
+            .filter(|scene| scene.scene_generation == scene_generation)
+            .ok_or(UiWorkspaceError::StaleScene)?;
+        if surface_generation != scene.surface_generation {
+            return Err(UiWorkspaceError::StaleSurface);
+        }
+        if request_id == 0 || scene.pending_frame.replace(request_id).is_some() {
+            return Err(UiWorkspaceError::PendingFrame);
+        }
+        Ok(scene.viewport)
+    }
+
     pub fn frame(
         &mut self,
         slot: u16,
         scene_generation: u32,
         surface_generation: u64,
+        request_id: u64,
         sequence: u64,
     ) -> Result<UiViewport, UiWorkspaceError> {
         let scene = self
@@ -259,9 +286,13 @@ impl<const N: usize> UiWorkspace<N> {
         if surface_generation != scene.surface_generation {
             return Err(UiWorkspaceError::StaleSurface);
         }
+        if scene.pending_frame != Some(request_id) {
+            return Err(UiWorkspaceError::PendingFrame);
+        }
         if sequence <= scene.frame_sequence {
             return Err(UiWorkspaceError::ReplayFrame);
         }
+        scene.pending_frame = None;
         scene.frame_sequence = sequence;
         Ok(scene.viewport)
     }
@@ -475,8 +506,10 @@ mod tests {
             &[1, 1],
         )
         .unwrap();
-        workspace.frame(0, 1, 1, 1).unwrap();
+        workspace.prepare_frame(0, 1, 1, 40).unwrap();
+        workspace.frame(0, 1, 1, 40, 1).unwrap();
         workspace.input(0, 1, 1, 1).unwrap();
+        workspace.prepare_frame(0, 1, 1, 42).unwrap();
         workspace
             .reconfigure(
                 event(2),
@@ -487,14 +520,20 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            workspace.frame(0, 1, 1, 2),
+            workspace.frame(0, 1, 1, 42, 2),
             Err(UiWorkspaceError::StaleSurface)
         );
         assert_eq!(
             workspace.input(0, 1, 1, 2),
             Err(UiWorkspaceError::StaleInput)
         );
-        assert!(workspace.frame(0, 1, 2, 2).is_ok());
+        workspace.prepare_frame(0, 1, 2, 41).unwrap();
+        assert!(workspace.frame(0, 1, 2, 41, 2).is_ok());
+        workspace.prepare_frame(1, 1, 2, 43).unwrap();
+        assert_eq!(
+            workspace.prepare_frame(1, 1, 2, 44),
+            Err(UiWorkspaceError::PendingFrame)
+        );
         assert!(workspace.input(0, 1, 2, 2).is_ok());
     }
 
@@ -521,8 +560,9 @@ mod tests {
             Err(UiWorkspaceError::Budget)
         );
         assert_eq!(workspace.surface(), SURFACE);
+        workspace.prepare_frame(0, 1, 1, 50).unwrap();
         assert_eq!(
-            workspace.frame(0, 1, 1, 1),
+            workspace.frame(0, 1, 1, 50, 1),
             Ok(UiViewport {
                 x: 0,
                 y: 0,

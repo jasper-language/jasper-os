@@ -407,6 +407,9 @@ fn run_round(round: u32) -> bool {
         check(false, "multi-window migration capability was not admitted");
         return false;
     };
+    workspace
+        .prepare_frame(0, 1, 1, 71)
+        .expect("pre-migration frame ticket");
     let layout_mode = workspace.reconfigure(
         UiCapabilityEvent {
             capability_epoch: 2,
@@ -422,9 +425,12 @@ fn run_round(round: u32) -> bool {
         1024 * 1024,
         layout_capability,
     );
-    let old_frame_rejected = workspace.frame(0, 1, 1, 2).is_err();
+    let old_frame_rejected = workspace.frame(0, 1, 1, 71, 2).is_err();
     let old_input_rejected = workspace.input(0, 1, 1, 2).is_err();
-    let new_frame_ok = workspace.frame(0, 1, 2, 1).is_ok();
+    let new_frame_ok = workspace
+        .prepare_frame(0, 1, 2, 72)
+        .and_then(|_| workspace.frame(0, 1, 2, 72, 1))
+        .is_ok();
     let new_input_ok = workspace.input(0, 1, 2, 1).is_ok();
     let multiwindow_ok = layout_mode == Ok(UiLayoutMode::MultiWindow)
         && old_frame_rejected
@@ -433,9 +439,10 @@ fn run_round(round: u32) -> bool {
         && new_input_ok;
     check(multiwindow_ok, "multi-window migration contract failed");
     kprintln!(
-        "[JSR-UI-MULTIWINDOW] round={} layout={:?} old_frame_rejected={} old_input_rejected={} new_surface_generation={} new_input_generation={} failed={}",
+        "[JSR-UI-MULTIWINDOW] round={} layout={:?} pending_canceled={} old_frame_rejected={} old_input_rejected={} new_surface_generation={} new_input_generation={} failed={}",
         round,
         layout_mode,
+        old_frame_rejected,
         old_frame_rejected,
         old_input_rejected,
         new_frame_ok,

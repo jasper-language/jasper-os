@@ -82,7 +82,7 @@ grep -aFq '[JSR-UI-SESSION] round=0 started=true channel=true request_queued=tru
 grep -aFq '[JSR-UI-SESSION] round=1 started=true channel=true request_queued=true engine=cpu rendered=true present=true patch=true input=true native_keyboard=true frames=3 display=true exit=0 response=true terminal_alive=true resources=true' "$OUT/serial.log"
 grep -aFq 'remote_channel=true session_key=true scope=true recovered=true scene=true focus=true input_capability=true replay_rejected=true failed=0' "$OUT/serial.log"
 grep -aFq 'primary_focus=true primary_input=true peer_resident=true peer_present=true ordinary_background_rejected=true background_grant=true background_revoked=true peer_failed=true resources=true failed=0' "$OUT/serial.log"
-grep -aFq 'layout=Ok(MultiWindow) old_frame_rejected=true old_input_rejected=true new_surface_generation=true new_input_generation=true failed=0' "$OUT/serial.log"
+grep -aFq 'layout=Ok(MultiWindow) pending_canceled=true old_frame_rejected=true old_input_rejected=true new_surface_generation=true new_input_generation=true failed=0' "$OUT/serial.log"
 grep -aFq '[JSR-UI-PROCESS] rounds=2 started=true channel=true request_queued=true engine=cpu rendered=true present=true patch=true input=true native_keyboard=true frames=6 display=true exit=0 response=true terminal_alive=true restart=true resources=true' "$OUT/serial.log"
 grep -aFq '[JSR-DISPLAY-UI] presented=true' "$OUT/serial.log"
 ! grep -aEq 'panicked|JSR-PANIC|JSR-UI-PROCESS-FAIL' "$OUT/serial.log"
