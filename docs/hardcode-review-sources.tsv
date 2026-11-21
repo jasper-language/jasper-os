@@ -132,3 +132,5 @@ linux-keyring-uapi-v1	35	spec	Linux-key-payload-field-bound
 linux-directory-batch-policy	35	policy	bounded-directory-record-batch
 profile-render-layout-v1	35	spec	profile-query-rendered-record-layout
 jasper-channel-byte-v1	35	spec	Jasper-Channel-v1-message-byte-envelope
+trust-v1-wire-envelope	46	spec	Jasper-Trust-v1-bounded-CBOR-and-collection-envelope
+trust-v1-freshness	46	policy	Jasper-Trust-v1-maximum-challenge-lifetime
