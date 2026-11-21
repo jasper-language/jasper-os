@@ -34,6 +34,8 @@ static STAGE: AtomicU32 = AtomicU32::new(0);
 static PASS_CPUS: AtomicU32 = AtomicU32::new(0);
 static DISTRIBUTED: AtomicBool = AtomicBool::new(false);
 static PUBLISHER_DISTRIBUTED: AtomicBool = AtomicBool::new(false);
+static REVOKE_MODE: AtomicBool = AtomicBool::new(false);
+static REVOKED: AtomicBool = AtomicBool::new(false);
 static SYNC: IrqSpinLock<Option<AddressSync<4>>> = IrqSpinLock::new(None);
 static GRANTS: IrqSpinLock<[Option<AddressGrant>; 2]> = IrqSpinLock::new([None; 2]);
 static TARGETS: IrqSpinLock<[Option<(ObjId, u64)>; 2]> =
@@ -149,6 +151,21 @@ fn waiter(index: usize) {
             let mut sync = SYNC.lock();
             sync.as_mut().map(|sync| sync.take_key(key))
         };
+        if REVOKE_MODE.load(Ordering::Acquire) {
+            let Some((pid, va)) = TARGETS.lock()[index] else {
+                finish(index, false);
+                return;
+            };
+            let revoked = proc::memory_capability_use(
+                pid,
+                va,
+                WORD_BYTES,
+                MemoryRights::READ,
+            )
+            .is_none();
+            finish(index, revoked && ready.is_some());
+            return;
+        }
         let ok = matches!(ready, Some(Ok(AddressWait::Ready(state)))
             if state.value == PUBLISHED && state.version == 1);
         finish(index, ok && read_word(&pin) == Some(PUBLISHED));
@@ -217,6 +234,43 @@ fn publisher() {
     finish(2, true);
 }
 
+fn revoker() {
+    for _ in 0..100 {
+        if PARKED.load(Ordering::Acquire) == 1 {
+            break;
+        }
+        sched::sleep_ticks(1);
+    }
+    if PARKED.load(Ordering::Acquire) != 1 {
+        finish(2, false);
+        return;
+    }
+    let Some((pid, va)) = TARGETS.lock()[1] else {
+        finish(2, false);
+        return;
+    };
+    let unmapped = proc::unmap_memory(pid, va, 1).is_ok();
+    let revoked = proc::memory_capability_use(
+        pid,
+        va,
+        WORD_BYTES,
+        MemoryRights::READ,
+    )
+    .is_none();
+    REVOKED.store(unmapped && revoked, Ordering::Release);
+    let mut wake = [None; 4];
+    {
+        let mut sync = SYNC.lock();
+        if let Some(sync) = sync.as_mut() {
+            sync.drain_keys(&mut wake);
+        }
+    }
+    for key in wake.into_iter().flatten() {
+        let _ = sched::wake_event_wait(key);
+    }
+    finish(2, unmapped && revoked);
+}
+
 fn reset_globals() {
     PARKED.store(0, Ordering::Relaxed);
     DONE.store(0, Ordering::Relaxed);
@@ -224,14 +278,17 @@ fn reset_globals() {
     PASS_CPUS.store(0, Ordering::Relaxed);
     DISTRIBUTED.store(false, Ordering::Relaxed);
     PUBLISHER_DISTRIBUTED.store(false, Ordering::Relaxed);
+    REVOKE_MODE.store(false, Ordering::Relaxed);
+    REVOKED.store(false, Ordering::Relaxed);
     *SYNC.lock() = None;
     *GRANTS.lock() = [None; 2];
     *TARGETS.lock() = [None; 2];
 }
 
-fn run_pass(pass: u64) -> bool {
+fn run_pass(pass: u64, revoke_mode: bool) -> bool {
     let before = crate::baseline::baseline();
     reset_globals();
+    REVOKE_MODE.store(revoke_mode, Ordering::Release);
     STAGE.store(1, Ordering::Relaxed);
     let calls = crate::syscall::SyscallSet::of(&[]);
     let Ok(a) = proc::create("address-sync-a", calls) else {
@@ -338,44 +395,69 @@ fn run_pass(pass: u64) -> bool {
         cpu_p != cpu_a && cpu_p != cpu_b,
         Ordering::Relaxed,
     );
-    if sched::spawn_on(
-        TaskId(base),
-        "address-sync-a",
-        waiter0,
-        None,
-        only(cpu_a),
-    )
-    .is_err()
-        || sched::spawn_on(
+    let spawned = if revoke_mode {
+        sched::spawn_on(
             TaskId(base + 1),
-            "address-sync-b",
+            "address-sync-revoke-waiter",
             waiter1,
             None,
-            only(cpu_b),
+            only(cpu_a),
         )
-        .is_err()
-        || sched::spawn_on(
-            TaskId(base + 2),
-            "address-sync-publisher",
-            publisher,
+        .is_ok()
+            && sched::spawn_on(
+                TaskId(base + 2),
+                "address-sync-revoker",
+                revoker,
+                None,
+                only(cpu_b),
+            )
+            .is_ok()
+    } else {
+        sched::spawn_on(
+            TaskId(base),
+            "address-sync-a",
+            waiter0,
             None,
-            only(cpu_p),
+            only(cpu_a),
         )
-        .is_err()
-    {
+        .is_ok()
+            && sched::spawn_on(
+                TaskId(base + 1),
+                "address-sync-b",
+                waiter1,
+                None,
+                only(cpu_b),
+            )
+            .is_ok()
+            && sched::spawn_on(
+                TaskId(base + 2),
+                "address-sync-publisher",
+                publisher,
+                None,
+                only(cpu_p),
+            )
+            .is_ok()
+    };
+    if !spawned {
         fail();
         return false;
     }
     STAGE.store(11, Ordering::Relaxed);
     sched::run();
     STAGE.store(12, Ordering::Relaxed);
-    if !sched::ran_on(TaskId(base)).is_some_and(|set| set.contains(cpu_a))
-        || !sched::ran_on(TaskId(base + 1)).is_some_and(|set| set.contains(cpu_b))
-        || !sched::ran_on(TaskId(base + 2)).is_some_and(|set| set.contains(cpu_p))
-    {
+    let affinity_ok = if revoke_mode {
+        sched::ran_on(TaskId(base + 1)).is_some_and(|set| set.contains(cpu_a))
+            && sched::ran_on(TaskId(base + 2)).is_some_and(|set| set.contains(cpu_b))
+    } else {
+        sched::ran_on(TaskId(base)).is_some_and(|set| set.contains(cpu_a))
+            && sched::ran_on(TaskId(base + 1)).is_some_and(|set| set.contains(cpu_b))
+            && sched::ran_on(TaskId(base + 2)).is_some_and(|set| set.contains(cpu_p))
+    };
+    if !affinity_ok {
         fail();
     }
-    if DONE.load(Ordering::Acquire) != 3 || FAILED.load(Ordering::Relaxed) != 0 {
+    let expected_done = if revoke_mode { 2 } else { 3 };
+    if DONE.load(Ordering::Acquire) != expected_done || FAILED.load(Ordering::Relaxed) != 0 {
         fail();
     }
     let exited = proc::exit_idle(a, 0) && proc::exit_idle(b, 0);
@@ -395,11 +477,11 @@ pub fn failed() -> u32 {
 pub fn run() {
     FAILED.store(0, Ordering::Relaxed);
     for pass in 0..2 {
-        let ok = run_pass(pass);
+        let ok = run_pass(pass, false);
         let parked = PARKED.load(Ordering::Acquire) == 2;
         let terminal = DONE.load(Ordering::Acquire) == 3 && FAILED.load(Ordering::Relaxed) == 0;
         kprintln!(
-            "[JSR-ADDRESS-SYNC] pass={} phase={} cpus={} distributed={} publisher_distributed={} parked={} terminal={} same_object={} resources={} failed={}",
+            "[JSR-ADDRESS-SYNC] pass={} phase={} mode=sync cpus={} distributed={} publisher_distributed={} parked={} terminal={} same_object={} resources={} failed={}",
             pass + 1,
             if pass == 0 { "warmup" } else { "measured" },
             PASS_CPUS.load(Ordering::Relaxed),
@@ -412,4 +494,17 @@ pub fn run() {
             failed()
         );
     }
+    let ok = run_pass(2, true);
+    let parked = PARKED.load(Ordering::Acquire) == 1;
+    let terminal = DONE.load(Ordering::Acquire) == 2 && FAILED.load(Ordering::Relaxed) == 0;
+    kprintln!(
+        "[JSR-ADDRESS-SYNC] pass=3 phase=revoke mode=revoke cpus={} distributed={} parked={} terminal={} revoked={} resources={} failed={}",
+        PASS_CPUS.load(Ordering::Relaxed),
+        DISTRIBUTED.load(Ordering::Relaxed),
+        if parked { 1 } else { PARKED.load(Ordering::Acquire) },
+        terminal,
+        REVOKED.load(Ordering::Acquire),
+        ok,
+        failed()
+    );
 }

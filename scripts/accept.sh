@@ -999,14 +999,16 @@ check_addresssync() { # Issue #42 M02：真实共享 MemoryObject + Process + �
   addresssync_verdict() {
     local log="$1" label="$2" minimum="$3" line1 line2 actual
     [ -s "$log" ] || { spot_skip "$log" "$label" || miss="$miss $label:缺日志"; return 0; }
-    line1=$(grep -aoE '^\[JSR-ADDRESS-SYNC\] pass=1 phase=warmup cpus=[0-9]+ distributed=(true|false) publisher_distributed=(true|false) parked=2 terminal=true same_object=true resources=true failed=0' "$log" | head -1)
-    line2=$(grep -aoE '^\[JSR-ADDRESS-SYNC\] pass=2 phase=measured cpus=[0-9]+ distributed=(true|false) publisher_distributed=(true|false) parked=2 terminal=true same_object=true resources=true failed=0' "$log" | head -1)
+    line1=$(grep -aoE '^\[JSR-ADDRESS-SYNC\] pass=1 phase=warmup mode=sync cpus=[0-9]+ distributed=(true|false) publisher_distributed=(true|false) parked=2 terminal=true same_object=true resources=true failed=0' "$log" | head -1)
+    line2=$(grep -aoE '^\[JSR-ADDRESS-SYNC\] pass=2 phase=measured mode=sync cpus=[0-9]+ distributed=(true|false) publisher_distributed=(true|false) parked=2 terminal=true same_object=true resources=true failed=0' "$log" | head -1)
     [ -n "$line1" ] && [ -n "$line2" ] || { miss="$miss $label:两轮标记"; return 0; }
+    grep -qaE '^\[JSR-ADDRESS-SYNC\] pass=3 phase=revoke mode=revoke cpus=[0-9]+ distributed=(true|false) parked=1 terminal=true revoked=true resources=true failed=0' "$log" \
+      || miss="$miss $label:撤销矩阵"
     actual=$(sed -E 's/.* cpus=([0-9]+).*/\1/' <<< "$line1")
     [ "$actual" -ge "$minimum" ] || miss="$miss $label:cpus($actual<$minimum)"
     if [ "$minimum" -gt 1 ]; then
-      grep -qa '^\[JSR-ADDRESS-SYNC\] pass=1 phase=warmup cpus=[0-9]+ distributed=true publisher_distributed=true' "$log" \
-        && grep -qa '^\[JSR-ADDRESS-SYNC\] pass=2 phase=measured cpus=[0-9]+ distributed=true publisher_distributed=true' "$log" \
+      grep -qa '^\[JSR-ADDRESS-SYNC\] pass=1 phase=warmup mode=sync cpus=[0-9]+ distributed=true publisher_distributed=true' "$log" \
+        && grep -qa '^\[JSR-ADDRESS-SYNC\] pass=2 phase=measured mode=sync cpus=[0-9]+ distributed=true publisher_distributed=true' "$log" \
         || miss="$miss $label:未分散到三个 CPU"
     fi
     grep -qa '\[JSR-LOCK-ORDER\]' "$log" && miss="$miss $label:锁序失败"
@@ -1016,7 +1018,7 @@ check_addresssync() { # Issue #42 M02：真实共享 MemoryObject + Process + �
   addresssync_verdict "$SERIAL_SMP8" "x86_64×8" 3
   addresssync_verdict "$SERIAL_Q35" "q35×4" 3
   if [ -z "$miss" ]; then
-    record ADDRESS-SYNC PASS "两个真实 Process 映射同一 MemoryObject；两个等待者与发布者固定在不同 CPU，经既有 Task event-wait key 停车，单次发布产生权威终态并唤醒双方；对象、映射、页帧和等待登记回基线"
+    record ADDRESS-SYNC PASS "两个真实 Process 映射同一 MemoryObject；两个等待者与发布者固定在不同 CPU，经既有 Task event-wait key 停车，单次发布产生权威终态并唤醒双方；等待者停车后撤销映射与 capability 也失败关闭；对象、映射、页帧和等待登记回基线"
   else
     record ADDRESS-SYNC FAIL "缺少两轮真实 MemoryObject 跨 CPU 地址同步、调度唤醒或资源回收证据：$miss"
   fi

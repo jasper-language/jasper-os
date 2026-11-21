@@ -74,6 +74,15 @@ scheduler task event-wait key；单次 published condition 只产生权威终态
 证据见 `evidence/issue42-m02-multicpu-20261121-r2/`。该次 QEMU 在后续长矩阵有界超时，
 因此只把两项命名矩阵作为跨 CPU 证据，不声明完整启动验收。
 
+第三轮在等待者停车后从另一 CPU 撤销其映射与 MemoryCapability，再排空 scheduler
+wait key。等待者重新验证 capability 并失败关闭：
+
+```text
+[JSR-ADDRESS-SYNC] pass=3 phase=revoke mode=revoke cpus=4 distributed=true parked=1 terminal=true revoked=true resources=true failed=0
+```
+
+证据见 `evidence/issue42-m02-revoke-20261121-r3/`；页帧、对象、映射和等待登记均回基线。
+
 覆盖场景：
 
 - 两个 capability 别名连接同一条件；
@@ -86,7 +95,7 @@ scheduler task event-wait key；单次 published condition 只产生权威终态
 
 - 已完成内核内真实 Process/MemoryObject/调度停车接线，但尚无关闭兼容层后的
   CPL3 原生调用者和经批准的用户接口；
-- 跨 CPU 等待/发布已通过；尚缺运行中重映射、对象撤销、task exit 竞争与压力公平性矩阵；
+- 跨 CPU 等待/发布与停车后 capability 撤销已通过；尚缺运行中重映射、task exit 竞争与压力公平性矩阵；
 - 用户态 Pager 仍未实现；PagerCapability、FaultEvent、处理者死亡、递归缺页、
   队列满、超时、取消与页表最终裁决都需要独立 ABI/安全设计；
 - 本切片不新增 syscall，不改变 `NO-HARDCODE-RESIDUAL-1` 或任何 DAG 节点状态。
