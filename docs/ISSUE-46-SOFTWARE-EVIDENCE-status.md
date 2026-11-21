@@ -72,7 +72,7 @@ Collector、Broker、Verifier 和 Policy 是独立对象/密钥/数据职责，�
 
 ```text
 cargo test -p jasper-trust-service
-9 passed; 0 failed
+10 passed; 0 failed
 ```
 
 覆盖：
@@ -83,7 +83,7 @@ cargo test -p jasper-trust-service
 - stale Challenge、过期 Evidence、成功后的 replay；
 - Provider 撤销、过期 Policy、Broker 死亡；
 - bounded Challenge capacity 与成功后回收；
-- Evidence/Result 截断、篡改和签名拒绝。
+- Evidence/Result 截断、payload 篡改后复用旧签名以及签名拒绝。
 
 机器验收记录在 `verification/trust-framework-spec.toml` 的
 `software-evidence-vertical` 项；硬件项继续保持 pending。
