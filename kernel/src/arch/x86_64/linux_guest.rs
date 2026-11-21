@@ -1261,7 +1261,9 @@ impl LinuxPlatform for VirtioGuestBus {
                 return false;
             };
             if offset == 0x070 && value == 0 {
-                self.gpu_backend.reset();
+                if self.gpu_backend.reset().is_err() {
+                    return false;
+                }
                 self.gpu_last_avail = 0;
                 self.pending_irqs &= !(1u16 << VIRTIO_GPU_IRQ);
             }

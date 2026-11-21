@@ -589,4 +589,81 @@ mod tests {
         assert_eq!(stats_after.dropped, stats_before.dropped);
         assert_eq!(stats_after.destroyed, stats_before.destroyed);
     }
+
+    #[test]
+    fn gpu_backend_cancel_waits_for_reset_quiescence_and_rejects_stale_generation() {
+        use crate::virtio_gpu::{
+            GpuFrontendError, GpuPolicy, VirtioGpuBackend, CMD_RESOURCE_ATTACH_BACKING,
+            CMD_RESOURCE_CREATE_2D, FORMAT_B8G8R8X8,
+        };
+
+        let mut gpu = VirtioGpuBackend::new(
+            GpuPolicy::single_display(1024, 768, 4, 16 * 1024 * 1024).unwrap(),
+        )
+        .unwrap();
+        let mut response = [0u8; 512];
+
+        let mut create = [0u8; 40];
+        create[0..4].copy_from_slice(&CMD_RESOURCE_CREATE_2D.to_le_bytes());
+        create[24..28].copy_from_slice(&1u32.to_le_bytes());
+        create[28..32].copy_from_slice(&FORMAT_B8G8R8X8.to_le_bytes());
+        create[32..36].copy_from_slice(&64u32.to_le_bytes());
+        create[36..40].copy_from_slice(&64u32.to_le_bytes());
+        assert_eq!(gpu.handle_command(&create, &mut response), Ok(24));
+
+        let mut attach = [0u8; 48];
+        attach[0..4].copy_from_slice(&CMD_RESOURCE_ATTACH_BACKING.to_le_bytes());
+        attach[24..28].copy_from_slice(&1u32.to_le_bytes());
+        attach[28..32].copy_from_slice(&1u32.to_le_bytes());
+        attach[32..40].copy_from_slice(&0x20_0000u64.to_le_bytes());
+        attach[40..44].copy_from_slice(&(64u32 * 64 * 4).to_le_bytes());
+        assert_eq!(gpu.handle_command(&attach, &mut response), Ok(24));
+        assert_eq!(gpu.resource_count(), 1);
+        assert!(gpu.resident_bytes() > 0);
+
+        let submitted_generation = gpu.generation();
+        let context = u64::from(submitted_generation);
+        let mut ring = RuntimeAsyncRing::new(2, 2).unwrap();
+        let request = ring
+            .submit(Submission {
+                op: 41,
+                user_tag: 17,
+                context,
+                uses_buffer: true,
+            })
+            .unwrap();
+        ring.start(request, Exec::Abortable).unwrap();
+        assert_eq!(
+            ring.cancel(request),
+            Ok(Cancelled::AbortBackend { context })
+        );
+        assert_eq!(ring.decided_unpublished(), 1);
+        assert_eq!(ring.ready(), 0);
+        assert!(gpu.validate_completion_generation(submitted_generation).is_ok());
+
+        gpu.reset().unwrap();
+        let reset_generation = gpu.generation();
+        assert_ne!(reset_generation, submitted_generation);
+        assert_eq!(gpu.resource_count(), 0);
+        assert_eq!(gpu.resident_bytes(), 0);
+        assert_eq!(
+            gpu.validate_completion_generation(submitted_generation),
+            Err(GpuFrontendError::StaleGeneration)
+        );
+        assert!(gpu.validate_completion_generation(reset_generation).is_ok());
+        assert_eq!(ring.decided_unpublished(), 1);
+
+        ring.quiesce(request).unwrap();
+        assert_eq!(ring.decided_unpublished(), 0);
+        assert_eq!(ring.in_flight(), 0);
+        assert_eq!(ring.take_reclaimed(), Some(context));
+        assert_eq!(
+            ring.peek(0).map(|completion| completion.terminal),
+            Some(Terminal::Cancelled)
+        );
+        assert_eq!(ring.consume(2), 1);
+        assert_eq!(ring.consume(2), 0);
+        assert_eq!(ring.quiesce(request), Err(ProgressError::NoSuchRequest));
+        assert_eq!(ring.credits(), 2);
+    }
 }

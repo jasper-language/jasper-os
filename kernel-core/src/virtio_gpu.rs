@@ -50,6 +50,7 @@ pub enum GpuFrontendError {
     BudgetExceeded,
     Capacity,
     ResponseTooSmall,
+    StaleGeneration,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -231,6 +232,17 @@ impl VirtioGpuBackend {
         self.generation
     }
 
+    /// A backend completion may only be consumed for the generation that
+    /// submitted it. Reset advances the backend generation and invalidates all
+    /// older completions before they can be published.
+    pub const fn validate_completion_generation(&self, generation: u32) -> Result<(), GpuFrontendError> {
+        if generation == self.generation {
+            Ok(())
+        } else {
+            Err(GpuFrontendError::StaleGeneration)
+        }
+    }
+
     pub const fn commands(&self) -> u64 {
         self.commands
     }
@@ -263,17 +275,25 @@ impl VirtioGpuBackend {
         self.resources.iter().flatten().count()
     }
 
-    pub fn reset(&mut self) {
-        self.generation = self.generation.saturating_add(1);
+    pub fn reset(&mut self) -> Result<(), GpuFrontendError> {
+        let generation = self.generation.checked_add(1).ok_or(GpuFrontendError::Capacity)?;
+        if self
+            .events
+            .as_ref()
+            .is_some_and(|events| !events.can_restart(u64::from(generation)))
+        {
+            return Err(GpuFrontendError::Capacity);
+        }
+        self.generation = generation;
         self.resources.fill(None);
         self.resident_bytes = 0;
         self.scanout = None;
         if let Some(events) = self.events.as_mut() {
-            let _ = events.restart(
-                u64::from(self.generation),
-                u64::from(self.generation),
-            );
+            events
+                .restart(u64::from(self.generation), u64::from(self.generation))
+                .expect("checked GPU reset event generation");
         }
+        Ok(())
     }
 
     pub fn handle_command(
@@ -832,7 +852,7 @@ mod tests {
         assert_eq!(get_u32(&response, 36), 768);
         assert_eq!(get_u32(&response, 40), 1);
         gpu.handle_command(&create(), &mut response).unwrap();
-        gpu.reset();
+        gpu.reset().unwrap();
         assert_eq!(gpu.generation(), 2);
         assert_eq!(gpu.resource_count(), 0);
         assert_eq!(gpu.resident_bytes(), 0);

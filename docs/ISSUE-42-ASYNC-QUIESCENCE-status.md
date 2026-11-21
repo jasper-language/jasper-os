@@ -4,9 +4,9 @@
 
 ## 状态
 
-`partial`。已为 Driver Host、FS 和 NET 三类真实 backend 补齐 AsyncRing 的
-submitted → cancel → backend terminal → quiesce → completion 路径；graphics
-和真实硬件 DMA/IRQ 故障注入仍未完成，不能关闭 M09。
+`partial`。已为 Driver Host、FS、NET 和 Graphics 四类 backend 补齐 AsyncRing
+的 submitted → cancel → backend terminal → quiesce → completion 路径；真实硬件
+DMA/IRQ 故障注入、hot-unplug 与物理 IOMMU 仍未完成，不能关闭 M09。
 
 ## 已闭合的设备矩阵
 
@@ -37,17 +37,24 @@ NET 矩阵使用真实 `UdpSocketRuntime`、已排队 datagram 和配额：
 - 随后只发布一次 `Cancelled` completion 并归还 Ring context；
 - 旧 socket Handle 的 recv/再次 close 返回 `Closed`。
 
+Graphics 矩阵使用真实 `VirtioGpuBackend` 的 2D resource 和 backing：
+
+- 资源与 backing 已实际提交后，取消 AsyncRing 请求仍不发布 completion；
+- GPU reset 清空 resource/resident bytes 并推进 generation，旧 generation
+  completion 显式返回 `StaleGeneration`；
+- reset 后才 quiesce 请求，产生唯一 `Cancelled` 终态并回收 context；
+- 新 generation 可接受完成，旧 credit/context 与资源不回绕。
+
 验证：
 
 ```text
 cargo test -p kernel-core --features runtime-registries,network-dynamic \
   async_ring_runtime --lib
-5 passed; 0 failed
+6 passed; 0 failed
 ```
 
 ## 尚未关闭
 
-- graphics 的同类真实 backend 矩阵；
 - 真实设备 DMA 仍访问、IRQ 迟到、FLR/reset 失败、hot-unplug 和物理 IOMMU；
 - 多 CPU 取消/完成竞争与高负载 reclaim。
 
