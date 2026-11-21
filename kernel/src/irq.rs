@@ -26,6 +26,7 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use alloc::vec::Vec;
 use kernel_core::cpu_bitmap::CpuBitmap;
+use kernel_core::cpu_storage::CpuTailLayout;
 use kernel_core::irq::{
     plan_runtime_lines, AffinityPolicy, Charge, CoreQuota, IrqError, LineLoad, QuotaParams,
 };
@@ -251,22 +252,93 @@ impl MsiStorageError {
 }
 
 fn msi_cpu_state(cpu: usize) -> Option<&'static MsiCpuState> {
-    if let Some(state) = BOOTSTRAP_MSI_CPUS.get(cpu) {
+    let layout = CpuTailLayout::new(MAX_CPUS, crate::smp::cpu_count());
+    if cpu >= layout.admitted() {
+        return None;
+    }
+    if !layout.is_tail(cpu) {
+        return BOOTSTRAP_MSI_CPUS.get(cpu);
+    }
+    let extra = layout.tail_index(cpu)?;
+    EXTRA_MSI_CPUS.get()?.as_ref().ok()?.get(extra)
+}
+
+fn bootstrap_msi_states() -> impl Iterator<Item = &'static MsiCpuState> {
+    let layout = CpuTailLayout::new(MAX_CPUS, crate::smp::cpu_count());
+    BOOTSTRAP_MSI_CPUS[..layout.bootstrap_len()].iter()
+}
+
+fn extra_msi_states(cpus: usize) -> impl Iterator<Item = &'static MsiCpuState> {
+    let layout = CpuTailLayout::new(MAX_CPUS, cpus);
+    let prepared = EXTRA_MSI_CPUS
+        .get()
+        .and_then(|states| states.as_ref().ok())
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    prepared[..layout.tail_len().min(prepared.len())].iter()
+}
+
+fn msi_prepared_count() -> usize {
+    let layout = CpuTailLayout::new(MAX_CPUS, crate::smp::cpu_count());
+    layout.bootstrap_len()
+        + EXTRA_MSI_CPUS
+            .get()
+            .and_then(|states| states.as_ref().ok())
+            .map_or(0, |states| states.len().min(layout.tail_len()))
+}
+
+fn has_bootstrap_msi_state(cpu: usize) -> bool {
+    let layout = CpuTailLayout::new(MAX_CPUS, crate::smp::cpu_count());
+    cpu < layout.bootstrap_len()
+}
+
+fn has_extra_msi_state(cpu: usize) -> bool {
+    let layout = CpuTailLayout::new(MAX_CPUS, crate::smp::cpu_count());
+    if !layout.is_tail(cpu) {
+        return false;
+    }
+    let Some(extra) = layout.tail_index(cpu) else {
+        return false;
+    };
+    EXTRA_MSI_CPUS
+        .get()
+        .and_then(|states| states.as_ref().ok())
+        .is_some_and(|states| extra < states.len())
+}
+
+fn bootstrap_msi_state(cpu: usize) -> Option<&'static MsiCpuState> {
+    if !has_bootstrap_msi_state(cpu) {
+        return None;
+    }
+    BOOTSTRAP_MSI_CPUS.get(cpu)
+}
+
+fn extra_msi_state(cpu: usize) -> Option<&'static MsiCpuState> {
+    if !has_extra_msi_state(cpu) {
+        return None;
+    }
+    let layout = CpuTailLayout::new(MAX_CPUS, crate::smp::cpu_count());
+    let extra = layout.tail_index(cpu)?;
+    EXTRA_MSI_CPUS.get()?.as_ref().ok()?.get(extra)
+}
+
+fn msi_state(cpu: usize) -> Option<&'static MsiCpuState> {
+    if let Some(state) = bootstrap_msi_state(cpu) {
         return Some(state);
     }
-    let extra = cpu.checked_sub(MAX_CPUS)?;
-    EXTRA_MSI_CPUS.get()?.as_ref().ok()?.get(extra)
+    extra_msi_state(cpu)
 }
 
 /// Reserve MSI dispatch state before AP startup. Calling twice is idempotent.
 pub fn prepare_msi_storage(cpus: usize) -> Result<(), MsiStorageError> {
-    let needed = cpus.saturating_sub(MAX_CPUS);
+    let layout = CpuTailLayout::new(MAX_CPUS, cpus);
+    let needed = layout.tail_len();
     let states = EXTRA_MSI_CPUS.call_once(|| {
         let mut states = Vec::new();
         states
             .try_reserve_exact(needed)
             .map_err(|_| MsiStorageError::Allocation)?;
-        for _ in MAX_CPUS..cpus {
+        for _ in layout.bootstrap_len()..cpus {
             states.push(MsiCpuState::new());
         }
         Ok(states)
@@ -368,11 +440,7 @@ pub fn on_msi(vector: u8) {
         crate::kprintln!(
             "[JSR-SMP] reject=cpu_index_storage_missing index={} prepared={}",
             cpu,
-            MAX_CPUS
-                + EXTRA_MSI_CPUS
-                    .get()
-                    .and_then(|states| states.as_ref().ok())
-                    .map_or(0, Vec::len)
+            msi_prepared_count()
         );
         arch::halt_forever();
     };
@@ -429,13 +497,11 @@ pub fn reset_msi_stats() {
         }
         state.spurious.store(0, Ordering::Relaxed);
     };
-    for state in BOOTSTRAP_MSI_CPUS.iter() {
+    for state in bootstrap_msi_states() {
         reset(state);
     }
-    if let Some(states) = EXTRA_MSI_CPUS.get().and_then(|states| states.as_ref().ok()) {
-        for state in states {
-            reset(state);
-        }
+    for state in extra_msi_states(crate::smp::cpu_count()) {
+        reset(state);
     }
 }
 
@@ -527,10 +593,17 @@ pub mod device {
     }
 
     fn quota_slot(cpu: usize) -> Option<&'static IrqSpinLock<CoreQuota>> {
-        if let Some(quota) = QUOTAS.get(cpu) {
+        let layout = CpuTailLayout::new(MAX_CPUS, crate::smp::cpu_count());
+        if cpu >= layout.admitted() {
+            return None;
+        }
+        if !layout.is_tail(cpu) {
+            let Some(quota) = QUOTAS.get(cpu) else {
+                return None;
+            };
             return Some(quota);
         }
-        let extra = cpu.checked_sub(MAX_CPUS)?;
+        let extra = layout.tail_index(cpu)?;
         EXTRA_QUOTAS.get()?.as_ref().ok()?.get(extra)
     }
 
@@ -572,13 +645,14 @@ pub mod device {
 
     /// Reserve device-IRQ per-CPU counts and quotas before AP startup.
     pub fn prepare_cpu_storage(cpus: usize) -> Result<(), DeviceCpuStorageError> {
-        let needed = cpus.saturating_sub(MAX_CPUS);
+        let layout = CpuTailLayout::new(MAX_CPUS, cpus);
+        let needed = layout.tail_len();
         let lines = line_count();
         let counts = EXTRA_LINE_COUNTS.call_once(|| {
             let mut rows = Vec::new();
             rows.try_reserve_exact(needed)
                 .map_err(|_| DeviceCpuStorageError::Allocation)?;
-            for _ in MAX_CPUS..cpus {
+            for _ in layout.bootstrap_len()..cpus {
                 let mut row = Vec::new();
                 row.try_reserve_exact(lines)
                     .map_err(|_| DeviceCpuStorageError::Allocation)?;
@@ -598,7 +672,7 @@ pub mod device {
             quotas
                 .try_reserve_exact(needed)
                 .map_err(|_| DeviceCpuStorageError::Allocation)?;
-            for _ in MAX_CPUS..cpus {
+            for _ in layout.bootstrap_len()..cpus {
                 quotas.push(IrqSpinLock::ranked(
                     lockorder::IRQ_QUOTA,
                     CoreQuota::new(QuotaParams::DEFAULT),
@@ -626,12 +700,18 @@ pub mod device {
         line: usize,
         cpu: usize,
     ) -> Option<&'a AtomicU32> {
-        if let Some(row) = storage.counts.get(line) {
+        let layout = CpuTailLayout::new(MAX_CPUS, crate::smp::cpu_count());
+        if cpu >= layout.admitted() {
+            return None;
+        }
+        if !layout.is_tail(cpu) {
+            let row = storage.counts.get(line)?;
             if let Some(count) = row.get(cpu) {
                 return Some(count);
             }
+            return None;
         }
-        let extra_cpu = cpu.checked_sub(MAX_CPUS)?;
+        let extra_cpu = layout.tail_index(cpu)?;
         EXTRA_LINE_COUNTS
             .get()?
             .as_ref()
@@ -1064,11 +1144,14 @@ pub mod device {
                 "[JSR-IRQ] reject=cpu_index_storage_missing line={} index={} prepared={}",
                 line,
                 cpu,
-                MAX_CPUS
-                    + EXTRA_LINE_COUNTS
-                        .get()
-                        .and_then(|rows| rows.as_ref().ok())
-                        .map_or(0, Vec::len)
+                {
+                    let layout = CpuTailLayout::new(MAX_CPUS, crate::smp::cpu_count());
+                    layout.bootstrap_len()
+                        + EXTRA_LINE_COUNTS
+                            .get()
+                            .and_then(|rows| rows.as_ref().ok())
+                            .map_or(0, |rows| rows.len().min(layout.tail_len()))
+                }
             );
             arch::halt_forever();
         };

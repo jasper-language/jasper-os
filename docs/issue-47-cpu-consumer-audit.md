@@ -35,6 +35,25 @@ fixture=11 paths
 只要这些路径仍含未完成在线/离线事务、固定诊断数组或 bootstrap 宽度门面，
 `CPU-DYNAMIC-ADMISSION-1` 就保持 in-progress。
 
+### scheduler 剩余阻塞点
+
+`kernel/src/sched` 的 leaf、`CoreQueue`、task-index/lifecycle 和若干 timer/forest
+已经具备 bootstrap 内联区加堆后备尾部。当前不能把 scheduler 两行标为 verified
+的原因不是静态 `MAX_CPUS` 名称本身，而是下面两个仍只覆盖 bootstrap 区的事务：
+
+- `lock_state_from_observed` 的 `StateGuard` 只取得
+  `TICK_LEASES[0..MAX_CPUS]`；`EXTRA_TICK_LEASES` 已能预分配，但未加入同一事务
+  的 leaf guard 集合，逻辑 CPU 超过 128 时无法同时冻结其本地 tick 状态。
+- `Scheduler::tick_lease_owners` 返回固定
+  `[(Option<Token>, u8); MAX_CPUS]`，并使用固定 `touched` 数组汇总共享组额度；
+  即使 extra leaf 被冻结，也没有发布 extra CPU 的本地 tick lease。
+
+修复必须保持无堆分配、IRQ-off 的 hot path：在 AP 启动前为 extra guards 与
+owner publication 预留可复用 scratch，由全局 scheduler 锁串行访问；
+online/offline 扩展时先完成存储预留，再提交 membership。仅把
+`EXTRA_TICK_LEASES` 接入取锁但不接入 owner 发布会造成“已冻结但不结算”的
+半状态，因此本轮没有做局部接线，两个 scheduler 行继续保持 in-progress。
+
 以下清单排除了 `_demo`、`*/demo/*` 和测试文件。
 
 | 消费域 | 生产文件 | 当前依赖 | 迁移归属 |
