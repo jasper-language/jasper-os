@@ -1006,6 +1006,8 @@ check_addresssync() { # Issue #42 M02：真实共享 MemoryObject + Process + �
       || miss="$miss $label:撤销矩阵"
     grep -qaE '^\[JSR-ADDRESS-SYNC\] pass=4 phase=exit mode=exit cpus=[0-9]+ distributed=(true|false) parked=1 terminal=true exited=true revoked=true resources=true failed=0' "$log" \
       || miss="$miss $label:进程退出矩阵"
+    grep -qaE '^\[JSR-ADDRESS-SYNC\] pass=5 phase=remap mode=remap cpus=[0-9]+ distributed=(true|false) parked=1 terminal=true remapped=true revoked=true resources=true failed=0' "$log" \
+      || miss="$miss $label:重映射矩阵"
     actual=$(sed -E 's/.* cpus=([0-9]+).*/\1/' <<< "$line1")
     [ "$actual" -ge "$minimum" ] || miss="$miss $label:cpus($actual<$minimum)"
     if [ "$minimum" -gt 1 ]; then
@@ -1020,7 +1022,7 @@ check_addresssync() { # Issue #42 M02：真实共享 MemoryObject + Process + �
   addresssync_verdict "$SERIAL_SMP8" "x86_64×8" 3
   addresssync_verdict "$SERIAL_Q35" "q35×4" 3
   if [ -z "$miss" ]; then
-    record ADDRESS-SYNC PASS "两个真实 Process 映射同一 MemoryObject；两个等待者与发布者固定在不同 CPU，经既有 Task event-wait key 停车，单次发布产生权威终态并唤醒双方；等待者停车后撤销映射/capability 或所属 Process 退出均失败关闭并回收资源"
+    record ADDRESS-SYNC PASS "两个真实 Process 映射同一 MemoryObject；跨 CPU 等待/发布、停车后撤销、所属 Process 退出以及撤销后重映射到新地址均得到唯一安全终态并回收资源"
   else
     record ADDRESS-SYNC FAIL "缺少两轮真实 MemoryObject 跨 CPU 地址同步、调度唤醒或资源回收证据：$miss"
   fi

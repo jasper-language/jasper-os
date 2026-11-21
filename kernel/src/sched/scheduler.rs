@@ -3315,14 +3315,14 @@ impl Scheduler {
         let mut migrated = 0;
         for slot in 0..self.tasks.len() {
             let destination = {
-                let Some(task) = self
+                if !self
                     .tasks
                     .get(slot)
                     .and_then(Option::as_ref)
-                    .filter(|task| task.state != TaskState::Exited && task.home == c)
-                else {
+                    .is_some_and(|task| task.state != TaskState::Exited && task.home == c)
+                {
                     continue;
-                };
+                }
                 let affinity = self
                     .affinity_view(slot)
                     .ok_or("affinity-missing")?;

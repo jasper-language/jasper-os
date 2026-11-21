@@ -1,0 +1,7 @@
+qemu_rc=124
+m02_sync_warmup=pass
+m02_sync_measured=pass
+m02_revoke=pass
+m02_process_exit=pass
+m02_remap=pass
+full_boot_acceptance=false

@@ -12,7 +12,7 @@ use kernel_core::address_sync::{
     AddressGrant, AddressState, AddressSync, AddressWait,
 };
 use kernel_core::memory_capability::MemoryRights;
-use kernel_core::object::{ObjectType, Rights};
+use kernel_core::object::{HandleId, ObjectType, Rights};
 use kernel_core::objtable::ObjId;
 use kernel_core::smp::CpuSet;
 
@@ -36,12 +36,15 @@ static DISTRIBUTED: AtomicBool = AtomicBool::new(false);
 static PUBLISHER_DISTRIBUTED: AtomicBool = AtomicBool::new(false);
 static REVOKE_MODE: AtomicBool = AtomicBool::new(false);
 static EXIT_MODE: AtomicBool = AtomicBool::new(false);
+static REMAP_MODE: AtomicBool = AtomicBool::new(false);
 static REVOKED: AtomicBool = AtomicBool::new(false);
 static PROCESS_EXITED: AtomicBool = AtomicBool::new(false);
+static REMAPPED: AtomicBool = AtomicBool::new(false);
 static SYNC: IrqSpinLock<Option<AddressSync<4>>> = IrqSpinLock::new(None);
 static GRANTS: IrqSpinLock<[Option<AddressGrant>; 2]> = IrqSpinLock::new([None; 2]);
 static TARGETS: IrqSpinLock<[Option<(ObjId, u64)>; 2]> =
     IrqSpinLock::new([None; 2]);
+static REMAP: IrqSpinLock<Option<(HandleId, u64)>> = IrqSpinLock::new(None);
 
 fn fail() {
     FAILED.fetch_add(1, Ordering::Relaxed);
@@ -256,6 +259,24 @@ fn revoker() {
         let reaped = exited && proc::reap(pid).is_some();
         PROCESS_EXITED.store(exited && reaped, Ordering::Release);
         exited && reaped
+    } else if REMAP_MODE.load(Ordering::Acquire) {
+        let unmapped = proc::unmap_memory(pid, va, 1).is_ok();
+        let remap = {
+            let Some((handle, new_va)) = *REMAP.lock() else {
+                finish(2, false);
+                return;
+            };
+            proc::map_memory(pid, handle, new_va, 0, 1, true).is_ok()
+                && proc::memory_capability_use(
+                    pid,
+                    new_va,
+                    WORD_BYTES,
+                    MemoryRights::READ.union(MemoryRights::WRITE),
+                )
+                .is_some()
+        };
+        REMAPPED.store(unmapped && remap, Ordering::Release);
+        unmapped && remap
     } else {
         proc::unmap_memory(pid, va, 1).is_ok()
     };
@@ -289,18 +310,22 @@ fn reset_globals() {
     PUBLISHER_DISTRIBUTED.store(false, Ordering::Relaxed);
     REVOKE_MODE.store(false, Ordering::Relaxed);
     EXIT_MODE.store(false, Ordering::Relaxed);
+    REMAP_MODE.store(false, Ordering::Relaxed);
     REVOKED.store(false, Ordering::Relaxed);
     PROCESS_EXITED.store(false, Ordering::Relaxed);
+    REMAPPED.store(false, Ordering::Relaxed);
     *SYNC.lock() = None;
     *GRANTS.lock() = [None; 2];
     *TARGETS.lock() = [None; 2];
+    *REMAP.lock() = None;
 }
 
-fn run_pass(pass: u64, revoke_mode: bool, exit_mode: bool) -> bool {
+fn run_pass(pass: u64, revoke_mode: bool, exit_mode: bool, remap_mode: bool) -> bool {
     let before = crate::baseline::baseline();
     reset_globals();
     REVOKE_MODE.store(revoke_mode, Ordering::Release);
     EXIT_MODE.store(exit_mode, Ordering::Release);
+    REMAP_MODE.store(remap_mode, Ordering::Release);
     STAGE.store(1, Ordering::Relaxed);
     let calls = crate::syscall::SyscallSet::of(&[]);
     let Ok(a) = proc::create("address-sync-a", calls) else {
@@ -390,6 +415,9 @@ fn run_pass(pass: u64, revoke_mode: bool, exit_mode: bool) -> bool {
     *SYNC.lock() = Some(AddressSync::new(a_grant.range(), AddressState::default()));
     *GRANTS.lock() = [Some(a_grant), Some(b_grant)];
     *TARGETS.lock() = [Some((a, a_va)), Some((b, b_va))];
+    if remap_mode {
+        *REMAP.lock() = Some((second, arch::USER_WINDOW.0 + 0x60_0000));
+    }
 
     STAGE.store(10, Ordering::Relaxed);
     let base = 0xa44_2000 + pass * 0x10;
@@ -493,7 +521,7 @@ pub fn failed() -> u32 {
 pub fn run() {
     FAILED.store(0, Ordering::Relaxed);
     for pass in 0..2 {
-        let ok = run_pass(pass, false, false);
+        let ok = run_pass(pass, false, false, false);
         let parked = PARKED.load(Ordering::Acquire) == 2;
         let terminal = DONE.load(Ordering::Acquire) == 3 && FAILED.load(Ordering::Relaxed) == 0;
         kprintln!(
@@ -510,7 +538,7 @@ pub fn run() {
             failed()
         );
     }
-    let ok = run_pass(2, true, false);
+    let ok = run_pass(2, true, false, false);
     let parked = PARKED.load(Ordering::Acquire) == 1;
     let terminal = DONE.load(Ordering::Acquire) == 2 && FAILED.load(Ordering::Relaxed) == 0;
     kprintln!(
@@ -523,7 +551,7 @@ pub fn run() {
         ok,
         failed()
     );
-    let ok = run_pass(3, true, true);
+    let ok = run_pass(3, true, true, false);
     let parked = PARKED.load(Ordering::Acquire) == 1;
     let terminal = DONE.load(Ordering::Acquire) == 2 && FAILED.load(Ordering::Relaxed) == 0;
     kprintln!(
@@ -533,6 +561,20 @@ pub fn run() {
         if parked { 1 } else { PARKED.load(Ordering::Acquire) },
         terminal,
         PROCESS_EXITED.load(Ordering::Acquire),
+        REVOKED.load(Ordering::Acquire),
+        ok,
+        failed()
+    );
+    let ok = run_pass(4, true, false, true);
+    let parked = PARKED.load(Ordering::Acquire) == 1;
+    let terminal = DONE.load(Ordering::Acquire) == 2 && FAILED.load(Ordering::Relaxed) == 0;
+    kprintln!(
+        "[JSR-ADDRESS-SYNC] pass=5 phase=remap mode=remap cpus={} distributed={} parked={} terminal={} remapped={} revoked={} resources={} failed={}",
+        PASS_CPUS.load(Ordering::Relaxed),
+        DISTRIBUTED.load(Ordering::Relaxed),
+        if parked { 1 } else { PARKED.load(Ordering::Acquire) },
+        terminal,
+        REMAPPED.load(Ordering::Acquire),
         REVOKED.load(Ordering::Acquire),
         ok,
         failed()
