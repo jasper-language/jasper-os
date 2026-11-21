@@ -141,6 +141,7 @@ pub fn run() {
     if lines > 0 && n > 1 {
         route(online, lines);
         balance(n, lines);
+        detach(n, lines);
         storm(n, lines);
         recovery(n, lines);
     } else if lines == 0 {
@@ -416,6 +417,51 @@ fn balance(n: usize, lines: usize) {
         spread_at.unwrap_or(u64::MAX),
         bound,
         in_time
+    );
+}
+
+/// Move every active route away from one departing CPU, then demote its quota.
+fn detach(n: usize, lines: usize) {
+    let before = baseline();
+    let online = CpuSet::first(n);
+    let target = online.iter().filter(|&cpu| cpu != 0).last().unwrap_or(0);
+    let mut configured = true;
+    for line in 0..lines {
+        configured &= device::set_affinity(line, only(target)) == Ok(target);
+        configured &= device::set_affinity(line, online.clone()) == Ok(target);
+        configured &= device::set_enabled(line, true).is_ok();
+    }
+    let handoff = device::detach_cpu_lines(target);
+    let mut stale = 0;
+    let mut outside = 0;
+    for line in 0..lines {
+        match device::routed_to(line) {
+            Some(cpu) if cpu == target => stale += 1,
+            Some(cpu) if online.contains(cpu) => {}
+            _ => outside += 1,
+        }
+        let _ = device::set_enabled(line, false);
+    }
+    let quota_demoted = device::demote_cpu_quota(target).is_ok();
+    let changed = device::set_affinity(0, only(0));
+    let clean = baseline() == before && device::enabled_lines().is_empty();
+    let ok = configured
+        && handoff == Ok(lines)
+        && stale == 0
+        && outside == 0
+        && quota_demoted
+        && changed.is_ok()
+        && clean;
+    check(ok, "CPU route detach, quota demotion or cleanup failed");
+    kprintln!(
+        "[JSR-SMP3] case=detach target={} lines={} rerouted={:?} stale_targets={} outside_online={} quota_demoted={} resources={}",
+        target,
+        lines,
+        handoff,
+        stale,
+        outside,
+        quota_demoted,
+        clean
     );
 }
 

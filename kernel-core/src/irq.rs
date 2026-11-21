@@ -476,6 +476,22 @@ impl CoreQuota {
         self.throttle_events = 0;
         self.msi_throttle_events = 0;
     }
+
+    /// Quiesce one departing processor without changing its configured policy.
+    ///
+    /// Active throttles must already have been drained by the route handoff.
+    /// This clears stale software state so a later online generation starts from
+    /// a fresh accounting window instead of inheriting the prior CPU lifetime.
+    pub fn demote(&mut self) {
+        self.last_tick = 0;
+        self.tick_cycles = 0;
+        self.used_cycles = 0;
+        self.used_count = 0;
+        self.throttled.fill(0);
+        self.released_lines.clear();
+        self.msi_throttled = SlotSet::EMPTY;
+        self.reset_stats();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -854,6 +870,31 @@ mod tests {
             })
             .is_ok());
         assert_eq!(b.params().max_per_tick, 2);
+    }
+
+    #[test]
+    fn quota_demote_clears_generation_state_but_keeps_policy() {
+        let params = QuotaParams {
+            permille: 250,
+            max_per_tick: 4,
+        };
+        let mut q = quota(params);
+        q.on_tick(1000);
+        q.on_tick(2000);
+        assert_eq!(q.charge(1, 300), Charge::Exhausted);
+        assert!(q.charge_msi(7, 0).is_ok());
+        assert!(q.needs_tick());
+
+        q.demote();
+
+        assert_eq!(q.params(), params);
+        assert_eq!(q.tick_cycles(), 0);
+        assert_eq!(q.stats(), (0, 0, 0));
+        assert_eq!(q.msi_throttles(), 0);
+        assert!(!q.is_line_throttled(1));
+        assert!(q.msi_throttled().is_empty());
+        assert!(q.released_lines().is_empty());
+        assert!(!q.needs_tick());
     }
 
     #[test]

@@ -28,7 +28,7 @@ use alloc::vec::Vec;
 use kernel_core::cpu_bitmap::CpuBitmap;
 use kernel_core::cpu_storage::CpuTailLayout;
 use kernel_core::irq::{
-    plan_runtime_lines, AffinityPolicy, Charge, CoreQuota, IrqError, LineLoad, QuotaParams,
+    plan_runtime_lines, AffinityPolicy, Charge, CoreQuota, IrqError, Keep, LineLoad, QuotaParams,
 };
 use kernel_core::msi::MsiError;
 use kernel_core::smp::{CpuSet, MAX_CPUS};
@@ -904,6 +904,114 @@ pub mod device {
         drop(replaced);
         ROUTING_CPU_BITS.fetch_max(cpu_bits, Ordering::Relaxed);
         Ok(target)
+    }
+
+    /// Remove one departing processor from every active device-IRQ route.
+    ///
+    /// The complete route plan is computed before any hardware mutation. A
+    /// line with no remaining online affinity rejects the handoff without
+    /// changing routes. Affected lines are masked while moved, and remain
+    /// masked on a hardware routing failure rather than risking delivery to
+    /// the departing processor.
+    pub fn detach_cpu_lines(cpu: usize) -> Result<usize, IrqError> {
+        let mut online_set = sched::online_cpus();
+        if !online_set.contains(cpu) {
+            return Err(IrqError::Offline);
+        }
+        online_set.remove(cpu);
+        if online_set.is_empty() {
+            return Err(IrqError::Offline);
+        }
+        let online = CpuBitmap::from_cpu_set(online_set)
+            .map_err(|_| IrqError::NoMemory)?;
+        let cpu_bits = ROUTING_CPU_BITS
+            .load(Ordering::Relaxed)
+            .max(online.capacity_bits().map_err(|_| IrqError::NoLine)?);
+        let n = line_count();
+        let mut lines = Vec::new();
+        let mut indices = Vec::new();
+        lines.try_reserve_exact(n).map_err(|_| IrqError::NoLine)?;
+        indices
+            .try_reserve_exact(n)
+            .map_err(|_| IrqError::NoLine)?;
+        for _ in 0..n {
+            let allowed = CpuBitmap::with_capacity(cpu_bits)
+                .map_err(|_| IrqError::NoMemory)?;
+            lines.push(LineLoad {
+                allowed,
+                current: None,
+                load: 0,
+            });
+        }
+        {
+            let routing = ROUTING.lock();
+            let mut used = 0;
+            for line in 0..n {
+                if routing.enabled[line] {
+                    lines[used]
+                        .allowed
+                        .copy_from(&routing.allowed[line])
+                        .map_err(|_| IrqError::NoMemory)?;
+                    lines[used].current = routing.target[line];
+                    indices.push(line);
+                    used += 1;
+                }
+            }
+            lines.truncate(used);
+        }
+        let mut targets = Vec::new();
+        targets
+            .try_reserve_exact(lines.len())
+            .map_err(|_| IrqError::NoLine)?;
+        targets.resize(lines.len(), 0);
+        let mut base = Vec::new();
+        base.try_reserve_exact(cpu_bits)
+            .map_err(|_| IrqError::NoMemory)?;
+        base.resize(cpu_bits, 0);
+        Keep.assign(&lines, &online, &base, &mut targets)?;
+
+        let mut rerouted = 0;
+        let mut affected = Vec::new();
+        affected
+            .try_reserve_exact(indices.len())
+            .map_err(|_| IrqError::NoLine)?;
+        for (index, line) in indices.iter().copied().enumerate() {
+            if lines[index].current != Some(targets[index]) {
+                affected.push((line, targets[index]));
+            }
+        }
+        for &(line, _) in affected.iter() {
+            arch::device_irq_set_masked(line, true);
+        }
+        for &(line, target) in affected.iter() {
+            arch::device_irq_route(line, target)?;
+            ROUTING.lock().target[line] = Some(target);
+            arch::device_irq_set_masked(line, false);
+            rerouted += 1;
+        }
+        Ok(rerouted)
+    }
+
+    /// Demote the line-IRQ quota of a processor after route handoff and
+    /// quiescence. MSI ownership and in-flight device work remain the caller's
+    /// responsibility and must be drained before this call.
+    pub fn demote_cpu_quota(cpu: usize) -> Result<(), IrqError> {
+        let still_routed = {
+            let routing = ROUTING.lock();
+            routing
+                .enabled
+                .iter()
+                .enumerate()
+                .any(|(line, enabled)| *enabled && routing.target[line] == Some(cpu))
+        };
+        if still_routed {
+            return Err(IrqError::Offline);
+        }
+        quota_slot(cpu)
+            .ok_or(IrqError::Offline)?
+            .lock()
+            .demote();
+        Ok(())
     }
 
     /// 当前路由到的处理器（尚未路由时为 `None`）。

@@ -55,6 +55,37 @@ python3 scripts/check-hardcode-gate.py --inventory \
 findings=278; added=0; cleared=0
 ```
 
+## IRQ detach handoff slice
+
+`irq::device::detach_cpu_lines(cpu)` now performs the line-interrupt portion of a
+CPU departure:
+
+- computes the complete replacement route set against `online - departing_cpu`
+  before touching the interrupt controller;
+- rejects if no other CPU is online or any active line has no remaining legal
+  affinity;
+- masks every affected line before moving it, keeps a hardware-routing failure
+  masked instead of delivering to the departing CPU, updates the route table
+  only after controller routing succeeds, then unmasks;
+- `demote_cpu_quota(cpu)` clears stale tick/throttle/statistics state only after
+  no enabled line remains routed to that CPU.
+
+The existing CPL3 SMP-3 drill now routes both device lines to a secondary CPU,
+detaches that CPU, verifies no stale or offline target remains, demotes its
+quota and checks resource restoration. Real KVM runs passed in x86_64 4-vCPU,
+8-vCPU and q35 4-vCPU guests:
+
+```text
+[JSR-SMP3] case=detach ... rerouted=Ok(2) stale_targets=0 outside_online=0
+  quota_demoted=true resources=true
+[JSR-SMP3] summary ... checks=35 failed=0
+```
+
+This is an IRQ route/quota handoff milestone, not complete CPU offline:
+in-flight MSI completions, scheduler task migration, architecture stop IPIs,
+CPU runtime generation publication and hotplug rollback still require the
+following transactions before `CPU-DYNAMIC-CONSUMERS-1` can become done.
+
 ## 未完成
 
 - 当前主机没有 129+ CPU 的真实启动环境，因此该切片只证明软件不再以固定数组

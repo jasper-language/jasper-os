@@ -1810,6 +1810,7 @@ smp3_verdict() {
   grep -qaE '^\[JSR-SMP3\] case=shard_refusals unconfigured=refused bad_count=refused no_cpu_shard=refused full=refused kept_order=true reconfigure_busy=refused unchanged=true' "$s3f" || S3_MISS="$S3_MISS $s3name:分片拒绝路径"
   grep -qaE "^\[JSR-SMP3\] case=route cpus=$s3n lines=2 delivered_exact=$s3n/$s3n handler_calls_match=true disabled_after=true" "$s3f" || S3_MISS="$S3_MISS $s3name:按亲和送达"
   grep -qaE '^\[JSR-SMP3\] case=balance lines=2 keep_moves=0 keep_cpus=0x1 spread_moves=[1-9][0-9]* spread_cpus=0x[0-9a-f]+ distinct=true spread_after=[0-9]+ bound=16 in_time=true' "$s3f" || S3_MISS="$S3_MISS $s3name:亲和均衡"
+  grep -qaE '^\[JSR-SMP3\] case=detach target=[1-9][0-9]* lines=2 rerouted=Ok\(2\) stale_targets=0 outside_online=0 quota_demoted=true resources=true' "$s3f" || S3_MISS="$S3_MISS $s3name:下线前路由交接"
   grep -qaE "^\[JSR-SMP3\] case=storm cpus=$s3n lines=2 hogs=$s3hogs window=120 interactive_rounds=20 samples=20 latency_max=[0-9]+ bound=2 bounded=(true|false) all_busy=(true|false) irq_handled=[1-9][0-9]* cores_hit=[2-$s3n] spread=true throttles=[1-9][0-9]* worst_irq_share_permille=[0-9]+ quota_permille=250 within_quota=(true|false) min_hog_cpu=[0-9]+" "$s3f" || S3_MISS="$S3_MISS $s3name:风暴下交互延迟/预算/分散"
   grep -qaE "^\[JSR-SMP3\] case=storm cpus=$s3n lines=2 hogs=$s3hogs window=120 interactive_rounds=20 samples=20 latency_max=[0-2] bound=2 bounded=true all_busy=true irq_handled=[1-9][0-9]* cores_hit=[2-$s3n] spread=true throttles=[1-9][0-9]* worst_irq_share_permille=[0-9]+ quota_permille=250 within_quota=true min_hog_cpu=([3-9][0-9]|[1-9][0-9][0-9]+)" "$s3f" || S3_TIME_MISS="$S3_TIME_MISS $s3name:风暴下交互延迟/预算"
   grep -qaE "^\[JSR-SMP3\] case=recovery cpus=$s3n rounds=20 samples=20 max=0 immediate=true irq_after_disable=0 quiet=true reclaimed=true" "$s3f" || S3_MISS="$S3_MISS $s3name:风暴撤销后恢复"
@@ -1825,7 +1826,7 @@ smp3_verdict() {
     S3_TIME_MISS="$S3_TIME_MISS $s3name:分片加速比"
   fi
   grep -qaE '^\[JSR-SMP3-FAIL\]|^\[JSR-LOCK-ORDER\]|^\[JSR-PANIC\]' "$s3f" && S3_MISS="$S3_MISS $s3name:出现失败断言/锁顺序违反/panic"
-  grep -qaE "^\[JSR-SMP3\] summary cpus=$s3n device_lines=2 free_frames=([0-9]+)/\1 objects=0/0 reclaimed=true checks=34 failed=0" "$s3f" && exit_ok "$s3f" && qemu_ok "$s3rc" \
+  grep -qaE "^\[JSR-SMP3\] summary cpus=$s3n device_lines=2 free_frames=([0-9]+)/\1 objects=0/0 reclaimed=true checks=35 failed=0" "$s3f" && exit_ok "$s3f" && qemu_ok "$s3rc" \
     || S3_MISS="$S3_MISS $s3name:汇总/退出"
 }
 
@@ -1883,7 +1884,7 @@ check_smp3() { # 中断与服务的多核化：设备中断按亲和送达、均
     lat8=$(grep -aoE 'case=storm .*latency_max=[0-9]+' "$SERIAL_SMP8" | grep -oE '[0-9]+$')
     sp4=$(grep -aoE 'case=service .*speedup_permille=[0-9]+' "$SERIAL_SMP4" | grep -oE '[0-9]+$')
     sp8=$(grep -aoE 'case=service .*speedup_permille=[0-9]+' "$SERIAL_SMP8" | grep -oE '[0-9]+$')
-    record SMP-3 PASS "$s3_archdesc -smp 4（QEMU=$QRC_SMP4）与 -smp 8（QEMU=$QRC_SMP8）：两条设备中断线依次钉到 4 / 8 个核，只在该核处理 4/4、8/8；两条线都在 0 号核时对照策略不搬、均衡策略两个周期内分到不同的核；两条线持续风暴 + 2N 个吃满处理器的任务时交互唤醒延迟 ≤2 tick（4 核实测 $lat4、8 核实测 $lat8）、各核都忙、每核中断次数与时间不超过预算的界、风暴分散到多个核；撤销后无中断、延迟全为 0；分片服务 128 个流 512 个请求，4 / 8 分片分别比 1 分片快（4 核 ${sp4}‰、8 核 ${sp8}‰）、不均衡度 ≤350‰、流内有序；拒绝路径无残留；单处理器 / 4 处理器 / 8 处理器均已覆盖，单处理器如实跳过$RV32_NOTE"
+    record SMP-3 PASS "$s3_archdesc -smp 4（QEMU=$QRC_SMP4）与 -smp 8（QEMU=$QRC_SMP8）：两条设备中断线依次钉到 4 / 8 个核，只在该核处理 4/4、8/8；两条线都在 0 号核时对照策略不搬、均衡策略两个周期内分到不同的核；另一颗目标 CPU 下线演练把所有活动线同时迁走、无 stale/offline 目标，随后 demote 其 quota；两条线持续风暴 + 2N 个吃满处理器的任务时交互唤醒延迟 ≤2 tick（4 核实测 $lat4、8 核实测 $lat8）、各核都忙、每核中断次数与时间不超过预算的界、风暴分散到多个核；撤销后无中断、延迟全为 0；分片服务 128 个流 512 个请求，4 / 8 分片分别比 1 分片快（4 核 ${sp4}‰、8 核 ${sp8}‰）、不均衡度 ≤350‰、流内有序；拒绝路径无残留；单处理器 / 4 处理器 / 8 处理器均已覆盖，单处理器如实跳过$RV32_NOTE"
   else
     record SMP-3 FAIL "缺少/不符：$S3_MISS"
   fi
