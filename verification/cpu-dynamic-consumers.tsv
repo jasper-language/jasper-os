@@ -1,0 +1,32 @@
+path	production_occurrences	test_occurrences	status	lifetime	migration	evidence
+kernel/src/arch/aarch64/gic.rs	7	0	verified	BOOTSTRAP_CPUS static + pre-start heap tail	Migrate each GIC registration/affinity slot and drain IRQ state before growth	checked_sub(MAX_CPUS), saturating_sub, 4-vCPU GIC routing acceptance
+kernel/src/arch/aarch64/user.rs	6	0	verified	BOOTSTRAP_CPUS stack-top table + pre-start heap tail	Reject incomplete storage before AP startup; keep logical CPU identity	checked_sub(MAX_CPUS), user-return stack migration evidence
+kernel/src/arch/riscv/plic.rs	7	0	verified	BOOTSTRAP_CPUS context table + pre-start heap tail	Publish PLIC contexts after heap topology publication	checked_sub(MAX_CPUS), 4-vCPU PLIC route acceptance
+kernel/src/arch/riscv/smp.rs	5	0	verified	BOOTSTRAP_CPUS mailbox + pre-start heap tail	Bind logical index to discovered hart identity	checked_sub(MAX_CPUS), 4-vCPU SMP/IPI acceptance
+kernel/src/arch/riscv/user.rs	6	0	verified	BOOTSTRAP_CPUS stack-top table + pre-start heap tail	Reject storage failure before AP start	checked_sub(MAX_CPUS), user stack migration
+kernel/src/arch/x86_64/gdt.rs	7	0	verified	BOOTSTRAP_CPUS descriptor table + pre-start heap tail	Pre-reserve GDT/TSS/stack records before AP start	checked_sub(MAX_CPUS), AP-before allocation evidence
+kernel/src/arch/x86_64/smp.rs	6	0	verified	BOOTSTRAP_CPUS hardware identity + pre-start heap tail	Preserve APIC IDs and logical indices across growth	checked_sub(MAX_CPUS), 4-vCPU SMP/IPI acceptance
+kernel/src/arch/x86_64/syscall.rs	8	0	verified	BOOTSTRAP_CPUS entry blocks + pre-start heap tail	Allocate return frames before secondary CPUs start	checked_sub(MAX_CPUS), syscall return migration
+kernel/src/arch/x86_64/user.rs	5	0	verified	BOOTSTRAP_CPUS return frames + pre-start heap tail	Fail closed on missing frame storage	checked_sub(MAX_CPUS), user-return storage migration
+kernel/src/balance_demo.rs	4	0	fixture	demo-only arrays	not production	balance acceptance demo
+kernel/src/config.rs	1	0	verified	runtime admitted CPU-count report	Consume admitted topology count	JSR-CONFIG CPU inventory report
+kernel/src/irq.rs	17	0	in-progress	BOOTSTRAP_CPUS MSI/quota/route storage + heap tail	Remaining per-line/device rows and transactional online/offline migration	no_ns migration tests; full IRQ/MSI matrix pending
+kernel/src/irq_demo.rs	9	0	fixture	demo-only arrays	not production	IRQ acceptance demo
+kernel/src/irqring_demo.rs	3	0	fixture	demo-only arrays	not production	IRQ Ring acceptance demo
+kernel/src/irqstorm_demo.rs	5	0	fixture	demo-only arrays	not production	IRQ storm acceptance demo
+kernel/src/msi_demo.rs	10	0	fixture	demo-only arrays	not production	MSI acceptance demo
+kernel/src/pex4_demo.rs	1	0	fixture	demo-only array	not production	PEX-4 acceptance demo
+kernel/src/sched/mod.rs	17	0	in-progress	BOOTSTRAP_CPUS gates/mailboxes/leased state + heap tail	Every scheduler/IRQ consumer must use admitted identity before expansion	CPU 129 sparse tests and heap-tail migration partly complete
+kernel/src/sched/pex4_probe.rs	9	0	fixture	verification probe arrays	not production	PEX-4 probe fixture
+kernel/src/sched/scheduler.rs	91	0	in-progress	BOOTSTRAP_CPUS leaves/tables + heap tails for selected structures	Audit every remaining inline/diagnostic/timer array; drain/demote before online/offline	CPU 129/4096 tests and 4-vCPU acceptance partly complete
+kernel/src/smp/demo.rs	2	0	fixture	demo-only arrays	not production	SMP acceptance demo
+kernel/src/smp/mod.rs	1	0	verified	bootstrap execution identity	Preserve explicit boot identity and fail closed on missing admission	bootstrap CPU identity tests
+kernel/src/smp/percpu.rs	6	0	verified	BOOTSTRAP_CPUS records + pre-start heap tail	Preallocate heap overflow before AP launch	BOOTSTRAP_CPUS_DATA plus checked_sub migration
+kernel/src/smp/shared_demo.rs	3	0	fixture	demo-only arrays	not production	SMP shared demo
+kernel/src/sync.rs	2	0	verified	bootstrap counter storage only	Heap-backed counter tail grows without per-CPU arrays	CpuAtomicCounter growth tests
+kernel/src/virtio_rng_demo.rs	8	0	fixture	demo-only arrays	not production	virtio-rng acceptance demo
+kernel/src/wcet.rs	5	0	in-progress	BOOTSTRAP_CPUS IRQ-off records + heap tail	Finish transactional migration and lock/IRQ constraints	forced-growing WCET storage tests partly complete
+kernel-core/src/msi.rs	4	0	in-progress	feature-selected CpuBitmap + preallocated vector tables	Vector tables must remain preallocated before IRQ context	CPU 129 sparse-target test; full hotplug pending
+kernel-core/src/smp.rs	29	12	in-progress	bootstrap inventory + heap-backed CpuBitmap	CpuSet front door still contains bootstrap-width names; final width must be heap-driven	CPU 1/32/64/128/129/256/1024/4096 tests; phase 2 remains
+kernel-core/src/tickless.rs	5	0	verified	feature-selected CpuBitmap + preallocated Vec tails	Allocate before scheduler/IRQ hot path	CPU 130 and tickless migration tests
+kernel-core/src/fdt.rs	0	1	fixture	test-only depth/capacity fixture	not production	FDT parser test

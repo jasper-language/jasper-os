@@ -1,8 +1,8 @@
 # Issue #47 阶段 1：CPU 固定容量消费链审计
 
-更新时间：2026-11-19。
+更新时间：2026-11-21。
 
-状态：**阶段 1 审计清单；当前 128 槽生产实现仍存在，阶段 2/3 尚未完成。**
+状态：**阶段 1 消费链已冻结为机器可查清单；6 个生产路径仍需迁移，阶段 2/3 尚未完成。**
 
 ## 已知固定事实
 
@@ -18,6 +18,20 @@
 `Topology` 保留全部固件身份不代表调度器、IRQ 或原生 ABI 已支持对应 CPU。
 
 ## 生产消费链
+
+机器可查清单位于 `verification/cpu-dynamic-consumers.tsv`，由
+`scripts/check-cpu-dynamic-consumers.py` 校验路径集合和每文件生产/测试出现次数。
+当前冻结结果：
+
+```text
+verified=14 paths
+in-progress=6 paths
+fixture=11 paths
+```
+
+`in-progress` 路径包括调度器、调度门面、IRQ、WCET、核心 `CpuSet` 门面和 MSI。
+只要这些路径仍含未完成在线/离线事务、固定诊断数组或 bootstrap 宽度门面，
+`CPU-DYNAMIC-ADMISSION-1` 就保持 in-progress。
 
 以下清单排除了 `_demo`、`*/demo/*` 和测试文件。
 
