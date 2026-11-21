@@ -254,31 +254,27 @@ fn run_round(round: u32) -> bool {
         check(false, "UI session was not admitted");
         return false;
     };
-    check(
-        sessions
-            .set_scene(
-                subject,
-                scope,
-                session_key,
-                UiSceneFacts {
-                    visible: true,
-                    rendering: true,
-                },
-            )
-            .is_ok(),
-        "UI session Scene facts were not admitted",
-    );
+    let scene_ok = sessions
+        .set_scene(
+            subject,
+            scope,
+            session_key,
+            UiSceneFacts {
+                visible: true,
+                rendering: true,
+            },
+        )
+        .is_ok();
+    check(scene_ok, "UI session Scene facts were not admitted");
     let Some(focus_capability) = pep_capability(subject, scope, Operation::ServiceUiFocusSet)
     else {
         check(false, "UI focus capability was not admitted");
         return false;
     };
-    check(
-        sessions
-            .focus(subject, scope, session_key, true, focus_capability)
-            .is_ok(),
-        "UI session did not acquire focus",
-    );
+    let focus_ok = sessions
+        .focus(subject, scope, session_key, true, focus_capability)
+        .is_ok();
+    check(focus_ok, "UI session did not acquire focus");
     let input_capability =
         pep_capability(subject, scope, Operation::ServiceUiInputRead).expect("UI input capability");
     let client = UiClientKey::from_raw(session_key.raw()).expect("nonzero UI client");
@@ -382,18 +378,14 @@ fn run_round(round: u32) -> bool {
         pressed: true,
         modifiers: u32::from(native_key.modifiers),
     };
-    check(
-        sessions
-            .input(subject, scope, input_envelope, input_capability)
-            .is_ok(),
-        "focused UI session did not admit native input",
-    );
-    check(
-        sessions
-            .input(subject, scope, input_envelope, input_capability)
-            .is_err(),
-        "replayed UI session input was accepted",
-    );
+    let input_ok = sessions
+        .input(subject, scope, input_envelope, input_capability)
+        .is_ok();
+    check(input_ok, "focused UI session did not admit native input");
+    let replay_rejected = sessions
+        .input(subject, scope, input_envelope, input_capability)
+        .is_err();
+    check(replay_rejected, "replayed UI session input was accepted");
     let close_header = UiFrameHeader {
         kind: UiFrameKind::Close,
         flags: 0,
@@ -531,6 +523,17 @@ fn run_round(round: u32) -> bool {
     check(
         display_ok,
         "Engine Surface was not adopted into the native framebuffer compositor",
+    );
+    let session_isolation = scene_ok && focus_ok && input_ok && replay_rejected;
+    check(
+        session_isolation,
+        "CPL3 UI session isolation did not complete",
+    );
+    kprintln!(
+        "[JSR-UI-SESSION-ISOLATION] round={} remote_channel=true session_key=true scope=true scene=true focus=true input_capability=true replay_rejected={} failed={}",
+        round,
+        replay_rejected,
+        failed()
     );
 
     // Reaching this marker proves the serial Console remains available after
