@@ -32,11 +32,23 @@ Tests cover single/split geometry, independent generation rotation, stale frame
 and input rejection, capability degradation to Split, budget failure atomicity
 and authorization failure atomicity.
 
+The real CPL3 UI process drill now constructs a two-Scene workspace and submits
+a capability event with new geometry/DPI, policy and revocation epochs. It
+recomputes MultiWindow layout, applies the unified present authorization and
+memory budget, starts successful new-generation frame/input streams, and checks
+that the old generations are rejected. The real QEMU run passes with
+`qemu_rc=33`; marker:
+
+```text
+[JSR-UI-MULTIWINDOW] layout=Ok(MultiWindow) old_frame_rejected=true \
+old_input_rejected=true new_surface_generation=true new_input_generation=true
+```
+
 ## Remaining gates
 
-- Emit real display-size/DPI/keyboard capability events and run this transaction
-  through the CPL3 UI process.
-- Exercise compositor/framebuffer migration, rollback and pending-frame
+- Emit display-size/DPI/keyboard capability events from actual hardware/QEMU
+  hotplug rather than the verification input.
+- Exercise the migrated compositor/framebuffer output, rollback and pending-frame
   cancellation on QEMU and then on a real display hotplug matrix.
 
 `UI-MULTIWINDOW-TRANSITION-1` therefore remains in progress.

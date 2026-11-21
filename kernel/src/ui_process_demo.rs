@@ -18,7 +18,7 @@ use kernel_core::authz::{AccessScope, Decision, Effect, Operation, Reason, AUTHZ
 use kernel_core::display_input::{KeyInput, PixelLayout, SurfaceSpec};
 use kernel_core::frame::FRAME_SIZE;
 use kernel_core::paging::MapFlags;
-use kernel_core::ui_policy::UiDeviceCapabilities;
+use kernel_core::ui_policy::{InteractionProfile, UiDeviceCapabilities, UiPolicyScope};
 use kernel_core::ui_protocol::{
     decode_ui_frame, encode_ui_frame, UiFrameHeader, UiFrameKind, UiInputRecord,
     UI_FRAME_HEADER_BYTES,
@@ -27,6 +27,7 @@ use kernel_core::ui_service::{UiCapability, UiClientKey};
 use kernel_core::ui_session::{
     UiInputEnvelope, UiSceneFacts, UiSessionKind, UiSessionRegistry, UiSessionScope,
 };
+use kernel_core::ui_workspace::{UiCapabilityEvent, UiLayoutMode, UiWorkspace};
 
 use crate::proc::{self, ProcState};
 use crate::syscall::{table as abi, SyscallSet};
@@ -106,6 +107,16 @@ fn pep_capability(
     scope: UiSessionScope,
     operation: Operation,
 ) -> Option<UiCapability> {
+    pep_capability_at(subject, scope, operation, 1, 0)
+}
+
+fn pep_capability_at(
+    subject: u64,
+    scope: UiSessionScope,
+    operation: Operation,
+    policy_epoch: u64,
+    revocation_epoch: u32,
+) -> Option<UiCapability> {
     let decision = Decision {
         format_version: AUTHZ_FORMAT_VERSION,
         issuer: kernel_core::authz::KERNEL_PEP_ISSUER,
@@ -121,8 +132,8 @@ fn pep_capability(
         } else {
             Effect::Write
         },
-        policy_epoch: 1,
-        revocation_generation: Some(0),
+        policy_epoch,
+        revocation_generation: Some(revocation_epoch),
         allowed: true,
         reason: Reason::Allowed,
     };
@@ -147,6 +158,18 @@ fn ui_capabilities() -> UiDeviceCapabilities {
         touch: false,
         split_layouts: false,
         multi_window: false,
+        background_grants: true,
+    }
+}
+
+fn workspace_capabilities() -> UiDeviceCapabilities {
+    UiDeviceCapabilities {
+        display: true,
+        keyboard: true,
+        pointer: false,
+        touch: true,
+        split_layouts: true,
+        multi_window: true,
         background_grants: true,
     }
 }
@@ -355,6 +378,69 @@ fn run_round(round: u32) -> bool {
     check(
         peer_background_ok,
         "authorized peer background rendering was not admitted",
+    );
+    let policy_scope = UiPolicyScope {
+        user: u32::try_from(scope.user).expect("bounded UI user identity"),
+        tenant: u32::try_from(scope.tenant).expect("bounded UI tenant identity"),
+        session: scope.session,
+        display_seat: scope.display_seat,
+        input_seat: scope.input_seat,
+    };
+    let mut workspace = UiWorkspace::<2>::new(
+        subject,
+        policy_scope,
+        workspace_capabilities(),
+        test_surface(),
+        160,
+        160,
+        &[1, 1],
+    )
+    .expect("bounded two-Scene workspace");
+    let migrated_surface = SurfaceSpec {
+        width: 80,
+        stride: 80,
+        ..test_surface()
+    };
+    let Some(layout_capability) =
+        pep_capability_at(subject, scope, Operation::ServiceUiFramePresent, 2, 2)
+    else {
+        check(false, "multi-window migration capability was not admitted");
+        return false;
+    };
+    let layout_mode = workspace.reconfigure(
+        UiCapabilityEvent {
+            capability_epoch: 2,
+            policy_epoch: 2,
+            revocation_epoch: 2,
+            capabilities: workspace_capabilities(),
+            surface: migrated_surface,
+            dpi_x: 180,
+            dpi_y: 180,
+        },
+        InteractionProfile::MultiWindow,
+        600,
+        1024 * 1024,
+        layout_capability,
+    );
+    let old_frame_rejected = workspace.frame(0, 1, 1, 2).is_err();
+    let old_input_rejected = workspace.input(0, 1, 1, 2).is_err();
+    let new_frame_ok = workspace.frame(0, 1, 2, 1).is_ok();
+    let new_input_ok = workspace.input(0, 1, 2, 1).is_ok();
+    let multiwindow_ok = layout_mode == Ok(UiLayoutMode::MultiWindow)
+        && old_frame_rejected
+        && old_input_rejected
+        && new_frame_ok
+        && new_input_ok;
+    check(multiwindow_ok, "multi-window migration contract failed");
+    kprintln!(
+        "[JSR-UI-MULTIWINDOW] round={} layout={:?} old_frame_rejected={} old_input_rejected={} new_surface_generation={} new_input_generation={} failed={}",
+        round,
+        layout_mode,
+        old_frame_rejected,
+        old_input_rejected,
+        new_frame_ok,
+        new_input_ok,
+        failed()
     );
     let peer_client = UiClientKey::from_raw(peer_key.raw()).expect("nonzero peer UI client");
     let client = UiClientKey::from_raw(session_key.raw()).expect("nonzero UI client");
