@@ -1,0 +1,10 @@
+serial=31311JEGR07191
+getvar:product=product: bluejay Finished. Total time: 0.000s 
+getvar:current-slot=current-slot: a Finished. Total time: 0.000s 
+getvar:unlocked=unlocked: yes Finished. Total time: 0.005s 
+getvar:is-userspace=is-userspace: no Finished. Total time: 0.000s 
+getvar:partition-size:userdata=partition-size:userdata: 0x1b91215000 Finished. Total time: 0.002s 
+getvar:partition-size:metadata=partition-size:metadata: 0x1000000 Finished. Total time: 0.007s 
+getvar:partition-size:super=partition-size:super: 0x1fc800000 Finished. Total time: 0.007s 
+getvar:partition-size:boot_a=partition-size:boot_a: 0x4000000 Finished. Total time: 0.007s 
+getvar:partition-size:boot_b=partition-size:boot_b: 0x4000000 Finished. Total time: 0.006s 

@@ -1,0 +1,10 @@
+serial=31311JEGR07191
+product=bluejay
+fingerprint=google/bluejay/bluejay:16/BP4A.251205.006/14401865:user/release-keys
+release=16
+sdk=36
+slot=_a
+verifiedbootstate=orange
+flash_locked=0
+boot_completed=1
+data_available_kib=104305568
