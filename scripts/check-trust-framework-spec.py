@@ -16,6 +16,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 SPEC = ROOT / "docs/TRUST-FRAMEWORK-SPEC.md"
 CDDL = ROOT / "trust/schema/v1/trust.cddl"
 MANIFEST = ROOT / "verification/trust-framework-spec.toml"
+SOFTWARE_STATUS = ROOT / "docs/ISSUE-46-SOFTWARE-EVIDENCE-status.md"
 
 DOC_TOKENS = (
     "Attester",
@@ -59,11 +60,9 @@ PASSED_ACCEPTANCE = {
     "privacy-and-bounded-input",
     "rats-eat-mapping",
     "kernel-abi-boundary",
-}
-PENDING_ACCEPTANCE = {
     "software-evidence-vertical",
-    "hardware-attestation",
 }
+PENDING_ACCEPTANCE = {"hardware-attestation"}
 
 
 def validate(spec: str, cddl: str, manifest: dict) -> list[str]:
@@ -95,6 +94,19 @@ def validate(spec: str, cddl: str, manifest: dict) -> list[str]:
     for item in PENDING_ACCEPTANCE:
         if states.get(item) != "pending":
             errors.append(f"acceptance {item!r} must remain pending")
+    software = next(
+        (
+            item
+            for item in acceptance
+            if isinstance(item, dict)
+            and item.get("id") == "software-evidence-vertical"
+        ),
+        None,
+    )
+    if software is None or not SOFTWARE_STATUS.exists():
+        errors.append("software evidence status or manifest entry is missing")
+    elif "trust-service/src/tests.rs" not in software.get("evidence", ""):
+        errors.append("software evidence acceptance lacks executable test evidence")
     return errors
 
 
