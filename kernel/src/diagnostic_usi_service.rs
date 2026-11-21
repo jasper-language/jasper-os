@@ -13,7 +13,7 @@ use jasper_lifecycle_model::diagnostic_usi::{
 use jasper_lifecycle_model::diagnostics::{
     ClockQuality, DiagnosticAccess, DiagnosticAuthority, DiagnosticIo, DiagnosticIoError,
     DiagnosticService, EventInput, EventKind, PayloadKind, PrivacyClass, RecoveryAction,
-    Severity,
+    Severity, TraceCorrelation,
 };
 use spin::Mutex;
 
@@ -108,7 +108,7 @@ fn boot_event() -> EventInput<'static> {
         payload_reference: &[],
         payload_digest: [0; 32],
         redacted: true,
-        correlation: None,
+        correlation: Some(TraceCorrelation::new(1, 1, None).expect("nonzero boot trace")),
     }
 }
 

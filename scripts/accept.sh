@@ -2902,6 +2902,7 @@ check_usi1() {
      && has 'usi: mode=denied all_denied=true' \
      && has 'usi: mode=degraded devices_available=false' \
      && has 'usi: mode=restored devices_available=true' \
+     && has 'usi: mode=diagnostic status=Ok records=[1-9][0-9]* .*correlated=true ok=true' \
      && has '\[JSR-USI\] summary cli=true structured=true denied=true degraded=true restored=true diagnostic=true failed=0 reclaimed=true' \
      && ! has 'usi: .*error=' \
      && ! has '^\[JSR-USI-FAIL\]'; then

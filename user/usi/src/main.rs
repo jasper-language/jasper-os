@@ -14,7 +14,7 @@ use jasper_rt::{entry, ids, println};
 use jasper_lifecycle_model::diagnostic_usi::{
     Operation, QueryRequest, ResponseHeader, ResponseStatus, MAX_PAGE_EVENTS, RESPONSE_HEADER_BYTES,
 };
-use jasper_lifecycle_model::diagnostics::{PrivacyClass, Severity};
+use jasper_lifecycle_model::diagnostics::{PrivacyClass, Severity, TraceCorrelation};
 use kernel_core::usi;
 
 entry!(main);
@@ -369,6 +369,7 @@ fn capability_source() -> i32 {
 
 fn diagnostic_query() -> i32 {
     let request_id = request_id();
+    let correlation = TraceCorrelation::new(request_id, 1, None).expect("nonzero request trace");
     let request = QueryRequest {
         request_id,
         expected_generation: 0,
@@ -380,7 +381,7 @@ fn diagnostic_query() -> i32 {
         privacy_ceiling: PrivacyClass::Internal,
         limit: MAX_PAGE_EVENTS as u16,
         cancelable: false,
-        correlation: None,
+        correlation: Some(correlation),
     };
     let Ok(request) = request.encode() else {
         return 11;
@@ -408,14 +409,16 @@ fn diagnostic_query() -> i32 {
         && header.request_id == request_id
         && header.operation == Operation::Query
         && header.records >= 1
-        && header.accepted >= header.records as u64;
+        && header.accepted >= header.records as u64
+        && header.correlation == Some(correlation);
     println!(
-        "usi: mode=diagnostic status={} records={} accepted={} sequence={} generation={} ok={}",
+        "usi: mode=diagnostic status={} records={} accepted={} sequence={} generation={} correlated={} ok={}",
         header.status as u16,
         header.records,
         header.accepted,
         header.sequence,
         header.generation,
+        header.correlation == Some(correlation),
         ok
     );
     if ok { 0 } else { 14 }

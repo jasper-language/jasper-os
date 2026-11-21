@@ -46,6 +46,18 @@ PASS rounds=2 evidence/lifecycle-diagnostic-block-20261121-043731
 `events=5 sequence=6 query=4 sources=2`，重启只读来源清零后第二轮
 `events=6 sequence=7 query=4 sources=0`，持久事件、隐私门和追加顺序保持。
 
+USI-1 真实 guest 的单核、4 vCPU、8 vCPU 和 q35 ECAM 四条启动路径均执行独立
+`usi-diagnostic` 进程并得到：
+
+```text
+usi: mode=diagnostic status=0 records=1 accepted=1 sequence=2 generation=1
+  correlated=true ok=true
+[JSR-USI] summary ... diagnostic=true failed=0 reclaimed=true
+```
+
+这证明请求、响应头与持久诊断页共用同一个非零 correlation；不包含物理 UI
+或安全审计语义。
+
 ## 尚未关闭
 
 - 真实多进程/多核因果重建，以及 consumer 重启后的关联完整性矩阵。
