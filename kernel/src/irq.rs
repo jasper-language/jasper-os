@@ -268,14 +268,15 @@ fn bootstrap_msi_states() -> impl Iterator<Item = &'static MsiCpuState> {
     BOOTSTRAP_MSI_CPUS[..layout.bootstrap_len()].iter()
 }
 
-fn extra_msi_states(cpus: usize) -> impl Iterator<Item = &'static MsiCpuState> {
+fn extra_msi_states(
+    cpus: usize,
+) -> Option<impl Iterator<Item = &'static MsiCpuState>> {
     let layout = CpuTailLayout::new(MAX_CPUS, cpus);
-    let prepared = EXTRA_MSI_CPUS
-        .get()
-        .and_then(|states| states.as_ref().ok())
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    prepared[..layout.tail_len().min(prepared.len())].iter()
+    let prepared = EXTRA_MSI_CPUS.get()?.as_ref().ok()?.as_slice();
+    Some(
+        prepared[..layout.tail_len().min(prepared.len())]
+            .iter(),
+    )
 }
 
 fn msi_prepared_count() -> usize {
@@ -458,8 +459,10 @@ pub fn reset_msi_stats() {
     for state in bootstrap_msi_states() {
         reset(state);
     }
-    for state in extra_msi_states(crate::smp::cpu_count()) {
-        reset(state);
+    if let Some(states) = extra_msi_states(crate::smp::cpu_count()) {
+        for state in states {
+            reset(state);
+        }
     }
 }
 

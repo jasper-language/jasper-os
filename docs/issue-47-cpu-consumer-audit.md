@@ -54,6 +54,11 @@ online/offline 扩展时先完成存储预留，再提交 membership。仅把
 `EXTRA_TICK_LEASES` 接入取锁但不接入 owner 发布会造成“已冻结但不结算”的
 半状态，因此本轮没有做局部接线，两个 scheduler 行继续保持 in-progress。
 
+`kernel/src/irq.rs` 的 MSI 状态、设备中断计数和每核配额已改为
+`CpuTailLayout` 驱动的 bootstrap 区加准入数量堆后备尾部；读取、重置和越界
+失败关闭使用同一布局，不再静默访问未准入 CPU。该行仍保持 in-progress，
+因为 transactional online/offline 迁移和完整热插拔 IRQ/MSI 矩阵尚未完成。
+
 以下清单排除了 `_demo`、`*/demo/*` 和测试文件。
 
 | 消费域 | 生产文件 | 当前依赖 | 迁移归属 |
