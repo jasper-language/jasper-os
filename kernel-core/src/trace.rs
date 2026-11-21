@@ -27,7 +27,11 @@ impl<T, const N: usize> RingBuffer<T, N> {
     /// 新建空缓冲。
     pub const fn new() -> Self {
         assert!(N > 0, "环形缓冲容量必须大于 0");
-        RingBuffer { slots: [const { None }; N], head: 0, len: 0 }
+        RingBuffer {
+            slots: [const { None }; N],
+            head: 0,
+            len: 0,
+        }
     }
 
     /// 元素个数。
@@ -128,16 +132,63 @@ pub struct Tag {
 impl Tag {
     /// 整数标签。
     pub const fn u64(key: &'static str, v: u64) -> Tag {
-        Tag { key, value: TagValue::U64(v) }
+        Tag {
+            key,
+            value: TagValue::U64(v),
+        }
     }
     /// 字符串标签。
     pub const fn str(key: &'static str, v: &'static str) -> Tag {
-        Tag { key, value: TagValue::Str(v) }
+        Tag {
+            key,
+            value: TagValue::Str(v),
+        }
     }
 }
 
 /// 单个事件最多携带的标签数（超出部分被截断，并在 `truncated` 中注明）。
 pub const MAX_TAGS: usize = 4; // JASPER-HARDCODE-REVIEW: issue=35 source=trace-tag-envelope-policy reason=fixed-event-envelope-marks-visible-truncation-instead-of-silent-overwrite
+
+/// Non-zero correlation identity for one causally related trace group.
+///
+/// This is a native diagnostic fact, not an execution capability. It never
+/// grants access and must not be accepted as a substitute for security audit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceContext {
+    pub trace_id: u64,
+    pub span_id: u64,
+    pub parent_span_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceContextError {
+    ZeroTrace,
+    ZeroSpan,
+    SelfParent,
+}
+
+impl TraceContext {
+    pub fn new(
+        trace_id: u64,
+        span_id: u64,
+        parent_span_id: Option<u64>,
+    ) -> Result<Self, TraceContextError> {
+        if trace_id == 0 {
+            return Err(TraceContextError::ZeroTrace);
+        }
+        if span_id == 0 || parent_span_id == Some(0) {
+            return Err(TraceContextError::ZeroSpan);
+        }
+        if parent_span_id == Some(span_id) {
+            return Err(TraceContextError::SelfParent);
+        }
+        Ok(Self {
+            trace_id,
+            span_id,
+            parent_span_id,
+        })
+    }
+}
 
 /// 结构化事件。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +200,8 @@ pub struct TraceEvent {
     tags: [Option<Tag>; MAX_TAGS],
     /// 是否有标签因超过 [`MAX_TAGS`] 被截断。
     pub truncated: bool,
+    /// Optional native causal context. Security audit remains separate.
+    pub context: Option<TraceContext>,
 }
 
 impl TraceEvent {
@@ -168,6 +221,12 @@ impl fmt::Display for TraceEvent {
                 TagValue::Str(s) => write!(f, " {}={}", t.key, s)?,
             }
         }
+        if let Some(context) = self.context {
+            write!(f, " trace={} span={}", context.trace_id, context.span_id)?;
+            if let Some(parent) = context.parent_span_id {
+                write!(f, " parent_span={}", parent)?;
+            }
+        }
         if self.truncated {
             f.write_str(" …")?;
         }
@@ -178,17 +237,33 @@ impl fmt::Display for TraceEvent {
 /// 事件观察者（例如内核的串口输出）。
 pub type TraceSink = fn(&TraceEvent);
 
+/// Explicit cumulative losses from the best-effort retained-event ring.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TraceLossStats {
+    pub ring_overwrites: u64,
+    pub sequence_exhausted: u64,
+}
+
 /// 结构化事件追踪器：保留最近 `N` 条事件。
 pub struct Tracer<const N: usize> {
     events: RingBuffer<TraceEvent, N>,
     seq: IdAllocator,
     sink: Option<TraceSink>,
+    losses: TraceLossStats,
 }
 
 impl<const N: usize> Tracer<N> {
     /// 新建（无观察者）。
     pub const fn new() -> Self {
-        Tracer { events: RingBuffer::new(), seq: IdAllocator::new(), sink: None }
+        Tracer {
+            events: RingBuffer::new(),
+            seq: IdAllocator::new(),
+            sink: None,
+            losses: TraceLossStats {
+                ring_overwrites: 0,
+                sequence_exhausted: 0,
+            },
+        }
     }
 
     /// 安装观察者；每条事件记录后同步回调一次。
@@ -198,16 +273,49 @@ impl<const N: usize> Tracer<N> {
 
     /// 记录一条事件，返回其序号；序号用尽时丢弃该事件并返回 `None`（不回绕、不复用序号）。
     pub fn emit(&mut self, name: &'static str, tags: &[Tag]) -> Option<u64> {
-        let seq = self.seq.allocate()?;
+        self.emit_with_context(name, tags, None)
+    }
+
+    /// Record one event with explicit native causal context.
+    pub fn emit_correlated(
+        &mut self,
+        name: &'static str,
+        tags: &[Tag],
+        context: TraceContext,
+    ) -> Option<u64> {
+        self.emit_with_context(name, tags, Some(context))
+    }
+
+    fn emit_with_context(
+        &mut self,
+        name: &'static str,
+        tags: &[Tag],
+        context: Option<TraceContext>,
+    ) -> Option<u64> {
+        let seq = match self.seq.allocate() {
+            Some(seq) => seq,
+            None => {
+                self.losses.sequence_exhausted = self.losses.sequence_exhausted.saturating_add(1);
+                return None;
+            }
+        };
         let mut slot = [None; MAX_TAGS];
         for (dst, src) in slot.iter_mut().zip(tags) {
             *dst = Some(*src);
         }
-        let ev = TraceEvent { seq, name, tags: slot, truncated: tags.len() > MAX_TAGS };
+        let ev = TraceEvent {
+            seq,
+            name,
+            tags: slot,
+            truncated: tags.len() > MAX_TAGS,
+            context,
+        };
         if let Some(sink) = self.sink {
             sink(&ev);
         }
-        self.events.push_overwrite(ev);
+        if self.events.push_overwrite(ev).is_some() {
+            self.losses.ring_overwrites = self.losses.ring_overwrites.saturating_add(1);
+        }
         Some(ev.seq)
     }
 
@@ -224,6 +332,12 @@ impl<const N: usize> Tracer<N> {
     /// 迄今记录过的事件总数（含已被覆盖的）。
     pub fn total(&self) -> u64 {
         self.seq.allocated()
+    }
+
+    /// Cumulative best-effort trace losses. These counters never replace the
+    /// reliable security audit stream.
+    pub const fn losses(&self) -> TraceLossStats {
+        self.losses
     }
 
     /// 从旧到新遍历保留的事件。
@@ -286,12 +400,18 @@ mod tests {
         let mut t: Tracer<2> = Tracer::new();
         t.emit("system.module.loaded", &[Tag::str("module", "a")]);
         t.emit("system.module.loaded", &[Tag::str("module", "b")]);
-        let s = t.emit("system.module.unloaded", &[Tag::str("module", "b"), Tag::u64("n", 1)]);
+        let s = t.emit(
+            "system.module.unloaded",
+            &[Tag::str("module", "b"), Tag::u64("n", 1)],
+        );
         assert_eq!(s, Some(3));
         assert_eq!(t.len(), 2);
         assert_eq!(t.total(), 3);
         let last = t.iter().last().unwrap();
-        assert_eq!(format!("{}", last), "seq=3 system.module.unloaded module=b n=1");
+        assert_eq!(
+            format!("{}", last),
+            "seq=3 system.module.unloaded module=b n=1"
+        );
     }
 
     #[test]
@@ -319,5 +439,68 @@ mod tests {
         t.set_sink(sink);
         t.emit("x.test.happened", &[]);
         assert_eq!(SEEN.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn correlated_events_keep_trace_and_parent_identity() {
+        let root = TraceContext::new(17, 1, None).unwrap();
+        let child = TraceContext::new(17, 2, Some(1)).unwrap();
+        let mut t: Tracer<2> = Tracer::new();
+        assert_eq!(
+            t.emit_correlated("system.request.started", &[], root),
+            Some(1)
+        );
+        assert_eq!(
+            t.emit_correlated("system.request.completed", &[Tag::u64("status", 0)], child),
+            Some(2)
+        );
+        assert_eq!(
+            format!("{}", t.iter().last().unwrap()),
+            "seq=2 system.request.completed status=0 trace=17 span=2 parent_span=1"
+        );
+    }
+
+    #[test]
+    fn trace_context_rejects_zero_and_self_parent() {
+        assert_eq!(
+            TraceContext::new(0, 1, None),
+            Err(TraceContextError::ZeroTrace)
+        );
+        assert_eq!(
+            TraceContext::new(1, 0, None),
+            Err(TraceContextError::ZeroSpan)
+        );
+        assert_eq!(
+            TraceContext::new(1, 1, Some(0)),
+            Err(TraceContextError::ZeroSpan)
+        );
+        assert_eq!(
+            TraceContext::new(1, 1, Some(1)),
+            Err(TraceContextError::SelfParent)
+        );
+    }
+
+    #[test]
+    fn ring_overwrites_are_accounted_without_hiding_sequence_progress() {
+        let mut t: Tracer<2> = Tracer::new();
+        for value in 0..5 {
+            assert_eq!(
+                t.emit("x.test.happened", &[Tag::u64("n", value)]),
+                Some(value + 1)
+            );
+        }
+        assert_eq!(t.total(), 5);
+        assert_eq!(t.len(), 2);
+        assert_eq!(
+            t.losses(),
+            TraceLossStats {
+                ring_overwrites: 3,
+                sequence_exhausted: 0,
+            }
+        );
+        assert_eq!(
+            t.iter().map(|event| event.seq).collect::<Vec<_>>(),
+            vec![4, 5]
+        );
     }
 }
