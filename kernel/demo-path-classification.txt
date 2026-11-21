@@ -2,6 +2,7 @@
 # verification-only modules must never be referenced by production.rs.
 # temporary-in-use modules require an explicit production caller and removal condition.
 abi_demo = verification-only
+address_sync_demo = verification-only
 appid_demo = verification-only
 arbiter_demo = verification-only
 arch2_demo = verification-only
@@ -72,6 +73,8 @@ sec3_demo = verification-only
 sec4_demo = verification-only
 sec5_demo = verification-only
 sec6_demo = verification-only
+security_observation_demo = verification-only
+service_event_demo = verification-only
 shm_demo = verification-only
 smp::demo = verification-only
 smp::shared_demo = verification-only
