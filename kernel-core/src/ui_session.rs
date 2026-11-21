@@ -271,7 +271,9 @@ impl<const N: usize> UiSessionRegistry<N> {
         subject: u64,
         scope: UiSessionScope,
         input: UiInputEnvelope,
+        capability: UiCapability,
     ) -> Result<(), UiSessionError> {
+        authorize(capability, subject, scope, Operation::ServiceUiInputRead)?;
         let _ = self.active(subject, scope, input.key)?;
         if self.focus != Some(input.key) || self.focus_subject != subject {
             return Err(UiSessionError::NotFocused);
@@ -594,7 +596,12 @@ mod tests {
             modifiers: 0,
         };
         assert_eq!(
-            registry.input(10, s, input),
+            registry.input(
+                10,
+                s,
+                input,
+                capability(10, s, Operation::ServiceUiInputRead)
+            ),
             Err(UiSessionError::NotFocused)
         );
         registry
@@ -617,8 +624,24 @@ mod tests {
                 capability(10, s, Operation::ServiceUiFocusSet),
             )
             .unwrap();
-        assert_eq!(registry.input(10, s, input), Ok(()));
-        assert_eq!(registry.input(10, s, input), Err(UiSessionError::Replay));
+        assert_eq!(
+            registry.input(
+                10,
+                s,
+                input,
+                capability(10, s, Operation::ServiceUiInputRead)
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            registry.input(
+                10,
+                s,
+                input,
+                capability(10, s, Operation::ServiceUiInputRead)
+            ),
+            Err(UiSessionError::Replay)
+        );
         assert_eq!(
             registry.input(
                 10,
@@ -627,7 +650,8 @@ mod tests {
                     input_generation: 0,
                     sequence: 2,
                     ..input
-                }
+                },
+                capability(10, s, Operation::ServiceUiInputRead)
             ),
             Err(UiSessionError::StaleInput)
         );
@@ -673,7 +697,8 @@ mod tests {
                     code: 28,
                     pressed: true,
                     modifiers: 0,
-                }
+                },
+                capability(10, s, Operation::ServiceUiInputRead)
             ),
             Err(UiSessionError::UnknownSession)
         );
