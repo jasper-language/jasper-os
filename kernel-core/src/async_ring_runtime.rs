@@ -366,6 +366,82 @@ mod tests {
     }
 
     #[test]
+    fn device_backend_completion_waits_for_clean_reset_quiescence() {
+        use crate::driver_host::{
+            DeviceIdentity, DriverHostBroker, Needs, Policy, QuiesceProof,
+        };
+
+        let mut ring = RuntimeAsyncRing::new(2, 2).unwrap();
+        let mut broker = DriverHostBroker::<1, 1, 1, 1>::new();
+        let device = DeviceIdentity {
+            identity: 0x1044,
+            generation: 7,
+        };
+        broker.discover(device).unwrap();
+        let host = broker.register_host().unwrap();
+        let rights = Needs::DEVICE
+            .union(Needs::MMIO)
+            .union(Needs::MMIO_WRITE)
+            .union(Needs::DMA)
+            .union(Needs::DMA_WRITE)
+            .union(Needs::IRQ);
+        let pass = broker
+            .admit(host, device, rights, Policy::new(rights, 1, 1, 1))
+            .unwrap();
+        let driver_request = broker.begin_queue_work(pass, 1, 1, 1).unwrap();
+
+        let context = 0x51;
+        let request = ring
+            .submit(Submission {
+                op: 7,
+                user_tag: 9,
+                context,
+                uses_buffer: true,
+            })
+            .unwrap();
+        ring.start(request, Exec::Abortable).unwrap();
+        assert_eq!(
+            ring.cancel(request),
+            Ok(Cancelled::AbortBackend { context })
+        );
+        assert_eq!(ring.decided_unpublished(), 1);
+        assert_eq!(ring.ready(), 0);
+
+        let unclean = QuiesceProof {
+            dma_quiesced: false,
+            irq_quiesced: true,
+        };
+        assert_eq!(
+            broker.reset(host, unclean),
+            Err(crate::driver_host::Error::NotQuiesced)
+        );
+        assert_eq!(broker.stats().pending_requests, 1);
+        assert_eq!(ring.decided_unpublished(), 1);
+
+        let reset = broker.reset(host, QuiesceProof::CLEAN).unwrap();
+        assert_eq!(reset.cancelled, 1);
+        assert_eq!(reset.revoked_passes, 1);
+        assert_eq!(broker.cancel(driver_request), Err(crate::driver_host::Error::StaleRequest));
+        ring.quiesce(request).unwrap();
+        assert_eq!(ring.decided_unpublished(), 0);
+        assert_eq!(ring.in_flight(), 0);
+        assert_eq!(ring.ready(), 1);
+        assert_eq!(ring.take_reclaimed(), Some(context));
+        assert_eq!(
+            ring.peek(0).map(|completion| {
+                (completion.request_id, completion.user_tag, completion.terminal)
+            }),
+            Some((request, 9, Terminal::Cancelled))
+        );
+        assert_eq!(ring.consume(2), 1);
+        assert_eq!(ring.consume(2), 0);
+        assert_eq!(ring.quiesce(request), Err(ProgressError::NoSuchRequest));
+        assert_eq!(broker.stats().pending_requests, 0);
+        assert_eq!(broker.stats().active_passes, 0);
+        assert_eq!(broker.stats().bound, 0);
+    }
+
+    #[test]
     fn capacity_rejection_is_failure_atomic() {
         assert!(RuntimeAsyncRing::new(0, 4).is_none());
         assert!(RuntimeAsyncRing::new(5, 4).is_none());

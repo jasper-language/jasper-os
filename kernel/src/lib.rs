@@ -229,6 +229,7 @@ pub mod sec3_demo;
 pub mod sec4_demo;
 #[cfg(feature = "sec5-verify")]
 pub mod sec5_demo;
+pub mod security_observation_demo;
 #[cfg(feature = "net2-verify")]
 pub mod net2_demo;
 #[cfg(feature = "net3-verify")]

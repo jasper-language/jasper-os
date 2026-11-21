@@ -290,6 +290,7 @@ pub mod hwvirt_vmm;
 pub mod ns_budget;
 pub mod security;
 pub mod security_domain;
+pub mod security_observation;
 pub mod net1b;
 pub mod net1c;
 pub mod net2;

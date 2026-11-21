@@ -22,7 +22,9 @@ fn check(condition: bool, what: &'static str) {
 }
 
 pub fn failed() -> u32 {
-    FAILED.load(Ordering::Relaxed)
+    FAILED
+        .load(Ordering::Relaxed)
+        .saturating_add(crate::security_observation_demo::failed())
 }
 
 pub fn run() {
@@ -198,6 +200,7 @@ pub fn run() {
     let _ = proc::exit_idle(vm_pid, 0);
     let _ = proc::reap(vm_pid);
     kobj::run_cleanup(usize::MAX);
+    crate::security_observation_demo::run();
     let after = baseline();
     check(
         after == before,

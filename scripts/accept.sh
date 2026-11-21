@@ -2963,6 +2963,8 @@ check_sec3() {
 
 check_sec4() {
   if has '^\[JSR-SEC4\] default_deny=true gateways=6 channel_bind=true compromise=true restart=true old_generation=false audit=true isolated=true resources=true failed=0' \
+     && has '^\[JSR-SEC-OBSERVE\] pep_once=true after_effect=true deny_no_effect=true audit_full_no_effect=true observation_capacity_no_effect=true scope=true restart=false resources=true failed=0' \
+     && ! has '^\[JSR-SEC-OBSERVE-FAIL\]' \
      && ! has '^\[JSR-SEC4-FAIL\]'; then
     record SEC-4 PASS "Application/Service/VM 安全域默认互不可见；六类跨域通道独立授权且不可替换；域失陷只撤销本域并保持其他域运行；崩溃/重启代次隔离旧权限；所有允许/拒绝决策可审计，资源回基线"
   else
