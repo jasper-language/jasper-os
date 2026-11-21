@@ -102,6 +102,8 @@ jobs:
           python3 scripts/check-issue43-driver-ledger.py
           python3 scripts/check-issue43-support-matrix.py --self-test
           python3 scripts/check-issue43-support-matrix.py
+          python3 scripts/check-issue43-binary-inventory.py --self-test
+          python3 scripts/check-issue43-binary-inventory.py
       - name: Issue #47 CPU 固定消费者清单 / CPU consumer inventory
         run: |
           python3 scripts/check-cpu-dynamic-consumers.py --self-test

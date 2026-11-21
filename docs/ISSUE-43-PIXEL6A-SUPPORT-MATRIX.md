@@ -25,10 +25,17 @@ source/license/firmware/security/EOL 未核实的项目标为 `approved`，也�
 
 ## 当前缺口
 
-2026-11-19 的实机盘点记录 323 个 vendor `.ko` 和 26 个 vendor HAL `.so`；当前
-矩阵只冻结了关键类别，尚未逐模块完成 323 项 source revision、许可证、firmware
-哈希、签名、漏洞响应和 EOL 审核。因此 D12 只能从 `missing` 推进为
-`software-contract`，不能标记完成。
+2026-11-21 的实机盘点由
+`scripts/collect-issue43-pixel6a-inventory.sh` 生成
+`verification/issue43-pixel6a-binary-inventory.tsv`：完整枚举 318 个 vendor
+`.ko`、5 个模块加载元数据和 26 个 vendor HAL `.so`，并记录 build fingerprint、
+kernel release、可读取项的 SHA-256/大小以及 `/proc/modules` 加载状态。本次
+快照中有 313 个模块已加载；仅 4 个文件可由 adb shell 读取。
+
+该生产构建不允许 adb shell 读取多数 vendor 二进制，因此不可读取项明确记为
+`unreadable-by-adb-shell`，不得用镜像名称或加载状态推断许可证、源码 revision、
+firmware 哈希、签名或再分发权限。当前矩阵仍只冻结关键类别；D12 继续为
+`software-contract`，完整 349 项来源、许可证、漏洞响应和 EOL 审核仍是硬门。
 
 ## 校验
 
