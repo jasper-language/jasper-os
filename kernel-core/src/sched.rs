@@ -175,7 +175,7 @@ pub struct QosParams {
 
 impl QosParams {
     /// 默认参数：时间片 2/2/4/4 tick；最低份额 —/10%/5%/2%；用量每 8 tick 减半；欠账最多 2 个 tick。
-    pub const DEFAULT: QosParams = QosParams {
+    pub const DEFAULT: QosParams = QosParams { // JASPER-HARDCODE-REVIEW: issue=35 source=scheduler-qos-policy reason=explicit-relative-QoS-policy
         quantum: [2, 2, 4, 4],
         min_share_permille: [0, 100, 50, 20],
         decay_period: 8,

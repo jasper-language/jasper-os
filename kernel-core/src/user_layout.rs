@@ -31,7 +31,7 @@ pub const WINDOW_BASE_RISCV32: u64 = 1 << 22;
 pub const WINDOW_END_RISCV32: u64 = 256 << 22;
 /// 各指令集中最小的私有窗口长度（Sv32：255 个 4 MiB 顶级表项 = 1020 MiB）；用户态运行时的布局必须整体落在其中。
 /// The smallest private-window size over all ISAs; the runtime layout must fit inside it.
-pub const MIN_WINDOW_SIZE: u64 = WINDOW_END_RISCV32 - WINDOW_BASE_RISCV32;
+pub const MIN_WINDOW_SIZE: u64 = WINDOW_END_RISCV32 - WINDOW_BASE_RISCV32; // JASPER-HARDCODE-REVIEW: issue=35 source=user-layout-abi reason=derived-smallest-architecture-user-window
 /// 用户程序的装载地址相对窗口起点的偏移（4 MiB：窗口最低处留空，空指针附近的访问一律缺页）。
 /// Offset of the user-program load address from the window start.
 pub const IMAGE_OFFSET: u64 = 0x40_0000;

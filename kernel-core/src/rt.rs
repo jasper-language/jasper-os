@@ -18,7 +18,7 @@
 pub use crate::capacity::InstallError;
 
 /// 默认准入上限：总利用率不得超过 90%（留出中断与内核开销）。
-pub const DEFAULT_UTILISATION_PERMILLE: u32 = 900;
+pub const DEFAULT_UTILISATION_PERMILLE: u32 = 900; // JASPER-HARDCODE-REVIEW: issue=35 source=scheduler-rt-policy reason=explicit-realtime-utilization-reserve
 
 /// 准入或记账失败的原因。
 /// Admission or accounting failure.

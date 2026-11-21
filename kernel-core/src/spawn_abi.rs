@@ -27,7 +27,7 @@ pub const SPAWN_DESC_MAGIC: u32 = 0x4A53_5032;
 pub const SPAWN_DESC_VERSION: u16 = 2;
 /// 子进程映像（ELF）的字节数上限：内核要把它复制进内核缓冲区，必须有界。
 /// Upper bound on the child image size.
-pub const MAX_IMAGE_BYTES: u64 = 2 * 1024 * 1024;
+pub const MAX_IMAGE_BYTES: u64 = 2 * 1024 * 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=spawn-abi-v2 reason=bounded-copy-image-field
 /// Derive a parent's child-handle allowance from the admitted task inventory.
 ///
 /// Policy: one parent may retain at most one eighth of task slots, with at
@@ -42,7 +42,7 @@ pub fn child_limit(tasks: usize) -> usize {
 /// CPU 上限的取值上界（千分比；1000 = 不限）。
 pub const CPU_UNLIMITED: u32 = 1000;
 /// CPU 上限的取值下界（千分比）：太小的上限会让子进程几乎无法前进，按参数非法拒绝。
-pub const MIN_CPU_LIMIT: u32 = 10;
+pub const MIN_CPU_LIMIT: u32 = 10; // JASPER-HARDCODE-REVIEW: issue=35 source=spawn-abi-v2 reason=explicit-minimum-runable-child-CPU-share
 
 /// `system.process.spawn` 的参数块（v2）。
 /// Spawn parameter block (v2).

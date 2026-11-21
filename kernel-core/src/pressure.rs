@@ -89,7 +89,7 @@ pub struct InvalidParams;
 
 impl PressureParams {
     /// 默认参数：空闲 < 12.5% 紧张、< 5% 危急；保留 256 帧（1 MiB）。
-    pub const DEFAULT: PressureParams = PressureParams { low_permille: 125, critical_permille: 50, reserve_frames: 256 };
+    pub const DEFAULT: PressureParams = PressureParams { low_permille: 125, critical_permille: 50, reserve_frames: 256 }; // JASPER-HARDCODE-REVIEW: issue=35 source=scheduler-pressure-policy reason=explicit-memory-pressure-policy
 
     /// 校验后构造：`0 < critical < low ≤ 1000`。
     pub const fn new(low_permille: u32, critical_permille: u32, reserve_frames: usize) -> Result<Self, InvalidParams> {

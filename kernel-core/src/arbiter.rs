@@ -49,7 +49,7 @@ pub struct ArbiterParams {
 
 impl ArbiterParams {
     /// 默认：实时最多 300‰、批处理保底 100‰、连续 100 tick 未运行即补偿。
-    pub const DEFAULT: ArbiterParams = ArbiterParams {
+    pub const DEFAULT: ArbiterParams = ArbiterParams { // JASPER-HARDCODE-REVIEW: issue=35 source=scheduler-arbiter-policy reason=default-relative-scheduling-policy
         rt_reserve_permille: 300,
         batch_floor_permille: 100,
         batch_aging_ticks: 100,

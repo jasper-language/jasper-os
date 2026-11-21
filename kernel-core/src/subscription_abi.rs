@@ -2,7 +2,7 @@
 use crate::subscription::{Delivery,Event,Snapshot};
 pub const WAIT_BYTES:usize=24;
 pub const RECORD_BYTES:usize=32;
-pub const MAX_BATCH:usize=16;
+pub const MAX_BATCH:usize=16; // JASPER-HARDCODE-REVIEW: issue=35 source=subscription-abi-v1 reason=fixed-versioned-wait-batch-record-count
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub struct WaitArgs {pub ptr:u64,pub capacity:u32}
 impl WaitArgs {

@@ -7,8 +7,8 @@
 
 pub const FUSE_IN_HEADER_BYTES: usize = 40;
 pub const FUSE_OUT_HEADER_BYTES: usize = 16;
-pub const MAX_REQUEST_BYTES: usize = 4096;
-pub const MAX_RESPONSE_BYTES: usize = 4096;
+pub const MAX_REQUEST_BYTES: usize = 4096; // JASPER-HARDCODE-REVIEW: issue=35 source=virtio-fs-uapi-v1 reason=bounded-FUSE-request-record
+pub const MAX_RESPONSE_BYTES: usize = 4096; // JASPER-HARDCODE-REVIEW: issue=35 source=virtio-fs-uapi-v1 reason=bounded-FUSE-response-record
 
 pub const ROOT_NODE: u64 = 1;
 pub const FILE_NODE: u64 = 2;

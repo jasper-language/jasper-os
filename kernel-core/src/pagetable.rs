@@ -24,7 +24,7 @@ use crate::paging::{MapError, MapFlags};
 /// Size of one page table in bytes.
 pub const TABLE_BYTES: usize = 4096;
 /// 支持的最大级数（含顶级）。
-pub const MAX_LEVELS: usize = 5;
+pub const MAX_LEVELS: usize = 5; // JASPER-HARDCODE-REVIEW: issue=35 source=pagetable-architecture-policy reason=maximum-supported-hierarchical-page-table-depth
 
 /// 每张表的表项数：表大小除以表项宽度。
 /// Number of entries in one table for the given entry width.

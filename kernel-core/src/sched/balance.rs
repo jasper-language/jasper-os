@@ -200,7 +200,7 @@ pub struct BalanceParams {
 impl BalanceParams {
     /// 默认参数：迁移代价 2 tick、每 4 tick 检查一次、负载差至少 2。
     /// Defaults: 2-tick migration cost, check every 4 ticks, imbalance of at least 2.
-    pub const DEFAULT: BalanceParams = BalanceParams { migration_cost: 2, balance_interval: 4, imbalance: 2 };
+    pub const DEFAULT: BalanceParams = BalanceParams { migration_cost: 2, balance_interval: 4, imbalance: 2 }; // JASPER-HARDCODE-REVIEW: issue=35 source=scheduler-balance-policy reason=explicit-migration-cost-and-hysteresis-policy
 }
 
 /// 放置失败的原因。

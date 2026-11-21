@@ -759,7 +759,7 @@ impl<const N: usize> CapabilityGraph<N> {
             parent: node.parent,
             owner: node.owner,
             object: node.object,
-            rights: requested.unwrap_or(Rights::NONE),
+            rights: requested.unwrap_or(Rights::NONE), // JASPER-HARDCODE-REVIEW: issue=35 source=capability-audit-deny-default reason=denied-audit-defaults-to-empty-rights
         });
     }
 

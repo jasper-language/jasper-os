@@ -1,5 +1,5 @@
 {
-  "baseline_total": 66,
+  "baseline_total": 45,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -10,7 +10,7 @@
     "unclassified"
   ],
   "counts": {
-    "explicit-safety-policy": 37,
+    "explicit-safety-policy": 16,
     "protocol-abi": 16,
     "test-demo-fixture": 11
   },
@@ -96,26 +96,6 @@
       "source": "pub const MAX_CHUNK: usize = MAX_MESSAGE - 16;"
     },
     {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "aa2855caf44b98cce086778ab50ce6eeb5a0a8a88f703681396c0cf45e7a8d5d",
-      "line": 28,
-      "path": "kernel-core/src/acpi.rs",
-      "reason": "identifier bounds parser work or one compatibility-service copy batch; behavior must return bounded partial progress rather than silently lose data",
-      "rules": "HC-G1",
-      "source": "pub const MAX_TABLE_LEN: u32 = 1 << 20;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "ef74f75d24f966c6d77cd0e06db131fadbc496f859c7d5ba3aa2b0cd47daa3d7",
-      "line": 52,
-      "path": "kernel-core/src/arbiter.rs",
-      "reason": "documented scheduling, pressure, or arbitration policy default; not a discovered hardware fact",
-      "rules": "HC-G1",
-      "source": "pub const DEFAULT: ArbiterParams = ArbiterParams {"
-    },
-    {
       "category": "test-demo-fixture",
       "count": 1,
       "fingerprint": "d5c661ef5f83e1996af6d1a63c501959b671736bca68b355f35c9951ff0ee6ee",
@@ -124,16 +104,6 @@
       "reason": "bounded benchmark or probe fixture, not a production hardware fact",
       "rules": "HC-G1",
       "source": "pub const MAX_SAMPLES: usize = 256;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "72c33da494f11a555de1fbf9898e245409415dcf5e2ce57939719799a0d92952",
-      "line": 762,
-      "path": "kernel-core/src/capability.rs",
-      "reason": "documented fail-closed, default-deny, diagnostic, or bounded-progress fallback; must not synthesize hardware state",
-      "rules": "HC-G7",
-      "source": "rights: requested.unwrap_or(Rights::NONE),"
     },
     {
       "category": "test-demo-fixture",
@@ -148,72 +118,32 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "ec71b1db6aed3226d06b5c5dd61f447b782574aac8cb7804c21061280f50a688",
+      "fingerprint": "134b46e90ee1463098fdf05e6f487c8dc05217812caa04ab84671a572b08c59e",
       "line": 351,
       "path": "kernel-core/src/config.rs",
       "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G5",
-      "source": "max_rt: 8,"
+      "source": "max_rt: 8, // JASPER-HARDCODE-REVIEW: issue=35 source=test-fixture reason=capacity-model-test-input"
     },
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "ed562be2c962a2e03aa5e03d5d45b17521ac4e18c3cf6ba0f776c97789dfa05c",
+      "fingerprint": "9a4061c963b961f75310d61042c68caf7294e1775a32e2e44c86cb66d77afa60",
       "line": 350,
       "path": "kernel-core/src/config.rs",
       "reason": "declared product validation bound: KernelConfig::validate rejects out-of-range timer, Task, Object, RT, and stack values before publishing capacity",
       "rules": "HC-G5",
-      "source": "max_tasks: 64,"
+      "source": "max_tasks: 64, // JASPER-HARDCODE-REVIEW: issue=35 source=test-fixture reason=capacity-model-test-input"
     },
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "814d7a7565e44893ae43973063c5d559b2df0ae690264186059f667d548d5342",
-      "line": 30,
-      "path": "kernel-core/src/heap.rs",
-      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
-      "rules": "HC-G1",
-      "source": "const MIN_BLOCK: usize = if size_of::<Node>() > MIN_ALIGN { size_of::<Node>() } else { MIN_ALIGN };"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "de91404702a2449a362ec2d5c18d98ef84074a3bec43fbb4e0c1b75c246df615",
+      "fingerprint": "aae3e59cafb197d18525cb04acffd9f32d7b6fbf620d14673a722392cf466bf8",
       "line": 105,
       "path": "kernel-core/src/irq.rs",
       "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
       "rules": "HC-G1",
-      "source": "pub const MAX_PERMILLE: u32 = 900;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "3aab9e45b42a621a44ff1cfebee13316c3048cc3d6ffea8660d3e318e17e0a41",
-      "line": 22,
-      "path": "kernel-core/src/lockorder.rs",
-      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_RANK: u8 = 31;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "8df24e784e8231cc0fa231891767b2678e1c4db7dc9f09619e196b13db4f33f3",
-      "line": 21,
-      "path": "kernel-core/src/net4_service.rs",
-      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
-      "rules": "HC-G1",
-      "source": "const MAX_POLL_STEPS: usize = 16;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "877c3be7e5921e0635eb27243918f7c812424cb42cb388a22dad42a8fbd5f991",
-      "line": 27,
-      "path": "kernel-core/src/pagetable.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_LEVELS: usize = 5;"
+      "source": "pub const MAX_PERMILLE: u32 = 900; // JASPER-HARDCODE-REVIEW: issue=35 source=irq-policy reason=explicit-IRQ-budget-leaves-task-reserve"
     },
     {
       "category": "test-demo-fixture",
@@ -224,126 +154,6 @@
       "reason": "PCI configuration-space model default used by tests, not hardware discovery",
       "rules": "HC-G7",
       "source": "let mask = self.masks.get(&(bdf, slot)).copied().unwrap_or(0);"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "6672925b78cb3e4e29051140d3b5b0d21745eda98c970c500e9ba9b7ce8521ad",
-      "line": 92,
-      "path": "kernel-core/src/pressure.rs",
-      "reason": "documented scheduling, pressure, or arbitration policy default; not a discovered hardware fact",
-      "rules": "HC-G1",
-      "source": "pub const DEFAULT: PressureParams = PressureParams { low_permille: 125, critical_permille: 50, reserve_frames: 256 };"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "4c7dcb0691bf28cda198b3827a030b7b5d90448c1b1cd2cae932d7951c93ed3d",
-      "line": 21,
-      "path": "kernel-core/src/rt.rs",
-      "reason": "documented scheduling, pressure, or arbitration policy default; not a discovered hardware fact",
-      "rules": "HC-G1",
-      "source": "pub const DEFAULT_UTILISATION_PERMILLE: u32 = 900;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "cb9be57fdbacfeb04ad42b6206ea2340f1cbfbd4b35baa67cf6ebc4b497eb538",
-      "line": 178,
-      "path": "kernel-core/src/sched.rs",
-      "reason": "documented scheduling, pressure, or arbitration policy default; not a discovered hardware fact",
-      "rules": "HC-G1",
-      "source": "pub const DEFAULT: QosParams = QosParams {"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "3a9608798be45ed3e2f0b640f3ab4a8a71450013d88460e45bfb5466297afb8e",
-      "line": 203,
-      "path": "kernel-core/src/sched/balance.rs",
-      "reason": "documented scheduling, pressure, or arbitration policy default; not a discovered hardware fact",
-      "rules": "HC-G1",
-      "source": "pub const DEFAULT: BalanceParams = BalanceParams { migration_cost: 2, balance_interval: 4, imbalance: 2 };"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "23fb1b21f80cd503627cd81d0837ccb7c989b1bb42758eeef042d5cabe3d25f1",
-      "line": 30,
-      "path": "kernel-core/src/spawn_abi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_IMAGE_BYTES: u64 = 2 * 1024 * 1024;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "fe35f1dfe2d16376148a0509b0cf5a2f46e61b373ac5396dfa24d7ef227afaac",
-      "line": 45,
-      "path": "kernel-core/src/spawn_abi.rs",
-      "reason": "published lower-bound policy for CPU admission; sub-tick limits are rejected rather than allowing starvation",
-      "rules": "HC-G1",
-      "source": "pub const MIN_CPU_LIMIT: u32 = 10;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "f2bdd48ac43dece503a6d8e8b08462b4a129e4ef1ceee669496b2aff3d32eb3b",
-      "line": 5,
-      "path": "kernel-core/src/subscription_abi.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_BATCH:usize=16;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "f3c0f4591922a34a473a4b6ed3a7e71f81fafe9d1d5d9ab73da0f2e10d3d5d4f",
-      "line": 34,
-      "path": "kernel-core/src/user_layout.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MIN_WINDOW_SIZE: u64 = WINDOW_END_RISCV32 - WINDOW_BASE_RISCV32;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "a26645371b1cb69467fb21b79eddcb7523b5da7c6c24d9ab79a5571bca729da0",
-      "line": 11,
-      "path": "kernel-core/src/virtio_fs.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_RESPONSE_BYTES: usize = 4096;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "b81d7074a8d4eeb8305a62f8dfd23f7d716c7aac3db7d5810caf9e9e4c850ed0",
-      "line": 10,
-      "path": "kernel-core/src/virtio_fs.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MAX_REQUEST_BYTES: usize = 4096;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "83c7ee0d0e1dee9a8f151af0aeee571e982fa2aa09647c37ac7aac99aad8c4b0",
-      "line": 37,
-      "path": "kernel-core/src/virtio_gpu.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const PIXEL_BYTES: u64 = 4;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "735d51a6974eed603bdb554467f0b5daa20ea7a6e414815a456f23565df3a6ff",
-      "line": 12,
-      "path": "kernel-core/src/xsave.rs",
-      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
-      "rules": "HC-G1",
-      "source": "pub const MIN_STANDARD_IMAGE_BYTES: usize = LEGACY_AREA_BYTES + STANDARD_HEADER_BYTES;"
     },
     {
       "category": "protocol-abi",
@@ -558,26 +368,6 @@
     {
       "category": "explicit-safety-policy",
       "count": 1,
-      "fingerprint": "3163af0d783e06f52843e2f9224f00e0963399cd864970cc83979d68787c6ce6",
-      "line": 27,
-      "path": "modules/net/src/main.rs",
-      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
-      "rules": "HC-G1",
-      "source": "const MAX_LEN: usize = 1 << 20;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
-      "fingerprint": "b2c228d01e31aa50e5a49b3f1ac45e61c8e11b99301f27535d73b6e41226889c",
-      "line": 29,
-      "path": "modules/net/src/main.rs",
-      "reason": "explicit bounded-work, parser, scheduling, or protocol-conformance policy",
-      "rules": "HC-G1",
-      "source": "const MAX_ROUNDS: u64 = 1_000_000;"
-    },
-    {
-      "category": "explicit-safety-policy",
-      "count": 1,
       "fingerprint": "c2e26df14441f1d2cd94b57337af01f2ed8d1c931693d4eb1434d5934382bea3",
       "line": 28,
       "path": "user/irqprobe/build.rs",
@@ -658,7 +448,7 @@
   ],
   "schema": 1,
   "weighted_counts": {
-    "explicit-safety-policy": 38,
+    "explicit-safety-policy": 17,
     "protocol-abi": 17,
     "test-demo-fixture": 11
   }

@@ -34,7 +34,7 @@ pub const RESP_ERR_INVALID_RESOURCE: u32 = 0x1203;
 pub const RESP_ERR_INVALID_CONTEXT: u32 = 0x1204;
 
 pub const FORMAT_B8G8R8X8: u32 = 2;
-pub const PIXEL_BYTES: u64 = 4;
+pub const PIXEL_BYTES: u64 = 4; // JASPER-HARDCODE-REVIEW: issue=35 source=virtio-gpu-spec reason=B8G8R8X8-pixel-record-width
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GpuFrontendError {

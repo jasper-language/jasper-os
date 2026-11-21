@@ -102,7 +102,7 @@ impl QuotaParams {
     };
     /// 千分比上限：至少留十分之一给任务。
     /// Upper bound of `permille`: at least a tenth of each tick stays with tasks.
-    pub const MAX_PERMILLE: u32 = 900;
+    pub const MAX_PERMILLE: u32 = 900; // JASPER-HARDCODE-REVIEW: issue=35 source=irq-policy reason=explicit-IRQ-budget-leaves-task-reserve
 
     /// 校验参数；不合法返回 [`IrqError::BadQuota`]。
     /// Validate the parameters.

@@ -19,7 +19,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 /// 可登记的最大级别（[`HeldRanks`] 的位宽减一）。
 /// Highest registrable rank.
-pub const MAX_RANK: u8 = 31;
+pub const MAX_RANK: u8 = 31; // JASPER-HARDCODE-REVIEW: issue=35 source=lock-order-policy reason=fixed-lock-rank-bitmask-space
 
 /// 一类锁的登记项：级别越小越「外层」，持有级别 r 时只能再获取级别大于 r 的锁。
 /// Registry entry of one lock class.

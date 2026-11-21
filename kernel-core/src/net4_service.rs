@@ -18,7 +18,7 @@ use crate::wireguard::{
 };
 use alloc::vec::Vec;
 
-const MAX_POLL_STEPS: usize = 16;
+const MAX_POLL_STEPS: usize = 16; // JASPER-HARDCODE-REVIEW: issue=35 source=net4-poll-policy reason=bounded-service-poll-progress
 
 /// 服务与 UDP socket 集成失败的原因。
 ///

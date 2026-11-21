@@ -25,7 +25,7 @@ pub trait PhysRead {
 }
 
 /// 单张表长度上限（防御损坏或恶意的长度字段）。
-pub const MAX_TABLE_LEN: u32 = 1 << 20;
+pub const MAX_TABLE_LEN: u32 = 1 << 20; // JASPER-HARDCODE-REVIEW: issue=35 source=acpi-table-parser-policy reason=bounded-firmware-table-allocation
 /// 系统描述表头长度。
 const SDT_HEADER_LEN: u32 = 36;
 /// MADT 中本地中断控制器地址与标志之后、条目开始处的偏移。

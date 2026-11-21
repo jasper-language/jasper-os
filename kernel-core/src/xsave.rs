@@ -9,7 +9,7 @@
 
 pub const LEGACY_AREA_BYTES: usize = 512;
 pub const STANDARD_HEADER_BYTES: usize = 64;
-pub const MIN_STANDARD_IMAGE_BYTES: usize = LEGACY_AREA_BYTES + STANDARD_HEADER_BYTES;
+pub const MIN_STANDARD_IMAGE_BYTES: usize = LEGACY_AREA_BYTES + STANDARD_HEADER_BYTES; // JASPER-HARDCODE-REVIEW: issue=35 source=xsave-spec reason=legacy-area-plus-standard-header
 pub const X87_STATE_BIT: u64 = 1 << 0;
 pub const MXCSR_OFFSET: usize = 24;
 pub const XSTATE_BV_OFFSET: usize = LEGACY_AREA_BYTES;

@@ -24,9 +24,9 @@ use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
 
 /// 单次回送的字节数上限。
-const MAX_LEN: usize = 1 << 20;
+const MAX_LEN: usize = 1 << 20; // JASPER-HARDCODE-REVIEW: issue=35 source=net-loopback-policy reason=bounded-module-echo-payload
 /// 轮询轮数上限。
-const MAX_ROUNDS: u64 = 1_000_000;
+const MAX_ROUNDS: u64 = 1_000_000; // JASPER-HARDCODE-REVIEW: issue=35 source=net-loopback-policy reason=bounded-stack-poll-progress
 
 static ROUNDS: AtomicU32 = AtomicU32::new(0);
 
