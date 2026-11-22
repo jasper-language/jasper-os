@@ -910,41 +910,33 @@ fn install_root_android_files(
     root: &Ext4Reader,
     origin: compat_core::executable::SystemImage,
 ) -> Result<(), HealthError> {
-    const MAX_ROOT_FILE_BYTES: usize = 256 * 1024 * 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=compat-wine-verification-file-budget reason=lavapipe-llvm-closure
     for path in crate::linux_vfs::ANDROID_FILE_PATHS {
         #[cfg(feature = "compat-wine-verify")]
         if path.ends_with(b"/wine/x86_64-unix/ntdll.so") {
             crate::kprintln!("[JSR-WINE-VFS] load path=/usr/lib/x86_64-linux-gnu/wine/x86_64-unix/ntdll.so");
         }
-        let bytes = match root.read_file(
-            core::str::from_utf8(path).map_err(|_| HealthError::RootExecute)?,
-            MAX_ROOT_FILE_BYTES,
-        ) {
+        let path_text = core::str::from_utf8(path).map_err(|_| HealthError::RootExecute)?;
+        let max_bytes = match root.metadata(path_text) {
+            Ok(metadata) => match usize::try_from(metadata.len) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    log_root_android_file_skip(path);
+                    continue;
+                }
+            },
+            Err(_) => {
+                log_root_android_file_skip(path);
+                continue;
+            }
+        };
+        if crate::mm::heap::ensure_free(max_bytes).is_err() {
+            log_root_android_file_skip(path);
+            continue;
+        }
+        let bytes = match root.read_file(path_text, max_bytes) {
             Ok(bytes) => bytes,
             Err(_) => {
-                #[cfg(feature = "compat-wine-d3d-verify")]
-                if path.ends_with(b"d3d11.dll")
-                    || path.ends_with(b"dxgi.dll")
-                    || path.ends_with(b"d3d11-probe.exe")
-                {
-                    crate::kprintln!(
-                        "[JSR-WINE-D3D-VFS] read-fail path={}",
-                        core::str::from_utf8(path).unwrap_or("<non-utf8>")
-                    );
-                }
-                #[cfg(feature = "compat-wine-verify")]
-                if path.ends_with(b"/wine/x86_64-unix/ntdll.so") {
-                    crate::kprintln!("[JSR-WINE-VFS] read-fail path=ntdll.so");
-                }
-                #[cfg(any(
-                    feature = "android-apk-verify",
-                    feature = "android-art-verify",
-                    feature = "vulkan-metal2vulkan-verify"
-                ))]
-                crate::kprintln!(
-                    "[JSR-ANDROID-ART] file-skip path={}",
-                    core::str::from_utf8(path).unwrap_or("<non-utf8>")
-                );
+                log_root_android_file_skip(path);
                 continue;
             }
         };
@@ -954,20 +946,7 @@ fn install_root_android_files(
             crate::kprintln!("[JSR-WINE-VFS] read path=ntdll.so bytes={}", bytes.len());
         }
         if !crate::linux_vfs::install_root_android_file(path, bytes) {
-            #[cfg(feature = "compat-wine-d3d-verify")]
-            if path.ends_with(b"d3d11.dll")
-                || path.ends_with(b"dxgi.dll")
-                || path.ends_with(b"d3d11-probe.exe")
-            {
-                crate::kprintln!(
-                    "[JSR-WINE-D3D-VFS] install-fail path={}",
-                    core::str::from_utf8(path).unwrap_or("<non-utf8>")
-                );
-            }
-            #[cfg(feature = "compat-wine-verify")]
-            if path.ends_with(b"/wine/x86_64-unix/ntdll.so") {
-                crate::kprintln!("[JSR-WINE-VFS] install-fail path=ntdll.so");
-            }
+            log_root_android_file_skip(path);
             #[cfg(any(
                 feature = "android-apk-verify",
                 feature = "android-art-verify",
@@ -989,6 +968,33 @@ fn install_root_android_files(
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "lifecycle-root-exec-verify")]
+fn log_root_android_file_skip(_path: &[u8]) {
+    #[cfg(feature = "compat-wine-d3d-verify")]
+    if _path.ends_with(b"d3d11.dll")
+        || _path.ends_with(b"dxgi.dll")
+        || _path.ends_with(b"d3d11-probe.exe")
+    {
+        crate::kprintln!(
+            "[JSR-WINE-D3D-VFS] skip path={}",
+            core::str::from_utf8(_path).unwrap_or("<non-utf8>")
+        );
+    }
+    #[cfg(feature = "compat-wine-verify")]
+    if _path.ends_with(b"/wine/x86_64-unix/ntdll.so") {
+        crate::kprintln!("[JSR-WINE-VFS] skip path=ntdll.so");
+    }
+    #[cfg(any(
+        feature = "android-apk-verify",
+        feature = "android-art-verify",
+        feature = "vulkan-metal2vulkan-verify"
+    ))]
+    crate::kprintln!(
+        "[JSR-ANDROID-ART] file-skip path={}",
+        core::str::from_utf8(_path).unwrap_or("<non-utf8>")
+    );
 }
 
 #[cfg(any(
