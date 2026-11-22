@@ -66,6 +66,20 @@ const MAX_SYSV_SHARED_SEGMENTS: usize = 16; // JASPER-HARDCODE-REVIEW: issue=35 
 static NEXT_LINUX_TID: AtomicU32 = AtomicU32::new(0x10_0000);
 static NEXT_POSIX_TIMER_ID: AtomicU64 = AtomicU64::new(0x7000_0000_0000_0001);
 static NEXT_UNIX_AUTOBIND: AtomicU64 = AtomicU64::new(1);
+#[cfg(feature = "compat-darling-verify")]
+const DARLING_MMAP_TRACE_BUDGET: u32 = 256;
+#[cfg(feature = "compat-darling-verify")]
+static DARLING_MMAP_TRACE_REMAINING: AtomicU32 =
+    AtomicU32::new(DARLING_MMAP_TRACE_BUDGET);
+
+#[cfg(feature = "compat-darling-verify")]
+fn claim_darling_trace(counter: &AtomicU32) -> bool {
+    counter
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+            remaining.checked_sub(1)
+        })
+        .is_ok()
+}
 
 #[derive(Clone, Copy)]
 struct SignalOrigin {
@@ -5467,15 +5481,17 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         );
     }
     #[cfg(feature = "compat-darling-verify")]
-    crate::kprintln!(
-        "[JSR-DARLING-MMAP] addr={:#x} bytes={:#x} prot={:#x} flags={:#x} fd={} offset={:#x}",
-        args[0],
-        args[1],
-        args[2],
-        args[3],
-        args[4] as i64,
-        args[5]
-    );
+    if claim_darling_trace(&DARLING_MMAP_TRACE_REMAINING) {
+        crate::kprintln!(
+            "[JSR-DARLING-MMAP] addr={:#x} bytes={:#x} prot={:#x} flags={:#x} fd={} offset={:#x}",
+            args[0],
+            args[1],
+            args[2],
+            args[3],
+            args[4] as i64,
+            args[5]
+        );
+    }
     #[cfg(feature = "compat-wine-verify")]
     if args[3] & MAP_FIXED_NOREPLACE != 0 {
         crate::kprintln!(
