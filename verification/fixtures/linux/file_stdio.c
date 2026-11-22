@@ -8,6 +8,8 @@
 int main(void)
 {
     struct stat st;
+    mode_t old_mask;
+    int mode_fd;
     int pipe_fds[2];
     int socket_fds[2];
     int fd = creat("/tmp/jasper-file-stdio", 0600);
@@ -24,6 +26,20 @@ int main(void)
     if (fstat(-1, &st) != -1 || errno != EBADF) return 15;
     errno = 0;
     if (fstat(99, &st) != -1 || errno != EBADF) return 16;
+    old_mask = umask(0027);
+    mode_fd = open("/tmp/jasper-file-mode", O_CREAT | O_RDWR | O_CLOEXEC, 0666);
+    umask(old_mask);
+    if (mode_fd < 0) return 19;
+    if (fstat(mode_fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+        (st.st_mode & 0777) != 0640 || st.st_nlink != 1) return 20;
+    if ((fcntl(mode_fd, F_GETFL) & O_ACCMODE) != O_RDWR) return 21;
+    if ((fcntl(mode_fd, F_GETFD) & FD_CLOEXEC) == 0) return 22;
+    if (write(mode_fd, "abc", 3) != 3 || fstat(mode_fd, &st) != 0 ||
+        st.st_size != 3) return 23;
+    if (close(mode_fd) != 0) return 24;
+    errno = 0;
+    if (open("/tmp/jasper-missing-file", O_RDONLY) != -1 ||
+        errno != ENOENT) return 25;
     close(pipe_fds[0]);
     close(pipe_fds[1]);
     close(socket_fds[0]);
@@ -33,6 +49,6 @@ int main(void)
     if (!file) return 11;
     if (fputs("fdopen-ok\n", file) < 0) return 12;
     if (fclose(file) != 0) return 13;
-    puts("FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true");
+    puts("FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true");
     return 0;
 }

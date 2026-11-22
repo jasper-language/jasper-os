@@ -86,7 +86,7 @@ the real UEFI/root-image path. Wine loaded its preloader, wineserver, PE
 the built-in, wrote through the inherited standard-output handle, and exited
 zero.
 
-Evidence: `evidence/compat-wine-fd-stat-r63`.
+Evidence: `evidence/compat-wine-file-mode-r65`.
 
 ## Host baselines
 

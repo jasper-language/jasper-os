@@ -23,6 +23,11 @@ python3 scripts/check-compat-abi-matrix.py --self-test
 python3 scripts/check-compat-abi-matrix.py
 ```
 
+The first semantically verified ledger item is Linux file status/mode:
+`fstat` file type and umask-derived permissions, descriptor status flags,
+file size, standard-character streams, FIFOs, sockets, `EBADF` and `ENOENT`
+are covered by the root-image fixture.
+
 `map_shadow_stack` returns `EOPNOTSUPP` because the current Jasper kernel
 advertises no user shadow-stack feature through `ARCH_SHSTK_STATUS`. This is a
 hardware/configuration boundary, not a claim that CET shadow stacks run.
@@ -93,7 +98,7 @@ removed interfaces.
 - Latest full Linux/Android root UEFI slice:
   `evidence/issue21-uefi-boot-20261120-204541`
 - Compatibility ABI / Wine command execution:
-  `evidence/compat-wine-fd-stat-r63`
+  `evidence/compat-wine-file-mode-r65`
 
 - Full Linux/Android root UEFI:
   `evidence/issue21-uefi-boot-20261115-userfaultfd-v123-clean`

@@ -17142,14 +17142,14 @@ fn linux_fstat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Ok(0);
     }
     if let Some(id) = linux_cache_file_id(entry.handle) {
-        let size = COMPAT
+        let (size, mode) = COMPAT
             .lock()
             .cache_files
             .iter()
             .find(|file| file.id == id)
-            .map(|file| file.bytes.len() as u64)
+            .map(|file| (file.bytes.len() as u64, file.mode))
             .ok_or(CompatErrno::BadFd)?;
-        write_synthetic_stat(args[1], entry.handle, 1, size, 0o100666)?;
+        write_synthetic_stat(args[1], entry.handle, 1, size, 0o100000 | mode)?;
         #[cfg(feature = "compat-wine-verify")]
         crate::kprintln!("[JSR-WINE-FSTAT] cache-file=true size={}", size);
         return Ok(0);
@@ -17210,6 +17210,21 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             }
             if let Some(mode) = synthetic_fd_mode(entry.kind) {
                 write_synthetic_stat(args[2], entry.handle, 1, 0, mode)?;
+                return Ok(0);
+            }
+            if linux_cache_dir_id(entry.handle).is_some() {
+                write_synthetic_stat(args[2], entry.handle, 2, 4096, 0o040555)?;
+                return Ok(0);
+            }
+            if let Some(id) = linux_cache_file_id(entry.handle) {
+                let (size, mode) = COMPAT
+                    .lock()
+                    .cache_files
+                    .iter()
+                    .find(|file| file.id == id)
+                    .map(|file| (file.bytes.len() as u64, file.mode))
+                    .ok_or(CompatErrno::BadFd)?;
+                write_synthetic_stat(args[2], entry.handle, 1, size, 0o100000 | mode)?;
                 return Ok(0);
             }
             let node = if entry.kind == compat_core::fd::CompatKind::Path {
