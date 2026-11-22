@@ -16097,16 +16097,6 @@ fn linux_cache_write_bytes(
             .iter_mut()
             .find(|file| file.id == id)
             .ok_or(CompatErrno::BadFd)?;
-        #[cfg(feature = "compat-wine-verify")]
-        if bytes.windows(11).any(|window| window == b"WINE_CMD_OK") {
-            crate::kprintln!(
-                "[JSR-WINE-CACHE-WRITE] path={} offset={:#x} bytes={}",
-                core::str::from_utf8(&file.path).unwrap_or("<binary>"),
-                offset,
-                bytes.len()
-            );
-            crate::console::write_bytes(bytes);
-        }
         file.bytes.try_reserve(end.saturating_sub(file.bytes.len()))
             .map_err(|_| CompatErrno::NoSpace)?;
         file.bytes.resize(end, 0);
@@ -17103,6 +17093,12 @@ fn linux_fstat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if entry.kind == compat_core::fd::CompatKind::Path {
         let node = proc::linux_path_node(pid, fd).ok_or(CompatErrno::BadFd)?;
         write_linux_stat(args[1], node)?;
+        return Ok(0);
+    }
+    if entry.kind == compat_core::fd::CompatKind::Other
+        && entry.handle == proc::LINUX_CONSOLE_HANDLE
+    {
+        write_synthetic_stat(args[1], entry.handle, 1, 0, 0o020666)?;
         return Ok(0);
     }
     if entry.kind == compat_core::fd::CompatKind::Device {

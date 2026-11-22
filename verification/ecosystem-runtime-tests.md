@@ -82,11 +82,11 @@ this wrapper is recorded as a separate exit-path gap.
 Unmodified Ubuntu Wine 10.0 executed under the Jasper Linux/POSIX ABI through
 the real UEFI/root-image path. Wine loaded its preloader, wineserver, PE
 `start.exe`, `ntdll.dll`, `kernel32.dll`, `kernelbase.dll`, `win32u.dll`,
-`imm32.dll`, and `cmd.exe`. The command
-`cmd.exe /c echo WINE_CMD_OK >/tmp/wine-cmd.out` executed the built-in, wrote
-12 bytes through the compatibility filesystem, and exited zero.
+`imm32.dll`, and `cmd.exe`. The command `cmd.exe /c echo WINE_CMD_OK` executed
+the built-in, wrote through the inherited standard-output handle, and exited
+zero.
 
-Evidence: `evidence/compat-wine-accept-r58`.
+Evidence: `evidence/compat-wine-stdio-fstat-r61`.
 
 ## Host baselines
 

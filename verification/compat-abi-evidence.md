@@ -95,12 +95,12 @@ instead of rescanning the complete ABI surface.
 - `evidence/compat-wine-bootstrap-r37`
 - `evidence/compat-wine-win32u-imm-r44`
 - `evidence/compat-wine-low-prot-none-r57`
-- `evidence/compat-wine-accept-r58`
+- `evidence/compat-wine-stdio-fstat-r61`
 - Positive evidence: the unmodified Wine preloader, wineserver, prefix creation,
   protocol exchange, PE `start.exe`, `ntdll.dll`, `kernel32.dll`,
   `kernelbase.dll`, `win32u.dll`, `imm32.dll` and `cmd.exe` load work.
 - Positive evidence: `cmd.exe /c echo WINE_CMD_OK` executes the built-in,
-  writes 12 bytes to the compatibility filesystem, exits 0, and the literal
-  output reaches the serial log.
-- Remaining conformance work: standard-output handle behavior without command
-  redirection and steady-state resource accounting remain partial.
+  writes the literal output directly through the inherited standard-output
+  handle, exits 0, and the bytes reach the serial log.
+- Remaining conformance work: steady-state resource accounting remains
+  partial.

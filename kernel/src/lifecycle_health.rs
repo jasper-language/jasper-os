@@ -1063,13 +1063,12 @@ fn execute_root_dynamic_programs(
             "/usr/bin/jasper-file-stdio",
             &stdio_argv,
         )?;
-        let wine_argv: [&[u8]; 6] = [
+        let wine_argv: [&[u8]; 5] = [
             b"/usr/lib/x86_64-linux-gnu/wine/wine",
             b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/cmd.exe",
             b"/c",
             b"echo",
             b"WINE_CMD_OK",
-            br">/tmp/wine-cmd.out",
         ];
         // Leave TMPDIR unset: Ubuntu Wine's server_tmpdir helper frees the
         // secure_getenv() result when TMPDIR is present. Wine still defaults
