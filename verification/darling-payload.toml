@@ -1,0 +1,61 @@
+schema = 1
+release_tag = "v0.1.20260608"
+package_version = "0.1.20260609~noble"
+architecture = "x86_64"
+claim = "research inventory only; no Jasper guest execution"
+
+[[payload]]
+path = "usr/bin/darling"
+role = "linux-launcher"
+format = "elf64"
+size = 31648
+sha256 = "3b1522ee14d54da1501a6ff79ac4377bc92d84fd296407053480af0bb8541da2"
+
+[[payload]]
+path = "usr/bin/darlingserver"
+role = "linux-server"
+format = "elf64"
+size = 2384544
+sha256 = "fb25d4a70990229fee3d280d7c271c7f50bda031522e76829771aa8df456dedb"
+
+[[payload]]
+path = "usr/libexec/darling/usr/libexec/darling/mldr"
+role = "mach-o-loader"
+format = "elf64"
+size = 158664
+sha256 = "0953a5e6db6f1f9ae2d89124ac9ef1ed65cb734488623eb9a66cd43596be47ea"
+
+[[payload]]
+path = "usr/libexec/darling/usr/lib/dyld"
+role = "darwin-dyld"
+format = "macho-fat-x86_64"
+size = 5221712
+sha256 = "fb661324429a384480b57c8eeeddedb22ec8bb90db2e83a46b2e872e31e55b66"
+
+[[payload]]
+path = "usr/libexec/darling/usr/lib/libSystem.B.dylib"
+role = "libsystem"
+format = "macho-fat-x86_64"
+size = 244532
+sha256 = "f2caa3b1f39895d7b5c8853907ed73c9a93030b6460a3183318b5cb95b6caf32"
+
+[[payload]]
+path = "usr/libexec/darling/bin/echo"
+role = "mach-o-echo"
+format = "macho-x86_64"
+size = 13636
+sha256 = "382dba0daa05e4ca8cbeeecb0cd14acc5709bb4fd42a62745a5d01f12abc7a9f"
+
+[[payload]]
+path = "usr/libexec/darling/sbin/launchd"
+role = "launchd"
+format = "macho-x86_64"
+size = 295168
+sha256 = "972e2603b56839a309c423ce8679026a801756daa237b35c930b1b537441f2f5"
+
+[[payload]]
+path = "usr/libexec/darling/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation"
+role = "corefoundation"
+format = "macho-fat-x86_64"
+size = 6018188
+sha256 = "56fe0ba3f28e92c323e1be923a3b66940d844300cc62b0ffafd1aa1fe916486c"

@@ -50,9 +50,9 @@ claim = "The pinned Darling release is amd64 only and is not a Pixel 6a AArch64 
 
 [[stage]]
 id = "container-launch"
-status = "not-run"
+status = "blocked"
 requirements = "mount and PID namespaces, overlayfs, a privileged or otherwise host-authorized launcher, and Darling's setuid-root /usr/bin/darling entry point"
-evidence = ""
+evidence = "evidence/darling-namespace-capability-20261122/README.md"
 exit_gate = "The unmodified release launcher creates and shuts down an isolated Darling prefix without weakening Jasper host authorization"
 
 [[stage]]

@@ -51,7 +51,7 @@ image、Jasper VFS、资源核算或物理设备路径，因此不是 Jasper gue
 
 | 阶段 | 当前状态 | 核心退出条件 |
 | --- | --- | --- |
-| 容器启动 | 未运行 | 未修改的 launch 入口受 Jasper 授权约束创建/销毁前缀 |
+| 容器启动 | 阻塞 | 未修改的 launch 入口受 Jasper 授权约束创建/销毁前缀 |
 | mldr/Mach-O | 未运行 | 加载真实 Mach-O 并安全交棒 dyld |
 | dyld/libSystem | 未运行 | 完成初始化并执行 `DARLING_EXEC_OK` |
 | darlingserver/RPC | 未运行 | Mach/RPC、线程、死亡与取消终态一致 |
@@ -65,6 +65,11 @@ image、Jasper VFS、资源核算或物理设备路径，因此不是 Jasper gue
 即使未来阶段通过，也必须使用
 `DARLING_JASPER_GUEST_OK` 和 `evidence/darling-jasper-*` 证据命名；当前矩阵
 不存在任何 Jasper guest pass。
+
+容器启动阶段已记录
+`evidence/darling-namespace-capability-20261122/README.md`：固定 release
+在主机用户命名空间中仍被拒绝创建 UTS/IPC namespace。该证据只说明启动前置
+条件尚未满足，不构成 Jasper guest 结果。
 
 ## 当前明确 blocker
 
