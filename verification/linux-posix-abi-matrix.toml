@@ -93,10 +93,10 @@ id = "linux-epoll-readiness"
 abi = "epoll_ctl/epoll_wait/epoll_pwait readiness"
 positive_coverage = "listener accept queue, accepted socket readability, level and edge delivery, and timeout expiry"
 negative_coverage = "invalid fd, invalid event size, signal interruption, and no ready registrations"
-evidence = "verification/compat-abi-evidence.md"
-commit = "409c6e2"
+evidence = "verification/compat-abi-evidence.md; evidence/compat-wine-epoll-timeout-r78"
+commit = "5ee90f7"
 environment = "qemu-jasper-linux-abi"
-status = "partial"
+status = "verified"
 
 [[item]]
 id = "linux-monotonic-time"

@@ -88,14 +88,15 @@ instead of rescanning the complete ABI surface.
 - `evidence/compat-wine-epoll-r47`
 - `evidence/compat-wine-epoll-pri-20261121`
 - `evidence/compat-wine-listener-ready-r53`
+- `evidence/compat-wine-epoll-timeout-r78`
 - Positive evidence: `EPOLLPRI`, zero-interest `MOD`, listener queues and
-  accepted-socket readability.
-- Negative coverage still needs isolated invalid-mask and stale-generation
-  fixtures.
+  accepted-socket readability, edge delivery and elapsed timeout expiry.
+- Negative evidence: invalid descriptors return `EBADF`, no-ready registrations
+  time out, and `SIGUSR1` interrupts a blocking wait with `EINTR`.
 
 ## Monotonic time
 
-- `evidence/compat-wine-unix-socket-r76`
+- `evidence/compat-wine-epoll-timeout-r78`
 - Positive evidence: `CLOCK_MONOTONIC` advances across relative sleep and
   blocking absolute `clock_nanosleep` reaches its deadline.
 - Negative evidence: invalid clock IDs and negative `timespec` values return

@@ -24,13 +24,14 @@ python3 scripts/check-compat-abi-matrix.py
 ```
 
 The first semantically verified ledger items are Linux file status/mode,
-positioned I/O, current-directory lifecycle, POSIX record locks, monotonic time
-and AF_UNIX socket lifecycle. `fstat` file type and umask-derived permissions,
-descriptor status flags, file size, standard-character streams, FIFOs, sockets,
-`EBADF` and `ENOENT` are covered, as are cache-file `pread64/pwrite64`
-cursor/error semantics, deleted-cwd `getcwd`/relative-path behavior,
-blocking/interrupted fcntl locks, monotonic absolute/relative sleep deadlines,
-and pathname socket bind/connect/accept/stale-name behavior.
+positioned I/O, current-directory lifecycle, POSIX record locks, monotonic time,
+AF_UNIX socket lifecycle and epoll readiness. `fstat` file type and
+umask-derived permissions, descriptor status flags, file size,
+standard-character streams, FIFOs, sockets, `EBADF` and `ENOENT` are covered,
+as are cache-file `pread64/pwrite64` cursor/error semantics, deleted-cwd
+`getcwd`/relative-path behavior, blocking/interrupted fcntl locks, monotonic
+absolute/relative sleep deadlines, pathname socket bind/connect/accept/stale
+names, and listener/accepted readiness with real timeout and signal interruption.
 
 `map_shadow_stack` returns `EOPNOTSUPP` because the current Jasper kernel
 advertises no user shadow-stack feature through `ARCH_SHSTK_STATUS`. This is a
@@ -102,7 +103,7 @@ removed interfaces.
 - Latest full Linux/Android root UEFI slice:
   `evidence/issue21-uefi-boot-20261120-204541`
 - Compatibility ABI / Wine command execution:
-  `evidence/compat-wine-unix-socket-r76`
+  `evidence/compat-wine-epoll-timeout-r78`
 
 - Full Linux/Android root UEFI:
   `evidence/issue21-uefi-boot-20261115-userfaultfd-v123-clean`

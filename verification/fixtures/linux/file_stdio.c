@@ -49,6 +49,7 @@ int main(void)
     char socket_buffer[8] = {0};
     struct sockaddr_un unix_address;
     struct epoll_event epoll_event;
+    struct sigaction signal_action;
     struct iovec socket_iov[2];
     struct msghdr socket_message;
     struct cmsghdr *control_message;
@@ -316,6 +317,26 @@ int main(void)
         socket_buffer[0] != 'R') return 75;
     close(received_fd);
     close(rights_pipe[1]);
+    memset(control_buffer, 0, sizeof(control_buffer));
+    memset(&socket_message, 0, sizeof(socket_message));
+    socket_iov[0].iov_base = "X";
+    socket_iov[0].iov_len = 1;
+    socket_message.msg_iov = socket_iov;
+    socket_message.msg_iovlen = 1;
+    socket_message.msg_control = control_buffer;
+    socket_message.msg_controllen = sizeof(control_buffer);
+    control_message = CMSG_FIRSTHDR(&socket_message);
+    control_message->cmsg_level = SOL_SOCKET;
+    control_message->cmsg_type = SCM_RIGHTS;
+    control_message->cmsg_len = 0;
+    errno = 0;
+    if (sendmsg(unix_client, &socket_message, 0) != -1 || errno != EINVAL) return 81;
+    socket_message.msg_control = NULL;
+    socket_message.msg_controllen = 0;
+    socket_iov[0].iov_base = (void *)1;
+    socket_iov[0].iov_len = 1;
+    errno = 0;
+    if (sendmsg(unix_client, &socket_message, 0) != -1 || errno != EFAULT) return 82;
     socket_iov[0].iov_base = "EF";
     socket_iov[0].iov_len = 2;
     socket_iov[1].iov_base = "GH";
@@ -328,6 +349,44 @@ int main(void)
     socket_iov[1].iov_len = 2;
     if (readv(unix_client, socket_iov, 2) != 4 ||
         memcmp(socket_buffer, "EFGH", 4) != 0) return 77;
+    if (epoll_wait(epoll_fd, &epoll_event, 1, 0) != 0) return 83;
+    memset(&epoll_event, 0, sizeof(epoll_event));
+    epoll_event.events = EPOLLIN;
+    epoll_event.data.fd = 99;
+    errno = 0;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, 99, &epoll_event) != -1 ||
+        errno != EBADF) return 84;
+    memset(&epoll_event, 0, sizeof(epoll_event));
+    epoll_event.events = EPOLLIN;
+    epoll_event.data.fd = accepted;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, accepted, &epoll_event) != 0) return 85;
+    if (send(unix_client, "Z", 1, 0) != 1 ||
+        epoll_wait(epoll_fd, &epoll_event, 1, 1000) != 1 ||
+        recv(accepted, socket_buffer, 1, 0) != 1 ||
+        socket_buffer[0] != 'Z') return 86;
+    memset(&signal_action, 0, sizeof(signal_action));
+    signal_action.sa_handler = handle_signal;
+    sigemptyset(&signal_action.sa_mask);
+    if (sigaction(SIGUSR1, &signal_action, NULL) != 0) return 90;
+    interrupted = 0;
+    memset(&child_status, 0, sizeof(child_status));
+    child = fork();
+    if (child == 0) {
+        usleep(20000);
+        if (kill(getppid(), SIGUSR1) != 0) _exit(1);
+        _exit(0);
+    }
+    if (child < 0) return 87;
+    errno = 0;
+    if (epoll_wait(epoll_fd, &epoll_event, 1, 1000) != -1 ||
+        errno != EINTR || !interrupted) return 88;
+    if (waitpid(child, &child_status, 0) != child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) return 89;
+    if (clock_gettime(CLOCK_MONOTONIC, &time_a) != 0 ||
+        epoll_wait(epoll_fd, &epoll_event, 1, 20) != 0 ||
+        clock_gettime(CLOCK_MONOTONIC, &time_b) != 0) return 91;
+    if (time_b.tv_sec == time_a.tv_sec &&
+        time_b.tv_nsec - time_a.tv_nsec < 10000000) return 92;
     if (unlink("/tmp/jasper-unix.sock") != 0) return 78;
     unix_address.sun_path[strlen("/tmp/jasper-unix.sock")] = 'x';
     missing_client = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -365,6 +424,6 @@ int main(void)
     if (!file) return 11;
     if (fputs("fdopen-ok\n", file) < 0) return 12;
     if (fclose(file) != 0) return 13;
-    puts("FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true positioned_io=true cwd_status=true record_lock=true monotonic_time=true unix_socket=true");
+    puts("FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true positioned_io=true cwd_status=true record_lock=true monotonic_time=true unix_socket=true socket_message=true epoll_status=true");
     return 0;
 }
