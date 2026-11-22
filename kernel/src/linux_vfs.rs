@@ -173,6 +173,16 @@ pub(crate) const ANDROID_FILE_PATHS: &[&[u8]] = &[
     b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/user32.dll",
     b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/win32u.dll",
     b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/zlib1.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/apisetschema.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/wineboot.exe",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/ws2_32.dll",
+    b"/usr/share/wine/wine.inf",
+    b"/usr/share/wine/nls/sortdefault.nls",
+    b"/usr/share/wine/nls/normnfc.nls",
+    b"/usr/share/wine/nls/c_1252.nls",
+    b"/usr/share/wine/nls/c_437.nls",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-unix/win32u.so",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/imm32.dll",
 ];
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
@@ -966,10 +976,16 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
             node: Node::File(FileId::AndroidFile(85)),
         },
     ];
-    const WINE_UNIX: &[DirEntry] = &[DirEntry {
-        name: b"ntdll.so",
-        node: Node::File(FileId::AndroidFile(83)),
-    }];
+    const WINE_UNIX: &[DirEntry] = &[
+        DirEntry {
+            name: b"ntdll.so",
+            node: Node::File(FileId::AndroidFile(83)),
+        },
+        DirEntry {
+            name: b"win32u.so",
+            node: Node::File(FileId::AndroidFile(120)),
+        },
+    ];
     const WINE_WINDOWS: &[DirEntry] = &[
         DirEntry {
             name: b"advapi32.dll",
@@ -1034,6 +1050,22 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         DirEntry {
             name: b"zlib1.dll",
             node: Node::File(FileId::AndroidFile(111)),
+        },
+        DirEntry {
+            name: b"apisetschema.dll",
+            node: Node::File(FileId::AndroidFile(112)),
+        },
+        DirEntry {
+            name: b"wineboot.exe",
+            node: Node::File(FileId::AndroidFile(113)),
+        },
+        DirEntry {
+            name: b"ws2_32.dll",
+            node: Node::File(FileId::AndroidFile(114)),
+        },
+        DirEntry {
+            name: b"imm32.dll",
+            node: Node::File(FileId::AndroidFile(121)),
         },
     ];
     const USR: &[DirEntry] = &[
@@ -1319,10 +1351,16 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         name: b"wine",
         node: Node::Directory(DirectoryId::UsrShareWine),
     }];
-    const USR_SHARE_WINE: &[DirEntry] = &[DirEntry {
-        name: b"nls",
-        node: Node::Directory(DirectoryId::UsrShareWineNls),
-    }];
+    const USR_SHARE_WINE: &[DirEntry] = &[
+        DirEntry {
+            name: b"nls",
+            node: Node::Directory(DirectoryId::UsrShareWineNls),
+        },
+        DirEntry {
+            name: b"wine.inf",
+            node: Node::File(FileId::AndroidFile(115)),
+        },
+    ];
     const USR_SHARE_WINE_NLS: &[DirEntry] = &[
         DirEntry {
             name: b"c_20127.nls",
@@ -1335,6 +1373,22 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         DirEntry {
             name: b"l_intl.nls",
             node: Node::File(FileId::AndroidFile(95)),
+        },
+        DirEntry {
+            name: b"sortdefault.nls",
+            node: Node::File(FileId::AndroidFile(116)),
+        },
+        DirEntry {
+            name: b"normnfc.nls",
+            node: Node::File(FileId::AndroidFile(117)),
+        },
+        DirEntry {
+            name: b"c_1252.nls",
+            node: Node::File(FileId::AndroidFile(118)),
+        },
+        DirEntry {
+            name: b"c_437.nls",
+            node: Node::File(FileId::AndroidFile(119)),
         },
     ];
     match directory {

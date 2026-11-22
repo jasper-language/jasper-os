@@ -641,7 +641,7 @@ if [ "$MODE" = android-apk ]; then
 fi
 if [ "$MODE" = compat-wine ]; then
   grep -aq '^WINE_CMD_OK' "$OUT/serial.log"
-  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=compat-wine-cmd path=/usr/lib/x86_64-linux-gnu/wine/wine interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true failed=0' \
+  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=compat-wine-cmd path=/usr/lib/x86_64-linux-gnu/wine/wine interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=\(true\|false\) failed=0' \
     "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"
   ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' \

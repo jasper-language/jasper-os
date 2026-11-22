@@ -74,18 +74,26 @@ removed interfaces.
 - The unmodified AOSP Binder `binderDriverInterfaceTest.cpp` passed **20/20**
   cases on the Jasper UEFI path, including transactions, death and freeze
   notifications, reference commands, ioctl errors, and nonblocking reads.
+- Unmodified Ubuntu Wine 10.0 loaded its preloader, wineserver, PE
+  `start.exe`, `ntdll.dll`, `kernel32.dll`, `kernelbase.dll`, `win32u.dll`,
+  `imm32.dll`, and `cmd.exe` through the Linux ABI. `cmd.exe /c echo
+  WINE_CMD_OK` executed the built-in, wrote its output through the
+  compatibility filesystem, and exited 0.
 - The upstream multi-DEX `AndroidAutoBuildAPK-v18.apk` passed AOSP `aapt2`
   container/Manifest validation and one Java entry executed through unmodified
   Bionic and ART in the Jasper UEFI root-image path with exit 0 and
   `resources=true`. Android Activity lifecycle remains pending.
 - See [ecosystem-runtime-tests.md](ecosystem-runtime-tests.md) for exact
-  evidence and for host-only Wine, DXVK/VKD3D-Proton, Metal2Vulkan, Darling,
-  OpenJDK and ART baselines. Host results are not counted as Jasper passes.
+  evidence and for host-only DXVK/VKD3D-Proton, Metal2Vulkan, Darling,
+  OpenJDK and ART baselines. Host results and synthetic syscall mappings are
+  not counted as Jasper ABI semantic passes.
 
 ## Acceptance evidence
 
 - Latest full Linux/Android root UEFI slice:
   `evidence/issue21-uefi-boot-20261120-204541`
+- Compatibility ABI / Wine command execution:
+  `evidence/compat-wine-accept-r58`
 
 - Full Linux/Android root UEFI:
   `evidence/issue21-uefi-boot-20261115-userfaultfd-v123-clean`

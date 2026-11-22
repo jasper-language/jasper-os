@@ -74,10 +74,14 @@ instead of rescanning the complete ABI surface.
 ## Low private address window
 
 - `evidence/compat-wine-low-window-20261121-r19`
+- `evidence/compat-wine-mmap-cursor-r27`
+- `evidence/compat-wine-low-prot-none-r57`
 - Positive evidence: the 4 GiB `vprot` allocation range is admitted in the
   compatibility low private window.
-- Remaining failure is Wine-side `vprot` allocation after a successful mmap;
-  this prevents promoting the row to `verified`.
+- Positive evidence: ordinary `mmap(NULL)` can restart from the base or search
+  top-down after a fixed mapping exhausts the forward cursor.
+- Positive evidence: PROT_NONE reservations prefer the low private window,
+  avoiding overlap with Wine's fixed high system views.
 
 ## Wine bootstrap
 
@@ -86,7 +90,17 @@ instead of rescanning the complete ABI surface.
 - `evidence/compat-wine-read-enter-r52`
 - `evidence/compat-wine-pe-imports-20261121-r15`
 - `evidence/compat-wine-module-debug-20261121-r18`
+- `evidence/compat-wine-apisetschema-r28`
+- `evidence/compat-wine-mmap-cursor-r27`
+- `evidence/compat-wine-bootstrap-r37`
+- `evidence/compat-wine-win32u-imm-r44`
+- `evidence/compat-wine-low-prot-none-r57`
+- `evidence/compat-wine-accept-r58`
 - Positive evidence: the unmodified Wine preloader, wineserver, prefix creation,
-  protocol exchange, PE `start.exe` load, and bundled PE dependency set work.
-- Current blocker: `ntdll.dll` loading reports `c0000017` after mmap succeeds;
-  `WINE_CMD_OK` has not been observed.
+  protocol exchange, PE `start.exe`, `ntdll.dll`, `kernel32.dll`,
+  `kernelbase.dll`, `win32u.dll`, `imm32.dll` and `cmd.exe` load work.
+- Positive evidence: `cmd.exe /c echo WINE_CMD_OK` executes the built-in,
+  writes 12 bytes to the compatibility filesystem, exits 0, and the literal
+  output reaches the serial log.
+- Remaining conformance work: standard-output handle behavior without command
+  redirection and steady-state resource accounting remain partial.

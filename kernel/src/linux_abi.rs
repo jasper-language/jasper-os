@@ -532,6 +532,7 @@ pub(crate) fn reset_wine_syscall_trace_budget() {
     WINE_READINESS_TRACE_REMAINING.store(WINE_READINESS_TRACE_BUDGET, Ordering::Relaxed);
     WINE_EPOLL_CTL_TRACE_REMAINING.store(WINE_EPOLL_CTL_TRACE_BUDGET, Ordering::Relaxed);
     WINE_DATA_TRACE_REMAINING.store(WINE_DATA_TRACE_BUDGET, Ordering::Relaxed);
+    WINE_MMAP_TRACE_REMAINING.store(WINE_MMAP_TRACE_BUDGET, Ordering::Relaxed);
     SYSCALL_TRACE_REMAINING.store(SYSCALL_TRACE_BUDGET, Ordering::Relaxed);
 }
 
@@ -542,6 +543,8 @@ const WINE_EPOLL_CTL_TRACE_BUDGET: u32 = 128;
 #[cfg(feature = "compat-wine-verify")]
 const WINE_DATA_TRACE_BUDGET: u32 = 256;
 #[cfg(feature = "compat-wine-verify")]
+const WINE_MMAP_TRACE_BUDGET: u32 = 512;
+#[cfg(feature = "compat-wine-verify")]
 static WINE_READINESS_TRACE_REMAINING: AtomicU32 =
     AtomicU32::new(WINE_READINESS_TRACE_BUDGET);
 #[cfg(feature = "compat-wine-verify")]
@@ -549,6 +552,8 @@ static WINE_EPOLL_CTL_TRACE_REMAINING: AtomicU32 =
     AtomicU32::new(WINE_EPOLL_CTL_TRACE_BUDGET);
 #[cfg(feature = "compat-wine-verify")]
 static WINE_DATA_TRACE_REMAINING: AtomicU32 = AtomicU32::new(WINE_DATA_TRACE_BUDGET);
+#[cfg(feature = "compat-wine-verify")]
+static WINE_MMAP_TRACE_REMAINING: AtomicU32 = AtomicU32::new(WINE_MMAP_TRACE_BUDGET);
 
 #[cfg(feature = "compat-wine-verify")]
 fn claim_wine_trace(counter: &AtomicU32) -> bool {
@@ -2806,6 +2811,14 @@ pub fn on_syscall(a: &SyscallArgs) -> SyscallOutcome {
         };
     }
     let value = execute(pid, call, a.user_ip, a.user_preserved);
+    #[cfg(feature = "compat-wine-verify")]
+    if call.syscall == LinuxSyscall::Mmap {
+        crate::kprintln!(
+            "[JSR-WINE-MMAP-RETURN] value={} raw={:#x}",
+            value,
+            value as u64
+        );
+    }
     #[cfg(any(
         feature = "android-ecosystem-verify",
         feature = "android-art-verify",
@@ -5262,6 +5275,18 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const PROT_EXEC: u64 = 0x4;
 
     #[cfg(feature = "compat-wine-verify")]
+    if claim_wine_trace(&WINE_MMAP_TRACE_REMAINING) {
+        crate::kprintln!(
+            "[JSR-WINE-MMAP-REQUEST] addr={:#x} bytes={:#x} prot={:#x} flags={:#x} fd={} offset={:#x}",
+            args[0],
+            args[1],
+            args[2],
+            args[3],
+            args[4] as i64,
+            args[5]
+        );
+    }
+    #[cfg(feature = "compat-wine-verify")]
     if args[3] & MAP_FIXED_NOREPLACE != 0 {
         crate::kprintln!(
             "[JSR-WINE-MMAP] addr={:#x} bytes={:#x} prot={:#x} flags={:#x}",
@@ -5301,7 +5326,9 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let explicit_low = args[0] != 0
         && args[0] >= crate::arch::LOW_USER_WINDOW.0
         && args[0] < crate::arch::LOW_USER_WINDOW.1;
-    let use_low_window = map32 || explicit_low;
+    let low_prot_none_reservation =
+        anonymous && args[0] == 0 && args[2] == 0 && !map32;
+    let mut use_low_window = map32 || explicit_low || low_prot_none_reservation;
     let mut ashmem_handle = None;
     let mut ashmem_regular = false;
     let mut cache_file_id = None;
@@ -5344,6 +5371,7 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     if !anonymous
         && ashmem_handle.is_none()
+        && cache_file_id.is_none()
         && args[3] & MAP_SHARED != 0
         && args[2] & PROT_WRITE != 0
     {
@@ -5390,7 +5418,7 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         crate::kprintln!("[JSR-WINE-MMAP-CACHE] stage=backing-resolved");
     }
     let rounded = bytes.checked_add(PAGE - 1).ok_or(CompatErrno::Invalid)? & !(PAGE - 1);
-    let (window_start, window_end) = if use_low_window {
+    let (mut window_start, mut window_end) = if use_low_window {
         crate::arch::LOW_USER_WINDOW
     } else {
         crate::arch::USER_WINDOW
@@ -5406,10 +5434,15 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     } else {
         align_down(args[0], PAGE)
     };
-    if requested < window_start
-        || requested
-            .checked_add(rounded)
-            .is_none_or(|end| end > window_end)
+    // An explicit address must already belong to the selected window. For
+    // mmap(NULL), the cursor is only a search hint: Wine can place a final
+    // fixed mapping close enough to the top that the next allocation no
+    // longer fits at the cursor, while free space remains elsewhere.
+    if args[0] != 0
+        && (requested < window_start
+            || requested
+                .checked_add(rounded)
+                .is_none_or(|end| end > window_end))
     {
         return Err(CompatErrno::NoMemory);
     }
@@ -5424,8 +5457,28 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         );
     }
     if args[0] == 0 {
-        requested = proc::linux_next_free_start(pid, requested, rounded)
-            .ok_or(CompatErrno::NoMemory)?;
+        let forward = proc::linux_next_free_start(pid, requested, rounded);
+        let restart = proc::linux_next_free_start(pid, window_start, rounded);
+        let topdown = proc::linux_prev_free_start(pid, window_start, window_end, rounded);
+        let mut selected = forward.or(restart).or(topdown);
+        if selected.is_none() && !map32 {
+            window_start = crate::arch::LOW_USER_WINDOW.0;
+            window_end = crate::arch::LOW_USER_WINDOW.1;
+            use_low_window = true;
+            let forward = proc::linux_next_free_start(pid, window_start, rounded);
+            let topdown =
+                proc::linux_prev_free_start(pid, window_start, window_end, rounded);
+            selected = forward.or(topdown);
+            #[cfg(feature = "compat-wine-verify")]
+            if let Some(selected) = selected {
+                crate::kprintln!(
+                    "[JSR-WINE-MMAP] fallback low_window exhausted_cursor={:#x} selected={:#x}",
+                    cursor,
+                    selected
+                );
+            }
+        }
+        requested = selected.ok_or(CompatErrno::NoMemory)?;
         if requested < window_start
             || requested
                 .checked_add(rounded)
@@ -16044,6 +16097,16 @@ fn linux_cache_write_bytes(
             .iter_mut()
             .find(|file| file.id == id)
             .ok_or(CompatErrno::BadFd)?;
+        #[cfg(feature = "compat-wine-verify")]
+        if bytes.windows(11).any(|window| window == b"WINE_CMD_OK") {
+            crate::kprintln!(
+                "[JSR-WINE-CACHE-WRITE] path={} offset={:#x} bytes={}",
+                core::str::from_utf8(&file.path).unwrap_or("<binary>"),
+                offset,
+                bytes.len()
+            );
+            crate::console::write_bytes(bytes);
+        }
         file.bytes.try_reserve(end.saturating_sub(file.bytes.len()))
             .map_err(|_| CompatErrno::NoSpace)?;
         file.bytes.resize(end, 0);

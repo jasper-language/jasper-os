@@ -77,6 +77,17 @@ the current Jasper glibc/static-PIE teardown path faults at `ip=0x202` after
 the test suite returns. The AOSP test code and Binder assertions are unchanged;
 this wrapper is recorded as a separate exit-path gap.
 
+### Wine command execution on Jasper
+
+Unmodified Ubuntu Wine 10.0 executed under the Jasper Linux/POSIX ABI through
+the real UEFI/root-image path. Wine loaded its preloader, wineserver, PE
+`start.exe`, `ntdll.dll`, `kernel32.dll`, `kernelbase.dll`, `win32u.dll`,
+`imm32.dll`, and `cmd.exe`. The command
+`cmd.exe /c echo WINE_CMD_OK >/tmp/wine-cmd.out` executed the built-in, wrote
+12 bytes through the compatibility filesystem, and exited zero.
+
+Evidence: `evidence/compat-wine-accept-r58`.
+
 ## Host baselines
 
 ### Wine

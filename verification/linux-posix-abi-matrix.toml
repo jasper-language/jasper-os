@@ -1,7 +1,7 @@
 schema = 1
 scope = "compat-linux-posix"
 baseline = "Ubuntu Linux x86_64"
-updated = "2026-11-21"
+updated = "2026-11-22"
 
 # This file is the reusable ledger for the compatibility ABI surface exposed to
 # Linux/POSIX programs. A mapped syscall is not a verified ABI item. Wine is a
@@ -21,7 +21,7 @@ status = "mapped"
 [[item]]
 id = "linux-vfs-path-resolution"
 abi = "openat/stat/readlink/realpath pathname resolution"
-positive_coverage = "absolute, relative, dot, dot-dot, repeated separator, symlink, and writable cache paths"
+positive_coverage = "absolute, relative, dot, dot-dot, repeated separator, symlink, writable cache paths, Wine PE import closure and NLS files"
 negative_coverage = "missing paths, non-link readlink EINVAL, and attempted escape above compatibility root"
 evidence = "verification/compat-abi-evidence.md"
 commit = "409c6e2"
@@ -111,7 +111,7 @@ status = "partial"
 [[item]]
 id = "wine-wineserver-bootstrap"
 abi = "cross-process Wine runtime through Linux/POSIX ABI"
-positive_coverage = "unmodified Wine preloader, wineserver, prefix creation, Unix socket protocol, and SCM_RIGHTS exchange"
+positive_coverage = "unmodified Wine preloader, wineserver, prefix creation, Unix socket protocol, SCM_RIGHTS exchange, PE command execution and redirected command output"
 negative_coverage = "missing Wine components, incompatible dynamic libraries, unsupported syscalls, and resource exhaustion"
 evidence = "verification/compat-abi-evidence.md"
 commit = "409c6e2"
@@ -141,7 +141,7 @@ status = "partial"
 [[item]]
 id = "linux-file-backed-shared-mmap"
 abi = "MAP_SHARED file-backed mmap and coherent write visibility"
-positive_coverage = "wineserver and a Wine client map the same writable cache-file pages"
+positive_coverage = "wineserver and a Wine client map the same writable cache-file pages, including KUSER_SHARED_DATA.SystemCall=1"
 negative_coverage = "truncate, private mapping, permission mismatch, stale length and range replacement"
 evidence = "verification/compat-abi-evidence.md"
 commit = "409c6e2 + compatibility ABI hardening"
@@ -151,7 +151,7 @@ status = "partial"
 [[item]]
 id = "linux-low-private-address-window"
 abi = "Linux x86_64 low user virtual address admission"
-positive_coverage = "4 GiB and 5 GiB Wine ranges and MAP_32BIT ranges are admitted without overlapping the Jasper high window"
+positive_coverage = "4 GiB and 5 GiB Wine ranges, MAP_32BIT ranges and PROT_NONE reservations are admitted without overlapping the Jasper high window"
 negative_coverage = "addresses below 128 MiB, above 512 GiB and outside Jasper windows fail closed"
 evidence = "verification/compat-abi-evidence.md"
 commit = "409c6e2 + compatibility ABI hardening"
@@ -164,7 +164,7 @@ reason = "Rows above need deterministic positive and negative fixtures with arch
 
 [[remaining]]
 id = "wine-windows-pe-execution"
-reason = "start.exe loads, but ntdll.dll reports c0000017 after its vprot mmap succeeds; WINE_CMD_OK has not been observed."
+reason = "Unmodified Wine loads start.exe, ntdll.dll, kernel32.dll, kernelbase.dll and cmd.exe, then executes echo WINE_CMD_OK and exits 0. Standard-output handle behavior and steady-state resource accounting still need dedicated conformance coverage."
 
 [[remaining]]
 id = "wine-direct3d-vulkan"

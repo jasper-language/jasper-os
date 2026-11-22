@@ -6510,6 +6510,54 @@ pub(crate) fn linux_next_free_start(pid: ObjId, start: u64, size: u64) -> Option
     })
 }
 
+/// Finds a page-aligned range by searching downward from `upper`.
+///
+/// Linux normally chooses ordinary `mmap(NULL)` candidates top-down. The
+/// forward cursor remains useful for stable low-address placement, but a
+/// compatibility workload can exhaust that cursor while large gaps remain
+/// below the upper window boundary.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_prev_free_start(
+    pid: ObjId,
+    lower: u64,
+    upper: u64,
+    size: u64,
+) -> Option<u64> {
+    crate::kobj::with(|t| {
+        let p = match t.get(pid) {
+            Ok(KObject::Process(p)) => p,
+            _ => return None,
+        };
+        let linux = p.linux.as_ref()?;
+        let alignment = kernel_core::frame::FRAME_SIZE;
+        let mut candidate = upper.checked_sub(size)? & !(alignment - 1);
+        for _ in 0..linux.reservations.len().saturating_add(linux.mappings.len()).saturating_add(1) {
+            if candidate < lower {
+                return None;
+            }
+            let end = candidate.checked_add(size)?;
+            let reservation_start = linux
+                .reservations
+                .iter()
+                .filter(|reservation| reservation.start < end && reservation.end > candidate)
+                .map(|reservation| reservation.start)
+                .min();
+            let mapping_start = linux
+                .mappings
+                .iter()
+                .filter(|mapping| mapping.va < end && mapping.va + alignment > candidate)
+                .map(|mapping| mapping.va)
+                .min();
+            let Some(conflict_start) = reservation_start.into_iter().chain(mapping_start).min()
+            else {
+                return Some(candidate);
+            };
+            candidate = conflict_start.checked_sub(size)? & !(alignment - 1);
+        }
+        None
+    })
+}
+
 /// Renders this process's actual Linux mappings, lazy reservations, shared
 /// mappings and device mappings for `/proc/self/maps`.
 #[cfg(feature = "linux-abi")]

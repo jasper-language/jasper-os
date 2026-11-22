@@ -1063,23 +1063,26 @@ fn execute_root_dynamic_programs(
             "/usr/bin/jasper-file-stdio",
             &stdio_argv,
         )?;
-        let wine_argv: [&[u8]; 5] = [
+        let wine_argv: [&[u8]; 6] = [
             b"/usr/lib/x86_64-linux-gnu/wine/wine",
-            b"cmd",
+            b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/cmd.exe",
             b"/c",
             b"echo",
             b"WINE_CMD_OK",
+            br">/tmp/wine-cmd.out",
         ];
         // Leave TMPDIR unset: Ubuntu Wine's server_tmpdir helper frees the
         // secure_getenv() result when TMPDIR is present. Wine still defaults
         // its temporary directory to /tmp.
-        let wine_envp: [&[u8]; 9] = [
+        let wine_envp: [&[u8]; 11] = [
             b"HOME=/data",
             b"PATH=/usr/lib/x86_64-linux-gnu/wine:/usr/bin:/bin",
+            b"WINEBOOTSTRAPMODE=1",
             b"WINEPREFIX=/data/wineprefix",
             b"WINEARCH=win64",
             b"WINEDEBUG=+module",
-            b"WINEDLLPATH=/usr/lib/x86_64-linux-gnu/wine/x86_64-unix",
+            b"WINEDLLPATH=/usr/lib/x86_64-linux-gnu/wine/x86_64-windows:/usr/lib/x86_64-linux-gnu/wine/x86_64-unix",
+            b"WINEDLLDIR0=/usr/lib/x86_64-linux-gnu/wine",
             b"WINEDLLOVERRIDES=winemenubuilder.exe=d;mscoree=d;mshtml=d",
             b"LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/wine/x86_64-unix",
             b"LANG=C.UTF-8",
@@ -1130,7 +1133,7 @@ fn execute_root_dynamic_programs(
             &wine_argv,
             &wine_envp,
             crate::mm::frame::free_frames(),
-            true,
+            false,
             WINE_COLD_START_DEADLINE_TICKS,
         ) {
             return Err(HealthError::RootExecute);
