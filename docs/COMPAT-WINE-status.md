@@ -111,6 +111,12 @@ package drift, archive or probe digest mismatch, missing final artifacts and
 an existing output directory. See `docs/WINE-D3D-STAGING.md`. This removes the
 manual-root dependency without changing the guest acceptance claim.
 
+The next WSI slice now has a separate fail-closed fixture and matrix. It must
+create a Wine service-desktop HWND, DXGI swapchain and backbuffer, clear and
+read back the backbuffer, and require `Present` to return `S_OK`. The offscreen
+D3D11 pass is never treated as WSI proof. See
+`docs/COMPAT-D3D11-WSI-status.md`.
+
 A generic unmodified C/POSIX fixture performs the same
 `creat -> fdopen -> fputs -> fclose` sequence twice through Jasper and exits
 zero with resources recovered. Disabling tcache did not change the earlier
