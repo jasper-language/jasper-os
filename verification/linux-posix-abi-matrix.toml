@@ -31,7 +31,7 @@ status = "partial"
 [[item]]
 id = "linux-file-status-and-mode"
 abi = "open/create/stat/umask file mode and descriptor status flags"
-positive_coverage = "regular and cache files expose Linux modes, umask, writable O_ACCMODE status, /tmp mode 01777, and standard streams expose character-device stat metadata"
+positive_coverage = "regular and cache files expose Linux modes, umask, writable O_ACCMODE status, /tmp mode 01777; standard streams, pipes and sockets expose matching Linux stat file types"
 negative_coverage = "descriptor access rights reject operations not granted by the open description; fstat rejects negative and unopened descriptors with EBADF"
 evidence = "verification/compat-abi-evidence.md"
 commit = "409c6e2"

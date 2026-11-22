@@ -17101,6 +17101,10 @@ fn linux_fstat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         write_synthetic_stat(args[1], entry.handle, 1, 0, 0o020666)?;
         return Ok(0);
     }
+    if let Some(mode) = synthetic_fd_mode(entry.kind) {
+        write_synthetic_stat(args[1], entry.handle, 1, 0, mode)?;
+        return Ok(0);
+    }
     if entry.kind == compat_core::fd::CompatKind::Device {
         let (size, regular) = proc::linux_ashmem_state(pid, entry.handle)
             .map(|(size, _, _)| {
@@ -17196,6 +17200,16 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                     size,
                     if regular { 0o100600 } else { 0o020666 },
                 )?;
+                return Ok(0);
+            }
+            if entry.kind == compat_core::fd::CompatKind::Other
+                && entry.handle == proc::LINUX_CONSOLE_HANDLE
+            {
+                write_synthetic_stat(args[2], entry.handle, 1, 0, 0o020666)?;
+                return Ok(0);
+            }
+            if let Some(mode) = synthetic_fd_mode(entry.kind) {
+                write_synthetic_stat(args[2], entry.handle, 1, 0, mode)?;
                 return Ok(0);
             }
             let node = if entry.kind == compat_core::fd::CompatKind::Path {
@@ -21492,6 +21506,20 @@ fn write_linux_stat(address: u64, node: crate::linux_vfs::Node) -> Result<(), Co
     let (size, links, mode) = node.stat_metadata();
     write_synthetic_stat(address, node.inode(), links, size, mode)?;
     Ok(())
+}
+
+fn synthetic_fd_mode(kind: compat_core::fd::CompatKind) -> Option<u32> {
+    use compat_core::fd::CompatKind;
+    Some(match kind {
+        CompatKind::Pipe => 0o010600,
+        CompatKind::Socket => 0o140600,
+        CompatKind::Event
+        | CompatKind::Timer
+        | CompatKind::Signal
+        | CompatKind::Pidfd
+        | CompatKind::Inotify => 0o100600,
+        _ => return None,
+    })
 }
 
 /// Writes x86_64 `stat` for one synthetic file or device identity.

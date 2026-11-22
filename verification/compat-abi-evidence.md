@@ -18,11 +18,11 @@ instead of rescanning the complete ABI surface.
 - `evidence/compat-wine-modes-r37`
 - `evidence/compat-wine-fdopen-vm-r17`
 - `evidence/compat-wine-unlink-open-file-20261121-r14`
-- `evidence/compat-wine-stdio-fixture-r62`
+- `evidence/compat-wine-fd-stat-r63`
 - The last run proves an unlinked cache file remains addressable through an
   imported descriptor and that Wine can map it after `unlink`. The standard-fd
-  fixture proves `fstat(1)` reports a character device and invalid descriptors
-  return `EBADF`.
+  fixture proves `fstat(1)` reports a character device, pipe and socket pairs
+  report FIFO/socket types, and invalid descriptors return `EBADF`.
 
 ## Positioned I/O
 
@@ -98,7 +98,7 @@ instead of rescanning the complete ABI surface.
 - `evidence/compat-wine-bootstrap-r37`
 - `evidence/compat-wine-win32u-imm-r44`
 - `evidence/compat-wine-low-prot-none-r57`
-- `evidence/compat-wine-stdio-fixture-r62`
+- `evidence/compat-wine-fd-stat-r63`
 - Positive evidence: the unmodified Wine preloader, wineserver, prefix creation,
   protocol exchange, PE `start.exe`, `ntdll.dll`, `kernel32.dll`,
   `kernelbase.dll`, `win32u.dll`, `imm32.dll` and `cmd.exe` load work.

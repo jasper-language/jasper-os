@@ -93,7 +93,7 @@ removed interfaces.
 - Latest full Linux/Android root UEFI slice:
   `evidence/issue21-uefi-boot-20261120-204541`
 - Compatibility ABI / Wine command execution:
-  `evidence/compat-wine-stdio-fixture-r62`
+  `evidence/compat-wine-fd-stat-r63`
 
 - Full Linux/Android root UEFI:
   `evidence/issue21-uefi-boot-20261115-userfaultfd-v123-clean`
