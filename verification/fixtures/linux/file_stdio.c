@@ -52,14 +52,24 @@ int main(void)
     int lifetime_fd;
     int shared_fd;
     int shared_readonly_fd;
+    int vectored_fd;
+    int vectored_readonly_fd;
+    int vectored_writeonly_fd;
+    int vectored_pipe[2];
     int *fillers;
     size_t filler_count;
+    ssize_t vectored_result;
     char signal_byte;
     char socket_buffer[8] = {0};
+    char vector_buffer[64] = {0};
+    char vector_readback[64] = {0};
+    char *pipe_payload;
     struct sockaddr_un unix_address;
     struct epoll_event epoll_event;
     struct sigaction signal_action;
     struct iovec socket_iov[2];
+    struct iovec vectored_iov[2];
+    struct iovec above_uio_max[1025] = {{0}};
     struct msghdr socket_message;
     struct cmsghdr *control_message;
     struct rlimit old_rlimit;
@@ -413,6 +423,77 @@ int main(void)
     close(rights_pipe[0]);
     close(rights_pipe[1]);
     if (setrlimit(RLIMIT_NOFILE, &old_rlimit) != 0) return 97;
+    vectored_fd = open("/tmp/jasper-vectored",
+                       O_CREAT | O_TRUNC | O_RDWR, 0600);
+    if (vectored_fd < 0 || ftruncate(vectored_fd, 64) != 0) return 140;
+    memcpy(vector_buffer, "abcdef", 6);
+    vectored_iov[0].iov_base = vector_buffer;
+    vectored_iov[0].iov_len = 3;
+    vectored_iov[1].iov_base = vector_buffer + 3;
+    vectored_iov[1].iov_len = 3;
+    if (writev(vectored_fd, vectored_iov, 2) != 6) return 141;
+    if (lseek(vectored_fd, 0, SEEK_SET) != 0) return 142;
+    vectored_iov[0].iov_base = vector_readback;
+    vectored_iov[0].iov_len = 2;
+    vectored_iov[1].iov_base = vector_readback + 2;
+    vectored_iov[1].iov_len = 4;
+    if (readv(vectored_fd, vectored_iov, 2) != 6 ||
+        memcmp(vector_readback, "abcdef", 6) != 0 ||
+        lseek(vectored_fd, 0, SEEK_CUR) != 6) return 143;
+    if (lseek(vectored_fd, 5, SEEK_SET) != 5) return 144;
+    memset(vector_readback, 0, sizeof(vector_readback));
+    if (preadv(vectored_fd, vectored_iov, 2, 0) != 6 ||
+        memcmp(vector_readback, "abcdef", 6) != 0 ||
+        lseek(vectored_fd, 0, SEEK_CUR) != 5) return 145;
+    memcpy(vector_buffer + 32, "ghijkl", 6);
+    vectored_iov[0].iov_base = vector_buffer + 32;
+    vectored_iov[0].iov_len = 2;
+    vectored_iov[1].iov_base = vector_buffer + 34;
+    vectored_iov[1].iov_len = 4;
+    if (pwritev(vectored_fd, vectored_iov, 2, 32) != 6 ||
+        pread(vectored_fd, vector_readback, 6, 32) != 6 ||
+        memcmp(vector_readback, "ghijkl", 6) != 0 ||
+        lseek(vectored_fd, 0, SEEK_CUR) != 5) return 146;
+    vectored_readonly_fd = open("/tmp/jasper-vectored", O_RDONLY);
+    vectored_writeonly_fd = open("/tmp/jasper-vectored", O_WRONLY);
+    vectored_iov[0].iov_base = vector_buffer;
+    vectored_iov[0].iov_len = 1;
+    vectored_iov[1].iov_len = 0;
+    errno = 0;
+    if (vectored_readonly_fd < 0 || vectored_writeonly_fd < 0 ||
+        pwritev(vectored_readonly_fd, vectored_iov, 1, 0) != -1 ||
+        errno != EBADF) return 147;
+    errno = 0;
+    if (readv(vectored_writeonly_fd, vectored_iov, 1) != -1 ||
+        errno != EBADF) return 148;
+    errno = 0;
+    if (readv(vectored_fd, (struct iovec *)1, 1) != -1 ||
+        errno != EFAULT || lseek(vectored_fd, 0, SEEK_CUR) != 5) return 149;
+    errno = 0;
+    if (writev(vectored_fd, (struct iovec *)1, 1) != -1 ||
+        errno != EFAULT || lseek(vectored_fd, 0, SEEK_CUR) != 5) return 155;
+    errno = 0;
+    if (readv(vectored_fd, above_uio_max, 1025) != -1 ||
+        errno != EINVAL) return 150;
+    if (pipe(vectored_pipe) != 0 ||
+        fcntl(vectored_pipe[1], F_SETPIPE_SZ, 4096) != 4096 ||
+        fcntl(vectored_pipe[1], F_SETFL, O_NONBLOCK) != 0) return 151;
+    pipe_payload = malloc(8192);
+    if (!pipe_payload) return 152;
+    memset(pipe_payload, 'v', 8192);
+    vectored_iov[0].iov_base = pipe_payload;
+    vectored_iov[0].iov_len = 4096;
+    vectored_iov[1].iov_base = pipe_payload + 4096;
+    vectored_iov[1].iov_len = 4096;
+    vectored_result = writev(vectored_pipe[1], vectored_iov, 2);
+    if (vectored_result <= 0 || vectored_result >= 8192) return 153;
+    free(pipe_payload);
+    close(vectored_pipe[0]);
+    close(vectored_pipe[1]);
+    close(vectored_writeonly_fd);
+    close(vectored_readonly_fd);
+    close(vectored_fd);
+    if (unlink("/tmp/jasper-vectored") != 0) return 154;
     if (mkdir("/tmp/jasper-vfs", 0700) != 0 ||
         mkdir("/tmp/jasper-vfs/a", 0700) != 0 ||
         mkdir("/tmp/jasper-vfs/a/b", 0700) != 0) return 101;
@@ -594,6 +675,6 @@ int main(void)
         rmdir("/tmp/jasper-vfs/a/b") != 0 ||
         rmdir("/tmp/jasper-vfs/a") != 0 ||
         rmdir("/tmp/jasper-vfs") != 0) return 14;
-    puts("FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true positioned_io=true cwd_status=true record_lock=true monotonic_time=true unix_socket=true socket_message=true epoll_status=true vfs_path=true unlink_lifetime=true shared_mmap=true low_window=true");
+    puts("FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true positioned_io=true vectored_fd=true cwd_status=true record_lock=true monotonic_time=true unix_socket=true socket_message=true epoll_status=true vfs_path=true unlink_lifetime=true shared_mmap=true low_window=true");
     return 0;
 }

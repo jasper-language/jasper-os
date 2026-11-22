@@ -4455,18 +4455,7 @@ fn linux_pwrite64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         bytes.resize(len, 0);
         copy_from_user(&mut bytes, args[1], len).map_err(|_| CompatErrno::Fault)?;
         let offset = usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
-        let end = offset.checked_add(len).ok_or(CompatErrno::Invalid)?;
-        let mut state = COMPAT.lock();
-        let file = state
-            .cache_files
-            .iter_mut()
-            .find(|file| file.id == id)
-            .ok_or(CompatErrno::BadFd)?;
-        file.bytes
-            .try_reserve(end.saturating_sub(file.bytes.len()))
-            .map_err(|_| CompatErrno::NoSpace)?;
-        file.bytes.resize(end, 0);
-        file.bytes[offset..end].copy_from_slice(&bytes);
+        linux_cache_write_at(id, offset, &bytes)?;
         return Ok(len as u64);
     }
     if entry.kind != compat_core::fd::CompatKind::Device
@@ -4512,11 +4501,7 @@ fn linux_vectored_file_io(
         return Err(CompatErrno::Invalid);
     }
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
-    if entry.kind != compat_core::fd::CompatKind::Device
-        || proc::linux_ashmem_is_regular(pid, entry.handle) != Some(true)
-    {
-        return Err(CompatErrno::BadFd);
-    }
+    let cache_id = linux_cache_file_id(entry.handle);
     let required = if write {
         kernel_core::object::Rights::WRITE
     } else {
@@ -4561,6 +4546,77 @@ fn linux_vectored_file_io(
     };
     if total == 0 {
         return Ok(0);
+    }
+    if let Some(id) = cache_id {
+        if write {
+            let mut bytes = alloc::vec::Vec::new();
+            bytes
+                .try_reserve_exact(total)
+                .map_err(|_| CompatErrno::NoMemory)?;
+            bytes.resize(total, 0);
+            let mut input_offset = 0usize;
+            for (base, len) in vectors {
+                copy_from_user(&mut bytes[input_offset..input_offset + len], base, len)
+                    .map_err(|_| CompatErrno::Fault)?;
+                input_offset += len;
+            }
+            let file_offset =
+                usize::try_from(offset).map_err(|_| CompatErrno::Invalid)?;
+            linux_cache_write_at(id, file_offset, &bytes)?;
+            if uses_cursor
+                && !proc::set_linux_file_offset(pid, fd, offset + total as u64)
+            {
+                return Err(CompatErrno::BadFd);
+            }
+            return Ok(total as u64);
+        }
+        let file_offset = usize::try_from(offset).map_err(|_| CompatErrno::Invalid)?;
+        let mut bytes = linux_cache_read_at(id, file_offset, total)?;
+        let count = bytes.len();
+        scatter_iovec_bytes(pid, &vectors, &mut bytes)?;
+        if uses_cursor
+            && count != 0
+            && !proc::set_linux_file_offset(pid, fd, offset + count as u64)
+        {
+            return Err(CompatErrno::BadFd);
+        }
+        return Ok(count as u64);
+    }
+    if entry.kind == compat_core::fd::CompatKind::Pipe
+        || entry.kind == compat_core::fd::CompatKind::Socket
+    {
+        return Err(CompatErrno::Pipe);
+    }
+    if entry.kind == compat_core::fd::CompatKind::File {
+        if write {
+            return Err(CompatErrno::ReadOnly);
+        }
+        let (handle, _) = proc::linux_file_state(pid, fd).ok_or(CompatErrno::BadFd)?;
+        let file = crate::linux_vfs::FileId::from_handle(handle)
+            .ok_or(CompatErrno::BadFd)?;
+        let source = file.bytes();
+        let file_offset = usize::try_from(offset).map_err(|_| CompatErrno::Invalid)?;
+        let available = source.len().saturating_sub(file_offset).min(total);
+        let mut bytes = alloc::vec::Vec::new();
+        bytes
+            .try_reserve_exact(available)
+            .map_err(|_| CompatErrno::NoMemory)?;
+        if available != 0 {
+            bytes.extend_from_slice(&source[file_offset..file_offset + available]);
+        }
+        scatter_iovec_bytes(pid, &vectors, &mut bytes)?;
+        if uses_cursor
+            && available != 0
+            && !proc::set_linux_file_offset(pid, fd, offset + available as u64)
+        {
+            return Err(CompatErrno::BadFd);
+        }
+        return Ok(available as u64);
+    }
+    if entry.kind != compat_core::fd::CompatKind::Device
+        || proc::linux_ashmem_is_regular(pid, entry.handle) != Some(true)
+    {
+        return Err(CompatErrno::BadFd);
     }
     if write {
         let mut bytes = alloc::vec::Vec::new();
@@ -16373,6 +16429,74 @@ pub(crate) fn reclaim_unlinked_cache_files() {
     drop(removed);
 }
 
+fn linux_cache_read_at(
+    id: u32,
+    offset: usize,
+    limit: usize,
+) -> Result<alloc::vec::Vec<u8>, CompatErrno> {
+    let (available, shared) = {
+        let state = COMPAT.lock();
+        let file = state
+            .cache_files
+            .iter()
+            .find(|file| file.id == id)
+            .ok_or(CompatErrno::BadFd)?;
+        (
+            file.bytes.len().saturating_sub(offset).min(limit),
+            file.shared.clone(),
+        )
+    };
+    let mut bytes = alloc::vec::Vec::new();
+    bytes
+        .try_reserve_exact(available)
+        .map_err(|_| CompatErrno::NoSpace)?;
+    bytes.resize(available, 0);
+    if let Some(shared) = shared {
+        let copied =
+            proc::linux_shared_memory_read_into(&shared, offset as u64, &mut bytes)
+                .map_err(|_| CompatErrno::Invalid)?;
+        bytes.truncate(copied);
+    } else if available != 0 {
+        let state = COMPAT.lock();
+        let file = state
+            .cache_files
+            .iter()
+            .find(|file| file.id == id)
+            .ok_or(CompatErrno::BadFd)?;
+        bytes.copy_from_slice(&file.bytes[offset..offset + available]);
+    }
+    Ok(bytes)
+}
+
+fn linux_cache_write_at(
+    id: u32,
+    offset: usize,
+    bytes: &[u8],
+) -> Result<(), CompatErrno> {
+    let end = offset
+        .checked_add(bytes.len())
+        .ok_or(CompatErrno::Invalid)?;
+    let shared = {
+        let mut state = COMPAT.lock();
+        let file = state
+            .cache_files
+            .iter_mut()
+            .find(|file| file.id == id)
+            .ok_or(CompatErrno::BadFd)?;
+        file.bytes
+            .try_reserve(end.saturating_sub(file.bytes.len()))
+            .map_err(|_| CompatErrno::NoSpace)?;
+        file.bytes.resize(end, 0);
+        file.bytes[offset..end].copy_from_slice(bytes);
+        file.shared.clone()
+    };
+    if let Some(shared) = shared {
+        proc::linux_shared_memory_write_from(&shared, offset as u64, bytes)
+            .map_err(|_| CompatErrno::NoSpace)?;
+    }
+    Ok(())
+}
+
 fn linux_cache_read(
     pid: ObjId,
     fd: u32,
@@ -16383,21 +16507,7 @@ fn linux_cache_read(
     let id = linux_cache_file_id(handle).ok_or(CompatErrno::BadFd)?;
     let offset = proc::linux_fd_offset(pid, fd).ok_or(CompatErrno::BadFd)?;
     let offset = usize::try_from(offset).map_err(|_| CompatErrno::Invalid)?;
-    let bytes = {
-        let state = COMPAT.lock();
-        let file = state
-            .cache_files
-            .iter()
-            .find(|file| file.id == id)
-            .ok_or(CompatErrno::BadFd)?;
-        let available = file.bytes.len().saturating_sub(offset).min(len);
-        let mut bytes = alloc::vec::Vec::new();
-        bytes
-            .try_reserve_exact(available)
-            .map_err(|_| CompatErrno::NoSpace)?;
-        bytes.extend_from_slice(&file.bytes[offset..offset + available]);
-        bytes
-    };
+    let bytes = linux_cache_read_at(id, offset, len)?;
     if !bytes.is_empty() {
         copy_to_user(destination, &bytes, bytes.len()).map_err(|_| CompatErrno::Fault)?;
     }
@@ -16438,28 +16548,7 @@ fn linux_cache_write_bytes(
     let end = offset
         .checked_add(bytes.len())
         .ok_or(CompatErrno::Invalid)?;
-    {
-        let mut state = COMPAT.lock();
-        let file = state
-            .cache_files
-            .iter_mut()
-            .find(|file| file.id == id)
-            .ok_or(CompatErrno::BadFd)?;
-        file.bytes.try_reserve(end.saturating_sub(file.bytes.len()))
-            .map_err(|_| CompatErrno::NoSpace)?;
-        file.bytes.resize(end, 0);
-        file.bytes[offset..end].copy_from_slice(bytes);
-    }
-    let shared = COMPAT
-        .lock()
-        .cache_files
-        .iter()
-        .find(|file| file.id == id)
-        .and_then(|file| file.shared.clone());
-    if let Some(shared) = shared {
-        proc::linux_shared_memory_write_from(&shared, offset as u64, bytes)
-            .map_err(|_| CompatErrno::NoSpace)?;
-    }
+    linux_cache_write_at(id, offset, bytes)?;
     if !proc::set_linux_file_offset(pid, fd, end as u64) {
         return Err(CompatErrno::BadFd);
     }
@@ -16475,37 +16564,7 @@ fn linux_cache_read_bytes(
     let id = linux_cache_file_id(handle).ok_or(CompatErrno::BadFd)?;
     let offset = proc::linux_fd_offset(pid, fd).ok_or(CompatErrno::BadFd)?;
     let offset = usize::try_from(offset).map_err(|_| CompatErrno::Invalid)?;
-    let (available, shared) = {
-        let state = COMPAT.lock();
-        let file = state
-            .cache_files
-            .iter()
-            .find(|file| file.id == id)
-            .ok_or(CompatErrno::BadFd)?;
-        (
-            file.bytes.len().saturating_sub(offset).min(limit),
-            file.shared.clone(),
-        )
-    };
-    let mut bytes = alloc::vec::Vec::new();
-    bytes
-        .try_reserve_exact(available)
-        .map_err(|_| CompatErrno::NoSpace)?;
-    bytes.resize(available, 0);
-    if let Some(shared) = shared {
-        let read = proc::linux_shared_memory_read_into(&shared, offset as u64, &mut bytes)
-            .map_err(|_| CompatErrno::Invalid)?;
-        bytes.truncate(read);
-    } else {
-        let state = COMPAT.lock();
-        let file = state
-            .cache_files
-            .iter()
-            .find(|file| file.id == id)
-            .ok_or(CompatErrno::BadFd)?;
-        bytes.copy_from_slice(&file.bytes[offset..offset + available]);
-    }
-    Ok(bytes)
+    linux_cache_read_at(id, offset, limit)
 }
 
 fn linux_cache_shared_object(

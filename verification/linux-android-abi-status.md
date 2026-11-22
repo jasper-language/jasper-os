@@ -26,16 +26,18 @@ python3 scripts/check-compat-abi-matrix.py
 The first semantically verified ledger items are Linux file status/mode,
 positioned I/O, current-directory lifecycle, POSIX record locks, monotonic time,
 AF_UNIX socket lifecycle, socket messaging, epoll readiness, VFS path
-resolution, unlink lifetime, and the low private address window. `fstat` file
-type and umask-derived permissions, descriptor status flags, file size,
-standard-character streams, FIFOs, sockets, `EBADF` and `ENOENT` are covered,
-as are cache-file `pread64/pwrite64` cursor/error semantics, deleted-cwd
-`getcwd`/relative-path behavior, blocking/interrupted fcntl locks, monotonic
-absolute/relative sleep deadlines, pathname socket bind/connect/accept/stale
-names, SCM_RIGHTS descriptor transfer and `MSG_CTRUNC` exhaustion,
-listener/accepted readiness with real timeout and signal interruption,
-writable symlink/readlink/realpath paths, descriptor and shared-mapping
-survival after unlink, and 4 GiB/5 GiB/`MAP_32BIT` address admission.
+resolution, unlink lifetime, vectored file-descriptor I/O, and the low private
+address window. `fstat` file type and umask-derived permissions, descriptor
+status flags, file size, standard-character streams, FIFOs, sockets, `EBADF`
+and `ENOENT` are covered, as are cache-file `pread64/pwrite64`
+cursor/error semantics, split-iovec and positioned file I/O, bounded pipe
+short writes, deleted-cwd `getcwd`/relative-path behavior, blocking/interrupted
+fcntl locks, monotonic absolute/relative sleep deadlines, pathname socket
+bind/connect/accept/stale names, SCM_RIGHTS descriptor transfer and
+`MSG_CTRUNC` exhaustion, listener/accepted readiness with real timeout and
+signal interruption, writable symlink/readlink/realpath paths, descriptor and
+shared-mapping survival after unlink, and 4 GiB/5 GiB/`MAP_32BIT` address
+admission.
 
 `map_shadow_stack` returns `EOPNOTSUPP` because the current Jasper kernel
 advertises no user shadow-stack feature through `ARCH_SHSTK_STATUS`. This is a
@@ -107,7 +109,7 @@ removed interfaces.
 - Latest full Linux/Android root UEFI slice:
   `evidence/issue21-uefi-boot-20261120-204541`
 - Compatibility ABI / Wine command execution:
-  `evidence/compat-wine-remaining-abi-r96`
+  `evidence/compat-wine-vectored-abi-r98`
 
 - Full Linux/Android root UEFI:
   `evidence/issue21-uefi-boot-20261115-userfaultfd-v123-clean`

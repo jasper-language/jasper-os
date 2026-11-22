@@ -92,10 +92,19 @@ instead of rescanning the complete ABI surface.
 ## Vectored I/O
 
 - `evidence/compat-wine-writev-pipe-20261121-r5`
+- `evidence/compat-wine-scm-truncation-r85`
+- `evidence/compat-wine-vectored-abi-r98`
 - Positive evidence: unmodified wineserver returns the 64-byte reply header
   plus its variable payload through `writev`, allowing the client to complete
   `init_first_thread` and continue the Wine protocol.
-- Negative coverage still needs dedicated short-write, bad-iov and fault tests.
+- Positive evidence: cache files support split-iovec `readv/writev`,
+  `preadv/pwritev` at explicit offsets, and preserve the shared descriptor
+  cursor for positioned operations; a 4 KiB nonblocking pipe reports a
+  bounded short write.
+- Negative evidence: 1025 iovecs return `EINVAL`, bad iovec storage returns
+  `EFAULT` without advancing the cursor, and access-mode mismatches return
+  `EBADF`.
+- Environment: Jasper UEFI, Linux x86_64 compatibility ABI.
 
 ## Poll and epoll readiness
 

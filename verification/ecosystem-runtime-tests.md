@@ -86,7 +86,7 @@ the real UEFI/root-image path. Wine loaded its preloader, wineserver, PE
 the built-in, wrote through the inherited standard-output handle, and exited
 zero.
 
-Evidence: `evidence/compat-wine-remaining-abi-r96`.
+Evidence: `evidence/compat-wine-vectored-abi-r98`.
 
 ## Host baselines
 

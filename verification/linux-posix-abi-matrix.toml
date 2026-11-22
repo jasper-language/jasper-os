@@ -121,12 +121,12 @@ status = "partial"
 [[item]]
 id = "linux-vectored-file-descriptor-io"
 abi = "readv/writev over pipes, sockets and writable cache files"
-positive_coverage = "Wine protocol headers and payloads cross pipes and sockets with complete vectored writes"
-negative_coverage = "bad iovec ranges, short writes, user faults and descriptor access-mode mismatches"
-evidence = "verification/compat-abi-evidence.md"
-commit = "409c6e2 + compatibility ABI hardening"
+positive_coverage = "split cache-file iovecs, positioned preadv/pwritev without cursor movement, socket and pipe transfers, and bounded short pipe writes"
+negative_coverage = "too many iovecs, user faults, and descriptor access-mode mismatches fail without cursor movement or partial file mutation"
+evidence = "verification/compat-abi-evidence.md; evidence/compat-wine-vectored-abi-r98"
+commit = "compat vectored ABI r98"
 environment = "qemu-jasper-linux-abi"
-status = "partial"
+status = "verified"
 
 [[item]]
 id = "linux-open-unlink-lifetime"
