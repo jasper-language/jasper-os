@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,12 @@ MATRIX = ROOT / "verification/compat-d3d12.toml"
 PROBE = ROOT / "verification/fixtures/windows/d3d12_probe.c"
 BUILD = ROOT / "scripts/build-d3d12-probe.sh"
 STAGE = ROOT / "scripts/prepare-vkd3d-proton-tree.sh"
+CARGO = ROOT / "kernel/Cargo.toml"
+VFS = ROOT / "kernel/src/linux_vfs.rs"
+LIFECYCLE = ROOT / "kernel/src/lifecycle_health.rs"
+BOOT = ROOT / "scripts/issue21-uefi-boot-check.sh"
+STAGING = ROOT / "scripts/prepare-wine-d3d-staging.py"
+STAGING_MANIFEST = ROOT / "verification/wine-d3d-staging.json"
 
 
 class ValidationError(ValueError):
@@ -146,6 +153,51 @@ def validate(matrix: dict[str, Any]) -> tuple[int, int]:
     require(baseline["archive_sha256"] in stage, "staging script digest is not pinned")
     require("tar --zstd -xf" in stage, "staging script must extract the pinned archive")
     require("d3d12core.dll" in stage, "staging script must verify D3D12 core")
+
+    cargo = CARGO.read_text(encoding="utf-8")
+    require(
+        'compat-wine-d3d12-verify = ["compat-wine-d3d-verify"]' in cargo,
+        "D3D12 verification feature is not wired",
+    )
+    vfs = VFS.read_text(encoding="utf-8")
+    for path in (
+        "/opt/wine-devel/lib/wine/x86_64-windows/d3d12.dll",
+        "/opt/wine-devel/lib/wine/x86_64-windows/d3d12core.dll",
+        "/opt/wine-devel/lib/wine/x86_64-windows/d3d12-probe.exe",
+    ):
+        require(path in vfs, f"D3D12 VFS path missing: {path}")
+    lifecycle = LIFECYCLE.read_text(encoding="utf-8")
+    require(
+        'feature = "compat-wine-d3d12-verify"' in lifecycle,
+        "D3D12 probe is not behind its verification feature",
+    )
+    require(
+        "WINEDLLOVERRIDES=d3d12=n,b;d3d12core=n,b" in lifecycle,
+        "D3D12 Wine DLL overrides are missing",
+    )
+    require(
+        'run_root_dynamic_program_with_deadline(\n                    "compat-wine-d3d12"'
+        in lifecycle,
+        "D3D12 program identity is missing",
+    )
+    boot = BOOT.read_text(encoding="utf-8")
+    require("compat-wine-d3d12)" in boot, "D3D12 UEFI mode is missing")
+    require("^D3D12_PROBE_OK pixel=32,64,128,255 observed=" in boot,
+            "D3D12 marker gate is missing")
+    require("program=compat-wine-d3d12 " in boot,
+            "D3D12 lifecycle gate is missing")
+    staging = STAGING.read_text(encoding="utf-8")
+    require("vkd3d-proton-3.1.tar.zst" in staging,
+            "VKD3D archive staging is missing")
+    require("d3d12-probe.exe" in staging, "D3D12 probe staging is missing")
+    staged = json.loads(STAGING_MANIFEST.read_text(encoding="utf-8"))
+    final_files = staged.get("final_files", {})
+    for path in (
+        "opt/wine-devel/lib/wine/x86_64-windows/d3d12.dll",
+        "opt/wine-devel/lib/wine/x86_64-windows/d3d12core.dll",
+        "opt/wine-devel/lib/wine/x86_64-windows/d3d12-probe.exe",
+    ):
+        require(path in final_files, f"D3D12 staging manifest path missing: {path}")
     return len(cases), len(gates)
 
 

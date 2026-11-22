@@ -36,6 +36,17 @@ fixture 可构建、D3D11 通过或 host baseline 当作 D3D12 done。
 Jasper bounded user window 还不覆盖 Wine 随机化 PE 基址，因此该切片暂时使用
 `--disable-dynamicbase`；这不代表通用 ASLR 已完成。
 
+`scripts/prepare-wine-d3d-staging.py` 现在把固定 VKD3D-Proton DLL、D3D12 probe
+和 WSI probe 一起装入独立的 `/opt/wine-devel` root。内核已有独立
+`compat-wine-d3d12-verify` feature；对应启动模式为：
+
+```text
+ISSUE21_UEFI_MODE=compat-wine-d3d12
+```
+
+该模式要求字面量 `D3D12_PROBE_OK`、进程退出零和 `resources=true`。接线完成
+不改变下方“尚未运行”的结论。
+
 2026-11-22 已在隔离 Debian bookworm 容器中使用 MinGW-w64 GCC 12.2 实际交叉
 编译，产物为 x86-64 PE32+ console executable。该结果仅证明 fixture 可构建。
 证据见 `evidence/compat-d3d12-fixture-20261122/README.md`。

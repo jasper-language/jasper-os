@@ -22,6 +22,11 @@ Any failed stage emits `D3D11_WSI_PROBE_FAIL` and exits non-zero. The checker
 also rejects a pass marker placed before `Present` or a manifest that claims an
 unproven Jasper guest or physical GPU pass.
 
+The fixed staging root carries this probe under `/opt/wine-devel`, and the
+kernel exposes the separate `compat-wine-wsi-verify` feature. Its UEFI mode is
+`ISSUE21_UEFI_MODE=compat-wine-wsi`; the host-side gate requires the literal
+`D3D11_WSI_PROBE_OK ... present=1` marker and `resources=true`.
+
 ## Build
 
 The reference cross-build uses a pinned x86-64 MinGW toolchain and deliberately

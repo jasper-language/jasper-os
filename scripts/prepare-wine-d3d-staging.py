@@ -27,6 +27,8 @@ REPO = Path(__file__).resolve().parents[1]
 MANIFEST = REPO / "verification/wine-d3d-staging.json"
 ARCHIVE_CACHE = REPO / "target/wine-d3d-staging-cache"
 PROBE_SOURCE = REPO / "verification/fixtures/windows/d3d11_probe.c"
+D3D12_PROBE_SOURCE = REPO / "verification/fixtures/windows/d3d12_probe.c"
+D3D11_WSI_PROBE_SOURCE = REPO / "verification/fixtures/windows/d3d11_wsi_probe.c"
 DEFAULT_OUTPUT = REPO / "target/wine-d3d-staging"
 MESA_FILES = (
     (
@@ -85,7 +87,8 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     require(manifest.get("schema") == 1, "manifest schema must be 1")
     require(manifest.get("architecture") == "x86_64", "architecture must be x86_64")
     require(
-        manifest.get("release") == "wine-11.22-dxvk-3.1.1-lavapipe-26.0.8",
+        manifest.get("release")
+        == "wine-11.22-dxvk-3.1.1-vkd3d-3.1-lavapipe-26.0.8",
         "release identity mismatch",
     )
     components = manifest.get("components", {})
@@ -96,6 +99,11 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         "dxvk",
         "d3d11-probe-source",
         "d3d11-probe",
+        "d3d12-probe-source",
+        "d3d12-probe",
+        "d3d11-wsi-probe-source",
+        "d3d11-wsi-probe",
+        "vkd3d-proton",
     }
     require(set(components) == expected_components, "component set mismatch")
 
@@ -104,6 +112,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         "wine-devel": "11.22~noble-1",
         "wine-devel-amd64": "11.22~noble-1",
         "dxvk": "3.1.1",
+        "vkd3d-proton": "3.1",
     }
     for name, version in expected_versions.items():
         item = components[name]
@@ -112,16 +121,34 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         require(isinstance(digest, str) and len(digest) == 64, f"{name} digest missing")
         require(item.get("license"), f"{name} license missing")
 
-    probe_source = components["d3d11-probe-source"]
-    require(probe_source.get("path") == str(Path("verification/fixtures/windows/d3d11_probe.c")),
-            "probe source path mismatch")
-    require(
-        probe_source.get("sha256") == sha256_file(PROBE_SOURCE),
-        "probe source digest mismatch",
+    probe_sources = (
+        ("d3d11-probe-source", PROBE_SOURCE),
+        ("d3d12-probe-source", D3D12_PROBE_SOURCE),
+        ("d3d11-wsi-probe-source", D3D11_WSI_PROBE_SOURCE),
     )
+    for name, source_path in probe_sources:
+        probe_source = components[name]
+        require(
+            probe_source.get("path") == source_path.relative_to(REPO).as_posix(),
+            f"{name} path mismatch",
+        )
+        require(
+            probe_source.get("sha256") == sha256_file(source_path),
+            f"{name} digest mismatch",
+        )
+    for name in ("d3d11-probe", "d3d12-probe", "d3d11-wsi-probe"):
+        item = components[name]
+        require(
+            isinstance(item.get("bytes"), int) and item["bytes"] > 0,
+            f"{name} byte length missing",
+        )
+        require(
+            isinstance(item.get("sha256"), str) and len(item["sha256"]) == 64,
+            f"{name} digest missing",
+        )
 
     final_files = manifest.get("final_files", {})
-    require(len(final_files) >= 11, "final file set is incomplete")
+    require(len(final_files) == 15, "final file set is incomplete")
     for path, digest in final_files.items():
         _validate_relative_path(path, "final file")
         require(isinstance(digest, str) and len(digest) == 64, f"{path} digest missing")
@@ -157,7 +184,7 @@ def command_path(name: str) -> str | None:
 
 
 def verify_tools() -> None:
-    for tool in ("dpkg-deb", "ldd"):
+    for tool in ("dpkg-deb", "ldd", "tar"):
         require(command_path(tool) is not None, f"required tool is missing: {tool}")
 
 
@@ -203,6 +230,26 @@ def extract_deb(archive: Path, destination: Path) -> None:
 def safe_extract_tar(archive: Path, destination: Path) -> None:
     with tarfile.open(archive, "r:*") as source:
         source.extractall(destination, filter="data")
+
+
+def safe_extract_zstd_tar(archive: Path, destination: Path) -> None:
+    listing = subprocess.run(
+        ["tar", "--zstd", "-tf", str(archive)],
+        text=True,
+        stdout=subprocess.PIPE,
+        check=True,
+    ).stdout
+    for name in listing.splitlines():
+        member = Path(name)
+        require(
+            not member.is_absolute() and ".." not in member.parts,
+            f"zstd archive path escapes extraction root: {name}",
+        )
+    destination.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["tar", "--zstd", "-xf", str(archive), "-C", str(destination)],
+        check=True,
+    )
 
 
 def ldd_paths(inputs: list[Path]) -> set[Path]:
@@ -257,21 +304,50 @@ def write_identity_files(root: Path) -> None:
     (root / "tmp").chmod(stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO | stat.S_ISVTX)
 
 
-def verify_probe(path: Path, expected: str) -> None:
-    require(path.is_file(), f"D3D11 probe is missing: {path}")
-    verify_digest(path, expected, "D3D11 probe")
+def supplied_artifact(
+    explicit: Path | None,
+    environment: str,
+    label: str,
+    expected_sha256: str,
+) -> Path:
+    override = os.environ.get(environment)
+    path = explicit if explicit is not None else Path(override) if override else None
+    require(path is not None, f"pass {label} or set {environment}")
+    require(path.is_file(), f"{label} is missing: {path}")
+    verify_digest(path, expected_sha256, label)
+    return path
 
 
-def prepare(manifest: dict[str, Any], output: Path, cache: Path, probe: Path | None) -> None:
+def prepare(
+    manifest: dict[str, Any],
+    output: Path,
+    cache: Path,
+    probe: Path | None,
+    d3d12_probe: Path | None,
+    wsi_probe: Path | None,
+) -> None:
     require(not output.exists(), f"output already exists; choose a new directory: {output}")
     verify_tools()
     verify_host_packages(manifest)
     components = manifest["components"]
-    probe_path = probe
-    if probe_path is None and os.environ.get("JASPER_D3D11_PROBE"):
-        probe_path = Path(os.environ["JASPER_D3D11_PROBE"])
-    require(probe_path is not None, "pass --probe or set JASPER_D3D11_PROBE")
-    verify_probe(probe_path, components["d3d11-probe"]["sha256"])
+    probe_path = supplied_artifact(
+        probe,
+        "JASPER_D3D11_PROBE",
+        "D3D11 probe",
+        components["d3d11-probe"]["sha256"],
+    )
+    d3d12_probe_path = supplied_artifact(
+        d3d12_probe,
+        "JASPER_D3D12_PROBE",
+        "D3D12 probe",
+        components["d3d12-probe"]["sha256"],
+    )
+    wsi_probe_path = supplied_artifact(
+        wsi_probe,
+        "JASPER_D3D11_WSI_PROBE",
+        "D3D11 WSI probe",
+        components["d3d11-wsi-probe"]["sha256"],
+    )
 
     cache.mkdir(parents=True, exist_ok=True)
     wine_deb = explicit_artifact(
@@ -292,6 +368,12 @@ def prepare(manifest: dict[str, Any], output: Path, cache: Path, probe: Path | N
         "dxvk-3.1.1.tar.gz",
         components["dxvk"],
     )
+    vkd3d_archive = explicit_artifact(
+        "JASPER_VKD3D_PROTON_ARCHIVE",
+        cache,
+        "vkd3d-proton-3.1.tar.zst",
+        components["vkd3d-proton"],
+    )
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary_root = Path(tempfile.mkdtemp(prefix=output.name + ".tmp-", dir=output.parent))
@@ -311,7 +393,23 @@ def prepare(manifest: dict[str, Any], output: Path, cache: Path, probe: Path | N
             configuration = dxvk_root / "dxvk-3.1.1/dxvk.conf"
             if configuration.is_file():
                 shutil.copy2(configuration, destination / configuration.name)
+        with tempfile.TemporaryDirectory(prefix="jasper-vkd3d-") as vkd3d_work:
+            vkd3d_root = Path(vkd3d_work)
+            safe_extract_zstd_tar(vkd3d_archive, vkd3d_root)
+            source = vkd3d_root / "vkd3d-proton-3.1/x64"
+            require(source.is_dir(), "VKD3D-Proton x64 directory is missing")
+            destination = temporary_root / WINE_WINDOWS_DIR
+            for name in ("d3d12.dll", "d3d12core.dll"):
+                shutil.copy2(source / name, destination / name)
         shutil.copy2(probe_path, temporary_root / WINE_WINDOWS_DIR / "d3d11-probe.exe")
+        shutil.copy2(
+            d3d12_probe_path,
+            temporary_root / WINE_WINDOWS_DIR / "d3d12-probe.exe",
+        )
+        shutil.copy2(
+            wsi_probe_path,
+            temporary_root / WINE_WINDOWS_DIR / "d3d11-wsi-probe.exe",
+        )
 
         for source, relative in MESA_FILES:
             require(source.is_file(), f"Mesa host file is missing: {source}")
@@ -337,10 +435,7 @@ def prepare(manifest: dict[str, Any], output: Path, cache: Path, probe: Path | N
         shutil.rmtree(temporary_root, ignore_errors=True)
         raise
 
-    print(
-        f"wine-d3d-staging: PASS release={manifest['release']} root={output} "
-        f"host=Ubuntu-Resolute"
-    )
+    print(f"wine-d3d-staging: PASS release={manifest['release']} root={output} host=Ubuntu-Resolute")
 
 
 def verify_final_files(
@@ -411,6 +506,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--cache", type=Path, default=ARCHIVE_CACHE)
     parser.add_argument("--probe", type=Path)
+    parser.add_argument("--d3d12-probe", type=Path)
+    parser.add_argument("--d3d11-wsi-probe", type=Path)
     args = parser.parse_args(argv)
 
     try:
@@ -420,7 +517,14 @@ def main(argv: list[str] | None = None) -> int:
         elif args.verify_only is not None:
             verify_existing(manifest, args.verify_only)
         elif args.prepare:
-            prepare(manifest, args.output, args.cache, args.probe)
+            prepare(
+                manifest,
+                args.output,
+                args.cache,
+                args.probe,
+                args.d3d12_probe,
+                args.d3d11_wsi_probe,
+            )
         else:
             parser.error("choose --self-test, --prepare or --verify-only")
     except (OSError, subprocess.CalledProcessError, StagingError) as error:

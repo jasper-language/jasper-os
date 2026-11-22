@@ -117,6 +117,18 @@ read back the backbuffer, and require `Present` to return `S_OK`. The offscreen
 D3D11 pass is never treated as WSI proof. See
 `docs/COMPAT-D3D11-WSI-status.md`.
 
+The reproducible staging root now also carries unmodified VKD3D-Proton 3.1,
+the D3D12 offscreen probe and the D3D11 WSI probe. Two separate verification
+features and `issue21-uefi-boot-check.sh` modes are wired:
+
+```text
+ISSUE21_UEFI_MODE=compat-wine-d3d12
+ISSUE21_UEFI_MODE=compat-wine-wsi
+```
+
+Each mode requires its own literal marker plus `resources=true`; no fallback
+from D3D11 offscreen to D3D12/WSI is accepted.
+
 A generic unmodified C/POSIX fixture performs the same
 `creat -> fdopen -> fputs -> fclose` sequence twice through Jasper and exits
 zero with resources recovered. Disabling tcache did not change the earlier

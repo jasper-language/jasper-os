@@ -976,6 +976,10 @@ fn log_root_android_file_skip(_path: &[u8]) {
     if _path.ends_with(b"d3d11.dll")
         || _path.ends_with(b"dxgi.dll")
         || _path.ends_with(b"d3d11-probe.exe")
+        || _path.ends_with(b"d3d12.dll")
+        || _path.ends_with(b"d3d12core.dll")
+        || _path.ends_with(b"d3d12-probe.exe")
+        || _path.ends_with(b"d3d11-wsi-probe.exe")
     {
         crate::kprintln!(
             "[JSR-WINE-D3D-VFS] skip path={}",
@@ -1235,41 +1239,126 @@ fn execute_root_dynamic_programs(
             ) {
                 return Err(HealthError::RootExecute);
             }
-            let d3d_argv: [&[u8]; 2] = [
-                b"/opt/wine-devel/lib/wine/x86_64-unix/wine",
-                b"/opt/wine-devel/lib/wine/x86_64-windows/d3d11-probe.exe",
-            ];
-            let d3d_envp: [&[u8]; 15] = [
-                b"HOME=/data",
-                b"PATH=/opt/wine-devel/bin:/usr/bin:/bin",
-                b"WINEBOOTSTRAPMODE=1",
-                b"WINEPREFIX=/data/wineprefix",
-                b"WINEARCH=win64",
-                b"WINEDEBUG=+module",
-                b"WINEDLLPATH=/opt/wine-devel/lib/wine/x86_64-windows:/opt/wine-devel/lib/wine/x86_64-unix",
-                b"WINEDLLDIR0=/opt/wine-devel/lib/wine",
-                b"WINEDLLOVERRIDES=d3d11=n,b;dxgi=n,b;winemenubuilder.exe=d;mscoree=d;mshtml=d",
-                b"LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/opt/wine-devel/lib/wine/x86_64-unix",
-                b"LANG=C.UTF-8",
-                b"VK_DRIVER_FILES=/usr/lib/x86_64-linux-gnu/lvp_icd.json",
-                b"VK_ICD_FILENAMES=/usr/lib/x86_64-linux-gnu/lvp_icd.json",
-                b"VK_LOADER_DEBUG=error,warn",
-                b"DXVK_LOG_LEVEL=info",
-            ];
-            crate::linux_abi::reset_wine_syscall_trace_budget();
-            if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
-                "compat-wine-d3d11",
-                "/opt/wine-devel/lib/wine/x86_64-unix/wine",
-                &wine,
-                &interpreter,
-                "/lib64/ld-linux-x86-64.so.2",
-                &d3d_argv,
-                &d3d_envp,
-                crate::mm::frame::free_frames(),
-                false,
-                WINE_COLD_START_DEADLINE_TICKS,
-            ) {
-                return Err(HealthError::RootExecute);
+            #[cfg(not(any(
+                feature = "compat-wine-d3d12-verify",
+                feature = "compat-wine-wsi-verify"
+            )))]
+            {
+                let d3d_argv: [&[u8]; 2] = [
+                    b"/opt/wine-devel/lib/wine/x86_64-unix/wine",
+                    b"/opt/wine-devel/lib/wine/x86_64-windows/d3d11-probe.exe",
+                ];
+                let d3d_envp: [&[u8]; 15] = [
+                    b"HOME=/data",
+                    b"PATH=/opt/wine-devel/bin:/usr/bin:/bin",
+                    b"WINEBOOTSTRAPMODE=1",
+                    b"WINEPREFIX=/data/wineprefix",
+                    b"WINEARCH=win64",
+                    b"WINEDEBUG=+module",
+                    b"WINEDLLPATH=/opt/wine-devel/lib/wine/x86_64-windows:/opt/wine-devel/lib/wine/x86_64-unix",
+                    b"WINEDLLDIR0=/opt/wine-devel/lib/wine",
+                    b"WINEDLLOVERRIDES=d3d11=n,b;dxgi=n,b;winemenubuilder.exe=d;mscoree=d;mshtml=d",
+                    b"LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/opt/wine-devel/lib/wine/x86_64-unix",
+                    b"LANG=C.UTF-8",
+                    b"VK_DRIVER_FILES=/usr/lib/x86_64-linux-gnu/lvp_icd.json",
+                    b"VK_ICD_FILENAMES=/usr/lib/x86_64-linux-gnu/lvp_icd.json",
+                    b"VK_LOADER_DEBUG=error,warn",
+                    b"DXVK_LOG_LEVEL=info",
+                ];
+                crate::linux_abi::reset_wine_syscall_trace_budget();
+                if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+                    "compat-wine-d3d11",
+                    "/opt/wine-devel/lib/wine/x86_64-unix/wine",
+                    &wine,
+                    &interpreter,
+                    "/lib64/ld-linux-x86-64.so.2",
+                    &d3d_argv,
+                    &d3d_envp,
+                    crate::mm::frame::free_frames(),
+                    false,
+                    WINE_COLD_START_DEADLINE_TICKS,
+                ) {
+                    return Err(HealthError::RootExecute);
+                }
+            }
+            #[cfg(feature = "compat-wine-d3d12-verify")]
+            {
+                let d3d12_argv: [&[u8]; 2] = [
+                    b"/opt/wine-devel/lib/wine/x86_64-unix/wine",
+                    b"/opt/wine-devel/lib/wine/x86_64-windows/d3d12-probe.exe",
+                ];
+                let d3d12_envp: [&[u8]; 16] = [
+                    b"HOME=/data",
+                    b"PATH=/opt/wine-devel/bin:/usr/bin:/bin",
+                    b"WINEBOOTSTRAPMODE=1",
+                    b"WINEPREFIX=/data/wineprefix",
+                    b"WINEARCH=win64",
+                    b"WINEDEBUG=+module",
+                    b"WINEDLLPATH=/opt/wine-devel/lib/wine/x86_64-windows:/opt/wine-devel/lib/wine/x86_64-unix",
+                    b"WINEDLLDIR0=/opt/wine-devel/lib/wine",
+                    b"WINEDLLOVERRIDES=d3d12=n,b;d3d12core=n,b;dxgi=n,b;winemenubuilder.exe=d;mscoree=d;mshtml=d",
+                    b"LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/opt/wine-devel/lib/wine/x86_64-unix",
+                    b"LANG=C.UTF-8",
+                    b"VK_DRIVER_FILES=/usr/lib/x86_64-linux-gnu/lvp_icd.json",
+                    b"VK_ICD_FILENAMES=/usr/lib/x86_64-linux-gnu/lvp_icd.json",
+                    b"VK_LOADER_DEBUG=error,warn",
+                    b"DXVK_LOG_LEVEL=info",
+                    b"VKD3D_DEBUG=warn",
+                ];
+                crate::linux_abi::reset_wine_syscall_trace_budget();
+                if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+                    "compat-wine-d3d12",
+                    "/opt/wine-devel/lib/wine/x86_64-unix/wine",
+                    &wine,
+                    &interpreter,
+                    "/lib64/ld-linux-x86-64.so.2",
+                    &d3d12_argv,
+                    &d3d12_envp,
+                    crate::mm::frame::free_frames(),
+                    false,
+                    WINE_COLD_START_DEADLINE_TICKS,
+                ) {
+                    return Err(HealthError::RootExecute);
+                }
+            }
+            #[cfg(feature = "compat-wine-wsi-verify")]
+            {
+                let wsi_argv: [&[u8]; 2] = [
+                    b"/opt/wine-devel/lib/wine/x86_64-unix/wine",
+                    b"/opt/wine-devel/lib/wine/x86_64-windows/d3d11-wsi-probe.exe",
+                ];
+                let wsi_envp: [&[u8]; 15] = [
+                    b"HOME=/data",
+                    b"PATH=/opt/wine-devel/bin:/usr/bin:/bin",
+                    b"WINEBOOTSTRAPMODE=1",
+                    b"WINEPREFIX=/data/wineprefix",
+                    b"WINEARCH=win64",
+                    b"WINEDEBUG=+module",
+                    b"WINEDLLPATH=/opt/wine-devel/lib/wine/x86_64-windows:/opt/wine-devel/lib/wine/x86_64-unix",
+                    b"WINEDLLDIR0=/opt/wine-devel/lib/wine",
+                    b"WINEDLLOVERRIDES=d3d11=n,b;dxgi=n,b;winemenubuilder.exe=d;mscoree=d;mshtml=d",
+                    b"LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/opt/wine-devel/lib/wine/x86_64-unix",
+                    b"LANG=C.UTF-8",
+                    b"VK_DRIVER_FILES=/usr/lib/x86_64-linux-gnu/lvp_icd.json",
+                    b"VK_ICD_FILENAMES=/usr/lib/x86_64-linux-gnu/lvp_icd.json",
+                    b"VK_LOADER_DEBUG=error,warn",
+                    b"DXVK_LOG_LEVEL=info",
+                ];
+                crate::linux_abi::reset_wine_syscall_trace_budget();
+                if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+                    "compat-wine-wsi",
+                    "/opt/wine-devel/lib/wine/x86_64-unix/wine",
+                    &wine,
+                    &interpreter,
+                    "/lib64/ld-linux-x86-64.so.2",
+                    &wsi_argv,
+                    &wsi_envp,
+                    crate::mm::frame::free_frames(),
+                    false,
+                    WINE_COLD_START_DEADLINE_TICKS,
+                ) {
+                    return Err(HealthError::RootExecute);
+                }
             }
         }
         return Ok(());

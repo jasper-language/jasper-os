@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "release": "wine-11.22-dxvk-3.1.1-lavapipe-26.0.8",
+  "release": "wine-11.22-dxvk-3.1.1-vkd3d-3.1-lavapipe-26.0.8",
   "architecture": "x86_64",
   "host": {
     "distribution": "Ubuntu Resolute",
@@ -77,9 +77,44 @@
     },
     "d3d11-probe": {
       "version": "jasper-os-dc69adb-minw64",
+      "bytes": 43008,
       "sha256": "16a255dc0124be7ffde1fc27fedf2f0a608ca1a4f52a8a077feb2e81ed682b96",
       "build": "x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -Wl,--disable-dynamicbase -o d3d11-probe.exe verification/fixtures/windows/d3d11_probe.c -ld3d11",
       "license": "Apache-2.0"
+    },
+    "d3d12-probe-source": {
+      "version": "jasper-os-9db1700",
+      "path": "verification/fixtures/windows/d3d12_probe.c",
+      "sha256": "b210adea38862ce1b60c358057855b5f343d2d0ddcd58de6bdb469e07d4db782",
+      "license": "Apache-2.0"
+    },
+    "d3d12-probe": {
+      "version": "jasper-os-9db1700-minw64",
+      "bytes": 354689,
+      "sha256": "95b5bf0e1531b18a300d13c92972aa52a4d8d6c78b99f9c8ee5fbf0aa7485634",
+      "build": "x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -Wl,--disable-dynamicbase -o d3d12-probe.exe verification/fixtures/windows/d3d12_probe.c -ld3d12 -ldxguid -luuid",
+      "license": "Apache-2.0"
+    },
+    "d3d11-wsi-probe-source": {
+      "version": "jasper-os-c148400",
+      "path": "verification/fixtures/windows/d3d11_wsi_probe.c",
+      "sha256": "6e22507e7b81beefd410c2af28bb29c0d7aaed1a392a3aaa6438defff774e733",
+      "license": "Apache-2.0"
+    },
+    "d3d11-wsi-probe": {
+      "version": "jasper-os-c148400-minw64",
+      "bytes": 659156,
+      "sha256": "cbd9bb9aa7298fdd90d32abdc25df21ea98452a198fbe20e49bc088dc153da11",
+      "build": "x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -Wl,--disable-dynamicbase -o d3d11-wsi-probe.exe verification/fixtures/windows/d3d11_wsi_probe.c -ld3d11 -ldxgi -lole32 -luuid",
+      "license": "Apache-2.0"
+    },
+    "vkd3d-proton": {
+      "version": "3.1",
+      "tag": "v3.1",
+      "url": "https://github.com/HansKristian-Work/vkd3d-proton/releases/download/v3.1/vkd3d-proton-3.1.tar.zst",
+      "bytes": 5665978,
+      "sha256": "b85ea8219b71093a3924913dd7aae6172333dc0c069983ed510816d67f02120b",
+      "license": "LGPL-2.1"
     }
   },
   "final_files": {
@@ -91,6 +126,10 @@
     "opt/wine-devel/lib/wine/x86_64-windows/d3d11.dll": "0a203b6255c893430f0a8461c618962df04e62aa41538d5a875b21868317cf9f",
     "opt/wine-devel/lib/wine/x86_64-windows/dxgi.dll": "e3c1178eb7f0dd59f91bcfcc257549e5b9cfdb5e8508719293de7f8704f53160",
     "opt/wine-devel/lib/wine/x86_64-windows/d3d11-probe.exe": "16a255dc0124be7ffde1fc27fedf2f0a608ca1a4f52a8a077feb2e81ed682b96",
+    "opt/wine-devel/lib/wine/x86_64-windows/d3d12.dll": "502694a5fd5e06381ef2cdb33359c5948b6a012938902ddc9e9b381841bc0ce7",
+    "opt/wine-devel/lib/wine/x86_64-windows/d3d12core.dll": "0dfd690a39ef8361ca3b64e9fd8e945b27d2c568dac5dc0dce1a45abf65914cc",
+    "opt/wine-devel/lib/wine/x86_64-windows/d3d12-probe.exe": "95b5bf0e1531b18a300d13c92972aa52a4d8d6c78b99f9c8ee5fbf0aa7485634",
+    "opt/wine-devel/lib/wine/x86_64-windows/d3d11-wsi-probe.exe": "cbd9bb9aa7298fdd90d32abdc25df21ea98452a198fbe20e49bc088dc153da11",
     "usr/lib/x86_64-linux-gnu/libvulkan_lvp.so": "d9a8bc5d4b3ec0e065562d362541c2a4cb3f3d6208ac715f7ff1dcf01289d164",
     "usr/lib/x86_64-linux-gnu/lvp_icd.json": "8c55cd4279a21911e97beff1bd2bd30a779ac5ca390ccfb241ef317f8bb0b3fb",
     "usr/lib/x86_64-linux-gnu/libLLVM.so.21.1": "12dca1fc2d9f5d4ff35315fc2aa3a97b615b41ec6a71d3ce545efb62c075d902"

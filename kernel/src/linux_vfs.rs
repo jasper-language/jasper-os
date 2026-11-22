@@ -271,6 +271,10 @@ pub(crate) const ANDROID_FILE_PATHS: &[&[u8]] = &[
     b"/usr/lib/x86_64-linux-gnu/libxcb-sync.so.1",
     b"/usr/lib/x86_64-linux-gnu/libxcb-xfixes.so.0",
     b"/usr/lib/x86_64-linux-gnu/libxshmfence.so.1",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/d3d12.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/d3d12core.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/d3d12-probe.exe",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/d3d11-wsi-probe.exe",
 ];
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
@@ -1925,6 +1929,22 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         DirEntry {
             name: b"winedbg.exe",
             node: Node::File(FileId::AndroidFile(186)),
+        },
+        DirEntry {
+            name: b"d3d12.dll",
+            node: Node::File(FileId::AndroidFile(210)),
+        },
+        DirEntry {
+            name: b"d3d12core.dll",
+            node: Node::File(FileId::AndroidFile(211)),
+        },
+        DirEntry {
+            name: b"d3d12-probe.exe",
+            node: Node::File(FileId::AndroidFile(212)),
+        },
+        DirEntry {
+            name: b"d3d11-wsi-probe.exe",
+            node: Node::File(FileId::AndroidFile(213)),
         },
     ];
     const OPT_WINE_DEVEL_SHARE: &[DirEntry] = &[DirEntry {

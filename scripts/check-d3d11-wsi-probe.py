@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
+import json
 import struct
 import sys
 import tempfile
@@ -15,6 +17,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "verification/fixtures/windows/d3d11_wsi_probe.c"
 MANIFEST = ROOT / "verification/d3d11-wsi-probe.toml"
+CARGO = ROOT / "kernel/Cargo.toml"
+VFS = ROOT / "kernel/src/linux_vfs.rs"
+LIFECYCLE = ROOT / "kernel/src/lifecycle_health.rs"
+BOOT = ROOT / "scripts/issue21-uefi-boot-check.sh"
+STAGING_MANIFEST = ROOT / "verification/wine-d3d-staging.json"
 PASS_MARKER = "D3D11_WSI_PROBE_OK"
 FAIL_MARKER = "D3D11_WSI_PROBE_FAIL"
 
@@ -63,6 +70,18 @@ def validate_manifest(manifest: dict[str, object]) -> None:
     require(manifest.get("jasper_guest_passed") is False, "Jasper guest pass is not established")
     require(manifest.get("physical_gpu_passed") is False, "physical GPU pass is not established")
     require(manifest.get("source") == SOURCE.relative_to(ROOT).as_posix(), "source path mismatch")
+    require(manifest.get("binary_bytes") == 659156, "reference binary size mismatch")
+    require(
+        manifest.get("binary_sha256")
+        == "cbd9bb9aa7298fdd90d32abdc25df21ea98452a198fbe20e49bc088dc153da11",
+        "reference binary digest mismatch",
+    )
+    evidence = ROOT / str(manifest.get("build_evidence", ""))
+    require(evidence.is_file(), "reference build evidence is missing")
+    require(
+        str(manifest["binary_sha256"]) in evidence.read_text(encoding="utf-8"),
+        "reference binary digest is absent from build evidence",
+    )
     require(manifest.get("pass_marker") == PASS_MARKER, "pass marker mismatch")
     require(manifest.get("fail_marker") == FAIL_MARKER, "fail marker mismatch")
     layers = manifest.get("required_layer")
@@ -78,9 +97,51 @@ def validate_manifest(manifest: dict[str, object]) -> None:
     require(set(layers) == expected, "required WSI layer set mismatch")
     require(bool(manifest.get("blockers")), "at least one explicit blocker is required")
 
+    cargo = CARGO.read_text(encoding="utf-8")
+    require(
+        'compat-wine-wsi-verify = ["compat-wine-d3d-verify"]' in cargo,
+        "D3D11 WSI verification feature is not wired",
+    )
+    vfs = VFS.read_text(encoding="utf-8")
+    require(
+        "/opt/wine-devel/lib/wine/x86_64-windows/d3d11-wsi-probe.exe" in vfs,
+        "D3D11 WSI VFS path is missing",
+    )
+    lifecycle = LIFECYCLE.read_text(encoding="utf-8")
+    require(
+        'feature = "compat-wine-wsi-verify"' in lifecycle,
+        "D3D11 WSI probe is not behind its verification feature",
+    )
+    require(
+        'run_root_dynamic_program_with_deadline(\n                    "compat-wine-wsi"'
+        in lifecycle,
+        "D3D11 WSI program identity is missing",
+    )
+    boot = BOOT.read_text(encoding="utf-8")
+    require("compat-wine-wsi)" in boot, "D3D11 WSI UEFI mode is missing")
+    require("^D3D11_WSI_PROBE_OK .*present=1" in boot,
+            "D3D11 WSI marker gate is missing")
+    require("program=compat-wine-wsi " in boot,
+            "D3D11 WSI lifecycle gate is missing")
+    staged = json.loads(STAGING_MANIFEST.read_text(encoding="utf-8"))
+    require(
+        staged.get("final_files", {}).get(
+            "opt/wine-devel/lib/wine/x86_64-windows/d3d11-wsi-probe.exe"
+        )
+        == manifest["binary_sha256"],
+        "D3D11 WSI staging digest mismatch",
+    )
 
-def validate_binary(path: Path) -> None:
+
+def validate_binary(path: Path, *, enforce_reference: bool = True) -> None:
     data = path.read_bytes()
+    if enforce_reference:
+        require(len(data) == 659156, f"reference PE size mismatch: {len(data)}")
+        require(
+            hashlib.sha256(data).hexdigest()
+            == "cbd9bb9aa7298fdd90d32abdc25df21ea98452a198fbe20e49bc088dc153da11",
+            "reference PE digest mismatch",
+        )
     require(data[:2] == b"MZ", "artifact is not a PE image")
     pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
     require(data[pe_offset:pe_offset + 4] == b"PE\0\0", "missing PE signature")
@@ -141,7 +202,7 @@ def self_test() -> None:
     with tempfile.NamedTemporaryFile(prefix="jasper-wsi-pe-") as binary:
         binary.write(image)
         binary.flush()
-        validate_binary(Path(binary.name))
+        validate_binary(Path(binary.name), enforce_reference=False)
 
     print(
         "d3d11-wsi-probe: self-test PASS "

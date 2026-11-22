@@ -117,6 +117,11 @@ jobs:
           python3 scripts/check-darling-research.py
       - name: COMPAT-D3D-1 D3D12 fixture 与资产边界 / D3D12 fixture boundary
         run: python3 scripts/check-compat-d3d12.py
+      - name: Wine D3D runtime feature 接线编译 / D3D runtime feature wiring
+        run: |
+          CARGO_BUILD_JOBS=2 cargo check -p jasper-kernel \
+            --target x86_64-unknown-none \
+            --features lifecycle-root-exec-verify,compat-wine-verify,compat-wine-d3d-verify,compat-wine-d3d12-verify,compat-wine-wsi-verify
       - name: Issue #47 CPU 固定消费者清单 / CPU consumer inventory
         run: |
           python3 scripts/check-cpu-dynamic-consumers.py --self-test

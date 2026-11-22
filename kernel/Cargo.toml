@@ -234,6 +234,11 @@ vulkan-compute-only = []
 # through the same root-backed Linux ABI.
 compat-wine-verify = ["lifecycle-root-exec-verify"]
 compat-wine-d3d-verify = ["compat-wine-verify"]
+# Run the separate VKD3D-Proton D3D12 and D3D11 WSI probes through the same
+# fixed Wine/lavapipe root. Each feature keeps its own literal marker and
+# resource baseline gate.
+compat-wine-d3d12-verify = ["compat-wine-d3d-verify"]
+compat-wine-wsi-verify = ["compat-wine-d3d-verify"]
 # Dedicated negative acceptance: lose the first virtio-blk completion and require
 # the hardware-counter timeout to fail the health gate without hanging silently.
 lifecycle-block-timeout-verify = ["lifecycle-root-exec-verify", "fault-inject"]

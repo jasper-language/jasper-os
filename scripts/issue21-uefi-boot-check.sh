@@ -59,7 +59,9 @@ LIMIT="${ISSUE21_UEFI_TIMEOUT:-45}"
 MODE="${ISSUE21_UEFI_MODE:-normal}"
 REUSE_ROOT="${ISSUE21_REUSE_ROOT:-0}"
 if [ -z "${ISSUE21_UEFI_TIMEOUT:-}" ] &&
-  { [ "$MODE" = android-art ] || [ "$MODE" = android-apk ]; }; then
+  { [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] ||
+    [ "$MODE" = compat-wine-d3d ] || [ "$MODE" = compat-wine-d3d12 ] ||
+    [ "$MODE" = compat-wine-wsi ]; }; then
   LIMIT=900
 fi
 PREBUILT="${ISSUE21_UEFI_PREBUILT:-0}"
@@ -68,7 +70,9 @@ QEMU_CPUS="${ISSUE21_QEMU_CPUS:-$($ROOT/scripts/qemu-cpu-set.sh)}"
 QEMU_SMP="${ISSUE21_QEMU_SMP:-1}"
 QEMU_MEMORY="${ISSUE21_QEMU_MEMORY:-}"
 if [ -z "$QEMU_MEMORY" ]; then
-  if [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = compat-wine-d3d ]; then
+  if [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] ||
+    [ "$MODE" = compat-wine-d3d ] || [ "$MODE" = compat-wine-d3d12 ] ||
+    [ "$MODE" = compat-wine-wsi ]; then
     QEMU_MEMORY=2G
   else
     QEMU_MEMORY=512M
@@ -164,6 +168,8 @@ case "$MODE" in
   android-apk) KERNEL_FEATURES=lifecycle-root-exec-verify,android-apk-verify ;;
   compat-wine) KERNEL_FEATURES=lifecycle-root-exec-verify,compat-wine-verify ;;
   compat-wine-d3d) KERNEL_FEATURES=lifecycle-root-exec-verify,compat-wine-verify,compat-wine-d3d-verify ;;
+  compat-wine-d3d12) KERNEL_FEATURES=lifecycle-root-exec-verify,compat-wine-verify,compat-wine-d3d-verify,compat-wine-d3d12-verify ;;
+  compat-wine-wsi) KERNEL_FEATURES=lifecycle-root-exec-verify,compat-wine-verify,compat-wine-d3d-verify,compat-wine-wsi-verify ;;
   vulkan-metal2vulkan) KERNEL_FEATURES=lifecycle-root-exec-verify,vulkan-metal2vulkan-verify ;;
   vulkan-swiftshader) KERNEL_FEATURES=lifecycle-root-exec-verify,vulkan-metal2vulkan-verify,vulkan-compute-only ;;
   block-timeout) KERNEL_FEATURES=lifecycle-block-timeout-verify ;;
@@ -252,7 +258,7 @@ ROOT_ANDROID_TOYBOX="${JASPER_TOYBOX_BIN:-}"
 ROOT_AOSP_BINDER_TEST="${JASPER_AOSP_BINDER_TEST:-}"
 ROOT_ANDROID_TREE="${JASPER_ANDROID_TREE:-}"
 ROOT_ANDROID_LINKER_CONFIG=""
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = compat-wine ] || [ "$MODE" = compat-wine-d3d ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = compat-wine ] || [ "$MODE" = compat-wine-d3d ] || [ "$MODE" = compat-wine-d3d12 ] || [ "$MODE" = compat-wine-wsi ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
   ROOT_EXEC_PROBE=$(find "$BUILD_TARGET/x86_64-unknown-none/release/build" \
     -path '*/out/user-target/x86_64-unknown-none/release/user-linuxprobe' \
     -type f -print | sort | tail -n 1)
@@ -287,7 +293,7 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native
     echo "issue21-uefi-boot: JASPER_ANDROID_TREE is required for $MODE mode" >&2
     exit 64
   fi
-  if { [ "$MODE" = compat-wine ] || [ "$MODE" = compat-wine-d3d ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; } && [ -z "$ROOT_ANDROID_TREE" ]; then
+  if { [ "$MODE" = compat-wine ] || [ "$MODE" = compat-wine-d3d ] || [ "$MODE" = compat-wine-d3d12 ] || [ "$MODE" = compat-wine-wsi ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; } && [ -z "$ROOT_ANDROID_TREE" ]; then
     echo "issue21-uefi-boot: JASPER_ANDROID_TREE is required for $MODE mode" >&2
     exit 64
   fi
@@ -654,6 +660,26 @@ fi
 if [ "$MODE" = compat-wine-d3d ]; then
   grep -aq '^D3D11_PROBE_OK feature=0x[0-9a-f]* pixel=32,64,128,255' "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=compat-wine-d3d11 path=/opt/wine-devel/lib/wine/x86_64-unix/wine interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true failed=0' \
+    "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"
+  ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' \
+    "$OUT/serial.log"
+  echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
+  exit 0
+fi
+if [ "$MODE" = compat-wine-d3d12 ]; then
+  grep -aq '^D3D12_PROBE_OK pixel=32,64,128,255 observed=' "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=compat-wine-d3d12 path=/opt/wine-devel/lib/wine/x86_64-unix/wine interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true failed=0' \
+    "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"
+  ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' \
+    "$OUT/serial.log"
+  echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
+  exit 0
+fi
+if [ "$MODE" = compat-wine-wsi ]; then
+  grep -aq '^D3D11_WSI_PROBE_OK .*present=1' "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=compat-wine-wsi path=/opt/wine-devel/lib/wine/x86_64-unix/wine interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true failed=0' \
     "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"
   ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' \
