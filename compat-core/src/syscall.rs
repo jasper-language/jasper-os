@@ -680,6 +680,9 @@ pub enum CompatErrno {
     /// Bounded compatibility capacity is exhausted.
     /// 有界兼容容量耗尽。
     NoSpace = linux_raw_sys::errno::ENOSPC,
+    /// Per-process file descriptor capacity is exhausted.
+    /// 每进程文件描述符容量耗尽。
+    TooManyFiles = linux_raw_sys::errno::EMFILE,
     /// Absolute deadline elapsed.
     /// 绝对截止期已到。
     TimedOut = linux_raw_sys::errno::ETIMEDOUT,

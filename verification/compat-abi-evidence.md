@@ -69,10 +69,16 @@ instead of rescanning the complete ABI surface.
 - `evidence/compat-wine-protocol-r50`
 - `evidence/compat-wine-read-enter-r52`
 - `evidence/compat-wine-unix-socket-r76`
+- `evidence/compat-wine-scm-truncation-r85`
 - Positive evidence: pathname bind/listen/connect/accept, pending accept
   readiness, socket inode stat, unlink and peer EOF work.
 - Negative evidence: duplicate pathname bind returns `EADDRINUSE` and connect
   through either a missing or stale name returns `ENOENT`.
+- Positive message evidence: `send/recv`, `sendmsg/recvmsg`, `SCM_RIGHTS`,
+  `readv/writev`, and transferred-descriptor lifetime work.
+- Negative message evidence: invalid control length returns `EINVAL`, invalid
+  iovec storage returns `EFAULT`, peer closure returns EOF, and descriptor-table
+  exhaustion returns payload with `MSG_CTRUNC` and zero control length.
 - Environment: Jasper UEFI, Linux x86_64 compatibility ABI.
 
 ## Vectored I/O
@@ -88,7 +94,7 @@ instead of rescanning the complete ABI surface.
 - `evidence/compat-wine-epoll-r47`
 - `evidence/compat-wine-epoll-pri-20261121`
 - `evidence/compat-wine-listener-ready-r53`
-- `evidence/compat-wine-epoll-timeout-r78`
+- `evidence/compat-wine-scm-truncation-r85`
 - Positive evidence: `EPOLLPRI`, zero-interest `MOD`, listener queues and
   accepted-socket readability, edge delivery and elapsed timeout expiry.
 - Negative evidence: invalid descriptors return `EBADF`, no-ready registrations

@@ -6,7 +6,9 @@
 #include <stddef.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/epoll.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -45,6 +47,8 @@ int main(void)
     int accepted;
     int epoll_fd;
     int missing_client;
+    int *fillers;
+    size_t filler_count;
     char signal_byte;
     char socket_buffer[8] = {0};
     struct sockaddr_un unix_address;
@@ -53,6 +57,8 @@ int main(void)
     struct iovec socket_iov[2];
     struct msghdr socket_message;
     struct cmsghdr *control_message;
+    struct rlimit old_rlimit;
+    struct rlimit new_rlimit;
     char control_buffer[CMSG_SPACE(sizeof(int))];
     int pipe_fds[2];
     int socket_fds[2];
@@ -349,6 +355,55 @@ int main(void)
     socket_iov[1].iov_len = 2;
     if (readv(unix_client, socket_iov, 2) != 4 ||
         memcmp(socket_buffer, "EFGH", 4) != 0) return 77;
+    if (pipe(rights_pipe) != 0 || getrlimit(RLIMIT_NOFILE, &old_rlimit) != 0) {
+        return 93;
+    }
+    new_rlimit = old_rlimit;
+    new_rlimit.rlim_cur = 16;
+    if (setrlimit(RLIMIT_NOFILE, &new_rlimit) != 0) return 94;
+    if (getrlimit(RLIMIT_NOFILE, &new_rlimit) != 0 ||
+        new_rlimit.rlim_cur != 16) return 98;
+    fillers = calloc(64, sizeof(int));
+    if (!fillers) return 99;
+    filler_count = 0;
+    errno = 0;
+    while (filler_count < 64) {
+        int filler_fd = dup(STDIN_FILENO);
+        if (filler_fd < 0) break;
+        fillers[filler_count++] = filler_fd;
+    }
+    if (errno != EMFILE) return 100;
+    memset(control_buffer, 0, sizeof(control_buffer));
+    memset(&socket_message, 0, sizeof(socket_message));
+    socket_iov[0].iov_base = "Q";
+    socket_iov[0].iov_len = 1;
+    socket_message.msg_iov = socket_iov;
+    socket_message.msg_iovlen = 1;
+    socket_message.msg_control = control_buffer;
+    socket_message.msg_controllen = sizeof(control_buffer);
+    control_message = CMSG_FIRSTHDR(&socket_message);
+    control_message->cmsg_level = SOL_SOCKET;
+    control_message->cmsg_type = SCM_RIGHTS;
+    control_message->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(control_message), &rights_pipe[0], sizeof(int));
+    if (sendmsg(unix_client, &socket_message, 0) != 1) return 95;
+    memset(control_buffer, 0, sizeof(control_buffer));
+    memset(&socket_message, 0, sizeof(socket_message));
+    socket_iov[0].iov_base = socket_buffer;
+    socket_iov[0].iov_len = 1;
+    socket_message.msg_iov = socket_iov;
+    socket_message.msg_iovlen = 1;
+    socket_message.msg_control = control_buffer;
+    socket_message.msg_controllen = sizeof(control_buffer);
+    errno = 0;
+    if (recvmsg(accepted, &socket_message, 0) != 1 ||
+        (socket_message.msg_flags & MSG_CTRUNC) == 0 ||
+        socket_message.msg_controllen != 0) return 96;
+    while (filler_count > 0) close(fillers[--filler_count]);
+    free(fillers);
+    close(rights_pipe[0]);
+    close(rights_pipe[1]);
+    if (setrlimit(RLIMIT_NOFILE, &old_rlimit) != 0) return 97;
     if (epoll_wait(epoll_fd, &epoll_event, 1, 0) != 0) return 83;
     memset(&epoll_event, 0, sizeof(epoll_event));
     epoll_event.events = EPOLLIN;

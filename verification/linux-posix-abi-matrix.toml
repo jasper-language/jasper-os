@@ -83,10 +83,10 @@ id = "linux-unix-socket-message"
 abi = "send/recv/sendmsg/recvmsg/readv/writev and SCM_RIGHTS"
 positive_coverage = "stream bytes, credentials, descriptor transfer, and vectored socket I/O"
 negative_coverage = "invalid control messages, descriptor exhaustion, wrong buffer shape, and peer closure"
-evidence = "verification/compat-abi-evidence.md"
-commit = "409c6e2"
+evidence = "verification/compat-abi-evidence.md; evidence/compat-wine-scm-truncation-r85"
+commit = "39b347a"
 environment = "qemu-jasper-linux-abi"
-status = "partial"
+status = "verified"
 
 [[item]]
 id = "linux-epoll-readiness"

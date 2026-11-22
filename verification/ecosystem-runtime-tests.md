@@ -86,7 +86,7 @@ the real UEFI/root-image path. Wine loaded its preloader, wineserver, PE
 the built-in, wrote through the inherited standard-output handle, and exited
 zero.
 
-Evidence: `evidence/compat-wine-epoll-timeout-r78`.
+Evidence: `evidence/compat-wine-scm-truncation-r85`.
 
 ## Host baselines
 

@@ -7838,9 +7838,11 @@ fn update_linux_limit(
             if maximum > old.nofile_maximum {
                 return Err(CompatErrno::Perm);
             }
-            if current != old.nofile_current || maximum != old.nofile_maximum {
-                return Err(CompatErrno::NotSupported);
+            if current > maximum {
+                return Err(CompatErrno::Invalid);
             }
+            next.nofile_current = current;
+            next.nofile_maximum = maximum;
         }
         _ => return Err(CompatErrno::Invalid),
     }
@@ -9067,7 +9069,7 @@ fn linux_dup(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     proc::linux_fd(pid, source).ok_or(CompatErrno::BadFd)?;
     proc::linux_duplicate_fd(pid, source, 0, false)
         .map(u64::from)
-        .ok_or(CompatErrno::NoSpace)
+        .ok_or(CompatErrno::TooManyFiles)
 }
 
 /// Converts an x86_64 syscall argument to a non-negative Linux `int` fd.
@@ -14992,7 +14994,7 @@ fn receive_socket_control(
     data_bytes: usize,
     close_on_exec: bool,
 ) -> Result<(usize, u64), CompatErrno> {
-    const MSG_CTRUNC: u64 = 0x20;
+    const MSG_CTRUNC: u64 = 0x8;
     const CMSG_HEADER_BYTES: usize = 16;
     const SO_PASSCRED_ENABLED: u32 = 1;
     const SCM_RIGHTS: i32 = 1;
@@ -15009,41 +15011,58 @@ fn receive_socket_control(
     if delivery.fds.is_empty() && !include_credentials {
         return Ok((0, 0));
     }
-    let rights_payload = delivery
-        .fds
-        .len()
-        .checked_mul(4)
-        .ok_or(CompatErrno::Invalid)?;
-    let rights_space = if rights_payload == 0 {
-        0
-    } else {
-        (CMSG_HEADER_BYTES + rights_payload + 7) & !7
-    };
     let credentials_space = if include_credentials {
         (CMSG_HEADER_BYTES + 12 + 7) & !7
     } else {
         0
     };
-    let required = rights_space
+    let original_rights_payload = delivery
+        .fds
+        .len()
+        .checked_mul(4)
+        .ok_or(CompatErrno::Invalid)?;
+    let original_rights_space = if original_rights_payload == 0 {
+        0
+    } else {
+        (CMSG_HEADER_BYTES + original_rights_payload + 7) & !7
+    };
+    let original_required = original_rights_space
         .checked_add(credentials_space)
         .ok_or(CompatErrno::Invalid)?;
-    if required > header.control_len {
+    if original_required > header.control_len {
         return Ok((0, MSG_CTRUNC));
     }
     let mut installed = alloc::vec::Vec::new();
     installed
         .try_reserve(delivery.fds.len())
         .map_err(|_| CompatErrno::NoMemory)?;
+    let mut truncated = false;
     for transfer in delivery.fds {
         match proc::linux_install_fd_transfer(pid, transfer, close_on_exec) {
             Ok(fd) => installed.push(fd),
-            Err(_) => {
+            Err(proc::LinuxFdTransferError::NoSpace) => {
+                truncated = true;
+                break;
+            }
+            Err(proc::LinuxFdTransferError::Invalid) => {
                 for fd in installed {
                     let _ = proc::linux_close_fd(pid, fd);
                 }
-                return Err(CompatErrno::NoMemory);
+                return Err(CompatErrno::BadFd);
             }
         }
+    }
+    let rights_payload = installed.len() * 4;
+    let rights_space = if rights_payload == 0 {
+        0
+    } else {
+        (CMSG_HEADER_BYTES + rights_payload + 7) & !7
+    };
+    let required = rights_space
+        .checked_add(credentials_space)
+        .ok_or(CompatErrno::Invalid)?;
+    if required == 0 && truncated {
+        return Ok((0, MSG_CTRUNC));
     }
     let mut control = alloc::vec![0u8; required];
     let mut control_offset = 0usize;
@@ -15078,7 +15097,7 @@ fn receive_socket_control(
         )?;
     }
     proc::write(pid, header.control, &control).map_err(|_| CompatErrno::Fault)?;
-    Ok((required, 0))
+    Ok((control_offset, if truncated { MSG_CTRUNC } else { 0 }))
 }
 
 /// Implements `recvmsg(2)` on a connected AF_UNIX stream, including
@@ -15154,7 +15173,7 @@ fn linux_recvmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         fd,
         count,
         control_len,
-        flags
+        message_flags
     );
     Ok(count as u64)
 }
