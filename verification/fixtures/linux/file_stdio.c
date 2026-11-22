@@ -77,6 +77,7 @@ int main(void)
     struct rlimit new_rlimit;
     void *mapping;
     void *private_mapping;
+    void *reservation_mapping;
     unsigned char *mapped_bytes;
     char path_buffer[PATH_MAX];
     char control_buffer[CMSG_SPACE(sizeof(int))];
@@ -653,6 +654,20 @@ int main(void)
     munmap(mapping, 4096);
     close(offset_fd);
     if (unlink("/tmp/jasper-offset-shared") != 0) return 161;
+    reservation_mapping = mmap(NULL, 8192, PROT_NONE,
+                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (reservation_mapping == MAP_FAILED) return 165;
+    if (mprotect(reservation_mapping, 8192,
+                 PROT_READ | PROT_WRITE) != 0) return 166;
+    ((char *)reservation_mapping)[0] = 'P';
+    child = fork();
+    if (child == 0) {
+        if (((volatile char *)reservation_mapping)[0] != 'P') _exit(1);
+        _exit(0);
+    }
+    if (child < 0 || waitpid(child, &child_status, 0) != child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) return 167;
+    munmap(reservation_mapping, 8192);
     if (epoll_wait(epoll_fd, &epoll_event, 1, 0) != 0) return 83;
     memset(&epoll_event, 0, sizeof(epoll_event));
     epoll_event.events = EPOLLIN;
@@ -733,6 +748,6 @@ int main(void)
         rmdir("/tmp/jasper-vfs/a/b") != 0 ||
         rmdir("/tmp/jasper-vfs/a") != 0 ||
         rmdir("/tmp/jasper-vfs") != 0) return 14;
-    puts("FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true positioned_io=true vectored_fd=true cwd_status=true record_lock=true monotonic_time=true unix_socket=true socket_message=true epoll_status=true vfs_path=true unlink_lifetime=true shared_mmap=true low_window=true");
+    puts("FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true positioned_io=true vectored_fd=true cwd_status=true record_lock=true monotonic_time=true unix_socket=true socket_message=true epoll_status=true vfs_path=true unlink_lifetime=true shared_mmap=true materialized_fork_inherit=true low_window=true");
     return 0;
 }

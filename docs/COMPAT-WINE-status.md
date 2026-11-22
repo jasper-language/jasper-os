@@ -1,6 +1,6 @@
 # COMPAT-WINE-1 Status
 
-Updated: 2026-11-21
+Updated: 2026-11-22
 
 Status: **in-progress / partial groundwork**.
 
@@ -69,10 +69,22 @@ maps writable cache files as coherent shared pages, and exposes the Linux low
 private address ranges used by Wine PE images.
 
 The unmodified `start.exe` PE loads and its bundled import closure is available
-from the official Wine `x86_64-windows` tree. The current stop is
-`ntdll.dll` initialization: Wine reports `c0000017` after its `vprot` mmap and
-Jasper mmap both return success. This remains `partial`; a Windows executable has
-not completed and `WINE_CMD_OK` has not been emitted.
+from the official Wine `x86_64-windows` tree. The baseline Wine 10 command path
+now completes with `WINE_CMD_OK`.
+
+A generic Linux mapping bug blocked deeper Wine 11 execution. `mprotect`
+could materialize an anonymous `PROT_NONE` reservation, but the resulting pages
+were absent from the Linux mapping table, so `fork` did not copy them. Wine's
+PEB lives in such a materialized reservation, causing its nested process spawn
+to fault at `0x20002d020`. The Linux ABI now records every materialized page,
+rolls back the mapping on metadata failure, and restores the reservation on
+failure. The generic regression marker is
+`materialized_fork_inherit=true`; the full `compat-wine` run remains green.
+
+After that fix, Wine 11.22 can spawn and load Explorer through Jasper without
+the PEB fault. Direct3D is still not accepted: in a headless Jasper guest,
+Wine cannot create a desktop window, and the current test tree still lacks
+parts of the full Wine display/module closure. No `D3D11_PROBE_OK` exists yet.
 
 A generic unmodified C/POSIX fixture performs the same
 `creat -> fdopen -> fputs -> fclose` sequence twice through Jasper and exits
@@ -81,10 +93,12 @@ failure, and removing the preload shim did not change it either.
 
 The next slices must:
 
-1. determine why Wine rejects its successfully mapped `vprot` table during
-   `ntdll.dll` initialization;
-2. load the first Windows PE executable and produce `WINE_CMD_OK`;
-3. then stage DXVK/VKD3D-Proton and continue through Direct3D to Vulkan.
+1. complete the unmodified Wine 11 display/module closure and establish the
+   desktop path required by `win32u`;
+2. make the offscreen D3D11 probe complete with its literal
+   `D3D11_PROBE_OK ... pixel=32,64,128,255` marker;
+3. then continue through VKD3D-Proton D3D12, WSI presentation and real GPU
+   acceptance.
 
 Every ABI discovered by this work is recorded in
 `verification/linux-posix-abi-matrix.toml`. Wine progress alone does not

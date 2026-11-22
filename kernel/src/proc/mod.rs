@@ -7134,9 +7134,48 @@ pub(crate) fn linux_materialize_reserved(
         let _ = linux_reserve_range(pid, start, end);
         return Err(MemError::Quota);
     }
+    if with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::NoSuchProcess)?;
+        linux
+            .mappings
+            .try_reserve(pages as usize)
+            .map_err(|_| ProcError::OutOfFrames)?;
+        Ok(())
+    })
+    .is_err()
+    {
+        let _ = linux_reserve_range(pid, start, end);
+        return Err(MemError::OutOfMemory);
+    }
     if let Err(error) = map_anon(pid, start, pages, writable) {
         let _ = linux_reserve_range(pid, start, end);
         return Err(error);
+    }
+    let flags = if writable {
+        MapFlags::USER.union(MapFlags::WRITE)
+    } else {
+        MapFlags::USER
+    };
+    if with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::NoSuchProcess)?;
+        for index in 0..pages {
+            linux.mappings.push(LinuxMapping {
+                va: start + index * FRAME_SIZE,
+                flags,
+                file: None,
+                file_offset: 0,
+                shared_file: false,
+            });
+        }
+        Ok(())
+    })
+    .is_err()
+    {
+        for index in 0..pages {
+            let _ = unmap_page(pid, start + index * FRAME_SIZE);
+        }
+        let _ = linux_reserve_range(pid, start, end);
+        return Err(MemError::NoSuchProcess);
     }
     Ok(true)
 }
