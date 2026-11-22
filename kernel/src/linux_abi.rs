@@ -358,6 +358,28 @@ struct LinuxCacheSymlink {
     target: alloc::vec::Vec<u8>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinuxMountKind {
+    Proc,
+    Tmpfs,
+}
+
+struct LinuxMount {
+    target: alloc::vec::Vec<u8>,
+    kind: LinuxMountKind,
+}
+
+struct LinuxOverlayMount {
+    target: alloc::vec::Vec<u8>,
+    lower: alloc::vec::Vec<u8>,
+}
+
+struct LinuxMountNamespace {
+    id: u64,
+    mounts: alloc::vec::Vec<LinuxMount>,
+    overlay: Option<LinuxOverlayMount>,
+}
+
 struct CompatState {
     threads: alloc::vec::Vec<Option<LinuxThread>>,
     thread_landlock_domains:
@@ -388,6 +410,7 @@ struct CompatState {
     cache_dirs: alloc::vec::Vec<LinuxCacheDir>,
     cache_symlinks: alloc::vec::Vec<LinuxCacheSymlink>,
     next_cache_node_id: u32,
+    mount_namespaces: alloc::vec::Vec<LinuxMountNamespace>,
 }
 
 impl CompatState {
@@ -421,6 +444,7 @@ impl CompatState {
             cache_dirs: alloc::vec::Vec::new(),
             cache_symlinks: alloc::vec::Vec::new(),
             next_cache_node_id: 1,
+            mount_namespaces: alloc::vec::Vec::new(),
         }
     }
 }
@@ -3089,7 +3113,7 @@ fn execute(
         }
         LinuxSyscall::Vfork => compat_result(linux_vfork(pid, call.args, user_ip, user_preserved)),
         LinuxSyscall::Brk => compat_result(linux_brk(pid, call.args[0])),
-        LinuxSyscall::Access => compat_result(linux_access(call.args[0])),
+        LinuxSyscall::Access => compat_result(linux_access(pid, call.args[0])),
         LinuxSyscall::FaccessAt => compat_result(linux_faccessat(pid, call.args, false)),
         LinuxSyscall::FaccessAt2 => compat_result(linux_faccessat(pid, call.args, true)),
         LinuxSyscall::Prctl => compat_result(linux_prctl(pid, call.args)),
@@ -3178,8 +3202,6 @@ fn execute(
         | LinuxSyscall::Sethostname
         | LinuxSyscall::Setdomainname
         | LinuxSyscall::Reboot
-        | LinuxSyscall::Mount
-        | LinuxSyscall::Umount2
         | LinuxSyscall::PivotRoot
         | LinuxSyscall::Chroot
         | LinuxSyscall::Swapon
@@ -3197,10 +3219,12 @@ fn execute(
         | LinuxSyscall::Bpf
         | LinuxSyscall::PerfEventOpen
         | LinuxSyscall::Ptrace
-        | LinuxSyscall::Setns
-        | LinuxSyscall::Unshare
         | LinuxSyscall::Syslog
         | LinuxSyscall::Vhangup => -(CompatErrno::Perm as i32 as i64),
+        LinuxSyscall::Setns => compat_result(linux_setns(pid, call.args)),
+        LinuxSyscall::Unshare => compat_result(linux_unshare(pid, call.args[0])),
+        LinuxSyscall::Mount => compat_result(linux_mount(pid, call.args)),
+        LinuxSyscall::Umount2 => compat_result(linux_umount2(pid, call.args)),
         LinuxSyscall::ClockGettime => compat_result(linux_clock_gettime(call.args)),
         LinuxSyscall::ClockGetres => compat_result(linux_clock_getres(call.args)),
         LinuxSyscall::Nanosleep => compat_result(linux_nanosleep(pid, call.args)),
@@ -6982,6 +7006,7 @@ fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<(u64, u64), CompatErrno> {
         resolved.extend_from_slice(&path);
         resolved
     };
+    let resolved = linux_mount_resolve_path(pid, &resolved);
     drop(path);
     #[cfg(feature = "compat-wine-verify")]
     crate::kprintln!(
@@ -7122,12 +7147,13 @@ fn linux_fork_clone(
     const CLONE_CLEAR_SIGHAND: u64 = 0x0000_0001_0000_0000;
     const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
     const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
+    const CLONE_NEWPID: u64 = 0x2000_0000;
     const CLONE_FLAGS: u64 = CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID;
     let flags = args[0];
     let signal = flags & 0xff;
     if args[1] != 0
         || signal != SIGCHLD
-        || flags & !(CLONE_FLAGS | CLONE_CLEAR_SIGHAND | 0xff) != 0
+        || flags & !(CLONE_FLAGS | CLONE_CLEAR_SIGHAND | CLONE_NEWPID | 0xff) != 0
         || args[2] != 0
     {
         return Err(CompatErrno::Invalid);
@@ -7153,6 +7179,10 @@ fn linux_fork_clone(
             _ => CompatErrno::NoMemory,
         }
     })?;
+    if flags & CLONE_NEWPID != 0 && !proc::linux_unshare_namespaces(child, CLONE_NEWPID) {
+        let _ = proc::begin_exit(child, -1);
+        return Err(CompatErrno::NoMemory);
+    }
     proc::linux_pid(child)
         .map(u64::from)
         .ok_or(CompatErrno::NoSys)
@@ -8133,6 +8163,316 @@ fn linux_getrandom(args: [u64; 6]) -> Result<u64, CompatErrno> {
 ///
 /// 仅实现当前 Linux 任务的 `PR_SET_NAME`/`PR_GET_NAME`；名称固定为 Linux 的
 /// 16 字节任务命令名。其他 option 明确返回 EINVAL，不把未实现的安全策略当作成功。
+fn linux_unshare(pid: ObjId, flags: u64) -> Result<u64, CompatErrno> {
+    const CLONE_NEWNS: u64 = 0x0002_0000;
+    const CLONE_NEWUTS: u64 = 0x0400_0000;
+    const CLONE_NEWIPC: u64 = 0x0800_0000;
+    const CLONE_NEWPID: u64 = 0x2000_0000;
+    const CAP_SYS_ADMIN: u64 = 1 << 21;
+    if flags == 0 || flags & !(CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWPID) != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let capabilities = proc::linux_capabilities(pid).ok_or(CompatErrno::NoProcess)?;
+    if capabilities.effective & CAP_SYS_ADMIN == 0 {
+        return Err(CompatErrno::Perm);
+    }
+    if !proc::linux_unshare_namespaces(pid, flags) {
+        return Err(CompatErrno::NoProcess);
+    }
+    Ok(0)
+}
+
+/// Joins the bounded compatibility namespace retained by one namespace descriptor.
+fn linux_setns(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const CAP_SYS_ADMIN: u64 = 1 << 21;
+    let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
+    let (kind, namespace) = proc::linux_namespace_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if matches!(kind, proc::LinuxNamespaceType::Pid) {
+        return Err(CompatErrno::NotSupported);
+    }
+    let requested = args[1];
+    if requested != 0 && requested != kind.flag() {
+        return Err(CompatErrno::Invalid);
+    }
+    let capabilities = proc::linux_capabilities(pid).ok_or(CompatErrno::NoProcess)?;
+    if capabilities.effective & CAP_SYS_ADMIN == 0 {
+        return Err(CompatErrno::Perm);
+    }
+    if proc::linux_set_namespace_id(pid, kind, namespace) {
+        Ok(0)
+    } else {
+        Err(CompatErrno::NoProcess)
+    }
+}
+
+fn linux_optional_c_string(address: u64) -> Result<Option<alloc::vec::Vec<u8>>, CompatErrno> {
+    if address == 0 {
+        return Ok(None);
+    }
+    match linux_c_string(address, 4096) {
+        Ok(value) => Ok(Some(value)),
+        Err(CompatErrno::NoEntry) => Ok(Some(alloc::vec::Vec::new())),
+        Err(error) => Err(error),
+    }
+}
+
+fn linux_mount_namespace_mut(
+    namespace: u64,
+) -> Result<(), CompatErrno> {
+    let mut state = COMPAT.lock();
+    if state
+        .mount_namespaces
+        .iter()
+        .any(|entry| entry.id == namespace)
+    {
+        return Ok(());
+    }
+    state
+        .mount_namespaces
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    state.mount_namespaces.push(LinuxMountNamespace {
+        id: namespace,
+        mounts: alloc::vec::Vec::new(),
+        overlay: None,
+    });
+    Ok(())
+}
+
+fn linux_mount_replace(
+    namespace: u64,
+    target: alloc::vec::Vec<u8>,
+    kind: LinuxMountKind,
+) -> Result<(), CompatErrno> {
+    linux_mount_namespace_mut(namespace)?;
+    let mut state = COMPAT.lock();
+    let entry = state
+        .mount_namespaces
+        .iter_mut()
+        .find(|entry| entry.id == namespace)
+        .ok_or(CompatErrno::NoMemory)?;
+    if let Some(mount) = entry.mounts.iter_mut().find(|mount| mount.target == target) {
+        mount.kind = kind;
+        return Ok(());
+    }
+    entry
+        .mounts
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoMemory)?;
+    entry.mounts.push(LinuxMount { target, kind });
+    Ok(())
+}
+
+fn linux_overlay_replace(
+    namespace: u64,
+    target: alloc::vec::Vec<u8>,
+    lower: alloc::vec::Vec<u8>,
+) -> Result<(), CompatErrno> {
+    linux_mount_namespace_mut(namespace)?;
+    let mut state = COMPAT.lock();
+    let entry = state
+        .mount_namespaces
+        .iter_mut()
+        .find(|entry| entry.id == namespace)
+        .ok_or(CompatErrno::NoMemory)?;
+    entry.overlay = Some(LinuxOverlayMount { target, lower });
+    Ok(())
+}
+
+/// Applies the bounded mount forms used by Linux compatibility runtimes.
+fn linux_mount(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MS_RDONLY: u64 = 1;
+    const MS_NOSUID: u64 = 2;
+    const MS_NODEV: u64 = 4;
+    const MS_NOEXEC: u64 = 8;
+    const MS_REC: u64 = 0x4000;
+    const MS_SILENT: u64 = 0x8000;
+    const MS_SLAVE: u64 = 1 << 19;
+    const CAP_SYS_ADMIN: u64 = 1 << 21;
+    let capabilities = proc::linux_capabilities(pid).ok_or(CompatErrno::NoProcess)?;
+    if capabilities.effective & CAP_SYS_ADMIN == 0 {
+        return Err(CompatErrno::Perm);
+    }
+    let source = linux_optional_c_string(args[0])?;
+    let target = linux_c_string(args[1], 4096)?;
+    let target =
+        crate::linux_vfs::normalize_absolute_path(&target).ok_or(CompatErrno::Invalid)?;
+    let filesystem = linux_optional_c_string(args[2])?;
+    let flags = args[3];
+    let data = linux_optional_c_string(args[4])?;
+    let namespace =
+        proc::linux_namespace_id(pid, proc::LinuxNamespaceType::Mount)
+            .ok_or(CompatErrno::NoProcess)?;
+
+    if filesystem.is_none() {
+        if source.is_none()
+            && target == b"/"
+            && flags & (MS_REC | MS_SLAVE) == MS_REC | MS_SLAVE
+            && flags & !(MS_REC | MS_SLAVE | MS_SILENT) == 0
+            && data
+                .as_ref()
+                .is_none_or(|value| value.is_empty())
+        {
+            return Ok(0);
+        }
+        return Err(CompatErrno::Invalid);
+    }
+    let filesystem = filesystem.expect("checked filesystem");
+    match filesystem.as_slice() {
+        b"tmpfs" => {
+            if source.as_deref() != Some(b"tmpfs")
+                || target != b"/dev/shm"
+                || flags & !(MS_NOSUID | MS_NODEV | MS_NOEXEC) != 0
+                || data.as_ref().is_some_and(|value| !value.is_empty())
+            {
+                return Err(CompatErrno::Invalid);
+            }
+            linux_mount_replace(namespace, target, LinuxMountKind::Tmpfs)
+        }
+        b"proc" => {
+            if source.as_deref() != Some(b"proc")
+                || !linux_cache_path(&target)
+                || flags & MS_RDONLY != 0
+                || data.as_ref().is_some_and(|value| !value.is_empty())
+            {
+                return Err(CompatErrno::Invalid);
+            }
+            linux_mount_replace(namespace, target, LinuxMountKind::Proc)
+        }
+        b"overlay" => {
+            if source.as_deref() != Some(b"overlay")
+                || flags & MS_RDONLY != 0
+                || !linux_cache_path(&target)
+            {
+                return Err(CompatErrno::Invalid);
+            }
+            let data = data.ok_or(CompatErrno::Invalid)?;
+            let lower = data
+                .split(|byte| *byte == b',')
+                .find_map(|field| field.strip_prefix(b"lowerdir="))
+                .ok_or(CompatErrno::Invalid)?;
+            let mut lower = crate::linux_vfs::normalize_absolute_path(lower)
+                .ok_or(CompatErrno::Invalid)?;
+            if lower == b"/usr/libexec/darling" {
+                lower = b"/data/runtimes/darling/usr/libexec/darling".to_vec();
+            }
+            if !linux_cache_path(&lower) {
+                return Err(CompatErrno::Perm);
+            }
+            linux_overlay_replace(namespace, target, lower)
+        }
+        _ => Err(CompatErrno::NotSupported),
+    }
+    .map(|()| 0)
+}
+
+fn linux_umount2(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    const MNT_DETACH: u64 = 2;
+    const CAP_SYS_ADMIN: u64 = 1 << 21;
+    if args[1] & !MNT_DETACH != 0 {
+        return Err(CompatErrno::Invalid);
+    }
+    let capabilities = proc::linux_capabilities(pid).ok_or(CompatErrno::NoProcess)?;
+    if capabilities.effective & CAP_SYS_ADMIN == 0 {
+        return Err(CompatErrno::Perm);
+    }
+    let target = linux_c_string(args[0], 4096)?;
+    let target =
+        crate::linux_vfs::normalize_absolute_path(&target).ok_or(CompatErrno::Invalid)?;
+    let namespace =
+        proc::linux_namespace_id(pid, proc::LinuxNamespaceType::Mount)
+            .ok_or(CompatErrno::NoProcess)?;
+    linux_mount_namespace_mut(namespace)?;
+    let mut state = COMPAT.lock();
+    let entry = state
+        .mount_namespaces
+        .iter_mut()
+        .find(|entry| entry.id == namespace)
+        .ok_or(CompatErrno::NoProcess)?;
+    if entry.mounts.iter().any(|mount| mount.target == target) {
+        entry.mounts.retain(|mount| mount.target != target);
+        return Ok(0);
+    }
+    if target == b"/dev/shm" {
+        return Ok(0);
+    }
+    Err(CompatErrno::NoEntry)
+}
+
+fn linux_mount_resolve_path(pid: ObjId, path: &[u8]) -> alloc::vec::Vec<u8> {
+    let Some(namespace) = proc::linux_namespace_id(pid, proc::LinuxNamespaceType::Mount) else {
+        return path.to_vec();
+    };
+    let (mounts, overlay) = {
+        let state = COMPAT.lock();
+        let Some(entry) = state
+            .mount_namespaces
+            .iter()
+            .find(|entry| entry.id == namespace)
+        else {
+            return path.to_vec();
+        };
+        (
+            entry
+                .mounts
+                .iter()
+                .map(|mount| (mount.target.clone(), mount.kind))
+                .collect::<alloc::vec::Vec<_>>(),
+            entry
+                .overlay
+                .as_ref()
+                .map(|overlay| (overlay.target.clone(), overlay.lower.clone())),
+        )
+    };
+    for (target, kind) in mounts {
+        let suffix = if path == target {
+            Some(&[][..])
+        } else {
+            path.strip_prefix(target.as_slice())
+                .and_then(|suffix| suffix.strip_prefix(b"/"))
+        };
+        if let Some(suffix) = suffix {
+            if kind == LinuxMountKind::Proc {
+                let mut resolved = b"/proc".to_vec();
+                if !suffix.is_empty() {
+                    resolved.push(b'/');
+                    resolved.extend_from_slice(suffix);
+                }
+                return resolved;
+            }
+        }
+    }
+    if let Some((target, lower)) = overlay {
+        if lower == b"/data/runtimes/darling/usr/libexec/darling"
+            && (path == b"/usr/libexec/darling"
+                || path
+                    .strip_prefix(b"/usr/libexec/darling")
+                    .is_some_and(|suffix| suffix.starts_with(b"/")))
+        {
+            let mut resolved = lower.clone();
+            resolved.extend_from_slice(
+                path.strip_prefix(b"/usr/libexec/darling")
+                    .unwrap_or_default(),
+            );
+            return resolved;
+        }
+        if path == target
+            || path
+                .strip_prefix(target.as_slice())
+                .is_some_and(|suffix| suffix.starts_with(b"/"))
+        {
+            if linux_cache_metadata(path).is_some() {
+                return path.to_vec();
+            }
+            let suffix = path.strip_prefix(target.as_slice()).unwrap_or(&[]);
+            let mut resolved = lower;
+            resolved.extend_from_slice(suffix);
+            return resolved;
+        }
+    }
+    path.to_vec()
+}
+
 fn linux_prctl(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const PR_SET_PDEATHSIG: u64 = 1;
     const PR_GET_PDEATHSIG: u64 = 2;
@@ -12193,6 +12533,7 @@ fn linux_node_for_path_or_fd(
             resolved
         }
     };
+    let resolved = linux_mount_resolve_path(pid, &resolved);
     crate::linux_vfs::lookup_node(&resolved).ok_or(CompatErrno::NoEntry)
 }
 
@@ -16969,6 +17310,56 @@ fn linux_cache_shared_object(
     }
 }
 
+fn linux_proc_namespace_target(
+    pid: ObjId,
+    path: &[u8],
+) -> Option<(ObjId, proc::LinuxNamespaceType)> {
+    let rest = path.strip_prefix(b"/proc/")?;
+    let marker = rest.windows(4).position(|window| window == b"/ns/")?;
+    let target = &rest[..marker];
+    let name = &rest[marker + 4..];
+    if target.is_empty() || name.is_empty() || name.contains(&b'/') {
+        return None;
+    }
+    let kind = proc::LinuxNamespaceType::from_name(name)?;
+    let target = if target == b"self" || target == b"thread-self" {
+        pid
+    } else {
+        if target.iter().any(|byte| !byte.is_ascii_digit()) {
+            return None;
+        }
+        let digits = core::str::from_utf8(target).ok()?;
+        let requested = digits.parse::<u32>().ok()?;
+        proc::linux_process_for_pid(requested)?
+    };
+    let caller_app = proc::app(pid)?;
+    let target_app = proc::app(target)?;
+    (caller_app == target_app).then_some((target, kind))
+}
+
+fn linux_proc_namespace_open(
+    pid: ObjId,
+    path: &[u8],
+    flags: u64,
+) -> Result<Option<u64>, CompatErrno> {
+    let Some((target, kind)) = linux_proc_namespace_target(pid, path) else {
+        return Ok(None);
+    };
+    if flags & 3 != 0 {
+        return Err(CompatErrno::Perm);
+    }
+    let namespace =
+        proc::linux_namespace_id(target, kind).ok_or(CompatErrno::NoProcess)?;
+    let fd = proc::linux_install_namespace_fd(
+        pid,
+        kind,
+        namespace,
+        flags & 0x80000 != 0,
+    )
+    .ok_or(CompatErrno::NoSpace)?;
+    Ok(Some(u64::from(fd)))
+}
+
 /// Opens one exact virtual read-only path through `openat(2)`.
 ///
 /// 仅接受绝对路径与只读标志；`O_CLOEXEC` 被保留，写模式、路径穿越和未知路径失败关闭。
@@ -17089,6 +17480,12 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             resolved
         }
     };
+    let resolved = linux_mount_resolve_path(pid, &resolved);
+    if !path_only {
+        if let Some(fd) = linux_proc_namespace_open(pid, &resolved, flags)? {
+            return Ok(fd);
+        }
+    }
     if !path_only && resolved == b"/proc/self/maps" {
         if flags & 3 != 0 {
             return Err(CompatErrno::Perm);
@@ -17824,6 +18221,7 @@ fn linux_chdir(pid: ObjId, address: u64) -> Result<u64, CompatErrno> {
     } else {
         resolved
     };
+    let resolved = linux_mount_resolve_path(pid, &resolved);
     if linux_cache_path(&resolved) {
         if let Some(id) = linux_cache_directory_id(&resolved) {
             return if proc::set_linux_cwd_cache(pid, id) {
@@ -18086,6 +18484,19 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             resolved
         }
     };
+    let resolved = linux_mount_resolve_path(pid, &resolved);
+    if let Some((target, kind)) = linux_proc_namespace_target(pid, &resolved) {
+        let namespace =
+            proc::linux_namespace_id(target, kind).ok_or(CompatErrno::NoProcess)?;
+        write_synthetic_stat(
+            args[2],
+            0x4a53_4e53_0000_0000 | namespace,
+            1,
+            0,
+            0o120555,
+        )?;
+        return Ok(0);
+    }
     if unix_socket_pathname(&resolved)
         .is_some_and(|name| proc::linux_socket_name_bound(&name))
     {
@@ -18188,6 +18599,19 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                     resolved
                 }
             };
+            let resolved = linux_mount_resolve_path(pid, &resolved);
+            if let Some((target, kind)) = linux_proc_namespace_target(pid, &resolved) {
+                let namespace =
+                    proc::linux_namespace_id(target, kind).ok_or(CompatErrno::NoProcess)?;
+                write_synthetic_statx(
+                    args[4],
+                    0x4a53_4e53_0000_0000 | namespace,
+                    1,
+                    0,
+                    0o120555,
+                )?;
+                return Ok(0);
+            }
             if unix_socket_pathname(&resolved)
                 .is_some_and(|name| proc::linux_socket_name_bound(&name))
             {
@@ -21641,6 +22065,7 @@ fn linux_readlink_path(
         return Err(CompatErrno::Invalid);
     }
     let path = resolve_linux_at_path(pid, dirfd, path_address)?;
+    let path = linux_mount_resolve_path(pid, &path);
     #[cfg(any(
         feature = "compat-dynamic-libc-verify",
         feature = "compat-jvm-verify",
@@ -21648,6 +22073,15 @@ fn linux_readlink_path(
     ))]
     trace_path("readlink", &path);
     if path != b"/proc/self/exe" {
+        if let Some((target, kind)) = linux_proc_namespace_target(pid, &path) {
+            let namespace =
+                proc::linux_namespace_id(target, kind).ok_or(CompatErrno::NoProcess)?;
+            let text = alloc::format!("{}:[{}]", kind.name(), namespace);
+            let copied = capacity.min(text.len());
+            copy_to_user(buffer, &text.as_bytes()[..copied], copied)
+                .map_err(|_| CompatErrno::Fault)?;
+            return Ok(copied as u64);
+        }
         let resolved = linux_cache_resolve_symlinks(&path, false)?;
         if let Some(target) = linux_cache_symlink_target(&resolved) {
             let copied = capacity.min(target.len());
@@ -22496,7 +22930,7 @@ fn linux_brk(pid: ObjId, requested: u64) -> Result<u64, CompatErrno> {
 ///
 /// 已知虚拟文件返回成功，其他合法绝对路径返回 `ENOENT`；非法用户指针返回
 /// `EFAULT`。不得把宿主文件系统可见性泄漏给 Linux 兼容进程。
-fn linux_access(path: u64) -> Result<u64, CompatErrno> {
+fn linux_access(pid: ObjId, path: u64) -> Result<u64, CompatErrno> {
     let bytes = linux_c_string(path, 4096)?;
     #[cfg(any(
         feature = "compat-dynamic-libc-verify",
@@ -22509,7 +22943,9 @@ fn linux_access(path: u64) -> Result<u64, CompatErrno> {
     } else {
         bytes
     };
-    let present = linux_cache_metadata(&resolved).is_some()
+    let resolved = linux_mount_resolve_path(pid, &resolved);
+    let present = linux_proc_namespace_target(pid, &resolved).is_some()
+        || linux_cache_metadata(&resolved).is_some()
         || crate::linux_vfs::lookup_node(&resolved).is_some();
     if present {
         Ok(0)
@@ -22584,6 +23020,7 @@ fn linux_faccessat(
             } else {
                 resolved
             };
+            let resolved = linux_mount_resolve_path(pid, &resolved);
             if linux_cache_metadata(&resolved).is_some() {
                 return Ok(0);
             }

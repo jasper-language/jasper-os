@@ -32,7 +32,7 @@ RELEASE = {
 }
 ENVIRONMENTS = {
     "linux-host-baseline": ("host-only", "host-passed"),
-    "jasper-qemu-x86_64": ("jasper-guest", "not-run"),
+    "jasper-qemu-x86_64": ("jasper-guest", "blocked"),
     "pixel6a-aarch64": ("physical-hardware", "inapplicable"),
 }
 STAGES = {
@@ -100,10 +100,11 @@ def validate(matrix: dict[str, Any]) -> tuple[int, int]:
         require(item.get("status") == status, f"{ident} must remain {status}")
         evidence = item.get("evidence")
         require(isinstance(evidence, str), f"{ident} evidence must be a string")
-        if status in {"host-passed", "passed"}:
+        if status in {"host-passed", "passed", "blocked"}:
             require(bool(evidence), f"{ident} pass requires repository evidence")
             path = _repo_file(evidence)
             require(path.is_file(), f"{ident} evidence file is missing")
+        if status in {"host-passed", "passed"}:
             marker = item.get("marker")
             require(isinstance(marker, str) and bool(marker), f"{ident} needs a marker")
             require(marker in path.read_text(encoding="utf-8"), f"{ident} marker is absent")
@@ -112,8 +113,8 @@ def validate(matrix: dict[str, Any]) -> tuple[int, int]:
         encoding="utf-8"
     )
     require(
-        "No Darling result is claimed for Jasper yet." in host_text,
-        "host evidence must explicitly separate Jasper guest execution",
+        "No complete Darling result is claimed for Jasper." in host_text,
+        "host evidence must explicitly separate partial Jasper guest execution",
     )
 
     stages = {item.get("id"): item for item in matrix.get("stage", [])}

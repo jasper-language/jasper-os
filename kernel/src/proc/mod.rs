@@ -85,6 +85,8 @@ static LINUX_PID_NEXT: AtomicU32 = AtomicU32::new(1);
 static NEXT_LINUX_AIO_CONTEXT: AtomicU64 = AtomicU64::new(0x9000_0000_0000_0001);
 #[cfg(feature = "linux-abi")]
 static NEXT_LINUX_SYSV_SHMEM_ID: AtomicU64 = AtomicU64::new(0x0000_8d00_0000_0001);
+#[cfg(feature = "linux-abi")]
+static NEXT_LINUX_NAMESPACE_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_WORKLOAD_DOMAIN: AtomicU32 = AtomicU32::new(1);
 /// Opaque sentinel used only by the Linux standard-stream compatibility table.
 ///
@@ -123,6 +125,8 @@ const LINUX_MQ_HANDLE_BASE: u64 = 0x0000_8c00_0000_0000;
 const LINUX_MOUNT_TREE_HANDLE_BASE: u64 = 0x0000_8e00_0000_0000;
 #[cfg(feature = "linux-abi")]
 const LINUX_FS_CONTEXT_HANDLE_BASE: u64 = 0x0000_8f00_0000_0000;
+#[cfg(feature = "linux-abi")]
+const LINUX_NAMESPACE_HANDLE_BASE: u64 = 0x0000_8d80_0000_0000;
 const LINUX_LANDLOCK_HANDLE_BASE: u64 = 0x0000_9000_0000_0000;
 
 /// Compatibility-only process state installed by the optional Linux service.
@@ -164,6 +168,12 @@ struct LinuxProcessState {
     cap_effective: u64,
     cap_permitted: u64,
     cap_inheritable: u64,
+    namespace_generation: u64,
+    namespace_flags: u64,
+    mount_namespace_id: u64,
+    uts_namespace_id: u64,
+    ipc_namespace_id: u64,
+    pid_namespace_id: u64,
     uid: u32,
     euid: u32,
     suid: u32,
@@ -5866,6 +5876,189 @@ pub(crate) fn set_linux_capabilities(pid: ObjId, capabilities: LinuxCapabilities
     .is_ok()
 }
 
+/// Records supported per-process namespace flags after a successful unshare.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_add_namespace_flags(pid: ObjId, flags: u64) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        let next = linux
+            .namespace_generation
+            .checked_add(1)
+            .ok_or(ProcError::NoTaskSlot)?;
+        linux.namespace_generation = next;
+        linux.namespace_flags |= flags;
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// One Linux namespace class exposed through `/proc/<pid>/ns`.
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxNamespaceType {
+    Mount,
+    Uts,
+    Ipc,
+    Pid,
+}
+
+#[cfg(feature = "linux-abi")]
+impl LinuxNamespaceType {
+    pub(crate) const fn flag(self) -> u64 {
+        match self {
+            Self::Mount => 0x0002_0000,
+            Self::Uts => 0x0400_0000,
+            Self::Ipc => 0x0800_0000,
+            Self::Pid => 0x2000_0000,
+        }
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Mount => "mnt",
+            Self::Uts => "uts",
+            Self::Ipc => "ipc",
+            Self::Pid => "pid",
+        }
+    }
+
+    pub(crate) const fn from_name(name: &[u8]) -> Option<Self> {
+        match name {
+            b"mnt" => Some(Self::Mount),
+            b"uts" => Some(Self::Uts),
+            b"ipc" => Some(Self::Ipc),
+            b"pid" => Some(Self::Pid),
+            _ => None,
+        }
+    }
+}
+
+/// Creates new compatibility namespace identities for the requested classes.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_unshare_namespaces(pid: ObjId, flags: u64) -> bool {
+    let next = NEXT_LINUX_NAMESPACE_ID.fetch_add(1, Ordering::Relaxed);
+    if next == 0 {
+        return false;
+    }
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if flags & LinuxNamespaceType::Mount.flag() != 0 {
+            linux.mount_namespace_id = next;
+        }
+        if flags & LinuxNamespaceType::Uts.flag() != 0 {
+            linux.uts_namespace_id = next;
+        }
+        if flags & LinuxNamespaceType::Ipc.flag() != 0 {
+            linux.ipc_namespace_id = next;
+        }
+        if flags & LinuxNamespaceType::Pid.flag() != 0 {
+            linux.pid_namespace_id = next;
+        }
+        let generation = linux
+            .namespace_generation
+            .checked_add(1)
+            .ok_or(ProcError::NoTaskSlot)?;
+        linux.namespace_generation = generation;
+        linux.namespace_flags |= flags;
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Returns the identity of one namespace class for a compatibility process.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_namespace_id(pid: ObjId, kind: LinuxNamespaceType) -> Option<u64> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_ref().ok_or(ProcError::Exited)?;
+        Ok(match kind {
+            LinuxNamespaceType::Mount => linux.mount_namespace_id,
+            LinuxNamespaceType::Uts => linux.uts_namespace_id,
+            LinuxNamespaceType::Ipc => linux.ipc_namespace_id,
+            LinuxNamespaceType::Pid => linux.pid_namespace_id,
+        })
+    })
+    .ok()
+}
+
+/// Joins one already-created compatibility namespace identity.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_set_namespace_id(
+    pid: ObjId,
+    kind: LinuxNamespaceType,
+    namespace: u64,
+) -> bool {
+    if namespace == 0 || namespace >= (1u64 << 32) {
+        return false;
+    }
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        match kind {
+            LinuxNamespaceType::Mount => linux.mount_namespace_id = namespace,
+            LinuxNamespaceType::Uts => linux.uts_namespace_id = namespace,
+            LinuxNamespaceType::Ipc => linux.ipc_namespace_id = namespace,
+            LinuxNamespaceType::Pid => linux.pid_namespace_id = namespace,
+        }
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Installs one read-only namespace descriptor retaining its typed identity.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_install_namespace_fd(
+    pid: ObjId,
+    kind: LinuxNamespaceType,
+    namespace: u64,
+    close_on_exec: bool,
+) -> Option<u32> {
+    if namespace == 0 || namespace >= (1u64 << 32) {
+        return None;
+    }
+    let type_bits = match kind {
+        LinuxNamespaceType::Mount => 1,
+        LinuxNamespaceType::Uts => 2,
+        LinuxNamespaceType::Ipc => 3,
+        LinuxNamespaceType::Pid => 4,
+    };
+    let handle = LINUX_NAMESPACE_HANDLE_BASE | (type_bits << 32) | namespace;
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                Rights::READ,
+                compat_core::fd::CompatKind::Namespace,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+/// Resolves one namespace descriptor to its class and identity.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_namespace_fd(
+    pid: ObjId,
+    fd: u32,
+) -> Option<(LinuxNamespaceType, u64)> {
+    let entry = linux_fd(pid, fd)?;
+    if entry.kind != compat_core::fd::CompatKind::Namespace {
+        return None;
+    }
+    let encoded = entry.handle.checked_sub(LINUX_NAMESPACE_HANDLE_BASE)?;
+    let namespace = encoded & 0xffff_ffff;
+    let kind = match encoded >> 32 {
+        1 => LinuxNamespaceType::Mount,
+        2 => LinuxNamespaceType::Uts,
+        3 => LinuxNamespaceType::Ipc,
+        4 => LinuxNamespaceType::Pid,
+        _ => return None,
+    };
+    (namespace != 0).then_some((kind, namespace))
+}
+
 /// Returns the Linux ABI credential state for one compatibility process.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_credentials(pid: ObjId) -> Option<LinuxCredentials> {
@@ -7280,6 +7473,12 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         cap_effective: (1u64 << 41) - 1,
         cap_permitted: (1u64 << 41) - 1,
         cap_inheritable: 0,
+        namespace_generation: 0,
+        namespace_flags: 0,
+        mount_namespace_id: 1,
+        uts_namespace_id: 1,
+        ipc_namespace_id: 1,
+        pid_namespace_id: 1,
         uid: 0,
         euid: 0,
         suid: 0,

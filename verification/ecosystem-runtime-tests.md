@@ -133,7 +133,8 @@ Darling `v0.1.20260608` was extracted. The official launcher requires
 setuid-root/namespace privileges, so a privileged isolated container was used
 as the host baseline. Darling's `/bin/echo` ran and printed `DARLING_EXEC_OK`.
 The host user-space launcher without container privileges was blocked before
-that point. No Darling result is claimed for Jasper yet.
+that point. A separate Jasper guest launcher/mount diagnostic is recorded in
+`evidence/darling-jasper-mount-r12/README.md`; No complete Darling result is claimed for Jasper.
 
 The release's `debs_20260608.zip` asset was downloaded and verified as
 `sha256=27469ef3932da2e91dd7fb34b70e3628a3e54b7af9fb5480051f44af35eca1fd`;

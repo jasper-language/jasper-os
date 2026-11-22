@@ -275,6 +275,8 @@ pub(crate) const ANDROID_FILE_PATHS: &[&[u8]] = &[
     b"/opt/wine-devel/lib/wine/x86_64-windows/d3d12core.dll",
     b"/opt/wine-devel/lib/wine/x86_64-windows/d3d12-probe.exe",
     b"/opt/wine-devel/lib/wine/x86_64-windows/d3d11-wsi-probe.exe",
+    b"/etc/passwd",
+    b"/etc/group",
 ];
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
@@ -525,6 +527,7 @@ pub enum DirectoryId {
     OptWineDevelShare,
     OptWineDevelShareWine,
     OptWineDevelShareWineNls,
+    Etc,
 }
 
 impl DirectoryId {
@@ -578,6 +581,7 @@ impl DirectoryId {
                 Self::OptWineDevelShare => 41,
                 Self::OptWineDevelShareWine => 42,
                 Self::OptWineDevelShareWineNls => 43,
+                Self::Etc => 44,
             }
     }
 
@@ -631,6 +635,7 @@ impl DirectoryId {
                 Self::OptWineDevelShare => 42,
                 Self::OptWineDevelShareWine => 43,
                 Self::OptWineDevelShareWineNls => 44,
+                Self::Etc => 45,
             }
     }
 
@@ -693,6 +698,7 @@ impl DirectoryId {
             value if value == (DIRECTORY_HANDLE_BASE | 44) => {
                 Some(Self::OptWineDevelShareWineNls)
             }
+            value if value == (DIRECTORY_HANDLE_BASE | 45) => Some(Self::Etc),
             _ => None,
         }
     }
@@ -750,6 +756,7 @@ impl DirectoryId {
             Self::OptWineDevelShare => b"/opt/wine-devel/share",
             Self::OptWineDevelShareWine => b"/opt/wine-devel/share/wine",
             Self::OptWineDevelShareWineNls => b"/opt/wine-devel/share/wine/nls",
+            Self::Etc => b"/etc",
         }
     }
 }
@@ -933,6 +940,7 @@ pub fn lookup_node(path: &[u8]) -> Option<Node> {
         b"/apex/com.android.i18n/etc/icu" => Some(DirectoryId::ApexI18nEtcIcu),
         b"/apex/com.android.i18n/lib64" => Some(DirectoryId::ApexI18nLib64),
         b"/linkerconfig" => Some(DirectoryId::LinkerConfig),
+        b"/etc" => Some(DirectoryId::Etc),
         b"/data" => Some(DirectoryId::Data),
         b"/data/local" => Some(DirectoryId::DataLocal),
         b"/data/local/tmp" => Some(DirectoryId::DataLocalTmp),
@@ -1002,6 +1010,7 @@ pub fn lookup_node(path: &[u8]) -> Option<Node> {
         b"/apex/com.android.i18n/etc/icu" => Some(DirectoryId::ApexI18nEtcIcu),
         b"/apex/com.android.i18n/lib64" => Some(DirectoryId::ApexI18nLib64),
         b"/linkerconfig" => Some(DirectoryId::LinkerConfig),
+        b"/etc" => Some(DirectoryId::Etc),
         b"/data" => Some(DirectoryId::Data),
         b"/data/local" => Some(DirectoryId::DataLocal),
         b"/data/local/tmp" => Some(DirectoryId::DataLocalTmp),
@@ -1070,6 +1079,10 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         DirEntry {
             name: b"opt",
             node: Node::Directory(DirectoryId::Opt),
+        },
+        DirEntry {
+            name: b"etc",
+            node: Node::Directory(DirectoryId::Etc),
         },
     ];
     const LIB: &[DirEntry] = &[DirEntry {
@@ -1502,6 +1515,10 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         DirEntry {
             name: b"true",
             node: Node::Executable(0x300e),
+        },
+        DirEntry {
+            name: b"darlingserver",
+            node: Node::Executable(0x3014),
         },
         DirEntry {
             name: b"uname",
@@ -1997,6 +2014,16 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
             node: Node::File(FileId::AndroidFile(178)),
         },
     ];
+    const ETC: &[DirEntry] = &[
+        DirEntry {
+            name: b"passwd",
+            node: Node::File(FileId::AndroidFile(214)),
+        },
+        DirEntry {
+            name: b"group",
+            node: Node::File(FileId::AndroidFile(215)),
+        },
+    ];
     match directory {
         DirectoryId::Root => ROOT,
         DirectoryId::Lib => LIB,
@@ -2041,6 +2068,7 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         DirectoryId::OptWineDevelShare => OPT_WINE_DEVEL_SHARE,
         DirectoryId::OptWineDevelShareWine => OPT_WINE_DEVEL_SHARE_WINE,
         DirectoryId::OptWineDevelShareWineNls => OPT_WINE_DEVEL_SHARE_WINE_NLS,
+        DirectoryId::Etc => ETC,
     }
 }
 

@@ -857,6 +857,17 @@ fn install_root_libraries(root: &Ext4Reader) -> Result<(), HealthError> {
         }
         installed += 1;
     }
+    #[cfg(feature = "compat-darling-verify")]
+    for path in ["/usr/lib/x86_64-linux-gnu/libstdc++.so.6"] {
+        let bytes = root
+            .read_file(path, MAX_LIBRARY_BYTES)
+            .map_err(|_| HealthError::RootExecute)?;
+        total = total.saturating_add(bytes.len());
+        if !crate::linux_vfs::install_root_android_file(path.as_bytes(), bytes) {
+            return Err(HealthError::RootExecute);
+        }
+        installed += 1;
+    }
     crate::kprintln!(
         "[JSR-LIFE-ROOT-LIBS] count={} bytes={} source=system-ab",
         installed,
@@ -1307,6 +1318,16 @@ fn execute_root_dynamic_programs(
     install_root_libraries(root)?;
     #[cfg(feature = "compat-darling-verify")]
     {
+        for path in [b"/etc/passwd".as_slice(), b"/etc/group".as_slice()] {
+            let text_path =
+                core::str::from_utf8(path).map_err(|_| HealthError::RootExecute)?;
+            let bytes = root
+                .read_file(text_path, 16 * 1024)
+                .map_err(|_| HealthError::RootExecute)?;
+            if !crate::linux_vfs::install_root_android_file(path, bytes) {
+                return Err(HealthError::RootExecute);
+            }
+        }
         install_root_runtime_cache(
             root,
             "/data/runtimes/darling/runtime.manifest.tsv",
@@ -1318,6 +1339,31 @@ fn execute_root_dynamic_programs(
         let interpreter = root
             .read_file("/lib64/ld-linux-x86-64.so.2", 4 * 1024 * 1024)
             .map_err(|_| HealthError::RootExecute)?;
+        let server = root
+            .read_file("/usr/bin/darlingserver", 8 * 1024 * 1024)
+            .map_err(|_| HealthError::RootExecute)?;
+        if !crate::linux_vfs::install_root_program(
+            origin,
+            b"/usr/bin/darlingserver",
+            server.len(),
+            interpreter.len(),
+        ) {
+            return Err(HealthError::RootExecute);
+        }
+        let mldr = root
+            .read_file(
+                "/data/runtimes/darling/usr/libexec/darling/usr/libexec/darling/mldr",
+                4 * 1024 * 1024,
+            )
+            .map_err(|_| HealthError::RootExecute)?;
+        if !crate::linux_vfs::install_root_program(
+            origin,
+            b"/data/runtimes/darling/usr/libexec/darling/usr/libexec/darling/mldr",
+            mldr.len(),
+            interpreter.len(),
+        ) {
+            return Err(HealthError::RootExecute);
+        }
         let darling_argv: [&[u8]; 3] = [
             b"/data/runtimes/darling/usr/bin/darling",
             b"/bin/echo",

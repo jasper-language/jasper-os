@@ -37,9 +37,9 @@ claim = "Darling /bin/echo ran in a privileged isolated Linux host container"
 [[environment]]
 id = "jasper-qemu-x86_64"
 scope = "jasper-guest"
-status = "not-run"
-evidence = ""
-claim = "No Darling process has executed through Jasper's Linux ABI"
+status = "blocked"
+evidence = "evidence/darling-jasper-mount-r12/README.md"
+claim = "The unmodified launcher creates bounded UTS/IPC/mount/PID namespaces, mounts tmpfs/proc and reaches darlingserver plus mldr startup, but AF_UNIX setup and commpage mapping still fail"
 
 [[environment]]
 id = "pixel6a-aarch64"
@@ -52,7 +52,7 @@ claim = "The pinned Darling release is amd64 only and is not a Pixel 6a AArch64 
 id = "container-launch"
 status = "blocked"
 requirements = "mount and PID namespaces, overlayfs, a privileged or otherwise host-authorized launcher, and Darling's setuid-root /usr/bin/darling entry point"
-evidence = "evidence/darling-jasper-namespace-r3/README.md"
+evidence = "evidence/darling-jasper-mount-r12/README.md"
 exit_gate = "The unmodified release launcher creates and shuts down an isolated Darling prefix without weakening Jasper host authorization"
 
 [[stage]]

@@ -67,9 +67,11 @@ image、Jasper VFS、资源核算或物理设备路径，因此不是 Jasper gue
 不存在任何 Jasper guest pass。
 
 容器启动阶段已记录
-`evidence/darling-jasper-namespace-r3/README.md`：固定 release
-已在 Jasper guest 内实际运行 launcher，并被拒绝创建 UTS/IPC namespace。
-该证据只说明启动前置条件尚未满足，不构成 Darling/Mach-O guest 成功结果。
+`evidence/darling-jasper-mount-r12/README.md`：固定 release 已在 Jasper guest
+内创建有界 UTS/IPC/mount/PID namespace，完成 tmpfs、根传播、受控 overlay
+和 proc 挂载，并进入 darlingserver 与 mldr 启动。当前阻塞为 AF_UNIX
+socket 建立和 mldr commpage 映射；该证据仍不构成 Darling/Mach-O guest
+成功结果。
 
 ## 当前明确 blocker
 
@@ -80,6 +82,12 @@ image、Jasper VFS、资源核算或物理设备路径，因此不是 Jasper gue
 4. Mach-O/mldr/dyld、darlingserver 和 GUI/Metal 是彼此独立的兼容层，host
    `/bin/echo` 完全不能证明它们。
 5. GPL-3.0 与子模块混合许可证意味着不能未经逐项审核直接随 Jasper 发布二进制。
+
+特权 host baseline 的 syscall 顺序记录在
+`evidence/darling-launch-trace-20261122/README.md`。它明确了实现顺序：
+UTS/IPC namespace → vfork/reap → mount namespace → tmpfs/slave remount →
+overlay/vchroot，之后才是 `darlingserver` 和 Mach-O/dyld。不能跳级用
+host echo 替代其中任何一层。
 
 ## 验证
 

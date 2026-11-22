@@ -719,8 +719,8 @@ if [ "$MODE" = compat-dotnet ]; then
   exit 0
 fi
 if [ "$MODE" = compat-darling ]; then
-  grep -aq '^Cannot unshare UTS and IPC namespaces to create darling-init: Operation not permitted' \
-    "$OUT/serial.log"
+  grep -aq '^Failed to create socket: Invalid argument' "$OUT/serial.log"
+  grep -aq '^Cannot mmap commpage: Cannot allocate memory' "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=darling-launcher path=/data/runtimes/darling/usr/bin/darling interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=false frames_before=[0-9]* resources=false failed=[1-9][0-9]*' \
     "$OUT/serial.log"
   grep -aq '^\[JSR-COMPAT-DYNAMIC-RESOURCE\] program=darling-launcher .* retained=0 ' \
@@ -729,7 +729,7 @@ if [ "$MODE" = compat-darling ]; then
   ! grep -aq 'DARLING_JASPER_GUEST_OK' "$OUT/serial.log"
   ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL)\]|panicked at|KERNEL PANIC' \
     "$OUT/serial.log"
-  echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc gate=uts-ipc-namespace-blocked evidence=$OUT"
+  echo "issue21-uefi-boot: RECORDED mode=$MODE qemu_rc=$rc gate=proc-mounted-runtime-blocked evidence=$OUT"
   exit 0
 fi
 if [ "$MODE" = android-art ]; then

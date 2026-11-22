@@ -19,10 +19,37 @@ mkdir -p "$(dirname "$OUTPUT")"
 temporary="$(mktemp -d "$(dirname "$OUTPUT")/.darling-probe.XXXXXX")"
 trap 'rm -rf "$temporary"' EXIT
 runtime="$temporary/data/runtimes/darling"
-mkdir -p "$runtime/usr/bin" "$temporary/usr/lib/x86_64-linux-gnu" "$temporary/lib64"
+mkdir -p \
+    "$runtime/usr/bin" \
+    "$temporary/usr/bin" \
+    "$temporary/etc" \
+    "$temporary/usr/lib/x86_64-linux-gnu" \
+    "$temporary/lib64"
 
 install -m 0755 "$SOURCE/usr/bin/darling" "$runtime/usr/bin/darling"
-for library in libc.so.6 libm.so.6 libgcc_s.so.1; do
+install -D -m 0755 \
+    "$SOURCE/usr/libexec/darling/usr/libexec/darling/mldr" \
+    "$runtime/usr/libexec/darling/usr/libexec/darling/mldr"
+install -D -m 0755 \
+    "$SOURCE/usr/libexec/darling/usr/libexec/darling/vchroot" \
+    "$runtime/usr/libexec/darling/usr/libexec/darling/vchroot"
+install -D -m 0644 \
+    "$SOURCE/usr/libexec/darling/usr/lib/dyld" \
+    "$runtime/usr/libexec/darling/usr/lib/dyld"
+install -D -m 0644 \
+    "$SOURCE/usr/libexec/darling/usr/lib/libSystem.B.dylib" \
+    "$runtime/usr/libexec/darling/usr/lib/libSystem.B.dylib"
+install -m 0755 "$SOURCE/usr/bin/darlingserver" "$temporary/usr/bin/darlingserver"
+printf '%s\n' \
+    'root:x:0:0:System Administrator:/var/root:/bin/sh' \
+    'auth:x:1000:1000:Darling User:/Users/auth:/bin/bash' \
+    >"$temporary/etc/passwd"
+printf '%s\n' \
+    'root:x:0:' \
+    'wheel:x:0:root,auth' \
+    'auth:x:1000:' \
+    >"$temporary/etc/group"
+for library in libc.so.6 libm.so.6 libgcc_s.so.1 libstdc++.so.6; do
     install -m 0644 "/usr/lib/x86_64-linux-gnu/$library" \
         "$temporary/usr/lib/x86_64-linux-gnu/$library"
 done
@@ -52,4 +79,4 @@ PY
 
 mv "$temporary" "$OUTPUT"
 trap - EXIT
-echo "darling-probe: prepared tree=$OUTPUT guest_pass=false gate=uts-ipc-namespace"
+echo "darling-probe: prepared tree=$OUTPUT guest_pass=false gate=namespace-mount-probe"
