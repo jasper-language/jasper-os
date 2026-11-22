@@ -509,6 +509,8 @@ pub struct Installed {
     pub version: String,
     /// 激活版本的安装目录。
     pub path: PathBuf,
+    /// Whether this installed component is currently enabled for execution.
+    pub enabled: bool,
 }
 
 /// 管理单个组件根目录内的校验、安装、升级、回滚和卸载。
@@ -602,6 +604,10 @@ impl ComponentInstaller {
                 name: manifest.name,
                 version: manifest.version,
                 path: destination,
+                enabled: previous_state
+                    .as_ref()
+                    .map(|state| state.enabled)
+                    .unwrap_or(true),
             });
         }
         let staging = self.root.join(format!(
@@ -667,6 +673,10 @@ impl ComponentInstaller {
             name: manifest.name,
             version: manifest.version,
             path: destination,
+            enabled: previous_state
+                .as_ref()
+                .map(|state| state.enabled)
+                .unwrap_or(true),
         })
     }
 
@@ -848,7 +858,8 @@ impl ComponentInstaller {
         let previous_manifest = self.installed_manifest(name, &previous)?;
         self.preflight_dependency_closure(&previous_manifest)?;
         self.ensure_active_dependents_accept(name, &previous)?;
-        let pending = self.write_state_temporary_values(name, &previous, Some(&state.current))?;
+        let pending =
+            self.write_state_temporary_values(name, &previous, Some(&state.current), state.enabled)?;
         if let Err(error) = fs::rename(&pending, self.state_path(name)) {
             let _ = fs::remove_file(pending);
             return Err(error.into());
@@ -886,12 +897,64 @@ impl ComponentInstaller {
         self.verify_resolution(&previous_manifest, &plan, catalog)?;
         self.preflight_dependency_closure(&previous_manifest)?;
         self.ensure_active_dependents_accept(name, &previous)?;
-        let pending = self.write_state_temporary_values(name, &previous, Some(&state.current))?;
+        let pending =
+            self.write_state_temporary_values(name, &previous, Some(&state.current), state.enabled)?;
         if let Err(error) = fs::rename(&pending, self.state_path(name)) {
             let _ = fs::remove_file(pending);
             return Err(error.into());
         }
         Ok((self.current(name)?, plan))
+    }
+
+    /// Stop a component's future activation without deleting its verified files.
+    ///
+    /// Dependencies of an enabled component cannot be stopped implicitly.
+    pub fn stop(&self, name: &str) -> Result<Installed, PackageError> {
+        self.set_enabled(name, false)
+    }
+
+    /// Enable a stopped component after verifying its dependency closure.
+    pub fn start(&self, name: &str) -> Result<Installed, PackageError> {
+        let state = self.read_state(name)?;
+        self.verify_installed(name, &state.current)?;
+        let manifest = self.installed_manifest(name, &state.current)?;
+        self.preflight_dependency_closure(&manifest)?;
+        for dependency in &manifest.requires {
+            if !self.current(&dependency.name)?.enabled {
+                return Err(PackageError::MissingDependency {
+                    component: name.into(),
+                    required: dependency.name.clone(),
+                });
+            }
+        }
+        self.set_enabled(name, true)
+    }
+
+    fn set_enabled(&self, name: &str, enabled: bool) -> Result<Installed, PackageError> {
+        let state = self.read_state(name)?;
+        self.verify_installed(name, &state.current)?;
+        if !enabled {
+            if let Some(dependent) = self.active_dependent(name)? {
+                return Err(PackageError::DependencyInUse {
+                    component: name.into(),
+                    dependent,
+                });
+            }
+        }
+        if state.enabled == enabled {
+            return self.current(name);
+        }
+        let pending = self.write_state_temporary_values(
+            name,
+            &state.current,
+            state.previous.as_deref(),
+            enabled,
+        )?;
+        if let Err(error) = fs::rename(&pending, self.state_path(name)) {
+            let _ = fs::remove_file(pending);
+            return Err(error.into());
+        }
+        self.current(name)
     }
 
     /// 只卸载指定组件及其状态，不修改其他组件。
@@ -942,6 +1005,7 @@ impl ComponentInstaller {
             name: name.into(),
             path: self.component_path(name, &state.current),
             version: state.current,
+            enabled: state.enabled,
         })
     }
 
@@ -972,6 +1036,7 @@ impl ComponentInstaller {
         };
         let mut current = None;
         let mut previous = None;
+        let mut enabled = None;
         for (line_no, raw) in text.lines().enumerate() {
             let line = raw.trim();
             if line.is_empty() {
@@ -986,7 +1051,19 @@ impl ComponentInstaller {
             match key {
                 "current" if current.is_none() => current = nonempty(value),
                 "previous" if previous.is_none() => previous = nonempty(value),
-                "current" | "previous" => {
+                "enabled" if enabled.is_none() => {
+                    enabled = Some(match value {
+                        "true" => true,
+                        "false" => false,
+                        _ => {
+                            return Err(PackageError::CorruptState {
+                                name: name.into(),
+                                reason: "enabled 必须为 true 或 false".into(),
+                            })
+                        }
+                    })
+                }
+                "current" | "previous" | "enabled" => {
                     return Err(PackageError::CorruptState {
                         name: name.into(),
                         reason: format!("第 {} 行重复键", line_no + 1),
@@ -1016,7 +1093,11 @@ impl ComponentInstaller {
                 reason: "current 与 previous 相同".into(),
             });
         }
-        Ok(Some(InstallState { current, previous }))
+        Ok(Some(InstallState {
+            current,
+            previous,
+            enabled: enabled.unwrap_or(true),
+        }))
     }
 
     fn write_state_temporary(
@@ -1027,7 +1108,12 @@ impl ComponentInstaller {
         let previous = state
             .and_then(|state| (state.current != manifest.version).then_some(state.current.as_str()))
             .or_else(|| state.and_then(|state| state.previous.as_deref()));
-        self.write_state_temporary_values(&manifest.name, &manifest.version, previous)
+        self.write_state_temporary_values(
+            &manifest.name,
+            &manifest.version,
+            previous,
+            state.map(|state| state.enabled).unwrap_or(true),
+        )
     }
 
     fn write_state_temporary_values(
@@ -1035,10 +1121,16 @@ impl ComponentInstaller {
         name: &str,
         current: &str,
         previous: Option<&str>,
+        enabled: bool,
     ) -> Result<PathBuf, PackageError> {
         let target = self.state_path(name);
         let temporary = target.with_extension(format!("tmp-{}", now_nanos()));
-        let body = format!("current={}\nprevious={}\n", current, previous.unwrap_or(""));
+        let body = format!(
+            "current={}\nprevious={}\nenabled={}\n",
+            current,
+            previous.unwrap_or(""),
+            enabled
+        );
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1225,6 +1317,9 @@ impl ComponentInstaller {
                 continue;
             }
             let state = self.read_state(dependent)?;
+            if !state.enabled {
+                continue;
+            }
             let manifest = self.installed_manifest(dependent, &state.current)?;
             if let Some(required) = manifest
                 .requires
@@ -1275,6 +1370,7 @@ impl ComponentInstaller {
 struct InstallState {
     current: String,
     previous: Option<String>,
+    enabled: bool,
 }
 
 fn ensure_real_directory(path: &Path) -> Result<(), PackageError> {
@@ -1591,18 +1687,64 @@ mod tests {
         let (archive1, digest1) = archive(temp.path(), "1.0");
         let manifest1 = manifest(temp.path(), "1.0", &digest1);
         let first = installer.install(&manifest1, &archive1).unwrap();
+        assert!(first.enabled);
         assert!(first.path.join("bin/wine").is_file());
         assert_eq!(installer.install(&manifest1, &archive1).unwrap(), first);
+        assert!(!installer.stop("wine").unwrap().enabled);
+        assert!(!installer.current("wine").unwrap().enabled);
+        assert!(installer.start("wine").unwrap().enabled);
+        assert!(!installer.stop("wine").unwrap().enabled);
         let (archive2, digest2) = archive(temp.path(), "2.0");
         let manifest2 = manifest(temp.path(), "2.0", &digest2);
         installer.install(&manifest2, &archive2).unwrap();
         assert_eq!(installer.current("wine").unwrap().version, "2.0");
+        assert!(!installer.current("wine").unwrap().enabled);
         assert_eq!(installer.rollback("wine").unwrap().version, "1.0");
         assert_eq!(installer.current("wine").unwrap().version, "1.0");
+        assert!(!installer.current("wine").unwrap().enabled);
         installer.uninstall("wine").unwrap();
         assert!(installer.current("wine").is_err());
         assert!(!root.join(COMPONENT_DIR).join("wine").exists());
         assert!(transient_entries(&root).is_empty());
+    }
+
+    #[test]
+    fn stopped_dependencies_block_enabled_dependents_but_legacy_state_is_enabled() {
+        let temp = TestDir::new("stop-start");
+        let root = temp.path().join("root");
+        let installer = ComponentInstaller::new(&root);
+        let (dep_archive, dep_digest) = archive(temp.path(), "1.0.0");
+        let dep_manifest =
+            component_manifest(temp.path(), "runtime", "1.0.0", &dep_digest, "");
+        installer.install(&dep_manifest, &dep_archive).unwrap();
+        let (app_archive, app_digest) = archive(temp.path(), "1.0.0");
+        let app_manifest = component_manifest(
+            temp.path(),
+            "app",
+            "1.0.0",
+            &app_digest,
+            "runtime@>=1.0.0",
+        );
+        installer.install(&app_manifest, &app_archive).unwrap();
+        assert!(matches!(
+            installer.stop("runtime"),
+            Err(PackageError::DependencyInUse { .. })
+        ));
+        installer.stop("app").unwrap();
+        assert!(!installer.stop("runtime").unwrap().enabled);
+        assert!(matches!(
+            installer.start("app"),
+            Err(PackageError::MissingDependency { .. })
+        ));
+        installer.start("runtime").unwrap();
+        assert!(installer.start("app").unwrap().enabled);
+
+        fs::write(
+            installer.state_path("app"),
+            "current=1.0.0\nprevious=\n",
+        )
+        .unwrap();
+        assert!(installer.current("app").unwrap().enabled);
     }
 
     #[test]

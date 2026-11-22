@@ -65,12 +65,20 @@ Linux fd 表、兼容 pid、Linux 调用权限和 ELF 后端模块只在对应�
 | Native 发行 Profile | `release/native-profile.toml` 精确使用默认内核特性且兼容组件列表为空 | passed |
 | syscall 显式启用 | 启用 `compat-syscall-verify` 后引入并编译 `jasper-compat-core` | passed |
 | ELF 后端显式启用 | 启用 `compat-elf-backend-verify` 后引入并编译 `jasper-compat-loader` | passed |
+| 组件独立停用/恢复 | 固定上游 DXVK 3.1.1 安装后依次 stop/start，并验证 enabled 状态持久化 | passed (component lifecycle) |
 | 发行组件卸载 | 安装、停用、卸载后原生 Profile 启动与设备服务不回退 | pending |
 | 默认发行退出 | 兼容组件不在默认发行配置，且原生应用生态可替代迁移需求 | pending |
 
 机器检查脚本读取本矩阵、内核清单和源码门控锚点。`core-passed` 只表示默认依赖
 隔离、显式装配和组件管理软件侧闭环，不表示真实默认发行退出与完整原生生态
 迁移已经完成。
+
+组件管理器现在持久化每个已安装组件的 `enabled` 状态；`stop` 不删除已验证
+文件，`start` 重新验证版本、摘要和依赖闭包。启用的依赖方会阻止其依赖被隐式
+停用，旧状态文件缺省为 `enabled=true`，因此升级不会静默改变运行能力。
+固定 DXVK 3.1.1 包的在线安装、停用、恢复、升级、回滚、卸载和离线安装证据在
+`evidence/compat-package-real-dxvk-3.1.1-r2/`。这关闭软件组件生命周期缺口，
+但没有替代真实默认发行上的原生服务持续运行与回滚证据。
 
 ## 演进规则
 

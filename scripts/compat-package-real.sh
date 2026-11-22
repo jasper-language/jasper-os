@@ -68,6 +68,13 @@ manifest2=$(manifest_version "${DXVK_VERSION}-r2")
 "$CLI" current "$install_root" dxvk | tee "$OUT/current-r1.txt" |
     grep -q "dxvk ${DXVK_VERSION}-r1 "
 
+"$CLI" stop "$install_root" dxvk | tee "$OUT/stop-r1.txt" |
+    grep -q "enabled=false"
+"$CLI" current "$install_root" dxvk | tee "$OUT/current-stopped.txt" |
+    grep -q "enabled=false"
+"$CLI" start "$install_root" dxvk | tee "$OUT/start-r1.txt" |
+    grep -q "enabled=true"
+
 "$CLI" install "$install_root" "$manifest2" "$ARCHIVE" |
     tee "$OUT/install-r2.txt"
 "$CLI" current "$install_root" dxvk | tee "$OUT/current-r2.txt" |
@@ -99,6 +106,6 @@ offline_root="$WORK/offline-root"
     grep -q "dxvk ${DXVK_VERSION}-r1 "
 "$CLI" uninstall "$offline_root" dxvk | tee "$OUT/offline-uninstall.txt"
 
-printf 'dxvk_version=%s\ndxvk_sha256=%s\nonline_install=pass\nupgrade=pass\nrollback=pass\nuninstall=pass\noffline_install=pass\nsource_parity=true\n' \
+printf 'dxvk_version=%s\ndxvk_sha256=%s\nonline_install=pass\nstop_start=pass\nupgrade=pass\nrollback=pass\nuninstall=pass\noffline_install=pass\nsource_parity=true\n' \
     "$DXVK_VERSION" "$DXVK_SHA256" >"$OUT/summary.txt"
 echo "compat-package-real: PASS evidence=$OUT"
