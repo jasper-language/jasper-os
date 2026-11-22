@@ -67,10 +67,10 @@ image、Jasper VFS、资源核算或物理设备路径，因此不是 Jasper gue
 不存在任何 Jasper guest pass。
 
 容器启动阶段已记录
-`evidence/darling-jasper-mount-r12/README.md`：固定 release 已在 Jasper guest
-内创建有界 UTS/IPC/mount/PID namespace，完成 tmpfs、根传播、受控 overlay
-和 proc 挂载，并进入 darlingserver 与 mldr 启动。当前阻塞为 AF_UNIX
-socket 建立和 mldr commpage 映射；该证据仍不构成 Darling/Mach-O guest
+`evidence/darling-jasper-dyld-r37/README.md`：固定 release 已在 Jasper guest
+内完成有界 namespace、tmpfs、受控 overlay、procfs、darlingserver check-in、
+Mach port RPC、vchroot 与 Mach-O/dyld 装载。当前裁剪 payload 在 libSystem
+启动时报告缺少 `libobjc.A.dylib`；该证据仍不构成 Darling/Mach-O guest
 成功结果。
 
 ## 当前明确 blocker

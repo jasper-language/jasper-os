@@ -318,6 +318,7 @@ struct LinuxSocketHandle {
     endpoint: Arc<compat_core::UnixSocketEndpoint>,
     listener: Option<Arc<UnixListener>>,
     controls: Arc<LinuxSocketControls>,
+    packet_mode: bool,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -698,6 +699,7 @@ enum LinuxFdResource {
         endpoint: Arc<compat_core::UnixSocketEndpoint>,
         listener: Option<Arc<UnixListener>>,
         controls: Arc<LinuxSocketControls>,
+        packet_mode: bool,
     },
 }
 
@@ -759,6 +761,38 @@ impl LinuxSocketControls {
         (first, second)
     }
 
+    fn connect_pair(first: &Arc<Self>, second: &Arc<Self>) -> bool {
+        if Arc::ptr_eq(first, second) {
+            return false;
+        }
+        let first_to_second = Arc::new(LinuxSocketControlQueue {
+            messages: SpinLock::new(VecDeque::new()),
+            written: AtomicUsize::new(0),
+            read: AtomicUsize::new(0),
+        });
+        let second_to_first = Arc::new(LinuxSocketControlQueue {
+            messages: SpinLock::new(VecDeque::new()),
+            written: AtomicUsize::new(0),
+            read: AtomicUsize::new(0),
+        });
+        let mut first_tx = first.tx.lock();
+        let mut first_rx = first.rx.lock();
+        let mut second_tx = second.tx.lock();
+        let mut second_rx = second.rx.lock();
+        if first_tx.is_some()
+            || first_rx.is_some()
+            || second_tx.is_some()
+            || second_rx.is_some()
+        {
+            return false;
+        }
+        *first_tx = Some(Arc::clone(&first_to_second));
+        *second_rx = Some(first_to_second);
+        *second_tx = Some(Arc::clone(&second_to_first));
+        *first_rx = Some(second_to_first);
+        true
+    }
+
     fn attach_peer(&self) -> Option<Arc<Self>> {
         let mut tx = self.tx.lock();
         let mut rx = self.rx.lock();
@@ -794,6 +828,9 @@ struct PendingSocketConnection {
 struct UnixListener {
     name: compat_core::UnixSocketName,
     owner: compat_core::UnixCredentials,
+    packet_mode: bool,
+    datagram_endpoint: Option<Arc<compat_core::UnixSocketEndpoint>>,
+    datagram_controls: Option<Arc<LinuxSocketControls>>,
     listening: AtomicU32,
     backlog: AtomicU32,
     pending: SpinLock<VecDeque<PendingSocketConnection>>,
@@ -1373,6 +1410,7 @@ pub(crate) fn linux_socketpair(
     pid: ObjId,
     close_on_exec: bool,
     nonblocking: bool,
+    packet_mode: bool,
 ) -> Option<(u32, u32)> {
     let byte_budget = usize::try_from(crate::mm::heap::limit()).ok()?;
     with_proc(pid, |p| {
@@ -1430,12 +1468,14 @@ pub(crate) fn linux_socketpair(
             endpoint: Arc::new(first),
             listener: None,
             controls: first_controls,
+            packet_mode,
         });
         linux.sockets.push(LinuxSocketHandle {
             handle: second_handle,
             endpoint: Arc::new(second),
             listener: None,
             controls: second_controls,
+            packet_mode,
         });
         Ok((first_fd.fd(), second_fd.fd()))
     })
@@ -1448,6 +1488,7 @@ pub(crate) fn linux_socket_create(
     pid: ObjId,
     close_on_exec: bool,
     nonblocking: bool,
+    packet_mode: bool,
 ) -> Result<u32, LinuxSocketError> {
     let byte_budget =
         usize::try_from(crate::mm::heap::limit()).map_err(|_| LinuxSocketError::NoSpace)?;
@@ -1488,6 +1529,7 @@ pub(crate) fn linux_socket_create(
             endpoint,
             listener: None,
             controls: LinuxSocketControls::empty(),
+            packet_mode,
         });
         Ok(fd.fd())
     })
@@ -1535,6 +1577,13 @@ pub(crate) fn linux_socket_bind(
                     uid: compat_core::syscall::LINUX_COMPAT_UID as u32,
                     gid: compat_core::syscall::LINUX_COMPAT_GID as u32,
                 },
+                packet_mode: socket.packet_mode,
+                datagram_endpoint: socket
+                    .packet_mode
+                    .then(|| Arc::clone(&socket.endpoint)),
+                datagram_controls: socket
+                    .packet_mode
+                    .then(|| Arc::clone(&socket.controls)),
                 listening: AtomicU32::new(0),
                 backlog: AtomicU32::new(1),
                 pending: SpinLock::new(VecDeque::new()),
@@ -1653,6 +1702,35 @@ pub(crate) fn linux_socket_connect(
                     .find(|listener| listener.name == name)
             }
             .ok_or(LinuxSocketError::NoEntry)?;
+            if let (Some(server), Some(server_controls)) = (
+                listener.datagram_endpoint.as_ref(),
+                listener.datagram_controls.as_ref(),
+            ) {
+                if !compat_core::UnixSocketEndpoint::connect_pair(&socket.endpoint, server) {
+                    return Err(LinuxSocketError::Invalid);
+                }
+                if !LinuxSocketControls::connect_pair(&socket.controls, server_controls) {
+                    return Err(LinuxSocketError::Invalid);
+                }
+                if !socket.endpoint.set_names(local_name, name)
+                    || !server.set_names(name, local_name)
+                {
+                    return Err(LinuxSocketError::Invalid);
+                }
+                let client_credentials = compat_core::UnixCredentials {
+                    pid: linux.pid,
+                    uid: compat_core::syscall::LINUX_COMPAT_UID as u32,
+                    gid: compat_core::syscall::LINUX_COMPAT_GID as u32,
+                };
+                if !socket
+                    .endpoint
+                    .set_credentials(client_credentials, listener.owner)
+                    || !server.set_credentials(listener.owner, client_credentials)
+                {
+                    return Err(LinuxSocketError::Invalid);
+                }
+                return Ok(());
+            }
             if listener.listening.load(Ordering::Acquire) == 0 {
                 return Err(LinuxSocketError::ConnectionRefused);
             }
@@ -1765,6 +1843,7 @@ pub(crate) fn linux_socket_accept(
                 endpoint: accepted,
                 listener: None,
                 controls: accepted_controls,
+                packet_mode: listener.packet_mode,
             });
             Ok(fd.fd())
         }
@@ -1839,7 +1918,8 @@ pub(crate) fn linux_socket_is_listener(pid: ObjId, handle: u64) -> Option<bool> 
                 .iter()
                 .find(|socket| socket.handle == handle)?
                 .listener
-                .is_some(),
+                .as_ref()
+                .is_some_and(|listener| listener.listening.load(Ordering::Acquire) != 0),
         ),
         _ => None,
     })
@@ -1939,6 +2019,7 @@ pub(crate) fn linux_capture_fd_transfer(
                         endpoint: Arc::clone(&socket.endpoint),
                         listener: socket.listener.as_ref().map(Arc::clone),
                         controls: Arc::clone(&socket.controls),
+                        packet_mode: socket.packet_mode,
                     }
                 }
                 compat_core::fd::CompatKind::Event => {
@@ -2239,6 +2320,7 @@ pub(crate) fn linux_install_fd_transfer(
                     endpoint,
                     listener,
                     controls,
+                    packet_mode,
                 } => {
                     linux
                         .sockets
@@ -2253,7 +2335,7 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                         None,
                         None,
-                        Some((endpoint, listener, controls)),
+                        Some((endpoint, listener, controls, packet_mode)),
                     )
                 }
             };
@@ -2333,7 +2415,7 @@ pub(crate) fn linux_install_fd_transfer(
                 linux.next_mq_handle = next;
                 linux.message_queues.push(LinuxMqHandle { handle, queue });
             }
-            if let Some((endpoint, listener, controls)) = pending_socket {
+            if let Some((endpoint, listener, controls, packet_mode)) = pending_socket {
                 let next = handle
                     .checked_add(1)
                     .ok_or(LinuxFdTransferError::NoSpace)?;
@@ -2343,6 +2425,7 @@ pub(crate) fn linux_install_fd_transfer(
                     endpoint,
                     listener,
                     controls,
+                    packet_mode,
                 });
             }
             Ok(fd.fd())
@@ -2400,22 +2483,82 @@ pub(crate) fn linux_socket_record_data(pid: ObjId, handle: u64, bytes: usize) {
     if bytes == 0 {
         return;
     }
-    let Some(controls) = crate::kobj::with(|t| match t.get(pid) {
+    let Some((controls, packet_mode)) = crate::kobj::with(|t| match t.get(pid) {
         Ok(KObject::Process(p)) => p
             .linux
             .as_ref()?
             .sockets
             .iter()
             .find(|socket| socket.handle == handle)
-            .map(|socket| Arc::clone(&socket.controls)),
+            .map(|socket| (Arc::clone(&socket.controls), socket.packet_mode)),
         _ => None,
     }) else {
         return;
     };
     let queue = controls.tx.lock().as_ref().map(Arc::clone);
     if let Some(queue) = queue {
-        queue.written.fetch_add(bytes, Ordering::AcqRel);
+        let start = queue.written.fetch_add(bytes, Ordering::AcqRel);
+        if packet_mode {
+            let mut messages = queue.messages.lock();
+            if messages.try_reserve(1).is_ok() {
+                messages.push_back(LinuxControlMessage {
+                    start,
+                    fds: Vec::new(),
+                    credentials: true,
+                });
+            }
+        }
     }
+}
+
+/// Returns the remaining bytes in the oldest packet on one packet socket.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_packet_remaining(pid: ObjId, handle: u64) -> Option<usize> {
+    let (controls, packet_mode) = crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .sockets
+            .iter()
+            .find(|socket| socket.handle == handle)
+            .map(|socket| (Arc::clone(&socket.controls), socket.packet_mode)),
+        _ => None,
+    })?;
+    if !packet_mode {
+        return None;
+    }
+    let queue = controls.rx.lock().as_ref().map(Arc::clone)?;
+    let read = queue.read.load(Ordering::Acquire);
+    let written = queue.written.load(Ordering::Acquire);
+    let messages = queue.messages.lock();
+    let packet_start = messages
+        .iter()
+        .map(|message| message.start)
+        .filter(|start| *start <= read)
+        .max()?;
+    let end = messages
+        .iter()
+        .map(|message| message.start)
+        .filter(|start| *start > packet_start)
+        .min()
+        .unwrap_or(written);
+    (end > read).then_some(end - read)
+}
+
+/// Reports whether one socket preserves datagram or seqpacket boundaries.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_is_packet(pid: ObjId, handle: u64) -> Option<bool> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => Some(
+            p.linux
+                .as_ref()?
+                .sockets
+                .iter()
+                .find(|socket| socket.handle == handle)?
+                .packet_mode,
+        ),
+        _ => None,
+    })
 }
 
 /// Consumes ancillary records crossed by a socket read. A non-capturing read
@@ -6802,10 +6945,7 @@ pub(crate) fn set_linux_stack_range(pid: ObjId, start: u64, end: u64) -> bool {
 pub(crate) fn linux_reserve_range(pid: ObjId, start: u64, end: u64) -> Result<(), MemError> {
     if start % FRAME_SIZE != 0
         || end <= start
-        || !((start >= arch::USER_WINDOW.0 && end <= arch::USER_WINDOW.1)
-            || (arch::LOW_USER_WINDOW.1 > arch::LOW_USER_WINDOW.0
-                && start >= arch::LOW_USER_WINDOW.0
-                && end <= arch::LOW_USER_WINDOW.1))
+        || !arch::is_private_range(start, end)
     {
         return Err(MemError::InvalidRange);
     }
@@ -7436,7 +7576,9 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
     let pid = allocate_linux_pid().ok_or(ProcError::NoTaskSlot)?;
     let fd_budget = FdTable::capacity_for_bytes(
         (MAX_PROCESS_FRAMES as u64).saturating_mul(FRAME_SIZE as u64),
-    );
+    )
+    .min(linux_global_metadata_capacity() as u64)
+    .max(3);
     let mut fds = FdTable::with_limits(fd_budget as usize, fd_budget as usize);
     for (fd, rights) in [(0, Rights::READ), (1, Rights::WRITE), (2, Rights::WRITE)] {
         fds.install_at(
@@ -8029,7 +8171,7 @@ fn checked_range(va: u64, pages: u64) -> Result<(), MemError> {
         .checked_mul(FRAME_SIZE)
         .and_then(|len| va.checked_add(len))
         .ok_or(MemError::InvalidRange)?;
-    if !in_private_window(va) || end > arch::USER_WINDOW.1 {
+    if !in_private_window(va) || !arch::is_private_range(va, end) {
         return Err(MemError::InvalidRange);
     }
     Ok(())
@@ -8560,7 +8702,7 @@ pub fn map_device_bar(
         .checked_mul(FRAME_SIZE)
         .and_then(|len| va.checked_add(len))
         .ok_or(MemError::InvalidRange)?;
-    if !in_private_window(va) || end > arch::USER_WINDOW.1 {
+    if !in_private_window(va) || !arch::is_private_range(va, end) {
         return Err(MemError::InvalidRange);
     }
     let flags = MapFlags::USER

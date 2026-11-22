@@ -60,7 +60,7 @@ const JVM_PROGRAM_DEADLINE_TICKS: u64 = 12_000; // JASPER-HARDCODE-REVIEW: issue
 #[cfg(feature = "compat-dotnet-verify")]
 const DOTNET_PROGRAM_DEADLINE_TICKS: u64 = 12_000; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=coreclr-startup-and-thread-cleanup-uefi-budget
 #[cfg(feature = "compat-darling-verify")]
-const DARLING_PROGRAM_DEADLINE_TICKS: u64 = 2_000; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=darling-launch-gate-probe-uefi-budget
+const DARLING_PROGRAM_DEADLINE_TICKS: u64 = 30_000; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=darling-full-dyld-load-tcg-budget
 
 static CONTROL_DEVICE: spin::Mutex<Option<Arc<IrqSpinLock<BlockDevice>>>> = spin::Mutex::new(None);
 static CONTROL_MUTATION: AtomicBool = AtomicBool::new(false);
@@ -1369,10 +1369,12 @@ fn execute_root_dynamic_programs(
             b"/bin/echo",
             b"DARLING_EXEC_OK",
         ];
-        let darling_envp: [&[u8]; 3] = [
+        let darling_envp: [&[u8]; 5] = [
             b"DPREFIX=/tmp/darlingprefix",
             b"HOME=/data",
             b"PATH=/usr/bin:/bin",
+            b"DSERVER_LOG_STDERR=1",
+            b"DSERVER_LOG_LEVEL=debug",
         ];
         run_darling_namespace_probe(
             &executable,

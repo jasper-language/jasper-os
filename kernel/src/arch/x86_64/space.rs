@@ -30,6 +30,12 @@ pub const USER_WINDOW: (u64, u64) = ((USER_FIRST as u64) << 39, (USER_LAST as u6
 /// PML4[0] entries are private to the compatibility address space, covering
 /// Wine PE preferred images and `MAP_32BIT` users such as AOSP ART.
 pub const LOW_USER_WINDOW: (u64, u64) = (128 << 20, 1 << 39); // JASPER-HARDCODE-REVIEW: issue=32 source=linux-x86_64-low-private-window reason=wine-pe-images-and-map32bit-share-pml4-zero
+/// Sparse private PML4 slot reserved for ABI-defined fixed pages such as the
+/// Darwin commpage. It remains separate from the contiguous native window.
+pub const COMPAT_FIXED_FIRST: usize = 255;
+pub const COMPAT_FIXED_LAST: usize = 256;
+pub const COMPAT_FIXED_WINDOW: (u64, u64) =
+    ((COMPAT_FIXED_FIRST as u64) << 39, (COMPAT_FIXED_LAST as u64) << 39);
 const LOW_USER_PDPT_FIRST: usize = 0;
 const LOW_USER_PDPT_LAST: usize = 512;
 const LOW_KERNEL_PD_ENTRIES: usize = (LOW_USER_WINDOW.0 as usize) >> 21;
@@ -58,7 +64,10 @@ pub fn current() -> SpaceRoot {
 /// `phys_offset` 必须是全物理内存映射偏移；`template` 是有效的 PML4。
 pub unsafe fn create(template: SpaceRoot, phys_offset: u64, frames: &mut dyn FrameAllocator) -> Result<SpaceRoot, MapError> {
     let cur = table_at(phys_offset, template.0);
-    if (USER_FIRST..USER_LAST).any(|i| !cur[i].is_unused()) {
+    if (USER_FIRST..USER_LAST)
+        .chain(COMPAT_FIXED_FIRST..COMPAT_FIXED_LAST)
+        .any(|i| !cur[i].is_unused())
+    {
         return Err(MapError::InvalidAddress);
     }
     if !cur[0].is_unused() {
@@ -130,7 +139,10 @@ pub unsafe fn create(template: SpaceRoot, phys_offset: u64, frames: &mut dyn Fra
             | PageTableFlags::USER_ACCESSIBLE,
     );
     for i in 0..512 {
-        if i != 0 && !(USER_FIRST..USER_LAST).contains(&i) {
+        if i != 0
+            && !(USER_FIRST..USER_LAST).contains(&i)
+            && !(COMPAT_FIXED_FIRST..COMPAT_FIXED_LAST).contains(&i)
+        {
             new[i] = cur[i].clone();
         }
     }
@@ -242,7 +254,7 @@ pub unsafe fn destroy(root: SpaceRoot, phys_offset: u64, frames: &mut dyn FrameA
         deallocate_aligned_frame(frames, low_phys);
         pml4[0].set_unused();
     }
-    for i in USER_FIRST..USER_LAST {
+    for i in (USER_FIRST..USER_LAST).chain(COMPAT_FIXED_FIRST..COMPAT_FIXED_LAST) {
         free_subtree(&mut pml4[i], 3, phys_offset, frames);
     }
     deallocate_aligned_frame(frames, root.0);

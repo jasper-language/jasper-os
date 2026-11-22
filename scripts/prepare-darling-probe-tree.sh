@@ -39,6 +39,11 @@ install -D -m 0644 \
 install -D -m 0644 \
     "$SOURCE/usr/libexec/darling/usr/lib/libSystem.B.dylib" \
     "$runtime/usr/libexec/darling/usr/lib/libSystem.B.dylib"
+mkdir -p "$runtime/usr/libexec/darling/usr/lib/system"
+cp -a "$SOURCE/usr/libexec/darling/usr/lib/system/." \
+    "$runtime/usr/libexec/darling/usr/lib/system/"
+cp -a "$SOURCE/usr/libexec/darling/usr/lib/." \
+    "$runtime/usr/libexec/darling/usr/lib/"
 install -m 0755 "$SOURCE/usr/bin/darlingserver" "$temporary/usr/bin/darlingserver"
 printf '%s\n' \
     'root:x:0:0:System Administrator:/var/root:/bin/sh' \

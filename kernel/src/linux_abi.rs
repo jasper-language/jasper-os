@@ -65,6 +65,7 @@ const SYSV_SEMVMX: i32 = 32767; // JASPER-HARDCODE-REVIEW: issue=35 source=linux
 const MAX_SYSV_SHARED_SEGMENTS: usize = 16; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-sysv-uapi-v1 reason=compat-profile-public-shmmni-quota
 static NEXT_LINUX_TID: AtomicU32 = AtomicU32::new(0x10_0000);
 static NEXT_POSIX_TIMER_ID: AtomicU64 = AtomicU64::new(0x7000_0000_0000_0001);
+static NEXT_UNIX_AUTOBIND: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy)]
 struct SignalOrigin {
@@ -454,6 +455,7 @@ static COMPAT: IrqSpinLock<CompatState> =
 
 const LINUX_CACHE_ROOT: &[u8] = b"/data/.cache/metal2vulkan";
 const LINUX_CACHE_ROOTS: &[&[u8]] = &[
+    b"/proc",
     LINUX_CACHE_ROOT,
     b"/tmp",
     b"/data/wineprefix",
@@ -2206,10 +2208,7 @@ fn set_clear_child_tid(process: ObjId, address: u64) -> Option<u32> {
 }
 
 fn in_linux_private_window(address: u64) -> bool {
-    (address >= crate::arch::USER_WINDOW.0 && address < crate::arch::USER_WINDOW.1)
-        || (crate::arch::LOW_USER_WINDOW.1 > crate::arch::LOW_USER_WINDOW.0
-            && address >= crate::arch::LOW_USER_WINDOW.0
-            && address < crate::arch::LOW_USER_WINDOW.1)
+    crate::arch::is_private_range(address, address.saturating_add(1))
 }
 
 fn register_robust_list(process: ObjId, address: u64, length: u64) -> bool {
@@ -4169,11 +4168,20 @@ fn authorize_console(pid: ObjId, fd: u32, write: bool) -> Result<(), CompatErrno
 }
 
 fn admit_process_io(pid: ObjId, bytes: u64, ops: u64) -> Result<crate::workload::IoPermit, CompatErrno> {
-    crate::workload::begin_process_io(pid, bytes, ops).map_err(|error| match error {
-        kernel_core::workload::WorkloadError::Quota
-        | kernel_core::workload::WorkloadError::InvalidState => CompatErrno::NoSpace,
-        kernel_core::workload::WorkloadError::InvalidKey => CompatErrno::NoProcess,
-        _ => CompatErrno::Perm,
+    crate::workload::begin_process_io(pid, bytes, ops).map_err(|error| {
+        #[cfg(feature = "compat-darling-verify")]
+        crate::kprintln!(
+            "[JSR-DARLING-IO-FAIL] bytes={} ops={} error={:?}",
+            bytes,
+            ops,
+            error
+        );
+        match error {
+            kernel_core::workload::WorkloadError::Quota
+            | kernel_core::workload::WorkloadError::InvalidState => CompatErrno::NoSpace,
+            kernel_core::workload::WorkloadError::InvalidKey => CompatErrno::NoProcess,
+            _ => CompatErrno::Perm,
+        }
     })
 }
 
@@ -5407,10 +5415,7 @@ fn linux_task_for_tid(process: ObjId, tid: u32) -> Option<crate::task::TaskId> {
 }
 
 fn linux_user_range_valid(start: u64, end: u64) -> bool {
-    (start >= crate::arch::USER_WINDOW.0 && end <= crate::arch::USER_WINDOW.1)
-        || (crate::arch::LOW_USER_WINDOW.1 > crate::arch::LOW_USER_WINDOW.0
-            && start >= crate::arch::LOW_USER_WINDOW.0
-            && end <= crate::arch::LOW_USER_WINDOW.1)
+    crate::arch::is_private_range(start, end)
 }
 
 /// Returns whether an exact user range contains no concrete page or reservation.
@@ -5443,6 +5448,7 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const MAP_DENYWRITE: u64 = 0x800;
     const MAP_NORESERVE: u64 = 0x4000;
     const MAP_STACK: u64 = 0x20000;
+    const MAP_GROWSDOWN: u64 = 0x100;
     const MAP_FIXED_NOREPLACE: u64 = 0x10_0000;
     const PROT_READ: u64 = 0x1;
     const PROT_WRITE: u64 = 0x2;
@@ -5460,6 +5466,16 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             args[5]
         );
     }
+    #[cfg(feature = "compat-darling-verify")]
+    crate::kprintln!(
+        "[JSR-DARLING-MMAP] addr={:#x} bytes={:#x} prot={:#x} flags={:#x} fd={} offset={:#x}",
+        args[0],
+        args[1],
+        args[2],
+        args[3],
+        args[4] as i64,
+        args[5]
+    );
     #[cfg(feature = "compat-wine-verify")]
     if args[3] & MAP_FIXED_NOREPLACE != 0 {
         crate::kprintln!(
@@ -5486,6 +5502,7 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 | MAP_DENYWRITE
                 | MAP_NORESERVE
                 | MAP_STACK
+                | MAP_GROWSDOWN
                 | MAP_FIXED_NOREPLACE)
             != 0
         || args[5] % PAGE != 0
@@ -5496,6 +5513,7 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
 
     let anonymous = args[3] & MAP_ANONYMOUS != 0;
+    let grows_down = args[3] & MAP_GROWSDOWN != 0;
     let map32 = args[3] & MAP_32BIT != 0;
     let explicit_low = args[0] != 0
         && args[0] >= crate::arch::LOW_USER_WINDOW.0
@@ -5599,6 +5617,10 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         crate::kprintln!("[JSR-WINE-MMAP-CACHE] stage=backing-resolved");
     }
     let rounded = bytes.checked_add(PAGE - 1).ok_or(CompatErrno::Invalid)? & !(PAGE - 1);
+    let use_compat_fixed = crate::arch::COMPAT_FIXED_WINDOW.1
+        > crate::arch::COMPAT_FIXED_WINDOW.0
+        && args[0] >= crate::arch::COMPAT_FIXED_WINDOW.0
+        && args[0] < crate::arch::COMPAT_FIXED_WINDOW.1;
     let (mut window_start, mut window_end) = if map32 {
         (
             crate::arch::LOW_USER_WINDOW.0,
@@ -5606,6 +5628,8 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         )
     } else if use_low_window {
         crate::arch::LOW_USER_WINDOW
+    } else if use_compat_fixed {
+        crate::arch::COMPAT_FIXED_WINDOW
     } else {
         crate::arch::USER_WINDOW
     };
@@ -6007,7 +6031,10 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     let mut page = start;
     while page < start + rounded {
         if let Err(error) = proc::map_new(pid, page, flags) {
-            #[cfg(feature = "compat-wine-verify")]
+            #[cfg(any(
+                feature = "compat-wine-verify",
+                feature = "compat-darling-verify"
+            ))]
             crate::kprintln!(
                 "[JSR-WINE-MMAP-FAIL] addr={:#x} error={:?}",
                 page,
@@ -6080,6 +6107,12 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     if let Some(io) = io {
         io.commit();
+    }
+    if grows_down && !proc::set_linux_stack_range(pid, start, start + rounded) {
+        for address in mapped.iter().rev().copied() {
+            let _ = proc::unmap_page(pid, address);
+        }
+        return Err(CompatErrno::NoSys);
     }
     proc::clear_linux_truncated_range(pid, start, start + rounded);
     #[cfg(feature = "compat-wine-verify")]
@@ -6216,6 +6249,9 @@ fn linux_munmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     let was_reserved = proc::linux_range_is_reserved(pid, args[0], end);
     if args[2] == 0 && was_reserved {
+        if !proc::linux_remove_reserved_range(pid, args[0], end) {
+            return Err(CompatErrno::NoMemory);
+        }
         proc::clear_linux_truncated_range(pid, args[0], end);
         return Ok(0);
     }
@@ -8042,11 +8078,18 @@ fn linux_limit(pid: ObjId, resource: u64) -> Result<(u64, u64), CompatErrno> {
     const RLIMIT_STACK: u64 = 3;
     const RLIMIT_NOFILE: u64 = 7;
     let limits = proc::linux_rlimits(pid).ok_or(CompatErrno::Invalid)?;
-    match resource {
+    let value = match resource {
         RLIMIT_STACK => Ok((limits.stack_current, limits.stack_maximum)),
         RLIMIT_NOFILE => Ok((limits.nofile_current, limits.nofile_maximum)),
         _ => Err(CompatErrno::Invalid),
-    }
+    };
+    #[cfg(feature = "compat-darling-verify")]
+    crate::kprintln!(
+        "[JSR-DARLING-RLIMIT] resource={} value={:?}",
+        resource,
+        value
+    );
+    value
 }
 
 fn update_linux_limit(
@@ -14988,23 +15031,42 @@ fn trace_unix_socket(action: &str, name: Option<&compat_core::UnixSocketName>) {
 fn linux_socket(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const AF_UNIX: u64 = 1;
     const SOCK_STREAM: u64 = 1;
+    const SOCK_DGRAM: u64 = 2;
+    const SOCK_SEQPACKET: u64 = 5;
     const SOCK_NONBLOCK: u64 = 0x800;
     const SOCK_CLOEXEC: u64 = 0x80000;
     let socket_type = args[1];
+    #[cfg(feature = "compat-darling-verify")]
+    crate::kprintln!(
+        "[JSR-DARLING-SOCKET] domain={} type={:#x} protocol={}",
+        args[0],
+        args[1],
+        args[2]
+    );
+    let base_type = socket_type & 0xf;
     if args[0] != AF_UNIX
-        || socket_type & 0xf != SOCK_STREAM
+        || !matches!(base_type, SOCK_STREAM | SOCK_DGRAM | SOCK_SEQPACKET)
         || socket_type & !(0xf | SOCK_NONBLOCK | SOCK_CLOEXEC) != 0
         || args[2] != 0
     {
         return Err(CompatErrno::Invalid);
     }
-    let fd = proc::linux_socket_create(
+    let created = proc::linux_socket_create(
         pid,
         socket_type & SOCK_CLOEXEC != 0,
         socket_type & SOCK_NONBLOCK != 0,
+        matches!(base_type, SOCK_DGRAM | SOCK_SEQPACKET),
     )
     .map(u64::from)
-    .map_err(socket_compat_error)?;
+    .map_err(socket_compat_error);
+    #[cfg(feature = "compat-darling-verify")]
+    if let Err(error) = created {
+        crate::kprintln!("[JSR-DARLING-SOCKET] create-error={:?}", error);
+        return Err(error);
+    }
+    let fd = created.expect("checked socket creation");
+    #[cfg(feature = "compat-darling-verify")]
+    crate::kprintln!("[JSR-DARLING-SOCKET] created fd={}", fd);
     #[cfg(feature = "compat-wine-verify")]
     crate::kprintln!("[JSR-WINE-SOCKET] action=create fd={}", fd);
     Ok(fd)
@@ -15017,11 +15079,16 @@ fn linux_bind(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if entry.kind != compat_core::fd::CompatKind::Socket {
         return Err(CompatErrno::NotConnected);
     }
-    let name = canonical_unix_socket_name(
-        pid,
-        read_unix_socket_name(pid, args[1], args[2])?,
-    )
-    .ok_or(CompatErrno::Invalid)?;
+    let raw_name = read_unix_socket_name(pid, args[1], args[2])?;
+    let name = if raw_name.is_empty() {
+        let id = NEXT_UNIX_AUTOBIND.fetch_add(1, Ordering::Relaxed);
+        let process = proc::linux_pid(pid).ok_or(CompatErrno::NoProcess)?;
+        let generated = alloc::format!("\0jasper-autobind-{process}-{id}");
+        compat_core::UnixSocketName::new(generated.as_bytes())
+            .ok_or(CompatErrno::NoSpace)?
+    } else {
+        canonical_unix_socket_name(pid, raw_name).ok_or(CompatErrno::Invalid)?
+    };
     #[cfg(feature = "compat-wine-verify")]
     trace_unix_socket("bind", Some(&name));
     proc::linux_socket_bind(pid, entry.handle, name).map_err(socket_compat_error)?;
@@ -15146,13 +15213,16 @@ fn read_unix_socket_name(
     length: u64,
 ) -> Result<compat_core::UnixSocketName, CompatErrno> {
     let length = usize::try_from(length).map_err(|_| CompatErrno::Invalid)?;
-    if !(3..=110).contains(&length) {
+    if !(2..=110).contains(&length) {
         return Err(CompatErrno::Invalid);
     }
     let mut raw = [0u8; 110];
     proc::read(pid, address, &mut raw[..length]).map_err(|_| CompatErrno::Fault)?;
     if u16::from_le_bytes(raw[..2].try_into().unwrap()) != 1 {
         return Err(CompatErrno::Invalid);
+    }
+    if length == 2 {
+        return Ok(compat_core::UnixSocketName::empty());
     }
     let mut name = &raw[2..length];
     if name[0] != 0 {
@@ -15211,13 +15281,22 @@ fn unix_socket_path_inode(path: &[u8]) -> u64 {
 fn linux_socketpair(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const AF_UNIX: u64 = 1;
     const SOCK_STREAM: u64 = 1;
+    const SOCK_SEQPACKET: u64 = 5;
     const SOCK_NONBLOCK: u64 = 0x800;
     const SOCK_CLOEXEC: u64 = 0x80000;
     let domain = args[0];
     let socket_type = args[1];
+    #[cfg(feature = "compat-darling-verify")]
+    crate::kprintln!(
+        "[JSR-DARLING-SOCKETPAIR] domain={} type={:#x} protocol={}",
+        domain,
+        socket_type,
+        args[2]
+    );
+    let base_type = socket_type & 0xf;
     let protocol = args[2];
     if domain != AF_UNIX
-        || socket_type & 0xf != SOCK_STREAM
+        || !matches!(base_type, SOCK_STREAM | SOCK_SEQPACKET)
         || socket_type & !(0xf | SOCK_NONBLOCK | SOCK_CLOEXEC) != 0
         || protocol != 0
     {
@@ -15227,6 +15306,7 @@ fn linux_socketpair(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         pid,
         socket_type & SOCK_CLOEXEC != 0,
         socket_type & SOCK_NONBLOCK != 0,
+        base_type == SOCK_SEQPACKET,
     )
     .ok_or(CompatErrno::NoSpace)?;
     let mut output = [0u8; 8];
@@ -15251,7 +15331,21 @@ fn linux_sendto(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::Invalid);
     }
     if args[4] != 0 || args[5] != 0 {
-        return Err(CompatErrno::IsConnected);
+        if args[4] == 0 || args[5] == 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        let endpoint =
+            proc::linux_socket_endpoint(pid, proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?.handle)
+                .ok_or(CompatErrno::NotConnected)?;
+        let handle = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?.handle;
+        if endpoint.is_connected()
+            && !proc::linux_socket_is_packet(pid, handle).unwrap_or(false)
+        {
+            return Err(CompatErrno::IsConnected);
+        }
+        if !endpoint.is_connected() {
+            linux_connect(pid, [u64::from(fd), args[4], args[5], 0, 0, 0])?;
+        }
     }
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
     if entry.kind != compat_core::fd::CompatKind::Socket
@@ -15259,7 +15353,7 @@ fn linux_sendto(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     {
         return Err(CompatErrno::NotConnected);
     }
-    linux_socket_write(
+    let sent = linux_socket_write(
         pid,
         fd,
         entry.handle,
@@ -15267,7 +15361,10 @@ fn linux_sendto(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         len,
         flags & MSG_DONTWAIT != 0,
         flags & MSG_NOSIGNAL != 0,
-    )
+    );
+    #[cfg(feature = "compat-darling-verify")]
+    crate::kprintln!("[JSR-DARLING-SENDTO] fd={} result={:?}", fd, sent);
+    sent
 }
 
 /// Implements `recvfrom(2)` on an already connected AF_UNIX stream.
@@ -15468,7 +15565,24 @@ fn linux_sendmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Err(CompatErrno::Invalid);
     }
     if header.name != 0 || header.name_len != 0 {
-        return Err(CompatErrno::IsConnected);
+        if header.name == 0 || header.name_len == 0 {
+            return Err(CompatErrno::Invalid);
+        }
+        let endpoint =
+            proc::linux_socket_endpoint(pid, proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?.handle)
+                .ok_or(CompatErrno::NotConnected)?;
+        let handle = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?.handle;
+        if endpoint.is_connected()
+            && !proc::linux_socket_is_packet(pid, handle).unwrap_or(false)
+        {
+            return Err(CompatErrno::IsConnected);
+        }
+        if !endpoint.is_connected() {
+            linux_connect(
+                pid,
+                [u64::from(fd), header.name, header.name_len as u64, 0, 0, 0],
+            )?;
+        }
     }
     let control = capture_scm_control(pid, &header)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
@@ -15501,6 +15615,14 @@ fn linux_sendmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         flags & MSG_NOSIGNAL != 0,
         !has_control,
     )?;
+    #[cfg(feature = "compat-darling-verify")]
+    crate::kprintln!(
+        "[JSR-DARLING-SENDMSG] fd={} bytes={} control={} outbound={}",
+        fd,
+        written,
+        usize::from(has_control),
+        endpoint.outbound_buffered_bytes()
+    );
     if has_control {
         if written == 0 {
             return Err(CompatErrno::Invalid);
@@ -15696,6 +15818,10 @@ fn linux_recvmsg(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         flags & MSG_DONTWAIT != 0,
         header.control != 0 && header.control_len != 0,
     )?;
+    #[cfg(feature = "compat-darling-verify")]
+    if count != 0 {
+        crate::kprintln!("[JSR-DARLING-RECVMSG] fd={} bytes={}", fd, count);
+    }
     let mut offset = 0usize;
     for (base, len) in vectors {
         let take = count.saturating_sub(offset).min(len);
@@ -16173,6 +16299,18 @@ fn linux_socket_read_buffer(
     }
     let nonblocking = force_nonblocking
         || proc::linux_fd_status_flags(pid, fd).ok_or(CompatErrno::BadFd)? & 0x800 != 0;
+    let packet_limit = proc::linux_socket_packet_remaining(pid, handle)
+        .unwrap_or(output.len())
+        .min(output.len());
+    let packet_mode = proc::linux_socket_is_packet(pid, handle).unwrap_or(false);
+    if packet_limit == 0 {
+        return Err(if nonblocking {
+            CompatErrno::TryAgain
+        } else {
+            CompatErrno::Interrupted
+        });
+    }
+    let output = &mut output[..packet_limit];
     loop {
         match endpoint.read(output) {
             compat_core::PipeRead::Data(count) => {
@@ -16190,6 +16328,15 @@ fn linux_socket_read_buffer(
                     );
                 }
                 return Ok(count);
+            }
+            compat_core::PipeRead::Eof if packet_mode && nonblocking => {
+                return Err(CompatErrno::TryAgain)
+            }
+            compat_core::PipeRead::Eof if packet_mode => {
+                if proc::current_exiting() || current_signal_pending(pid) {
+                    return Err(CompatErrno::Interrupted);
+                }
+                sched::pause();
             }
             compat_core::PipeRead::Eof => return Ok(0),
             compat_core::PipeRead::WouldBlock if nonblocking => return Err(CompatErrno::TryAgain),
@@ -16785,6 +16932,90 @@ pub(crate) fn install_runtime_cache_file(path: &[u8], bytes: alloc::vec::Vec<u8>
         mode: 0o644,
     });
     true
+}
+
+fn linux_cache_ensure_public_dir(path: &[u8]) -> bool {
+    let mut state = COMPAT.lock();
+    linux_cache_ensure_dir(&mut state, path).is_some()
+}
+
+fn linux_cache_install_generated_file(path: &[u8], bytes: &[u8]) -> bool {
+    if linux_cache_metadata(path).is_some() {
+        return true;
+    }
+    install_runtime_cache_file(path, bytes.to_vec())
+}
+
+/// Installs the bounded procfs pid/task projection used by compatibility peers.
+fn linux_install_proc_pid_view(pid: ObjId, target_pid: u32) -> bool {
+    let Some(target) = proc::linux_process_for_pid(target_pid) else {
+        return false;
+    };
+    let Some(target_app) = proc::app(target) else {
+        return false;
+    };
+    if proc::app(pid) != Some(target_app) {
+        return false;
+    }
+    let root = alloc::format!("/proc/{target_pid}");
+    let task = alloc::format!("{root}/task");
+    if !linux_cache_ensure_public_dir(root.as_bytes())
+        || !linux_cache_ensure_public_dir(task.as_bytes())
+    {
+        return false;
+    }
+    let ppid = proc::linux_ppid(target).unwrap_or(0);
+    let process_status = alloc::format!(
+        "Name:\tjasper-linux\nPid:\t{target_pid}\nPPid:\t{ppid}\nTgid:\t{target_pid}\nNSpid:\t{target_pid}\n"
+    );
+    let process_status_path = alloc::format!("{root}/status");
+    if !linux_cache_install_generated_file(
+        process_status_path.as_bytes(),
+        process_status.as_bytes(),
+    ) {
+        return false;
+    }
+    let tids = {
+        let state = COMPAT.lock();
+        state
+            .threads
+            .iter()
+            .flatten()
+            .filter(|thread| thread.process == target)
+            .map(|thread| thread.tid)
+            .collect::<alloc::vec::Vec<_>>()
+    };
+    for tid in tids {
+        let status = alloc::format!(
+            "Name:\tjasper-linux\nPid:\t{tid}\nPPid:\t{ppid}\nTgid:\t{target_pid}\nNSpid:\t{tid}\n"
+        );
+        let path = alloc::format!("{task}/{tid}/status");
+        if !linux_cache_install_generated_file(path.as_bytes(), status.as_bytes()) {
+            return false;
+        }
+    }
+    true
+}
+
+fn linux_install_proc_view_for_path(pid: ObjId, path: &[u8]) -> bool {
+    let Some(rest) = path.strip_prefix(b"/proc/") else {
+        return true;
+    };
+    let numeric_len = rest
+        .iter()
+        .position(|byte| *byte == b'/')
+        .unwrap_or(rest.len());
+    let numeric = &rest[..numeric_len];
+    if numeric.is_empty() || numeric.iter().any(|byte| !byte.is_ascii_digit()) {
+        return true;
+    }
+    let Ok(text) = core::str::from_utf8(numeric) else {
+        return false;
+    };
+    let Ok(target) = text.parse::<u32>() else {
+        return false;
+    };
+    linux_install_proc_pid_view(pid, target)
 }
 
 fn linux_cache_parent(path: &[u8], root: &[u8]) -> Option<alloc::vec::Vec<u8>> {
@@ -17417,6 +17648,14 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         feature = "vulkan-metal2vulkan-verify"
     ))]
     trace_path("openat", &path);
+    if !linux_install_proc_view_for_path(pid, &path) {
+        return Err(CompatErrno::NoMemory);
+    }
+    if !path_only && path.starts_with(b"/") {
+        if let Some(fd) = linux_proc_namespace_open(pid, &path, flags)? {
+            return Ok(fd);
+        }
+    }
     if linux_cache_path(&path) {
         let resolved = linux_cache_resolve_symlinks(&path, true)?;
         if linux_cache_path(&resolved) {
@@ -21258,6 +21497,8 @@ fn linux_epoll_readiness(
         }
         compat_core::fd::CompatKind::Socket => {
             let socket = proc::linux_socket_endpoint(pid, registration.handle)?;
+            let packet_mode =
+                proc::linux_socket_is_packet(pid, registration.handle).unwrap_or(false);
             let listener_ready =
                 proc::linux_socket_listener_ready(pid, registration.handle).unwrap_or(false);
             let is_listener =
@@ -21269,6 +21510,8 @@ fn linux_epoll_readiness(
                     .contains(kernel_core::object::Rights::READ)
                 && if is_listener {
                     listener_ready
+                } else if packet_mode {
+                    socket.buffered_bytes() != 0
                 } else {
                     socket.is_readable()
                 }
@@ -21283,10 +21526,10 @@ fn linux_epoll_readiness(
             {
                 ready |= EPOLLOUT;
             }
-            if !is_listener && socket.peer_read_gone() {
+            if !is_listener && !packet_mode && socket.peer_read_gone() {
                 ready |= EPOLLERR;
             }
-            if !is_listener && socket.peer_write_gone() {
+            if !is_listener && !packet_mode && socket.peer_write_gone() {
                 ready |= EPOLLHUP | EPOLLRDHUP;
             }
             #[cfg(feature = "compat-wine-verify")]
@@ -21462,7 +21705,11 @@ fn linux_epoll_wait(
                     let always = selected & (EPOLLERR | EPOLLHUP);
                     let relevant = selected & registration.events & !(EPOLLONESHOT | EPOLLET);
                     let selected = relevant | always;
-                    let deliver = if registration.events & EPOLLET != 0 {
+                    let packet_socket = registration.kind
+                        == compat_core::fd::CompatKind::Socket
+                        && proc::linux_socket_is_packet(pid, registration.handle)
+                            .unwrap_or(false);
+                    let deliver = if registration.events & EPOLLET != 0 && !packet_socket {
                         selected & !registration.edge_seen != 0
                     } else {
                         selected != 0
