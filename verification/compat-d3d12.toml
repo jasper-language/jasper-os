@@ -1,0 +1,88 @@
+schema = 1
+node = "COMPAT-D3D-1"
+status = "core-passed"
+updated = "2026-11-22"
+acceptance_claim = "bounded-fixture-not-runtime-pass"
+
+[baseline]
+name = "VKD3D-Proton"
+version = "3.1"
+release_url = "https://github.com/HansKristian-Work/vkd3d-proton/releases/tag/v3.1"
+archive = "vkd3d-proton-3.1.tar.zst"
+archive_bytes = 5665978
+archive_sha256 = "b85ea8219b71093a3924913dd7aae6172333dc0c069983ed510816d67f02120b"
+license = "LGPL-2.1"
+runtime = "Wine PE x86_64"
+backend = "Vulkan"
+
+[[artifact]]
+path = "vkd3d-proton-3.1/x64/d3d12.dll"
+bytes = 147470
+sha256 = "502694a5fd5e06381ef2cdb33359c5948b6a012938902ddc9e9b381841bc0ce7"
+role = "Wine DLL override and entrypoint"
+
+[[artifact]]
+path = "vkd3d-proton-3.1/x64/d3d12core.dll"
+bytes = 6651918
+sha256 = "0dfd690a39ef8361ca3b64e9fd8e945b27d2c568dac5dc0dce1a45abf65914cc"
+role = "D3D12 to Vulkan implementation"
+
+[[case]]
+id = "d3d11-offscreen-core"
+status = "passed"
+environment = "jasper-qemu-software"
+evidence = "evidence/compat-wine-d3d-r49-kvm/README.md"
+marker = "D3D11_PROBE_OK feature=0xb000 pixel=32,64,128,255"
+hardware_gpu = false
+
+[[case]]
+id = "d3d12-offscreen-fixture"
+status = "fixture-available"
+environment = "build-fixture"
+evidence = "evidence/compat-d3d12-fixture-20261122/README.md"
+marker = "D3D12_PROBE_OK pixel=32,64,128,255"
+hardware_gpu = false
+
+[[case]]
+id = "d3d12-offscreen-runtime"
+status = "not-run"
+environment = "jasper-qemu-software"
+evidence = ""
+marker = "D3D12_PROBE_OK pixel=32,64,128,255"
+hardware_gpu = false
+
+[[case]]
+id = "wsi-present"
+status = "not-run"
+environment = "windowed"
+evidence = ""
+marker = "D3D12_PRESENT_OK"
+hardware_gpu = false
+
+[[case]]
+id = "physical-gpu"
+status = "not-run"
+environment = "physical-hardware"
+evidence = ""
+marker = "D3D12_PHYSICAL_OK"
+hardware_gpu = true
+
+[[remaining_gate]]
+id = "d3d12-runtime-through-wine"
+reason = "fixture and pinned VKD3D assets exist, but no Jasper UEFI/QEMU runtime marker has been captured"
+
+[[remaining_gate]]
+id = "swapchain-wsi-present"
+reason = "offscreen clear/readback does not exercise DXGI swapchain, compositor surface or presented pixels"
+
+[[remaining_gate]]
+id = "input-and-desktop"
+reason = "the service desktop is headless and proves neither interactive input nor explorer-backed desktop behavior"
+
+[[remaining_gate]]
+id = "resource-reclamation"
+reason = "D3D11 currently reports resources=false; D3D12 worker, allocator, fence and mapping cleanup is not yet proven"
+
+[[remaining_gate]]
+id = "physical-gpu-and-pixel6a"
+reason = "lavapipe, QEMU and a Windows fixture cannot satisfy physical GPU or Pixel 6a presentation acceptance"

@@ -115,6 +115,8 @@ jobs:
         run: |
           python3 scripts/check-darling-research.py --self-test
           python3 scripts/check-darling-research.py
+      - name: COMPAT-D3D-1 D3D12 fixture 与资产边界 / D3D12 fixture boundary
+        run: python3 scripts/check-compat-d3d12.py
       - name: Issue #47 CPU 固定消费者清单 / CPU consumer inventory
         run: |
           python3 scripts/check-cpu-dynamic-consumers.py --self-test
