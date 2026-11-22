@@ -798,6 +798,7 @@ pub(crate) enum LinuxSocketError {
     Invalid,
     IsConnected,
     AddressInUse,
+    NoEntry,
     NotBound,
     NotConnected,
     ConnectionRefused,
@@ -1639,7 +1640,7 @@ pub(crate) fn linux_socket_connect(
                     .filter_map(Weak::upgrade)
                     .find(|listener| listener.name == name)
             }
-            .ok_or(LinuxSocketError::ConnectionRefused)?;
+            .ok_or(LinuxSocketError::NoEntry)?;
             if listener.listening.load(Ordering::Acquire) == 0 {
                 return Err(LinuxSocketError::ConnectionRefused);
             }

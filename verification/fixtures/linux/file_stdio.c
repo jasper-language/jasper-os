@@ -1,11 +1,16 @@
+#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
+#include <stddef.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -32,7 +37,22 @@ int main(void)
     pid_t child;
     int child_status;
     int sync_pipe[2];
+    int rights_pipe[2];
+    int received_fd;
+    int listener;
+    int duplicate_listener;
+    int unix_client;
+    int accepted;
+    int epoll_fd;
+    int missing_client;
     char signal_byte;
+    char socket_buffer[8] = {0};
+    struct sockaddr_un unix_address;
+    struct epoll_event epoll_event;
+    struct iovec socket_iov[2];
+    struct msghdr socket_message;
+    struct cmsghdr *control_message;
+    char control_buffer[CMSG_SPACE(sizeof(int))];
     int pipe_fds[2];
     int socket_fds[2];
     int cwd_fd;
@@ -217,6 +237,111 @@ int main(void)
     timeout.tv_nsec = -1;
     errno = 0;
     if (nanosleep(&timeout, NULL) != -1 || errno != EINVAL) return 61;
+    unlink("/tmp/jasper-unix.sock");
+    listener = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (listener < 0) return 62;
+    memset(&unix_address, 0, sizeof(unix_address));
+    unix_address.sun_family = AF_UNIX;
+    strcpy(unix_address.sun_path, "/tmp/jasper-unix.sock");
+    if (bind(listener, (struct sockaddr *)&unix_address, sizeof(unix_address)) != 0 ||
+        listen(listener, 1) != 0) return 63;
+    if (fstat(listener, &st) != 0 || !S_ISSOCK(st.st_mode)) return 64;
+    duplicate_listener = socket(AF_UNIX, SOCK_STREAM, 0);
+    errno = 0;
+    if (duplicate_listener < 0 ||
+        bind(duplicate_listener, (struct sockaddr *)&unix_address,
+             sizeof(unix_address)) != -1 ||
+        errno != EADDRINUSE) return 65;
+    close(duplicate_listener);
+    missing_client = socket(AF_UNIX, SOCK_STREAM, 0);
+    unix_address.sun_path[strlen("/tmp/jasper-unix.sock")] = 'x';
+    errno = 0;
+    if (missing_client < 0 ||
+        connect(missing_client, (struct sockaddr *)&unix_address,
+                sizeof(unix_address)) != -1 ||
+        errno != ENOENT) return 66;
+    close(missing_client);
+    unix_address.sun_path[strlen("/tmp/jasper-unix.sock")] = '\0';
+    unix_client = socket(AF_UNIX, SOCK_STREAM, 0);
+    epoll_fd = epoll_create1(0);
+    if (unix_client < 0 || epoll_fd < 0 ||
+        connect(unix_client, (struct sockaddr *)&unix_address,
+                sizeof(unix_address)) != 0) return 67;
+    memset(&epoll_event, 0, sizeof(epoll_event));
+    epoll_event.events = EPOLLIN | EPOLLET;
+    epoll_event.data.fd = listener;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listener, &epoll_event) != 0 ||
+        epoll_wait(epoll_fd, &epoll_event, 1, 1000) != 1) return 68;
+    accepted = accept(listener, NULL, NULL);
+    if (accepted < 0) return 69;
+    if (send(accepted, "hello", 5, 0) != 5 ||
+        recv(unix_client, socket_buffer, 5, 0) != 5 ||
+        memcmp(socket_buffer, "hello", 5) != 0) return 70;
+    if (pipe(rights_pipe) != 0) return 71;
+    memset(control_buffer, 0, sizeof(control_buffer));
+    memset(&socket_message, 0, sizeof(socket_message));
+    socket_iov[0].iov_base = "AB";
+    socket_iov[0].iov_len = 2;
+    socket_iov[1].iov_base = "CD";
+    socket_iov[1].iov_len = 2;
+    socket_message.msg_iov = socket_iov;
+    socket_message.msg_iovlen = 2;
+    socket_message.msg_control = control_buffer;
+    socket_message.msg_controllen = sizeof(control_buffer);
+    control_message = CMSG_FIRSTHDR(&socket_message);
+    control_message->cmsg_level = SOL_SOCKET;
+    control_message->cmsg_type = SCM_RIGHTS;
+    control_message->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(control_message), &rights_pipe[0], sizeof(int));
+    if (sendmsg(unix_client, &socket_message, 0) != 4) return 72;
+    memset(socket_buffer, 0, sizeof(socket_buffer));
+    memset(control_buffer, 0, sizeof(control_buffer));
+    memset(&socket_message, 0, sizeof(socket_message));
+    socket_message.msg_iov = socket_iov;
+    socket_iov[0].iov_base = socket_buffer;
+    socket_iov[0].iov_len = sizeof(socket_buffer);
+    socket_message.msg_iovlen = 1;
+    socket_message.msg_control = control_buffer;
+    socket_message.msg_controllen = sizeof(control_buffer);
+    if (recvmsg(accepted, &socket_message, 0) != 4 ||
+        memcmp(socket_buffer, "ABCD", 4) != 0) return 73;
+    control_message = CMSG_FIRSTHDR(&socket_message);
+    if (!control_message || control_message->cmsg_level != SOL_SOCKET ||
+        control_message->cmsg_type != SCM_RIGHTS ||
+        control_message->cmsg_len < CMSG_LEN(sizeof(int))) return 74;
+    memcpy(&received_fd, CMSG_DATA(control_message), sizeof(int));
+    close(rights_pipe[0]);
+    if (write(rights_pipe[1], "R", 1) != 1 ||
+        read(received_fd, socket_buffer, 1) != 1 ||
+        socket_buffer[0] != 'R') return 75;
+    close(received_fd);
+    close(rights_pipe[1]);
+    socket_iov[0].iov_base = "EF";
+    socket_iov[0].iov_len = 2;
+    socket_iov[1].iov_base = "GH";
+    socket_iov[1].iov_len = 2;
+    if (writev(accepted, socket_iov, 2) != 4) return 76;
+    memset(socket_buffer, 0, sizeof(socket_buffer));
+    socket_iov[0].iov_base = socket_buffer;
+    socket_iov[0].iov_len = 2;
+    socket_iov[1].iov_base = socket_buffer + 2;
+    socket_iov[1].iov_len = 2;
+    if (readv(unix_client, socket_iov, 2) != 4 ||
+        memcmp(socket_buffer, "EFGH", 4) != 0) return 77;
+    if (unlink("/tmp/jasper-unix.sock") != 0) return 78;
+    unix_address.sun_path[strlen("/tmp/jasper-unix.sock")] = 'x';
+    missing_client = socket(AF_UNIX, SOCK_STREAM, 0);
+    errno = 0;
+    if (missing_client < 0 ||
+        connect(missing_client, (struct sockaddr *)&unix_address,
+                sizeof(unix_address)) != -1 ||
+        errno != ENOENT) return 79;
+    close(missing_client);
+    close(unix_client);
+    if (recv(accepted, socket_buffer, 1, 0) != 0) return 80;
+    close(accepted);
+    close(listener);
+    close(epoll_fd);
     child = fork();
     if (child == 0) {
         int child_fd = open("/tmp/jasper-record-lock", O_RDWR);
@@ -240,6 +365,6 @@ int main(void)
     if (!file) return 11;
     if (fputs("fdopen-ok\n", file) < 0) return 12;
     if (fclose(file) != 0) return 13;
-    puts("FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true positioned_io=true cwd_status=true record_lock=true monotonic_time=true");
+    puts("FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true positioned_io=true cwd_status=true record_lock=true monotonic_time=true unix_socket=true");
     return 0;
 }

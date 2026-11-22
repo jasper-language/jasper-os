@@ -14564,6 +14564,7 @@ fn socket_compat_error(error: proc::LinuxSocketError) -> CompatErrno {
         proc::LinuxSocketError::Invalid => CompatErrno::Invalid,
         proc::LinuxSocketError::IsConnected => CompatErrno::IsConnected,
         proc::LinuxSocketError::AddressInUse => CompatErrno::AddressInUse,
+        proc::LinuxSocketError::NoEntry => CompatErrno::NoEntry,
         proc::LinuxSocketError::NotBound => CompatErrno::Invalid,
         proc::LinuxSocketError::NotConnected => CompatErrno::NotConnected,
         proc::LinuxSocketError::ConnectionRefused => CompatErrno::ConnectionRefused,

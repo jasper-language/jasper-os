@@ -640,7 +640,7 @@ if [ "$MODE" = android-apk ]; then
   exit 0
 fi
 if [ "$MODE" = compat-wine ]; then
-  grep -aq '^FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true positioned_io=true cwd_status=true record_lock=true monotonic_time=true' "$OUT/serial.log"
+  grep -aq '^FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true positioned_io=true cwd_status=true record_lock=true monotonic_time=true unix_socket=true' "$OUT/serial.log"
   grep -aq '^WINE_CMD_OK' "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=compat-wine-cmd path=/usr/lib/x86_64-linux-gnu/wine/wine interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=\(true\|false\) failed=0' \
     "$OUT/serial.log"

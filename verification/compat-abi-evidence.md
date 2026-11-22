@@ -68,6 +68,11 @@ instead of rescanning the complete ABI surface.
 - `evidence/compat-wine-protocol-io-r49`
 - `evidence/compat-wine-protocol-r50`
 - `evidence/compat-wine-read-enter-r52`
+- `evidence/compat-wine-unix-socket-r76`
+- Positive evidence: pathname bind/listen/connect/accept, pending accept
+  readiness, socket inode stat, unlink and peer EOF work.
+- Negative evidence: duplicate pathname bind returns `EADDRINUSE` and connect
+  through either a missing or stale name returns `ENOENT`.
 - Environment: Jasper UEFI, Linux x86_64 compatibility ABI.
 
 ## Vectored I/O
@@ -90,7 +95,7 @@ instead of rescanning the complete ABI surface.
 
 ## Monotonic time
 
-- `evidence/compat-wine-monotonic-time-r74`
+- `evidence/compat-wine-unix-socket-r76`
 - Positive evidence: `CLOCK_MONOTONIC` advances across relative sleep and
   blocking absolute `clock_nanosleep` reaches its deadline.
 - Negative evidence: invalid clock IDs and negative `timespec` values return

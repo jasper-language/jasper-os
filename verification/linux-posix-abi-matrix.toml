@@ -71,12 +71,12 @@ status = "verified"
 [[item]]
 id = "linux-unix-socket-lifecycle"
 abi = "AF_UNIX socket/bind/listen/connect/accept/unlink/stat"
-positive_coverage = "abstract and pathname namespaces, canonical pathname registration, pending accept queue, and listener socket inode"
+positive_coverage = "abstract and pathname namespaces, canonical pathname registration, queued accept connections, and listener socket inode"
 negative_coverage = "wrong family/type, duplicate bind, connect without listener, stale name, and invalid address length"
-evidence = "verification/compat-abi-evidence.md"
-commit = "409c6e2"
+evidence = "verification/compat-abi-evidence.md; evidence/compat-wine-unix-socket-r76"
+commit = "b299d3e"
 environment = "qemu-jasper-linux-abi"
-status = "partial"
+status = "verified"
 
 [[item]]
 id = "linux-unix-socket-message"
