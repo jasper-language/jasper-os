@@ -51,6 +51,13 @@ instead of rescanning the complete ABI surface.
 ## POSIX record locks
 
 - `evidence/compat-wine-fcntl-r39`
+- `evidence/compat-wine-record-lock-wait-r73`
+- Positive evidence: a parent write lock is visible to a forked child through
+  `F_GETLK`; a blocked `F_SETLKW` succeeds after unlock, and close releases the
+  byte range for a later child.
+- Negative evidence: a conflicting nonblocking child lock returns
+  `EACCES`/`EAGAIN`, a read-only descriptor fails with `EBADF`, and a blocked
+  waiter interrupted by `SIGUSR1` returns `EINTR`.
 - Environment: Jasper UEFI, Linux x86_64 compatibility ABI.
 
 ## Unix sockets

@@ -63,10 +63,10 @@ id = "linux-posix-record-locks"
 abi = "fcntl F_GETLK/F_SETLK/F_SETLKW"
 positive_coverage = "read/write locks, byte ranges, blocking wait, and close/process-exit release"
 negative_coverage = "access-mode mismatch, conflicting nonblocking requests, interruption, and EBADF"
-evidence = "verification/compat-abi-evidence.md"
-commit = "409c6e2"
+evidence = "verification/compat-abi-evidence.md; evidence/compat-wine-record-lock-wait-r73"
+commit = "1caf79d"
 environment = "qemu-jasper-linux-abi"
-status = "partial"
+status = "verified"
 
 [[item]]
 id = "linux-unix-socket-lifecycle"

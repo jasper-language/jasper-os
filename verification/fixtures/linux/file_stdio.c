@@ -1,11 +1,21 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <signal.h>
 #include <string.h>
 #include <stdio.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
+
+static volatile sig_atomic_t interrupted;
+
+static void handle_signal(int signal_number)
+{
+    (void)signal_number;
+    interrupted = 1;
+}
 
 int main(void)
 {
@@ -14,9 +24,15 @@ int main(void)
     int mode_fd;
     char io_buffer[4] = {0};
     char cwd[PATH_MAX];
+    struct flock lock;
+    pid_t child;
+    int child_status;
+    int sync_pipe[2];
+    char signal_byte;
     int pipe_fds[2];
     int socket_fds[2];
     int cwd_fd;
+    int lock_fd;
     int fd = creat("/tmp/jasper-file-stdio", 0600);
     FILE *file;
 
@@ -80,6 +96,110 @@ int main(void)
     errno = 0;
     if (fchdir(99) != -1 || errno != EBADF) return 40;
     if (close(cwd_fd) != 0) return 41;
+    lock_fd = open("/tmp/jasper-record-lock", O_CREAT | O_RDWR, 0600);
+    if (lock_fd < 0 || write(lock_fd, "lock", 4) != 4) return 42;
+    memset(&lock, 0, sizeof(lock));
+    lock.l_type = F_WRLCK;
+    lock.l_whence = SEEK_SET;
+    lock.l_start = 0;
+    lock.l_len = 4;
+    if (fcntl(lock_fd, F_SETLK, &lock) != 0) return 43;
+    child = fork();
+    if (child == 0) {
+        int child_fd = open("/tmp/jasper-record-lock", O_RDWR);
+        struct flock probe;
+        if (child_fd < 0) _exit(1);
+        memset(&probe, 0, sizeof(probe));
+        probe.l_type = F_WRLCK;
+        probe.l_whence = SEEK_SET;
+        probe.l_len = 4;
+        if (fcntl(child_fd, F_GETLK, &probe) != 0 ||
+            probe.l_type == F_UNLCK) _exit(2);
+        errno = 0;
+        if (fcntl(child_fd, F_SETLK, &probe) != -1 ||
+            (errno != EACCES && errno != EAGAIN)) _exit(3);
+        _exit(0);
+    }
+    if (child < 0 || waitpid(child, &child_status, 0) != child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) return 44;
+    if (pipe(sync_pipe) != 0) return 47;
+    child = fork();
+    if (child == 0) {
+        int child_fd = open("/tmp/jasper-record-lock", O_RDWR);
+        struct flock waiting;
+        close(sync_pipe[0]);
+        if (child_fd < 0) _exit(1);
+        memset(&waiting, 0, sizeof(waiting));
+        waiting.l_type = F_WRLCK;
+        waiting.l_whence = SEEK_SET;
+        waiting.l_len = 4;
+        if (write(sync_pipe[1], "R", 1) != 1) _exit(2);
+        if (fcntl(child_fd, F_SETLKW, &waiting) != 0) _exit(3);
+        _exit(0);
+    }
+    close(sync_pipe[1]);
+    if (child < 0 || read(sync_pipe[0], &signal_byte, 1) != 1) return 48;
+    usleep(100000);
+    lock.l_type = F_UNLCK;
+    if (fcntl(lock_fd, F_SETLK, &lock) != 0) return 49;
+    if (waitpid(child, &child_status, 0) != child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) return 50;
+    close(sync_pipe[0]);
+    lock.l_type = F_WRLCK;
+    if (fcntl(lock_fd, F_SETLK, &lock) != 0) return 51;
+    if (pipe(sync_pipe) != 0) return 52;
+    child = fork();
+    if (child == 0) {
+        int child_fd = open("/tmp/jasper-record-lock", O_RDWR);
+        struct flock waiting;
+        struct sigaction action;
+        close(sync_pipe[0]);
+        if (child_fd < 0) _exit(1);
+        memset(&action, 0, sizeof(action));
+        action.sa_handler = handle_signal;
+        sigemptyset(&action.sa_mask);
+        if (sigaction(SIGUSR1, &action, NULL) != 0) _exit(2);
+        memset(&waiting, 0, sizeof(waiting));
+        waiting.l_type = F_WRLCK;
+        waiting.l_whence = SEEK_SET;
+        waiting.l_len = 4;
+        if (write(sync_pipe[1], "R", 1) != 1) _exit(3);
+        errno = 0;
+        if (fcntl(child_fd, F_SETLKW, &waiting) != -1 ||
+            errno != EINTR || !interrupted) _exit(4);
+        _exit(0);
+    }
+    close(sync_pipe[1]);
+    if (child < 0 || read(sync_pipe[0], &signal_byte, 1) != 1) return 53;
+    if (kill(child, SIGUSR1) != 0 ||
+        waitpid(child, &child_status, 0) != child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) return 54;
+    close(sync_pipe[0]);
+    lock.l_type = F_UNLCK;
+    if (fcntl(lock_fd, F_SETLK, &lock) != 0 || close(lock_fd) != 0) return 45;
+    mode_fd = open("/tmp/jasper-record-lock", O_RDONLY);
+    if (mode_fd < 0) return 55;
+    memset(&lock, 0, sizeof(lock));
+    lock.l_type = F_WRLCK;
+    lock.l_whence = SEEK_SET;
+    lock.l_len = 4;
+    errno = 0;
+    if (fcntl(mode_fd, F_SETLK, &lock) != -1 || errno != EBADF) return 56;
+    close(mode_fd);
+    child = fork();
+    if (child == 0) {
+        int child_fd = open("/tmp/jasper-record-lock", O_RDWR);
+        struct flock acquired;
+        if (child_fd < 0) _exit(1);
+        memset(&acquired, 0, sizeof(acquired));
+        acquired.l_type = F_WRLCK;
+        acquired.l_whence = SEEK_SET;
+        acquired.l_len = 4;
+        if (fcntl(child_fd, F_SETLK, &acquired) != 0) _exit(2);
+        _exit(0);
+    }
+    if (child < 0 || waitpid(child, &child_status, 0) != child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) return 46;
     close(pipe_fds[0]);
     close(pipe_fds[1]);
     close(socket_fds[0]);
@@ -89,6 +209,6 @@ int main(void)
     if (!file) return 11;
     if (fputs("fdopen-ok\n", file) < 0) return 12;
     if (fclose(file) != 0) return 13;
-    puts("FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true positioned_io=true cwd_status=true");
+    puts("FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true positioned_io=true cwd_status=true record_lock=true");
     return 0;
 }
