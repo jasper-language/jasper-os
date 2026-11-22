@@ -177,6 +177,8 @@ jobs:
         run: CARGO_BUILD_JOBS=2 bash scripts/compat-package-real.sh
         env:
           COMPAT_PACKAGE_REAL_DIRECT_CARGO: "1"
+      - name: Wine D3D/lavapipe staging manifest / reproducible staging
+        run: python3 scripts/prepare-wine-d3d-staging.py --self-test
       - name: jaso 格式与打包测试 / jaso tests
         run: cargo test -p jaso --features pack
       - name: kernel-core 单元测试（32 位 i686、AArch64、RISC-V64） / cross-ISA unit tests

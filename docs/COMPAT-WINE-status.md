@@ -104,6 +104,13 @@ claim of general ASLR, desktop, D3D12/WSI, or physical-GPU compatibility.
 The process resource baseline still reports `resources=false`; cleanup of the
 DXVK worker/thread/cache state remains open.
 
+The Wine/DXVK/lavapipe staging inputs are now pinned in
+`verification/wine-d3d-staging.json` and assembled by
+`scripts/prepare-wine-d3d-staging.py`. The staging path fails closed on host
+package drift, archive or probe digest mismatch, missing final artifacts and
+an existing output directory. See `docs/WINE-D3D-STAGING.md`. This removes the
+manual-root dependency without changing the guest acceptance claim.
+
 A generic unmodified C/POSIX fixture performs the same
 `creat -> fdopen -> fputs -> fclose` sequence twice through Jasper and exits
 zero with resources recovered. Disabling tcache did not change the earlier
