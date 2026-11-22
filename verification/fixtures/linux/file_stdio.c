@@ -7,6 +7,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 static volatile sig_atomic_t interrupted;
@@ -25,6 +26,9 @@ int main(void)
     char io_buffer[4] = {0};
     char cwd[PATH_MAX];
     struct flock lock;
+    struct timespec time_a;
+    struct timespec time_b;
+    struct timespec timeout;
     pid_t child;
     int child_status;
     int sync_pipe[2];
@@ -48,7 +52,7 @@ int main(void)
     errno = 0;
     if (fstat(99, &st) != -1 || errno != EBADF) return 16;
     old_mask = umask(0027);
-    mode_fd = open("/tmp/jasper-file-mode", O_CREAT | O_RDWR | O_CLOEXEC, 0666);
+    mode_fd = open("/tmp/jasper-file-mode", O_CREAT | O_TRUNC | O_RDWR | O_CLOEXEC, 0666);
     umask(old_mask);
     if (mode_fd < 0) return 19;
     if (fstat(mode_fd, &st) != 0 || !S_ISREG(st.st_mode) ||
@@ -96,7 +100,7 @@ int main(void)
     errno = 0;
     if (fchdir(99) != -1 || errno != EBADF) return 40;
     if (close(cwd_fd) != 0) return 41;
-    lock_fd = open("/tmp/jasper-record-lock", O_CREAT | O_RDWR, 0600);
+    lock_fd = open("/tmp/jasper-record-lock", O_CREAT | O_TRUNC | O_RDWR, 0600);
     if (lock_fd < 0 || write(lock_fd, "lock", 4) != 4) return 42;
     memset(&lock, 0, sizeof(lock));
     lock.l_type = F_WRLCK;
@@ -186,6 +190,33 @@ int main(void)
     errno = 0;
     if (fcntl(mode_fd, F_SETLK, &lock) != -1 || errno != EBADF) return 56;
     close(mode_fd);
+    if (clock_gettime(CLOCK_MONOTONIC, &time_a) != 0) return 57;
+    timeout.tv_sec = 0;
+    timeout.tv_nsec = 20000000;
+    if (nanosleep(&timeout, NULL) != 0 ||
+        clock_gettime(CLOCK_MONOTONIC, &time_b) != 0 ||
+        time_b.tv_sec < time_a.tv_sec ||
+        (time_b.tv_sec == time_a.tv_sec && time_b.tv_nsec < time_a.tv_nsec)) {
+        return 58;
+    }
+    timeout = time_b;
+    timeout.tv_nsec += 20000000;
+    if (timeout.tv_nsec >= 1000000000) {
+        timeout.tv_nsec -= 1000000000;
+        timeout.tv_sec++;
+    }
+    if (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &timeout, NULL) != 0 ||
+        clock_gettime(CLOCK_MONOTONIC, &time_b) != 0 ||
+        time_b.tv_sec < timeout.tv_sec ||
+        (time_b.tv_sec == timeout.tv_sec && time_b.tv_nsec < timeout.tv_nsec)) {
+        return 59;
+    }
+    errno = 0;
+    if (clock_gettime((clockid_t)-1, &time_b) != -1 || errno != EINVAL) return 60;
+    timeout.tv_sec = 0;
+    timeout.tv_nsec = -1;
+    errno = 0;
+    if (nanosleep(&timeout, NULL) != -1 || errno != EINVAL) return 61;
     child = fork();
     if (child == 0) {
         int child_fd = open("/tmp/jasper-record-lock", O_RDWR);
@@ -209,6 +240,6 @@ int main(void)
     if (!file) return 11;
     if (fputs("fdopen-ok\n", file) < 0) return 12;
     if (fclose(file) != 0) return 13;
-    puts("FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true positioned_io=true cwd_status=true record_lock=true");
+    puts("FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true positioned_io=true cwd_status=true record_lock=true monotonic_time=true");
     return 0;
 }

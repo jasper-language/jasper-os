@@ -88,6 +88,14 @@ instead of rescanning the complete ABI surface.
 - Negative coverage still needs isolated invalid-mask and stale-generation
   fixtures.
 
+## Monotonic time
+
+- `evidence/compat-wine-monotonic-time-r74`
+- Positive evidence: `CLOCK_MONOTONIC` advances across relative sleep and
+  blocking absolute `clock_nanosleep` reaches its deadline.
+- Negative evidence: invalid clock IDs and negative `timespec` values return
+  `EINVAL`.
+
 ## File-backed shared mapping
 
 - `evidence/compat-wine-mmap-cache-20261121-r7`

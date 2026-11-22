@@ -103,10 +103,10 @@ id = "linux-monotonic-time"
 abi = "clock_gettime/clock_nanosleep timeout progress"
 positive_coverage = "monotonic clock advances and blocking deadlines terminate within the declared budget"
 negative_coverage = "invalid clock IDs and negative nanos remain explicit errors"
-evidence = "verification/compat-abi-evidence.md"
-commit = "409c6e2"
+evidence = "verification/compat-abi-evidence.md; evidence/compat-wine-monotonic-time-r74"
+commit = "93804e9"
 environment = "qemu-jasper-linux-abi"
-status = "partial"
+status = "verified"
 
 [[item]]
 id = "wine-wineserver-bootstrap"
