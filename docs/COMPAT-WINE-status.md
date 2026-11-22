@@ -90,9 +90,19 @@ and their Linux mapping metadata before publishing the replacement reservation.
 The regression marker is `fixed_prot_none_replace=true`.
 
 After that fix, Wine 11.22 can spawn and load Explorer through Jasper without
-the PEB fault. Direct3D is still not accepted: in a headless Jasper guest,
-Wine cannot create a desktop window, and the current test tree still lacks
-parts of the full Wine display/module closure. No `D3D11_PROBE_OK` exists yet.
+the PEB fault. The ordinary headless desktop path still cannot create a
+desktop window, and the current test tree still lacks parts of the full Wine
+display/module closure.
+
+The offscreen D3D11 core slice has now passed separately through the Wine
+service desktop and Mesa lavapipe. The unmodified DXVK 3.1.1 path reported
+`D3D11_PROBE_OK feature=0xb000 pixel=32,64,128,255`, and the probe exited zero.
+The probe binary is intentionally linked without `DYNAMIC_BASE` for this
+verification profile because Jasper's current x86_64 user window does not yet
+cover Wine's randomized high PE base. This is a bounded core result, not a
+claim of general ASLR, desktop, D3D12/WSI, or physical-GPU compatibility.
+The process resource baseline still reports `resources=false`; cleanup of the
+DXVK worker/thread/cache state remains open.
 
 A generic unmodified C/POSIX fixture performs the same
 `creat -> fdopen -> fputs -> fclose` sequence twice through Jasper and exits

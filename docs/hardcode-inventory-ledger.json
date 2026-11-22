@@ -1,5 +1,5 @@
 {
-  "baseline_total": 0,
+  "baseline_total": 1,
   "categories": [
     "confirmed-defect",
     "explicit-safety-policy",
@@ -9,8 +9,23 @@
     "test-demo-fixture",
     "unclassified"
   ],
-  "counts": {},
-  "entries": [],
+  "counts": {
+    "explicit-safety-policy": 1
+  },
+  "entries": [
+    {
+      "category": "explicit-safety-policy",
+      "count": 1,
+      "fingerprint": "486655819aaf9c685fc8feadceb0b5ba195992f1449862883968c37ce9ba3b82",
+      "line": 913,
+      "path": "kernel/src/lifecycle_health.rs",
+      "reason": "identifier or clamp names a parser, batching, address, or security ceiling; retain only with a documented policy",
+      "rules": "HC-G1",
+      "source": "const MAX_ROOT_FILE_BYTES: usize = 256 * 1024 * 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=compat-wine-verification-file-budget reason=lavapipe-llvm-closure"
+    }
+  ],
   "schema": 1,
-  "weighted_counts": {}
+  "weighted_counts": {
+    "explicit-safety-policy": 1
+  }
 }

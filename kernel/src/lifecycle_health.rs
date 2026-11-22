@@ -910,6 +910,7 @@ fn install_root_android_files(
     root: &Ext4Reader,
     origin: compat_core::executable::SystemImage,
 ) -> Result<(), HealthError> {
+    const MAX_ROOT_FILE_BYTES: usize = 256 * 1024 * 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=compat-wine-verification-file-budget reason=lavapipe-llvm-closure
     for path in crate::linux_vfs::ANDROID_FILE_PATHS {
         #[cfg(feature = "compat-wine-verify")]
         if path.ends_with(b"/wine/x86_64-unix/ntdll.so") {
@@ -917,10 +918,20 @@ fn install_root_android_files(
         }
         let bytes = match root.read_file(
             core::str::from_utf8(path).map_err(|_| HealthError::RootExecute)?,
-            64 * 1024 * 1024,
+            MAX_ROOT_FILE_BYTES,
         ) {
             Ok(bytes) => bytes,
             Err(_) => {
+                #[cfg(feature = "compat-wine-d3d-verify")]
+                if path.ends_with(b"d3d11.dll")
+                    || path.ends_with(b"dxgi.dll")
+                    || path.ends_with(b"d3d11-probe.exe")
+                {
+                    crate::kprintln!(
+                        "[JSR-WINE-D3D-VFS] read-fail path={}",
+                        core::str::from_utf8(path).unwrap_or("<non-utf8>")
+                    );
+                }
                 #[cfg(feature = "compat-wine-verify")]
                 if path.ends_with(b"/wine/x86_64-unix/ntdll.so") {
                     crate::kprintln!("[JSR-WINE-VFS] read-fail path=ntdll.so");
@@ -943,6 +954,16 @@ fn install_root_android_files(
             crate::kprintln!("[JSR-WINE-VFS] read path=ntdll.so bytes={}", bytes.len());
         }
         if !crate::linux_vfs::install_root_android_file(path, bytes) {
+            #[cfg(feature = "compat-wine-d3d-verify")]
+            if path.ends_with(b"d3d11.dll")
+                || path.ends_with(b"dxgi.dll")
+                || path.ends_with(b"d3d11-probe.exe")
+            {
+                crate::kprintln!(
+                    "[JSR-WINE-D3D-VFS] install-fail path={}",
+                    core::str::from_utf8(path).unwrap_or("<non-utf8>")
+                );
+            }
             #[cfg(feature = "compat-wine-verify")]
             if path.ends_with(b"/wine/x86_64-unix/ntdll.so") {
                 crate::kprintln!("[JSR-WINE-VFS] install-fail path=ntdll.so");
@@ -1056,104 +1077,194 @@ fn execute_root_dynamic_programs(
     #[cfg(feature = "compat-wine-verify")]
     {
         install_root_android_files(root, origin)?;
-        let stdio_argv: [&[u8]; 1] = [b"/usr/bin/jasper-file-stdio"];
-        run_root_program(
-            root,
-            origin,
-            "/usr/bin/jasper-file-stdio",
-            &stdio_argv,
-        )?;
-        let wine_argv: [&[u8]; 5] = [
-            b"/usr/lib/x86_64-linux-gnu/wine/wine",
-            b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/cmd.exe",
-            b"/c",
-            b"echo",
-            b"WINE_CMD_OK",
-        ];
-        // Leave TMPDIR unset: Ubuntu Wine's server_tmpdir helper frees the
-        // secure_getenv() result when TMPDIR is present. Wine still defaults
-        // its temporary directory to /tmp.
-        let wine_envp: [&[u8]; 11] = [
-            b"HOME=/data",
-            b"PATH=/usr/lib/x86_64-linux-gnu/wine:/usr/bin:/bin",
-            b"WINEBOOTSTRAPMODE=1",
-            b"WINEPREFIX=/data/wineprefix",
-            b"WINEARCH=win64",
-            b"WINEDEBUG=+module",
-            b"WINEDLLPATH=/usr/lib/x86_64-linux-gnu/wine/x86_64-windows:/usr/lib/x86_64-linux-gnu/wine/x86_64-unix",
-            b"WINEDLLDIR0=/usr/lib/x86_64-linux-gnu/wine",
-            b"WINEDLLOVERRIDES=winemenubuilder.exe=d;mscoree=d;mshtml=d",
-            b"LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/wine/x86_64-unix",
-            b"LANG=C.UTF-8",
-        ];
-        let wine = root
-            .read_file("/usr/lib/x86_64-linux-gnu/wine/wine", 4 * 1024 * 1024)
-            .map_err(|_| HealthError::RootExecute)?;
-        let wineserver = root
-            .read_file("/usr/lib/x86_64-linux-gnu/wine/wineserver", 4 * 1024 * 1024)
-            .map_err(|_| HealthError::RootExecute)?;
-        let wine_preloader = root
-            .read_file(
-                "/usr/lib/x86_64-linux-gnu/wine/wine-preloader.static",
-                4 * 1024 * 1024,
-            )
-            .map_err(|_| HealthError::RootExecute)?;
-        let interpreter = root
-            .read_file("/lib64/ld-linux-x86-64.so.2", 4 * 1024 * 1024)
-            .map_err(|_| HealthError::RootExecute)?;
-        if !crate::linux_vfs::install_root_android_file(
-            b"/usr/lib/x86_64-linux-gnu/wine/wine-preloader",
-            wine_preloader.clone(),
-        ) || !crate::linux_vfs::install_root_program(
-            origin,
-            b"/usr/lib/x86_64-linux-gnu/wine/wine",
-            wine.len(),
-            interpreter.len(),
-        ) || !crate::linux_vfs::install_root_program(
-            origin,
-            b"/usr/lib/x86_64-linux-gnu/wine/wineserver",
-            wineserver.len(),
-            interpreter.len(),
-        ) || !crate::linux_vfs::install_root_program(
-            origin,
-            b"/usr/lib/x86_64-linux-gnu/wine/wine-preloader",
-            wine_preloader.len(),
-            interpreter.len(),
-        ) {
-            return Err(HealthError::RootExecute);
+        #[cfg(not(feature = "compat-wine-d3d-verify"))]
+        {
+            let stdio_argv: [&[u8]; 1] = [b"/usr/bin/jasper-file-stdio"];
+            run_root_program(
+                root,
+                origin,
+                "/usr/bin/jasper-file-stdio",
+                &stdio_argv,
+            )?;
         }
-        crate::linux_abi::reset_wine_syscall_trace_budget();
-        if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
-            "compat-wine-cmd",
-            "/usr/lib/x86_64-linux-gnu/wine/wine",
-            &wine,
-            &interpreter,
-            "/lib64/ld-linux-x86-64.so.2",
-            &wine_argv,
-            &wine_envp,
-            crate::mm::frame::free_frames(),
-            false,
-            WINE_COLD_START_DEADLINE_TICKS,
-        ) {
-            return Err(HealthError::RootExecute);
+        #[cfg(not(feature = "compat-wine-d3d-verify"))]
+        {
+            let wine_argv: [&[u8]; 5] = [
+                b"/usr/lib/x86_64-linux-gnu/wine/wine",
+                b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/cmd.exe",
+                b"/c",
+                b"echo",
+                b"WINE_CMD_OK",
+            ];
+            // Leave TMPDIR unset: Ubuntu Wine's server_tmpdir helper frees the
+            // secure_getenv() result when TMPDIR is present. Wine still defaults
+            // its temporary directory to /tmp.
+            let wine_envp: [&[u8]; 11] = [
+                b"HOME=/data",
+                b"PATH=/usr/lib/x86_64-linux-gnu/wine:/usr/bin:/bin",
+                b"WINEBOOTSTRAPMODE=1",
+                b"WINEPREFIX=/data/wineprefix",
+                b"WINEARCH=win64",
+                b"WINEDEBUG=+module",
+                b"WINEDLLPATH=/usr/lib/x86_64-linux-gnu/wine/x86_64-windows:/usr/lib/x86_64-linux-gnu/wine/x86_64-unix",
+                b"WINEDLLDIR0=/usr/lib/x86_64-linux-gnu/wine",
+                b"WINEDLLOVERRIDES=winemenubuilder.exe=d;mscoree=d;mshtml=d",
+                b"LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/wine/x86_64-unix",
+                b"LANG=C.UTF-8",
+            ];
+            let wine = root
+                .read_file("/usr/lib/x86_64-linux-gnu/wine/wine", 4 * 1024 * 1024)
+                .map_err(|_| HealthError::RootExecute)?;
+            let wineserver = root
+                .read_file("/usr/lib/x86_64-linux-gnu/wine/wineserver", 4 * 1024 * 1024)
+                .map_err(|_| HealthError::RootExecute)?;
+            let wine_preloader = root
+                .read_file(
+                    "/usr/lib/x86_64-linux-gnu/wine/wine-preloader.static",
+                    4 * 1024 * 1024,
+                )
+                .map_err(|_| HealthError::RootExecute)?;
+            let interpreter = root
+                .read_file("/lib64/ld-linux-x86-64.so.2", 4 * 1024 * 1024)
+                .map_err(|_| HealthError::RootExecute)?;
+            if !crate::linux_vfs::install_root_android_file(
+                b"/usr/lib/x86_64-linux-gnu/wine/wine-preloader",
+                wine_preloader.clone(),
+            ) || !crate::linux_vfs::install_root_program(
+                origin,
+                b"/usr/lib/x86_64-linux-gnu/wine/wine",
+                wine.len(),
+                interpreter.len(),
+            ) || !crate::linux_vfs::install_root_program(
+                origin,
+                b"/usr/lib/x86_64-linux-gnu/wine/wineserver",
+                wineserver.len(),
+                interpreter.len(),
+            ) || !crate::linux_vfs::install_root_program(
+                origin,
+                b"/usr/lib/x86_64-linux-gnu/wine/wine-preloader",
+                wine_preloader.len(),
+                interpreter.len(),
+            ) {
+                return Err(HealthError::RootExecute);
+            }
+            crate::linux_abi::reset_wine_syscall_trace_budget();
+            if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+                "compat-wine-cmd",
+                "/usr/lib/x86_64-linux-gnu/wine/wine",
+                &wine,
+                &interpreter,
+                "/lib64/ld-linux-x86-64.so.2",
+                &wine_argv,
+                &wine_envp,
+                crate::mm::frame::free_frames(),
+                false,
+                WINE_COLD_START_DEADLINE_TICKS,
+            ) {
+                return Err(HealthError::RootExecute);
+            }
+            // A cold prefix initializes Wine and compatibility-cache metadata once.
+            // Measure an immediately repeated command to prove steady-state release.
+            crate::mm::heap::ensure_free(2 * 1024 * 1024)
+                .map_err(|_| HealthError::RootExecute)?;
+            crate::linux_abi::reset_wine_syscall_trace_budget();
+            if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+                "compat-wine-cmd",
+                "/usr/lib/x86_64-linux-gnu/wine/wine",
+                &wine,
+                &interpreter,
+                "/lib64/ld-linux-x86-64.so.2",
+                &wine_argv,
+                &wine_envp,
+                crate::mm::frame::free_frames(),
+                true,
+                WINE_COLD_START_DEADLINE_TICKS,
+            ) {
+                return Err(HealthError::RootExecute);
+            }
         }
-        // A cold prefix initializes Wine and compatibility-cache metadata once.
-        // Measure an immediately repeated command to prove steady-state release.
-        crate::mm::heap::ensure_free(2 * 1024 * 1024).map_err(|_| HealthError::RootExecute)?;
-        crate::linux_abi::reset_wine_syscall_trace_budget();
-        if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
-            "compat-wine-cmd",
-            "/usr/lib/x86_64-linux-gnu/wine/wine",
-            &wine,
-            &interpreter,
-            "/lib64/ld-linux-x86-64.so.2",
-            &wine_argv,
-            &wine_envp,
-            crate::mm::frame::free_frames(),
-            true,
-            WINE_COLD_START_DEADLINE_TICKS,
-        ) {
-            return Err(HealthError::RootExecute);
+        #[cfg(feature = "compat-wine-d3d-verify")]
+        {
+            let wine = root
+                .read_file("/opt/wine-devel/lib/wine/x86_64-unix/wine", 4 * 1024 * 1024)
+                .map_err(|_| HealthError::RootExecute)?;
+            let wineserver = root
+                .read_file("/opt/wine-devel/bin/wineserver", 4 * 1024 * 1024)
+                .map_err(|_| HealthError::RootExecute)?;
+            let wine_loader = root
+                .read_file(
+                    "/opt/wine-devel/lib/wine/x86_64-unix/wine",
+                    4 * 1024 * 1024,
+                )
+                .map_err(|_| HealthError::RootExecute)?;
+            let wine_preloader = root
+                .read_file(
+                    "/opt/wine-devel/lib/wine/x86_64-unix/wine-preloader",
+                    4 * 1024 * 1024,
+                )
+                .map_err(|_| HealthError::RootExecute)?;
+            let interpreter = root
+                .read_file("/lib64/ld-linux-x86-64.so.2", 4 * 1024 * 1024)
+                .map_err(|_| HealthError::RootExecute)?;
+            if !crate::linux_vfs::install_root_program(
+                origin,
+                b"/opt/wine-devel/bin/wine",
+                wine.len(),
+                interpreter.len(),
+            ) || !crate::linux_vfs::install_root_program(
+                origin,
+                b"/opt/wine-devel/bin/wineserver",
+                wineserver.len(),
+                interpreter.len(),
+            ) || !crate::linux_vfs::install_root_program(
+                origin,
+                b"/opt/wine-devel/lib/wine/x86_64-unix/wine",
+                wine_loader.len(),
+                interpreter.len(),
+            ) || !crate::linux_vfs::install_root_program(
+                origin,
+                b"/opt/wine-devel/lib/wine/x86_64-unix/wine-preloader",
+                wine_preloader.len(),
+                interpreter.len(),
+            ) {
+                return Err(HealthError::RootExecute);
+            }
+            let d3d_argv: [&[u8]; 2] = [
+                b"/opt/wine-devel/lib/wine/x86_64-unix/wine",
+                b"/opt/wine-devel/lib/wine/x86_64-windows/d3d11-probe.exe",
+            ];
+            let d3d_envp: [&[u8]; 15] = [
+                b"HOME=/data",
+                b"PATH=/opt/wine-devel/bin:/usr/bin:/bin",
+                b"WINEBOOTSTRAPMODE=1",
+                b"WINEPREFIX=/data/wineprefix",
+                b"WINEARCH=win64",
+                b"WINEDEBUG=+module",
+                b"WINEDLLPATH=/opt/wine-devel/lib/wine/x86_64-windows:/opt/wine-devel/lib/wine/x86_64-unix",
+                b"WINEDLLDIR0=/opt/wine-devel/lib/wine",
+                b"WINEDLLOVERRIDES=d3d11=n,b;dxgi=n,b;winemenubuilder.exe=d;mscoree=d;mshtml=d",
+                b"LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/opt/wine-devel/lib/wine/x86_64-unix",
+                b"LANG=C.UTF-8",
+                b"VK_DRIVER_FILES=/usr/lib/x86_64-linux-gnu/lvp_icd.json",
+                b"VK_ICD_FILENAMES=/usr/lib/x86_64-linux-gnu/lvp_icd.json",
+                b"VK_LOADER_DEBUG=error,warn",
+                b"DXVK_LOG_LEVEL=info",
+            ];
+            crate::linux_abi::reset_wine_syscall_trace_budget();
+            if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+                "compat-wine-d3d11",
+                "/opt/wine-devel/lib/wine/x86_64-unix/wine",
+                &wine,
+                &interpreter,
+                "/lib64/ld-linux-x86-64.so.2",
+                &d3d_argv,
+                &d3d_envp,
+                crate::mm::frame::free_frames(),
+                false,
+                WINE_COLD_START_DEADLINE_TICKS,
+            ) {
+                return Err(HealthError::RootExecute);
+            }
         }
         return Ok(());
     }

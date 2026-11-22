@@ -2168,9 +2168,15 @@ fn set_clear_child_tid(process: ObjId, address: u64) -> Option<u32> {
     Some(entry.tid)
 }
 
+fn in_linux_private_window(address: u64) -> bool {
+    (address >= crate::arch::USER_WINDOW.0 && address < crate::arch::USER_WINDOW.1)
+        || (crate::arch::LOW_USER_WINDOW.1 > crate::arch::LOW_USER_WINDOW.0
+            && address >= crate::arch::LOW_USER_WINDOW.0
+            && address < crate::arch::LOW_USER_WINDOW.1)
+}
+
 fn register_robust_list(process: ObjId, address: u64, length: u64) -> bool {
-    if length != 24 || address < crate::arch::USER_WINDOW.0 || address >= crate::arch::USER_WINDOW.1
-    {
+    if length != 24 || !in_linux_private_window(address) {
         return false;
     }
     let (task, _) = sched::current();
@@ -2211,10 +2217,10 @@ fn register_rseq(process: ObjId, address: u64, length: u64, flags: u64, signatur
         || signature != 0x5305_3053
         || length == 0
         || length > 32
-        || address < crate::arch::USER_WINDOW.0
-        || address
-            .checked_add(length)
-            .is_none_or(|end| end > crate::arch::USER_WINDOW.1)
+        || !in_linux_private_window(address)
+        || address.checked_add(length).is_none_or(|end| {
+            !in_linux_private_window(end.saturating_sub(1))
+        })
     {
         return false;
     }
@@ -7551,14 +7557,13 @@ fn linux_spawn_clone(
     let required = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM;
     if flags & !SUPPORTED != 0
         || flags & required != required
-        || child_stack < crate::arch::USER_WINDOW.0
-        || child_stack > crate::arch::USER_WINDOW.1
+        || !in_linux_private_window(child_stack)
     {
         return Err(CompatErrno::Invalid);
     }
     let (user_rip, _) = user_ip.ok_or(CompatErrno::NoSys)?;
     let fs_base = if flags & CLONE_SETTLS != 0 {
-        if tls < crate::arch::USER_WINDOW.0 || tls >= crate::arch::USER_WINDOW.1 {
+        if !in_linux_private_window(tls) {
             return Err(CompatErrno::Invalid);
         }
         Some(tls)

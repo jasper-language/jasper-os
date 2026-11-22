@@ -1,5 +1,12 @@
 {
-  "entries": [],
+  "entries": [
+    {
+      "count": 1,
+      "fingerprint": "486655819aaf9c685fc8feadceb0b5ba195992f1449862883968c37ce9ba3b82",
+      "path": "kernel/src/lifecycle_health.rs",
+      "rules": "HC-G1"
+    }
+  ],
   "schema": 1,
   "scope": [
     "arch-probes",
@@ -21,5 +28,5 @@
     "user",
     "xtask"
   ],
-  "total": 0
+  "total": 1
 }
