@@ -3822,7 +3822,7 @@ fn linux_write(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 ///
 /// 返回兼容进程的当前目录；当前装载命名空间只提供 System A 根。
 fn linux_getcwd(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    let cwd = linux_current_cwd_path(pid).ok_or(CompatErrno::NoSys)?;
+    let cwd = linux_current_cwd_path_checked(pid)?;
     let mut output = alloc::vec::Vec::with_capacity(cwd.len() + 1);
     output.extend_from_slice(&cwd);
     output.push(0);
@@ -6810,7 +6810,7 @@ fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<(u64, u64), CompatErrno> {
         {
             return Err(CompatErrno::Invalid);
         }
-        let base = linux_current_cwd_path(pid).ok_or(CompatErrno::NoSys)?;
+        let base = linux_current_cwd_path_checked(pid)?;
         let mut resolved = alloc::vec::Vec::with_capacity(base.len() + path.len() + 1);
         resolved.extend_from_slice(&base);
         if !base.ends_with(b"/") {
@@ -11858,7 +11858,7 @@ fn linux_file_attr_validate(
             return Err(CompatErrno::Invalid);
         }
         let base = if is_at_fdcwd(args[0]) {
-            linux_current_cwd_path(pid).ok_or(CompatErrno::NoSys)?
+            linux_current_cwd_path_checked(pid)?
         } else {
             let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
             if let Some(crate::linux_vfs::Node::Directory(directory)) =
@@ -11963,7 +11963,7 @@ fn linux_node_for_path_or_fd(
             return Err(CompatErrno::Invalid);
         }
         let base = if is_at_fdcwd(raw_dfd) {
-            linux_current_cwd_path(pid).ok_or(CompatErrno::NoSys)?
+            linux_current_cwd_path_checked(pid)?
         } else {
             let fd = u32::try_from(raw_dfd).map_err(|_| CompatErrno::BadFd)?;
             let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
@@ -13262,7 +13262,7 @@ fn resolve_linux_path_node(pid: ObjId, address: u64) -> Result<crate::linux_vfs:
         {
             return Err(CompatErrno::Invalid);
         }
-        let base = linux_current_cwd_path(pid).ok_or(CompatErrno::NoSys)?;
+        let base = linux_current_cwd_path_checked(pid)?;
         if path == b"." {
             base
         } else {
@@ -15823,6 +15823,16 @@ fn linux_current_cwd_path(pid: ObjId) -> Option<alloc::vec::Vec<u8>> {
     Some(proc::linux_cwd(pid)?.path().to_vec())
 }
 
+fn linux_current_cwd_path_checked(pid: ObjId) -> Result<alloc::vec::Vec<u8>, CompatErrno> {
+    linux_current_cwd_path(pid).ok_or_else(|| {
+        if proc::linux_cwd_cache(pid).is_some() {
+            CompatErrno::NoEntry
+        } else {
+            CompatErrno::NoSys
+        }
+    })
+}
+
 fn linux_cache_children(
     handle: u64,
 ) -> Option<alloc::vec::Vec<(alloc::vec::Vec<u8>, u64, u8)>> {
@@ -16330,7 +16340,7 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             return Err(CompatErrno::Invalid);
         }
         let base = if is_at_fdcwd(args[0]) {
-            linux_current_cwd_path(pid).ok_or(CompatErrno::NoSys)?
+            linux_current_cwd_path_checked(pid)?
         } else {
             let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
             if let Some(crate::linux_vfs::Node::Directory(directory)) =
@@ -16677,7 +16687,7 @@ fn resolve_linux_at_path(
         return Err(CompatErrno::Invalid);
     }
     let base = if is_at_fdcwd(dirfd) {
-        linux_current_cwd_path(pid).ok_or(CompatErrno::NoSys)?
+        linux_current_cwd_path_checked(pid)?
     } else {
         let fd = u32::try_from(dirfd).map_err(|_| CompatErrno::BadFd)?;
         if let Some(crate::linux_vfs::Node::Directory(directory)) =
@@ -17074,7 +17084,7 @@ fn linux_chdir(pid: ObjId, address: u64) -> Result<u64, CompatErrno> {
         if path == b"." {
             return Ok(0);
         }
-        let base = linux_current_cwd_path(pid).ok_or(CompatErrno::NoSys)?;
+        let base = linux_current_cwd_path_checked(pid)?;
         let mut resolved = alloc::vec::Vec::with_capacity(base.len() + path.len() + 1);
         resolved.extend_from_slice(&base);
         if !base.ends_with(b"/") {
@@ -17316,7 +17326,7 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             return Err(CompatErrno::Invalid);
         }
         let base = if is_at_fdcwd(args[0]) {
-            linux_current_cwd_path(pid).ok_or(CompatErrno::NoSys)?
+            linux_current_cwd_path_checked(pid)?
         } else {
             let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
             let (handle, _) = proc::linux_dir_state(pid, fd).ok_or(CompatErrno::NotDirectory)?;
@@ -17398,7 +17408,7 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                     return Err(CompatErrno::Invalid);
                 }
                 let base = if is_at_fdcwd(args[0]) {
-                    linux_current_cwd_path(pid).ok_or(CompatErrno::NoSys)?
+                    linux_current_cwd_path_checked(pid)?
                 } else {
                     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
                     if let Some(crate::linux_vfs::Node::Directory(directory)) =
@@ -21738,7 +21748,7 @@ fn linux_faccessat(
                     return Err(CompatErrno::Invalid);
                 }
                 let base = if is_at_fdcwd(args[0]) {
-                    linux_current_cwd_path(pid).ok_or(CompatErrno::NoSys)?
+                    linux_current_cwd_path_checked(pid)?
                 } else {
                     let fd = u32::try_from(args[0]).map_err(|_| CompatErrno::BadFd)?;
                     let (handle, _) =

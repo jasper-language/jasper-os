@@ -40,6 +40,12 @@ instead of rescanning the complete ABI surface.
 ## Current directory
 
 - `evidence/compat-wine-cwd-r38`
+- `evidence/compat-wine-cwd-status-r69`
+- Positive evidence: `chdir`, `fchdir` and `getcwd` preserve cache-directory
+  identity.
+- Negative evidence: deleting the active current directory makes `getcwd`
+  and relative pathname resolution fail with `ENOENT`; invalid `fchdir` and
+  `chdir` targets preserve `EBADF` and `ENOENT`.
 - Environment: Jasper UEFI, Linux x86_64 compatibility ABI.
 
 ## POSIX record locks

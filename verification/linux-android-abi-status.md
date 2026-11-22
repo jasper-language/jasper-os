@@ -23,11 +23,12 @@ python3 scripts/check-compat-abi-matrix.py --self-test
 python3 scripts/check-compat-abi-matrix.py
 ```
 
-The first semantically verified ledger items are Linux file status/mode and
-positioned I/O. `fstat` file type and umask-derived permissions, descriptor
-status flags, file size, standard-character streams, FIFOs, sockets, `EBADF`
-and `ENOENT` are covered, as are cache-file `pread64/pwrite64` cursor and error
-semantics.
+The first semantically verified ledger items are Linux file status/mode,
+positioned I/O and current-directory lifecycle. `fstat` file type and
+umask-derived permissions, descriptor status flags, file size,
+standard-character streams, FIFOs, sockets, `EBADF` and `ENOENT` are covered,
+as are cache-file `pread64/pwrite64` cursor/error semantics and deleted-cwd
+`getcwd`/relative-path behavior.
 
 `map_shadow_stack` returns `EOPNOTSUPP` because the current Jasper kernel
 advertises no user shadow-stack feature through `ARCH_SHSTK_STATUS`. This is a
@@ -99,7 +100,7 @@ removed interfaces.
 - Latest full Linux/Android root UEFI slice:
   `evidence/issue21-uefi-boot-20261120-204541`
 - Compatibility ABI / Wine command execution:
-  `evidence/compat-wine-positioned-io-r68`
+  `evidence/compat-wine-cwd-status-r69`
 
 - Full Linux/Android root UEFI:
   `evidence/issue21-uefi-boot-20261115-userfaultfd-v123-clean`

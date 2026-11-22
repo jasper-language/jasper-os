@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <string.h>
 #include <stdio.h>
 #include <sys/socket.h>
@@ -12,8 +13,10 @@ int main(void)
     mode_t old_mask;
     int mode_fd;
     char io_buffer[4] = {0};
+    char cwd[PATH_MAX];
     int pipe_fds[2];
     int socket_fds[2];
+    int cwd_fd;
     int fd = creat("/tmp/jasper-file-stdio", 0600);
     FILE *file;
 
@@ -56,6 +59,27 @@ int main(void)
     errno = 0;
     if (open("/tmp/jasper-missing-file", O_RDONLY) != -1 ||
         errno != ENOENT) return 25;
+    if (mkdir("/tmp/jasper-cwd", 0700) != 0 ||
+        chdir("/tmp/jasper-cwd") != 0 ||
+        !getcwd(cwd, sizeof(cwd)) || strcmp(cwd, "/tmp/jasper-cwd") != 0) {
+        return 33;
+    }
+    cwd_fd = open(".", O_RDONLY | O_DIRECTORY);
+    if (cwd_fd < 0 || chdir("/") != 0 || fchdir(cwd_fd) != 0 ||
+        !getcwd(cwd, sizeof(cwd)) || strcmp(cwd, "/tmp/jasper-cwd") != 0) {
+        return 34;
+    }
+    if (rmdir("/tmp/jasper-cwd") != 0) return 35;
+    errno = 0;
+    if (getcwd(cwd, sizeof(cwd)) != NULL || errno != ENOENT) return 36;
+    errno = 0;
+    if (open("relative-missing", O_RDONLY) != -1 || errno != ENOENT) return 37;
+    if (chdir("/") != 0) return 38;
+    errno = 0;
+    if (chdir("/tmp/jasper-cwd") != -1 || errno != ENOENT) return 39;
+    errno = 0;
+    if (fchdir(99) != -1 || errno != EBADF) return 40;
+    if (close(cwd_fd) != 0) return 41;
     close(pipe_fds[0]);
     close(pipe_fds[1]);
     close(socket_fds[0]);
@@ -65,6 +89,6 @@ int main(void)
     if (!file) return 11;
     if (fputs("fdopen-ok\n", file) < 0) return 12;
     if (fclose(file) != 0) return 13;
-    puts("FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true positioned_io=true");
+    puts("FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true positioned_io=true cwd_status=true");
     return 0;
 }
