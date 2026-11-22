@@ -135,6 +135,15 @@ as the host baseline. Darling's `/bin/echo` ran and printed `DARLING_EXEC_OK`.
 The host user-space launcher without container privileges was blocked before
 that point. No Darling result is claimed for Jasper yet.
 
+The release's `debs_20260608.zip` asset was downloaded and verified as
+`sha256=27469ef3932da2e91dd7fb34b70e3628a3e54b7af9fb5480051f44af35eca1fd`;
+its observed packages are `amd64` `0.1.20260609~noble`. Darling remains
+excluded by Issue #31 and research-only under Issue #55. The separate
+container, Mach-O/mldr/dyld, darlingserver/RPC, Linux ABI, GUI/WindowServer,
+Metal/Vulkan and resource gates are frozen in
+`verification/darling-research.toml` and
+`docs/DARLING-RESEARCH-MATRIX.md`; none is claimed as a Jasper guest pass.
+
 ### Java VM
 
 The unmodified OpenJDK 21 host JVM ran a Java class and printed

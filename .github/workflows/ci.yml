@@ -111,6 +111,10 @@ jobs:
         run: |
           python3 scripts/check-issue56-host-governance.py --self-test
           python3 scripts/check-issue56-host-governance.py
+      - name: Issue #31/#55 Darling 研究边界 / Darling research matrix
+        run: |
+          python3 scripts/check-darling-research.py --self-test
+          python3 scripts/check-darling-research.py
       - name: Issue #47 CPU 固定消费者清单 / CPU consumer inventory
         run: |
           python3 scripts/check-cpu-dynamic-consumers.py --self-test
