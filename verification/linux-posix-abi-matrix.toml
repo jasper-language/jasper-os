@@ -112,11 +112,11 @@ status = "verified"
 id = "wine-wineserver-bootstrap"
 abi = "cross-process Wine runtime through Linux/POSIX ABI"
 positive_coverage = "unmodified Wine preloader, wineserver, prefix creation, Unix socket protocol, SCM_RIGHTS exchange, standard-stream fstat conversion, PE command execution and direct command output"
-negative_coverage = "missing Wine components, incompatible dynamic libraries, unsupported syscalls, and resource exhaustion"
-evidence = "verification/compat-abi-evidence.md"
-commit = "409c6e2"
+negative_coverage = "absent components, incompatible libraries, unsupported syscalls, resource exhaustion, and repeated-run stale process, mapping, signal, object, or cache state"
+evidence = "verification/compat-abi-evidence.md; evidence/compat-wine-steady-r116"
+commit = "Wine steady-state conformance r116"
 environment = "qemu-jasper-linux-abi"
-status = "partial"
+status = "verified"
 
 [[item]]
 id = "linux-vectored-file-descriptor-io"
@@ -157,14 +157,6 @@ evidence = "verification/compat-abi-evidence.md; evidence/compat-wine-remaining-
 commit = "compat ABI hardening r95"
 environment = "qemu-jasper-linux-abi"
 status = "verified"
-
-[[remaining]]
-id = "linux-abi-semantic-conformance"
-reason = "Rows above need deterministic positive and negative fixtures with archived output before they can become verified."
-
-[[remaining]]
-id = "wine-windows-pe-execution"
-reason = "Unmodified Wine loads start.exe, ntdll.dll, kernel32.dll, kernelbase.dll and cmd.exe, then executes echo WINE_CMD_OK with direct standard output and exits 0. Steady-state resource accounting still needs dedicated conformance coverage."
 
 [[remaining]]
 id = "wine-direct3d-vulkan"

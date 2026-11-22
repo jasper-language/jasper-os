@@ -431,6 +431,9 @@ const LINUX_CACHE_ROOTS: &[&[u8]] = &[LINUX_CACHE_ROOT, b"/tmp", b"/data/winepre
 const LINUX_CACHE_FILE_HANDLE_BASE: u64 = 0x4a53_4346_0000_0000;
 const LINUX_CACHE_DIR_HANDLE_BASE: u64 = 0x4a53_4344_0000_0000;
 const LINUX_CACHE_SYMLINK_HANDLE_BASE: u64 = 0x4a53_434c_0000_0000;
+const LINUX_CACHE_FILE_GROWTH_RESERVE: usize = 4096; // JASPER-HARDCODE-REVIEW: issue=35 source=compat-cache-growth-reserve reason=stabilize-small-wine-registry-updates
+const LINUX_CACHE_FILE_CAPACITY_QUANTUM: usize =
+    kernel_core::frame::FRAME_SIZE as usize;
 
 #[cfg(any(
     feature = "compat-dynamic-libc-verify",
@@ -963,6 +966,11 @@ fn queue_process_signal_info(
             .flatten()
             .filter(|thread| thread.process == process)
             .count();
+        // A signal sent after the final thread exits must not resurrect a
+        // process-wide pending set that no thread can consume or release.
+        if target_count == 0 {
+            return true;
+        }
         if targets.try_reserve_exact(target_count).is_err() {
             return false;
         }
@@ -14333,9 +14341,17 @@ fn linux_ftruncate(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 .iter_mut()
                 .find(|file| file.id == id)
                 .ok_or(CompatErrno::BadFd)?;
-            file.bytes
-                .try_reserve(size.saturating_sub(file.bytes.len()))
-                .map_err(|_| CompatErrno::NoSpace)?;
+            if size > file.bytes.len() {
+                let wanted = size
+                    .checked_add(LINUX_CACHE_FILE_GROWTH_RESERVE)
+                    .ok_or(CompatErrno::NoSpace)?
+                    .checked_add(LINUX_CACHE_FILE_CAPACITY_QUANTUM - 1)
+                    .ok_or(CompatErrno::NoSpace)?
+                    & !(LINUX_CACHE_FILE_CAPACITY_QUANTUM - 1);
+                file.bytes
+                    .try_reserve(wanted.saturating_sub(file.bytes.len()))
+                    .map_err(|_| CompatErrno::NoSpace)?;
+            }
             file.bytes.resize(size, 0);
             file.shared.clone()
         };
@@ -15900,6 +15916,135 @@ fn linux_cache_path(path: &[u8]) -> bool {
     linux_cache_root(path).is_some()
 }
 
+/// Reports retained allocation shapes for steady-state compatibility auditing.
+pub(crate) fn compat_cache_usage() -> [usize; 15] {
+    let state = COMPAT.lock();
+    [
+        state.cache_files.len(),
+        state.cache_files.capacity(),
+        state
+            .cache_files
+            .iter()
+            .map(|file| file.path.capacity())
+            .sum(),
+        state
+            .cache_files
+            .iter()
+            .map(|file| file.bytes.len())
+            .sum(),
+        state
+            .cache_files
+            .iter()
+            .map(|file| file.bytes.capacity())
+            .sum(),
+        state
+            .cache_files
+            .iter()
+            .filter(|file| file.shared.is_some())
+            .count(),
+        state.cache_dirs.len(),
+        state.cache_dirs.capacity(),
+        state
+            .cache_dirs
+            .iter()
+            .map(|directory| directory.path.capacity())
+            .sum(),
+        state.cache_symlinks.len(),
+        state.cache_symlinks.capacity(),
+        state
+            .cache_symlinks
+            .iter()
+            .map(|symlink| symlink.path.capacity() + symlink.target.capacity())
+            .sum(),
+        state.threads.len(),
+        state.threads.capacity(),
+        usize::try_from(state.next_cache_node_id).unwrap_or(usize::MAX),
+    ]
+}
+
+/// Emits bounded per-file allocation details for Wine steady-state diagnosis.
+pub(crate) fn trace_compat_cache_files() {
+    let state = COMPAT.lock();
+    for file in &state.cache_files {
+        crate::kprintln!(
+            "[JSR-COMPAT-CACHE-FILE] id={} bytes={}/{} path={}",
+            file.id,
+            file.bytes.len(),
+            file.bytes.capacity(),
+            core::str::from_utf8(&file.path).unwrap_or("<non-utf8>")
+        );
+    }
+}
+
+/// Reports aggregate lengths and capacities of non-cache compatibility tables.
+pub(crate) fn compat_global_usage() -> [usize; 5] {
+    let (length, capacity, landlock_inner) = {
+        let state = COMPAT.lock();
+        let mut length = 0usize;
+        let mut capacity = 0usize;
+        macro_rules! count {
+            ($field:ident) => {
+                length = length.saturating_add(state.$field.len());
+                capacity = capacity.saturating_add(state.$field.capacity());
+            };
+        }
+        count!(threads);
+        count!(thread_landlock_domains);
+        count!(futexes);
+        count!(process_signals);
+        count!(flock_locks);
+        count!(flock_waiters);
+        count!(posix_locks);
+        count!(posix_lock_waiters);
+        count!(posix_timers);
+        count!(interval_timers);
+        count!(message_queue_names);
+        count!(pending_signal_records);
+        count!(sysv_message_queues);
+        count!(sysv_semaphore_sets);
+        count!(sysv_semaphore_waiters);
+        count!(sysv_semaphore_undos);
+        count!(sysv_shared_segments);
+        count!(keys);
+        count!(process_keyrings);
+        let landlock_inner = state
+            .thread_landlock_domains
+            .iter()
+            .flatten()
+            .map(|domains| domains.capacity())
+            .sum();
+        (length, capacity, landlock_inner)
+    };
+    let (live, pending, _) = crate::kobj::stats();
+    [length, capacity, landlock_inner, live, pending]
+}
+
+/// Returns non-cache compatibility table lengths in stable diagnostic order.
+pub(crate) fn compat_global_counts() -> [usize; 19] {
+    let state = COMPAT.lock();
+    [
+        state.threads.len(),
+        state.thread_landlock_domains.len(),
+        state.futexes.len(),
+        state.process_signals.len(),
+        state.flock_locks.len(),
+        state.flock_waiters.len(),
+        state.posix_locks.len(),
+        state.posix_lock_waiters.len(),
+        state.posix_timers.len(),
+        state.interval_timers.len(),
+        state.message_queue_names.len(),
+        state.pending_signal_records.len(),
+        state.sysv_message_queues.len(),
+        state.sysv_semaphore_sets.len(),
+        state.sysv_semaphore_waiters.len(),
+        state.sysv_semaphore_undos.len(),
+        state.sysv_shared_segments.len(),
+        state.keys.len(),
+        state.process_keyrings.len(),
+    ]
+}
+
 fn linux_cache_file_id(handle: u64) -> Option<u32> {
     handle
         .checked_sub(LINUX_CACHE_FILE_HANDLE_BASE)
@@ -16377,12 +16522,12 @@ fn linux_cache_unlink(path: &[u8], remove_dir: bool) -> Result<(), CompatErrno> 
 fn linux_cache_rename(old_path: &[u8], new_path: &[u8]) -> Result<(), CompatErrno> {
     let root = linux_cache_root(new_path).ok_or(CompatErrno::NoEntry)?;
     let mut state = COMPAT.lock();
-    if state
-        .cache_files
-        .iter()
-        .any(|file| file.path == new_path)
-    {
-        return Err(CompatErrno::Exists);
+    if old_path == new_path {
+        return if state.cache_files.iter().any(|file| file.path == old_path) {
+            Ok(())
+        } else {
+            Err(CompatErrno::NoEntry)
+        };
     }
     let parent = linux_cache_parent(new_path, root).ok_or(CompatErrno::NoEntry)?;
     if !state
@@ -16392,16 +16537,43 @@ fn linux_cache_rename(old_path: &[u8], new_path: &[u8]) -> Result<(), CompatErrn
     {
         return Err(CompatErrno::NoEntry);
     }
-    let Some(file) = state
+    if state
+        .cache_dirs
+        .iter()
+        .any(|directory| directory.path == new_path)
+    {
+        return Err(CompatErrno::IsDirectory);
+    }
+    let Some(source_index) = state
         .cache_files
-        .iter_mut()
-        .find(|file| file.path == old_path)
+        .iter()
+        .position(|file| file.path == old_path)
     else {
         return Err(CompatErrno::NoEntry);
     };
-    file.path.clear();
-    file.path.try_reserve(new_path.len()).map_err(|_| CompatErrno::NoSpace)?;
-    file.path.extend_from_slice(new_path);
+    state.cache_files[source_index]
+        .path
+        .try_reserve(new_path.len())
+        .map_err(|_| CompatErrno::NoSpace)?;
+    if let Some(destination) = state
+        .cache_files
+        .iter_mut()
+        .find(|file| file.path == new_path)
+    {
+        // POSIX rename atomically replaces a named destination while keeping
+        // any open descriptors and mappings attached to the old inode.
+        destination.path.clear();
+    }
+    if let Some(index) = state
+        .cache_symlinks
+        .iter()
+        .position(|symlink| symlink.path == new_path)
+    {
+        state.cache_symlinks.swap_remove(index);
+    }
+    let source = &mut state.cache_files[source_index];
+    source.path.clear();
+    source.path.extend_from_slice(new_path);
     Ok(())
 }
 
@@ -16507,9 +16679,17 @@ fn linux_cache_write_at(
             .iter_mut()
             .find(|file| file.id == id)
             .ok_or(CompatErrno::BadFd)?;
-        file.bytes
-            .try_reserve(end.saturating_sub(file.bytes.len()))
-            .map_err(|_| CompatErrno::NoSpace)?;
+        if end > file.bytes.len() {
+            let wanted = end
+                .checked_add(LINUX_CACHE_FILE_GROWTH_RESERVE)
+                .ok_or(CompatErrno::NoSpace)?
+                .checked_add(LINUX_CACHE_FILE_CAPACITY_QUANTUM - 1)
+                .ok_or(CompatErrno::NoSpace)?
+                & !(LINUX_CACHE_FILE_CAPACITY_QUANTUM - 1);
+            file.bytes
+                .try_reserve(wanted.saturating_sub(file.bytes.len()))
+                .map_err(|_| CompatErrno::NoSpace)?;
+        }
         file.bytes.resize(end, 0);
         file.bytes[offset..end].copy_from_slice(bytes);
         file.shared.clone()

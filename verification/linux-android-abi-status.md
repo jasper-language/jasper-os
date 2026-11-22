@@ -98,6 +98,9 @@ removed interfaces.
   `imm32.dll`, and `cmd.exe` through the Linux ABI. `cmd.exe /c echo
   WINE_CMD_OK` executed the built-in, wrote directly to the inherited standard
   output, and exited 0.
+- An immediately repeated Wine command also exited 0 with `resources=true`;
+  process frames, shared mappings, object entries, process-signal state and
+  cache capacity returned to baseline.
 - The upstream multi-DEX `AndroidAutoBuildAPK-v18.apk` passed AOSP `aapt2`
   container/Manifest validation and one Java entry executed through unmodified
   Bionic and ART in the Jasper UEFI root-image path with exit 0 and
@@ -112,7 +115,7 @@ removed interfaces.
 - Latest full Linux/Android root UEFI slice:
   `evidence/issue21-uefi-boot-20261120-204541`
 - Compatibility ABI / Wine command execution:
-  `evidence/compat-wine-file-mmap-r101`
+  `evidence/compat-wine-steady-r116`
 
 - Full Linux/Android root UEFI:
   `evidence/issue21-uefi-boot-20261115-userfaultfd-v123-clean`

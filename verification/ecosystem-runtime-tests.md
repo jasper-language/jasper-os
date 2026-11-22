@@ -86,7 +86,12 @@ the real UEFI/root-image path. Wine loaded its preloader, wineserver, PE
 the built-in, wrote through the inherited standard-output handle, and exited
 zero.
 
-Evidence: `evidence/compat-wine-file-mmap-r101`.
+Evidence: `evidence/compat-wine-steady-r116`.
+
+The immediately repeated command also completed with `resources=true`,
+including zero retained frames and zero shared-mapping growth. This establishes
+the POSIX runtime steady state separately from the still-pending D3D/Vulkan
+execution path.
 
 ## Host baselines
 

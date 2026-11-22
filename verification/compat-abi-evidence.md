@@ -27,6 +27,7 @@ instead of rescanning the complete ABI surface.
 - `evidence/compat-wine-unlink-open-file-20261121-r14`
 - `evidence/compat-wine-file-mode-r65`
 - `evidence/compat-wine-remaining-abi-r96`
+- `evidence/compat-wine-steady-r116`
 - The last run proves an unlinked cache file remains addressable through an
   imported descriptor and that Wine can map it after `unlink`. The standard-fd
   fixture proves `fstat(1)` reports a character device, pipe and socket pairs
@@ -183,5 +184,8 @@ instead of rescanning the complete ABI surface.
 - Positive evidence: `cmd.exe /c echo WINE_CMD_OK` executes the built-in,
   writes the literal output directly through the inherited standard-output
   handle, exits 0, and the bytes reach the serial log.
-- Remaining conformance work: steady-state resource accounting remains
-  partial.
+- Positive evidence: an immediately repeated Wine command exits 0 with
+  `resources=true`; process frames, shared mappings, object-table entries,
+  process-signal state and all cache allocation buckets return to baseline.
+- Remaining Wine work is Direct3D through DXVK/VKD3D-Proton and Vulkan
+  presentation, tracked separately from the POSIX runtime ABI.

@@ -80,7 +80,73 @@ fn check(ok: bool, stage: &'static str) {
 
 fn cleanup(pid: ObjId) {
     let _ = proc::reap(pid);
-    kobj::run_cleanup(usize::MAX);
+    for _ in 0..1000 {
+        while kobj::run_cleanup(usize::MAX) != 0 {}
+        let processes = proc::linux_process_ids();
+        if processes.is_empty() {
+            break;
+        }
+        for id in processes {
+            let _ = proc::reap(id);
+        }
+        crate::sched::pause();
+    }
+    while kobj::run_cleanup(usize::MAX) != 0 {}
+    #[cfg(feature = "compat-wine-verify")]
+    {
+        let usage = crate::linux_abi::compat_cache_usage();
+        kprintln!(
+            "[JSR-COMPAT-CACHE] files={}/{} path_cap={} bytes_len={} bytes_cap={} shared={} dirs={}/{} dir_path_cap={} symlinks={}/{} symlink_cap={} threads={}/{} next={}",
+            usage[0],
+            usage[1],
+            usage[2],
+            usage[3],
+            usage[4],
+            usage[5],
+            usage[6],
+            usage[7],
+            usage[8],
+            usage[9],
+            usage[10],
+            usage[11],
+            usage[12],
+            usage[13],
+            usage[14],
+        );
+        crate::linux_abi::trace_compat_cache_files();
+        let global = crate::linux_abi::compat_global_usage();
+        kprintln!(
+            "[JSR-COMPAT-GLOBAL] len={} cap={} landlock_inner={} objects={} pending={}",
+            global[0],
+            global[1],
+            global[2],
+            global[3],
+            global[4],
+        );
+        let counts = crate::linux_abi::compat_global_counts();
+        kprintln!(
+            "[JSR-COMPAT-GLOBAL-COUNTS] thread={} landlock={} futex={} psig={} flock={}/{} plock={}/{} ptimer={} itimer={} mq_name={} qsig={} sysv_msg={} sem={}/{} undo={} shm={} keys={}/{}",
+            counts[0],
+            counts[1],
+            counts[2],
+            counts[3],
+            counts[4],
+            counts[5],
+            counts[6],
+            counts[7],
+            counts[8],
+            counts[9],
+            counts[10],
+            counts[11],
+            counts[12],
+            counts[13],
+            counts[14],
+            counts[15],
+            counts[16],
+            counts[17],
+            counts[18],
+        );
+    }
 }
 
 fn application_identity(name: &str, executable: &[u8]) -> ApplicationIdentity {

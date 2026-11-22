@@ -495,6 +495,22 @@ int main(void)
     close(vectored_readonly_fd);
     close(vectored_fd);
     if (unlink("/tmp/jasper-vectored") != 0) return 154;
+    mode_fd = open("/tmp/jasper-rename-source", O_CREAT | O_TRUNC | O_RDWR, 0600);
+    if (mode_fd < 0 || write(mode_fd, "new", 3) != 3) return 165;
+    close(mode_fd);
+    mode_fd = open("/tmp/jasper-rename-target", O_CREAT | O_TRUNC | O_RDWR, 0600);
+    if (mode_fd < 0 || write(mode_fd, "old", 3) != 3) return 166;
+    close(mode_fd);
+    if (rename("/tmp/jasper-rename-source", "/tmp/jasper-rename-target") != 0)
+        return 167;
+    errno = 0;
+    if (open("/tmp/jasper-rename-source", O_RDONLY) != -1 ||
+        errno != ENOENT) return 168;
+    mode_fd = open("/tmp/jasper-rename-target", O_RDONLY);
+    if (mode_fd < 0 || read(mode_fd, path_buffer, 3) != 3 ||
+        memcmp(path_buffer, "new", 3) != 0) return 169;
+    close(mode_fd);
+    if (unlink("/tmp/jasper-rename-target") != 0) return 170;
     if (mkdir("/tmp/jasper-vfs", 0700) != 0 ||
         mkdir("/tmp/jasper-vfs/a", 0700) != 0 ||
         mkdir("/tmp/jasper-vfs/a/b", 0700) != 0) return 101;

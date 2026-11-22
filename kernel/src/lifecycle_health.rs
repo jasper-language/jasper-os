@@ -1137,6 +1137,24 @@ fn execute_root_dynamic_programs(
         ) {
             return Err(HealthError::RootExecute);
         }
+        // A cold prefix initializes Wine and compatibility-cache metadata once.
+        // Measure an immediately repeated command to prove steady-state release.
+        crate::mm::heap::ensure_free(2 * 1024 * 1024).map_err(|_| HealthError::RootExecute)?;
+        crate::linux_abi::reset_wine_syscall_trace_budget();
+        if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+            "compat-wine-cmd",
+            "/usr/lib/x86_64-linux-gnu/wine/wine",
+            &wine,
+            &interpreter,
+            "/lib64/ld-linux-x86-64.so.2",
+            &wine_argv,
+            &wine_envp,
+            crate::mm::frame::free_frames(),
+            true,
+            WINE_COLD_START_DEADLINE_TICKS,
+        ) {
+            return Err(HealthError::RootExecute);
+        }
         return Ok(());
     }
     #[cfg(feature = "android-apk-verify")]

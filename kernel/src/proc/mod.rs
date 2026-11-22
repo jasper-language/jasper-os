@@ -5560,6 +5560,32 @@ pub(crate) fn linux_handle_in_use_globally(handle: u64) -> bool {
     })
 }
 
+/// Returns live Linux compatibility process identities for verification quiescence.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_process_ids() -> Vec<ObjId> {
+    crate::kobj::with(|table| {
+        let mut processes = Vec::new();
+        table.for_each_live(|id, object| {
+            if matches!(
+                object,
+                KObject::Process(process)
+                    if process.linux.is_some()
+                        && matches!(
+                            process.state,
+                            ProcState::Running
+                                | ProcState::Exiting { .. }
+                                | ProcState::Exited { .. }
+                        )
+            ) {
+                let _ = processes.try_reserve(1);
+                processes.push(id);
+            }
+            true
+        });
+        processes
+    })
+}
+
 /// Commits a shared open-file cursor for any Linux descriptor kind.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn set_linux_fd_offset(pid: ObjId, fd: u32, offset: u64) -> bool {
