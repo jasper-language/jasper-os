@@ -674,6 +674,8 @@ pub enum CompatErrno {
     ReadOnly = linux_raw_sys::errno::EROFS,
     /// Path resolution would cross a requested confinement boundary.
     CrossDevice = linux_raw_sys::errno::EXDEV,
+    /// Too many symbolic links were encountered during pathname resolution.
+    SymlinkLoop = linux_raw_sys::errno::ELOOP,
     /// Resource is already owned or waited on.
     /// 资源已被占用或已有等待者。
     Busy = linux_raw_sys::errno::EBUSY,

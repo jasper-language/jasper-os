@@ -4,10 +4,12 @@
 #include <limits.h>
 #include <signal.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/epoll.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -47,6 +49,9 @@ int main(void)
     int accepted;
     int epoll_fd;
     int missing_client;
+    int lifetime_fd;
+    int shared_fd;
+    int shared_readonly_fd;
     int *fillers;
     size_t filler_count;
     char signal_byte;
@@ -59,6 +64,10 @@ int main(void)
     struct cmsghdr *control_message;
     struct rlimit old_rlimit;
     struct rlimit new_rlimit;
+    void *mapping;
+    void *private_mapping;
+    unsigned char *mapped_bytes;
+    char path_buffer[PATH_MAX];
     char control_buffer[CMSG_SPACE(sizeof(int))];
     int pipe_fds[2];
     int socket_fds[2];
@@ -404,6 +413,107 @@ int main(void)
     close(rights_pipe[0]);
     close(rights_pipe[1]);
     if (setrlimit(RLIMIT_NOFILE, &old_rlimit) != 0) return 97;
+    if (mkdir("/tmp/jasper-vfs", 0700) != 0 ||
+        mkdir("/tmp/jasper-vfs/a", 0700) != 0 ||
+        mkdir("/tmp/jasper-vfs/a/b", 0700) != 0) return 101;
+    mode_fd = open("/tmp/jasper-vfs/a/b/file", O_CREAT | O_RDWR, 0600);
+    if (mode_fd < 0 || write(mode_fd, "path", 4) != 4) return 102;
+    close(mode_fd);
+    unlink("/tmp/jasper-vfs/link");
+    if (symlink("a", "/tmp/jasper-vfs/link") != 0) return 130;
+    if (readlink("/tmp/jasper-vfs/link", path_buffer,
+                 sizeof(path_buffer)) != 1) return 131;
+    if (path_buffer[0] != 'a') return 132;
+    mode_fd = open("/tmp/jasper-vfs//link/./b/../b/file", O_RDONLY);
+    if (mode_fd < 0) return 133;
+    if (read(mode_fd, path_buffer, 4) != 4) return 134;
+    if (memcmp(path_buffer, "path", 4) != 0) return 135;
+    close(mode_fd);
+    if (!realpath("/tmp/jasper-vfs/link/b/file", path_buffer) ||
+        strcmp(path_buffer, "/tmp/jasper-vfs/a/b/file") != 0) return 136;
+    errno = 0;
+    if (readlink("/tmp/jasper-vfs/a/b/file", path_buffer,
+                 sizeof(path_buffer)) != -1 || errno != EINVAL) return 137;
+    errno = 0;
+    if (open("/tmp/../../jasper-missing", O_RDONLY) != -1 ||
+        errno != ENOENT) return 107;
+    lifetime_fd = open("/tmp/jasper-unlink-life", O_CREAT | O_RDWR, 0600);
+    if (lifetime_fd < 0 || write(lifetime_fd, "life", 4) != 4 ||
+        unlink("/tmp/jasper-unlink-life") != 0) return 108;
+    errno = 0;
+    if (open("/tmp/jasper-unlink-life", O_RDONLY) != -1 ||
+        errno != ENOENT || pread(lifetime_fd, path_buffer, 4, 0) != 4 ||
+        memcmp(path_buffer, "life", 4) != 0) return 109;
+    mapping = mmap(NULL, 4096, PROT_READ, MAP_SHARED, lifetime_fd, 0);
+    if (mapping == MAP_FAILED || memcmp(mapping, "life", 4) != 0) return 110;
+    munmap(mapping, 4096);
+    close(lifetime_fd);
+    shared_fd = open("/tmp/jasper-shared", O_CREAT | O_TRUNC | O_RDWR, 0600);
+    if (shared_fd < 0 || ftruncate(shared_fd, 4096) != 0) return 111;
+    mapped_bytes = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                        MAP_SHARED, shared_fd, 0);
+    if (mapped_bytes == MAP_FAILED) return 112;
+    mapped_bytes[0] = 'A';
+    if (pread(shared_fd, path_buffer, 1, 0) != 1 || path_buffer[0] != 'A') {
+        return 113;
+    }
+    child = fork();
+    if (child == 0) {
+        unsigned char *child_map = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                                        MAP_SHARED, shared_fd, 0);
+        if (child_map == MAP_FAILED || child_map[0] != 'A') _exit(1);
+        child_map[0] = 'C';
+        _exit(0);
+    }
+    if (child < 0 || waitpid(child, &child_status, 0) != child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0 ||
+        mapped_bytes[0] != 'C') return 114;
+    mapped_bytes[0] = 'B';
+    child = fork();
+    if (child == 0) {
+        unsigned char *child_map = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                                        MAP_PRIVATE, shared_fd, 0);
+        if (child_map == MAP_FAILED || child_map[0] != 'B') _exit(1);
+        child_map[0] = 'D';
+        _exit(0);
+    }
+    if (child < 0 || waitpid(child, &child_status, 0) != child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0 ||
+        mapped_bytes[0] != 'B') return 115;
+    shared_readonly_fd = open("/tmp/jasper-shared", O_RDONLY);
+    errno = 0;
+    if (shared_readonly_fd < 0 ||
+        mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED,
+             shared_readonly_fd, 0) != MAP_FAILED ||
+        errno != EACCES) return 116;
+    if (unlink("/tmp/jasper-shared") != 0) return 117;
+    errno = 0;
+    if (open("/tmp/jasper-shared", O_RDONLY) != -1 ||
+        errno != ENOENT || mapped_bytes[0] != 'B') return 118;
+    munmap(mapped_bytes, 4096);
+    close(shared_readonly_fd);
+    close(shared_fd);
+    mapping = mmap((void *)0x100000000ULL, 4096, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+    private_mapping = mmap((void *)0x140000000ULL, 4096, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+    if (mapping == MAP_FAILED || private_mapping == MAP_FAILED) return 119;
+    ((unsigned char *)mapping)[0] = 1;
+    ((unsigned char *)private_mapping)[0] = 2;
+    munmap(mapping, 4096);
+    munmap(private_mapping, 4096);
+    errno = 0;
+    if (mmap((void *)0x100000ULL, 4096, PROT_READ,
+             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0)
+            != MAP_FAILED || errno != ENOMEM) return 120;
+    errno = 0;
+    if (mmap((void *)0x8000000000ULL, 4096, PROT_READ,
+             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0)
+            != MAP_FAILED || errno != ENOMEM) return 121;
+    mapping = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+    if (mapping == MAP_FAILED || (uintptr_t)mapping >= 0x80000000ULL) return 122;
+    munmap(mapping, 4096);
     if (epoll_wait(epoll_fd, &epoll_event, 1, 0) != 0) return 83;
     memset(&epoll_event, 0, sizeof(epoll_event));
     epoll_event.events = EPOLLIN;
@@ -479,6 +589,11 @@ int main(void)
     if (!file) return 11;
     if (fputs("fdopen-ok\n", file) < 0) return 12;
     if (fclose(file) != 0) return 13;
-    puts("FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true positioned_io=true cwd_status=true record_lock=true monotonic_time=true unix_socket=true socket_message=true epoll_status=true");
+    if (unlink("/tmp/jasper-vfs/a/b/file") != 0 ||
+        unlink("/tmp/jasper-vfs/link") != 0 ||
+        rmdir("/tmp/jasper-vfs/a/b") != 0 ||
+        rmdir("/tmp/jasper-vfs/a") != 0 ||
+        rmdir("/tmp/jasper-vfs") != 0) return 14;
+    puts("FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true positioned_io=true cwd_status=true record_lock=true monotonic_time=true unix_socket=true socket_message=true epoll_status=true vfs_path=true unlink_lifetime=true shared_mmap=true low_window=true");
     return 0;
 }

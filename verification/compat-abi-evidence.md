@@ -11,6 +11,13 @@ instead of rescanning the complete ABI surface.
 - `evidence/compat-wine-readlink-r4-20261121`
 - `evidence/compat-wine-symlink-r9-20261121`
 - `evidence/compat-wine-nls-r30`
+- `evidence/compat-wine-remaining-abi-r96`
+- Positive evidence: writable cache entries support `symlink`, `readlink`,
+  repeated separators, `.`, `..`, `realpath`, and crossing from a writable
+  prefix symlink into the read-only VFS.
+- Negative evidence: missing paths and attempted escapes above the
+  compatibility root return `ENOENT`; `readlink` on a non-link returns
+  `EINVAL`.
 - Environment: Jasper UEFI, Linux x86_64 compatibility ABI.
 
 ## File status, modes and open-file lifetime
@@ -19,6 +26,7 @@ instead of rescanning the complete ABI surface.
 - `evidence/compat-wine-fdopen-vm-r17`
 - `evidence/compat-wine-unlink-open-file-20261121-r14`
 - `evidence/compat-wine-file-mode-r65`
+- `evidence/compat-wine-remaining-abi-r96`
 - The last run proves an unlinked cache file remains addressable through an
   imported descriptor and that Wine can map it after `unlink`. The standard-fd
   fixture proves `fstat(1)` reports a character device, pipe and socket pairs
@@ -114,6 +122,13 @@ instead of rescanning the complete ABI surface.
 - `evidence/compat-wine-cache-shared-run-20261121-r12`
 - Positive evidence: writable cache files share one page-backed object across
   wineserver and the Wine client; `MAP_SHARED` maps `user_shared_data`.
+- `evidence/compat-wine-remaining-abi-r96`
+- Positive evidence: `MAP_SHARED` writes are visible between parent and
+  forked-child mappings; `MAP_PRIVATE` creates a write-private copy of the
+  current shared content; an unlinked file remains readable through its open
+  descriptor and existing mapping.
+- Negative evidence: a writable `MAP_SHARED` request through a read-only
+  descriptor returns `EACCES`.
 
 ## Low private address window
 
@@ -126,6 +141,11 @@ instead of rescanning the complete ABI surface.
   top-down after a fixed mapping exhausts the forward cursor.
 - Positive evidence: PROT_NONE reservations prefer the low private window,
   avoiding overlap with Wine's fixed high system views.
+- `evidence/compat-wine-remaining-abi-r96`
+- Positive evidence: explicit 4 GiB and 5 GiB mappings succeed and
+  `MAP_32BIT` remains in `[128 MiB, 2 GiB)`.
+- Negative evidence: an address below 128 MiB and the 512 GiB boundary fail
+  with `ENOMEM`.
 
 ## Wine bootstrap
 
@@ -140,6 +160,7 @@ instead of rescanning the complete ABI surface.
 - `evidence/compat-wine-win32u-imm-r44`
 - `evidence/compat-wine-low-prot-none-r57`
 - `evidence/compat-wine-file-mode-r65`
+- `evidence/compat-wine-remaining-abi-r96`
 - Positive evidence: the unmodified Wine preloader, wineserver, prefix creation,
   protocol exchange, PE `start.exe`, `ntdll.dll`, `kernel32.dll`,
   `kernelbase.dll`, `win32u.dll`, `imm32.dll` and `cmd.exe` load work.

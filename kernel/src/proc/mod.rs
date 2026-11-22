@@ -5390,6 +5390,25 @@ pub(crate) fn linux_handle_fd_count(pid: ObjId, handle: u64) -> usize {
     })
 }
 
+/// Reports whether any live Linux process still references a compatibility handle.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_handle_in_use_globally(handle: u64) -> bool {
+    crate::kobj::with(|table| {
+        let mut in_use = false;
+        table.for_each_live(|_, object| {
+            let KObject::Process(process) = object else {
+                return true;
+            };
+            let Some(linux) = process.linux.as_ref() else {
+                return true;
+            };
+            in_use = linux_handle_in_use(linux, handle);
+            !in_use
+        });
+        in_use
+    })
+}
+
 /// Commits a shared open-file cursor for any Linux descriptor kind.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn set_linux_fd_offset(pid: ObjId, fd: u32, offset: u64) -> bool {
@@ -11479,6 +11498,8 @@ fn destroy_process(p: Box<Process>) {
         let _ = kobj::release_internal(c); // 防御：子进程表正常应已在退出时释放
     }
     let _ = kobj::release_internal(exit_state); // 进程 → 退出状态（在飞 wait 仍可持有它）
+    #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+    crate::linux_abi::reclaim_unlinked_cache_files();
 }
 
 /// Dedicated subscription-count/queue-slot admission. Does not share memory quota.

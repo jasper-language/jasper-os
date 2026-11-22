@@ -350,6 +350,12 @@ struct LinuxCacheDir {
     mode: u32,
 }
 
+struct LinuxCacheSymlink {
+    id: u32,
+    path: alloc::vec::Vec<u8>,
+    target: alloc::vec::Vec<u8>,
+}
+
 struct CompatState {
     threads: alloc::vec::Vec<Option<LinuxThread>>,
     thread_landlock_domains:
@@ -378,6 +384,7 @@ struct CompatState {
     next_key_serial: i32,
     cache_files: alloc::vec::Vec<LinuxCacheFile>,
     cache_dirs: alloc::vec::Vec<LinuxCacheDir>,
+    cache_symlinks: alloc::vec::Vec<LinuxCacheSymlink>,
     next_cache_node_id: u32,
 }
 
@@ -410,6 +417,7 @@ impl CompatState {
             next_key_serial: 1,
             cache_files: alloc::vec::Vec::new(),
             cache_dirs: alloc::vec::Vec::new(),
+            cache_symlinks: alloc::vec::Vec::new(),
             next_cache_node_id: 1,
         }
     }
@@ -422,6 +430,7 @@ const LINUX_CACHE_ROOT: &[u8] = b"/data/.cache/metal2vulkan";
 const LINUX_CACHE_ROOTS: &[&[u8]] = &[LINUX_CACHE_ROOT, b"/tmp", b"/data/wineprefix"];
 const LINUX_CACHE_FILE_HANDLE_BASE: u64 = 0x4a53_4346_0000_0000;
 const LINUX_CACHE_DIR_HANDLE_BASE: u64 = 0x4a53_4344_0000_0000;
+const LINUX_CACHE_SYMLINK_HANDLE_BASE: u64 = 0x4a53_434c_0000_0000;
 
 #[cfg(any(
     feature = "compat-dynamic-libc-verify",
@@ -5413,6 +5422,13 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 proc::linux_ashmem_is_regular(pid, entry.handle).unwrap_or(false);
             None
         } else if let Some(id) = linux_cache_file_id(entry.handle) {
+            if !entry.rights.contains(kernel_core::object::Rights::READ)
+                || args[3] & MAP_SHARED != 0
+                    && args[2] & PROT_WRITE != 0
+                    && !entry.rights.contains(kernel_core::object::Rights::WRITE)
+            {
+                return Err(CompatErrno::Access);
+            }
             cache_file_id = Some(id);
             None
         } else {
@@ -5476,7 +5492,12 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         crate::kprintln!("[JSR-WINE-MMAP-CACHE] stage=backing-resolved");
     }
     let rounded = bytes.checked_add(PAGE - 1).ok_or(CompatErrno::Invalid)? & !(PAGE - 1);
-    let (mut window_start, mut window_end) = if use_low_window {
+    let (mut window_start, mut window_end) = if map32 {
+        (
+            crate::arch::LOW_USER_WINDOW.0,
+            crate::arch::LOW_USER_WINDOW.1.min(1 << 31),
+        )
+    } else if use_low_window {
         crate::arch::LOW_USER_WINDOW
     } else {
         crate::arch::USER_WINDOW
@@ -5488,7 +5509,11 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     .ok_or(CompatErrno::NoSys)?;
     let mut requested = if args[0] == 0 {
-        cursor
+        if map32 && (cursor < window_start || cursor >= window_end) {
+            window_start
+        } else {
+            cursor
+        }
     } else {
         align_down(args[0], PAGE)
     };
@@ -5730,15 +5755,33 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 mapped.push(page);
                 page += PAGE;
             }
-            let bytes = COMPAT
-                .lock()
-                .cache_files
-                .iter()
-                .find(|file| file.id == id)
-                .ok_or(CompatErrno::BadFd)?
-                .bytes
-                .clone();
-            if offset < bytes.len() {
+            let (bytes, shared) = {
+                let state = COMPAT.lock();
+                let file = state
+                    .cache_files
+                    .iter()
+                    .find(|file| file.id == id)
+                    .ok_or(CompatErrno::BadFd)?;
+                (file.bytes.clone(), file.shared.clone())
+            };
+            if let Some(shared) = shared {
+                let available = bytes.len().saturating_sub(offset).min(rounded as usize);
+                let mut snapshot = alloc::vec::Vec::new();
+                snapshot
+                    .try_reserve_exact(available)
+                    .map_err(|_| CompatErrno::NoSpace)?;
+                snapshot.resize(available, 0);
+                let copied =
+                    proc::linux_shared_memory_read_into(&shared, offset as u64, &mut snapshot)
+                        .map_err(|_| CompatErrno::Invalid)?;
+                snapshot.truncate(copied);
+                if !snapshot.is_empty() && proc::write(pid, start, &snapshot).is_err() {
+                    for address in mapped.iter().rev().copied() {
+                        let _ = proc::unmap_page(pid, address);
+                    }
+                    return Err(CompatErrno::Fault);
+                }
+            } else if offset < bytes.len() {
                 let end = bytes.len().min(minimum);
                 if proc::write(pid, start, &bytes[offset..end]).is_err() {
                     for address in mapped.iter().rev().copied() {
@@ -15815,6 +15858,91 @@ fn linux_cache_metadata(path: &[u8]) -> Option<(u64, u64, u64, u32)> {
                 0o100000 | file.mode,
             )
         })
+        .or_else(|| {
+            state
+                .cache_symlinks
+                .iter()
+                .find(|symlink| symlink.path == path)
+                .map(|symlink| {
+                    (
+                        LINUX_CACHE_SYMLINK_HANDLE_BASE | u64::from(symlink.id),
+                        1,
+                        symlink.target.len() as u64,
+                        0o120777,
+                    )
+                })
+        })
+}
+
+fn linux_cache_symlink_target(path: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+    COMPAT
+        .lock()
+        .cache_symlinks
+        .iter()
+        .find(|symlink| symlink.path == path)
+        .map(|symlink| symlink.target.clone())
+}
+
+/// Resolves cache symlinks without leaving the bounded Linux namespace.
+///
+/// Intermediate symlinks are always followed. The final component is left in
+/// place for `lstat` and `readlink`, and followed for pathname opens and
+/// ordinary `stat` requests.
+fn linux_cache_resolve_symlinks(
+    path: &[u8],
+    follow_final: bool,
+) -> Result<alloc::vec::Vec<u8>, CompatErrno> {
+    let mut resolved =
+        crate::linux_vfs::normalize_absolute_path(path).ok_or(CompatErrno::NoEntry)?;
+    for _ in 0..40 {
+        let state = COMPAT.lock();
+        let mut prefix = alloc::vec::Vec::new();
+        prefix.push(b'/');
+        let mut link = None;
+        let components: alloc::vec::Vec<&[u8]> =
+            resolved.split(|byte| *byte == b'/').skip(1).collect();
+        for (index, component) in components.iter().enumerate() {
+            if !component.is_empty() {
+                if prefix.len() > 1 {
+                    prefix.push(b'/');
+                }
+                prefix.extend_from_slice(component);
+            }
+            let final_component = index + 1 == components.len();
+            if final_component && !follow_final {
+                break;
+            }
+            if let Some(symlink) = state.cache_symlinks.iter().find(|entry| entry.path == prefix) {
+                link = Some(symlink.target.clone());
+                break;
+            }
+        }
+        drop(state);
+        let Some(target) = link else {
+            return Ok(resolved);
+        };
+        let parent = linux_parent_path(&prefix).ok_or(CompatErrno::NoEntry)?;
+        let mut expanded = if target.starts_with(b"/") {
+            target
+        } else {
+            let mut expanded = parent;
+            if !expanded.ends_with(b"/") {
+                expanded.push(b'/');
+            }
+            expanded.extend_from_slice(&target);
+            expanded
+        };
+        if prefix.len() < resolved.len() {
+            let remainder = &resolved[prefix.len()..];
+            if !expanded.ends_with(b"/") && !remainder.starts_with(b"/") {
+                expanded.push(b'/');
+            }
+            expanded.extend_from_slice(remainder);
+        }
+        resolved =
+            crate::linux_vfs::normalize_absolute_path(&expanded).ok_or(CompatErrno::NoEntry)?;
+    }
+    Err(CompatErrno::SymlinkLoop)
 }
 
 fn linux_cache_dir_path(handle: u64) -> Option<alloc::vec::Vec<u8>> {
@@ -15890,6 +16018,19 @@ fn linux_cache_children(
             }
         }
     }
+    for symlink in &state.cache_symlinks {
+        if let Some(name) = symlink.path.strip_prefix(path.as_slice()) {
+            if let Some(name) = name.strip_prefix(b"/") {
+                if !name.is_empty() && !name.contains(&b'/') {
+                    children.push((
+                        name.to_vec(),
+                        LINUX_CACHE_SYMLINK_HANDLE_BASE | u64::from(symlink.id),
+                        10,
+                    ));
+                }
+            }
+        }
+    }
     Some(children)
 }
 
@@ -15907,6 +16048,7 @@ fn linux_cache_ensure_root(state: &mut CompatState, root: &[u8]) -> Option<u32> 
     // the steady-state heap check.
     state.cache_dirs.try_reserve(1).ok()?;
     state.cache_files.try_reserve(1).ok()?;
+    state.cache_symlinks.try_reserve(1).ok()?;
     let id = state.next_cache_node_id;
     state.next_cache_node_id = state.next_cache_node_id.checked_add(1)?;
     state.cache_dirs.try_reserve(1).ok()?;
@@ -15940,6 +16082,17 @@ fn linux_cache_open(
     const O_EXCL: u64 = 0x80;
     const O_TRUNC: u64 = 0x200;
     const O_DIRECTORY: u64 = 0x10000;
+    const O_NOFOLLOW: u64 = 0x20000;
+    let unresolved = linux_cache_resolve_symlinks(path, false)?;
+    let final_is_symlink = linux_cache_symlink_target(&unresolved).is_some();
+    if final_is_symlink && flags & O_CREAT != 0 && flags & O_EXCL != 0 {
+        return Err(CompatErrno::Exists);
+    }
+    if final_is_symlink && flags & O_NOFOLLOW != 0 {
+        return Err(CompatErrno::SymlinkLoop);
+    }
+    let resolved = linux_cache_resolve_symlinks(path, true)?;
+    let path = resolved.as_slice();
     let readable = flags & O_ACCMODE != 1;
     let writable = flags & O_ACCMODE != 0;
     let root = linux_cache_root(path).ok_or(CompatErrno::NoEntry)?;
@@ -16011,6 +16164,8 @@ fn linux_cache_open(
 }
 
 fn linux_cache_create_dir(pid: ObjId, path: &[u8], create_mode: u64) -> Result<(), CompatErrno> {
+    let resolved = linux_cache_resolve_symlinks(path, false)?;
+    let path = resolved.as_slice();
     let root = linux_cache_root(path).ok_or(CompatErrno::NoEntry)?;
     let umask = proc::linux_umask(pid).ok_or(CompatErrno::NoProcess)?;
     let dir_mode = (create_mode as u32 & 0o7777) & !umask;
@@ -16018,8 +16173,12 @@ fn linux_cache_create_dir(pid: ObjId, path: &[u8], create_mode: u64) -> Result<(
     linux_cache_ensure_root(&mut state, root).ok_or(CompatErrno::NoSpace)?;
     if state.cache_dirs.iter().any(|directory| directory.path == path)
         || state.cache_files.iter().any(|file| file.path == path)
+        || state
+            .cache_symlinks
+            .iter()
+            .any(|symlink| symlink.path == path)
     {
-        return Ok(());
+        return Err(CompatErrno::Exists);
     }
     let parent = linux_cache_parent(path, root).ok_or(CompatErrno::NoEntry)?;
     if !state
@@ -16040,7 +16199,49 @@ fn linux_cache_create_dir(pid: ObjId, path: &[u8], create_mode: u64) -> Result<(
     Ok(())
 }
 
+fn linux_cache_create_symlink(path: &[u8], target: &[u8]) -> Result<(), CompatErrno> {
+    let resolved = linux_cache_resolve_symlinks(path, false)?;
+    let path = resolved.as_slice();
+    let root = linux_cache_root(path).ok_or(CompatErrno::NoEntry)?;
+    let mut state = COMPAT.lock();
+    linux_cache_ensure_root(&mut state, root).ok_or(CompatErrno::NoSpace)?;
+    if state.cache_dirs.iter().any(|directory| directory.path == path)
+        || state.cache_files.iter().any(|file| file.path == path)
+        || state
+            .cache_symlinks
+            .iter()
+            .any(|symlink| symlink.path == path)
+    {
+        return Err(CompatErrno::Exists);
+    }
+    let parent = linux_cache_parent(path, root).ok_or(CompatErrno::NoEntry)?;
+    if !state
+        .cache_dirs
+        .iter()
+        .any(|directory| directory.path == parent)
+    {
+        return Err(CompatErrno::NoEntry);
+    }
+    let id = state.next_cache_node_id;
+    state.next_cache_node_id = state
+        .next_cache_node_id
+        .checked_add(1)
+        .ok_or(CompatErrno::NoSpace)?;
+    state
+        .cache_symlinks
+        .try_reserve(1)
+        .map_err(|_| CompatErrno::NoSpace)?;
+    state.cache_symlinks.push(LinuxCacheSymlink {
+        id,
+        path: path.to_vec(),
+        target: target.to_vec(),
+    });
+    Ok(())
+}
+
 fn linux_cache_unlink(path: &[u8], remove_dir: bool) -> Result<(), CompatErrno> {
+    let resolved = linux_cache_resolve_symlinks(path, false)?;
+    let path = resolved.as_slice();
     let mut state = COMPAT.lock();
     if remove_dir {
         if LINUX_CACHE_ROOTS.contains(&path) {
@@ -16052,6 +16253,9 @@ fn linux_cache_unlink(path: &[u8], remove_dir: bool) -> Result<(), CompatErrno> 
         }) || state.cache_dirs.iter().any(|directory| {
             directory.path.starts_with(path)
                 && directory.path.get(path.len()) == Some(&b'/')
+        }) || state.cache_symlinks.iter().any(|symlink| {
+            symlink.path.starts_with(path)
+                && symlink.path.get(path.len()) == Some(&b'/')
         }) {
             return Err(CompatErrno::Busy);
         }
@@ -16067,6 +16271,14 @@ fn linux_cache_unlink(path: &[u8], remove_dir: bool) -> Result<(), CompatErrno> 
     }
     if state.cache_dirs.iter().any(|directory| directory.path == path) {
         return Err(CompatErrno::IsDirectory);
+    }
+    if let Some(index) = state
+        .cache_symlinks
+        .iter()
+        .position(|symlink| symlink.path == path)
+    {
+        state.cache_symlinks.swap_remove(index);
+        return Ok(());
     }
     let Some(index) = state
         .cache_files
@@ -16111,6 +16323,54 @@ fn linux_cache_rename(old_path: &[u8], new_path: &[u8]) -> Result<(), CompatErrn
     file.path.try_reserve(new_path.len()).map_err(|_| CompatErrno::NoSpace)?;
     file.path.extend_from_slice(new_path);
     Ok(())
+}
+
+/// Reclaims unlinked cache files after their descriptors and shared mappings are gone.
+///
+/// POSIX unlink keeps the inode alive only while another reference exists. The
+/// compatibility cache stores those inode objects globally, so process teardown
+/// must remove the final unnamed records and shrink capacity that was only used
+/// by the completed workload.
+pub(crate) fn reclaim_unlinked_cache_files() {
+    let candidates = {
+        let state = COMPAT.lock();
+        state
+            .cache_files
+            .iter()
+            .filter(|file| file.path.is_empty())
+            .map(|file| {
+                (
+                    file.id,
+                    LINUX_CACHE_FILE_HANDLE_BASE | u64::from(file.id),
+                )
+            })
+            .collect::<alloc::vec::Vec<_>>()
+    };
+    let mut reclaim = alloc::vec::Vec::new();
+    for (id, handle) in candidates {
+        if !proc::linux_handle_in_use_globally(handle) {
+            let _ = reclaim.try_reserve(1);
+            reclaim.push(id);
+        }
+    }
+    let mut removed = alloc::vec::Vec::new();
+    if removed.try_reserve_exact(reclaim.len()).is_err() {
+        return;
+    }
+    {
+        let mut state = COMPAT.lock();
+        for id in reclaim {
+            if let Some(index) = state.cache_files.iter().position(|file| file.id == id) {
+                removed.push(state.cache_files.swap_remove(index));
+            }
+        }
+        state.cache_files.shrink_to_fit();
+        state.cache_dirs.shrink_to_fit();
+        state.cache_symlinks.shrink_to_fit();
+    }
+    // Page-backed backing objects acquire the memory pin lock when dropped.
+    // Destroy them after releasing the ranked compatibility lock.
+    drop(removed);
 }
 
 fn linux_cache_read(
@@ -16305,7 +16565,7 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         feature = "vulkan-metal2vulkan-verify"
     ))]
     trace_path_address(pid, "openat-address", args[1]);
-    let path = linux_c_string(args[1], 4096)?;
+    let mut path = linux_c_string(args[1], 4096)?;
     let flags = args[2];
     let path_only = flags & O_PATH != 0;
     if flags & 3 == 3
@@ -16339,7 +16599,20 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     ))]
     trace_path("openat", &path);
     if linux_cache_path(&path) {
-        return linux_cache_open(pid, &path, flags, args[3], flags & O_CLOEXEC != 0);
+        let resolved = linux_cache_resolve_symlinks(&path, true)?;
+        if linux_cache_path(&resolved) {
+            return linux_cache_open(
+                pid,
+                &resolved,
+                flags,
+                args[3],
+                flags & O_CLOEXEC != 0,
+            );
+        }
+        // A writable prefix symlink (notably Wine's `z:` drive) may target the
+        // read-only VFS. Continue pathname handling against that resolved
+        // namespace instead of returning the cache-specific ENOENT.
+        path = resolved;
     }
     if !path.starts_with(b"/") && !is_at_fdcwd(args[0]) {
         let candidate = resolve_linux_at_path(pid, args[0], args[1])?;
@@ -16873,7 +17146,12 @@ fn linux_linkat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 
 /// Implements `symlinkat(2)` after validating the destination parent and target string.
 fn linux_symlinkat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    let _target = linux_c_string(args[0], 4096)?;
+    let target = linux_c_string(args[0], 4096)?;
+    let path = resolve_linux_at_path(pid, args[1], args[2])?;
+    if linux_cache_path(&path) {
+        linux_cache_create_symlink(&path, &target)?;
+        return Ok(0);
+    }
     if validate_linux_creation_path(pid, args[1], args[2])? {
         return Err(CompatErrno::Exists);
     }
@@ -17111,6 +17389,11 @@ fn linux_chdir(pid: ObjId, address: u64) -> Result<u64, CompatErrno> {
             resolved.push(b'/');
         }
         resolved.extend_from_slice(&path);
+        resolved
+    };
+    let resolved = if linux_cache_path(&resolved) {
+        linux_cache_resolve_symlinks(&resolved, true)?
+    } else {
         resolved
     };
     if linux_cache_path(&resolved) {
@@ -17379,6 +17662,11 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         )?;
         return Ok(0);
     }
+    let resolved = if linux_cache_path(&resolved) {
+        linux_cache_resolve_symlinks(&resolved, args[3] & AT_SYMLINK_NOFOLLOW == 0)?
+    } else {
+        resolved
+    };
     if let Some((inode, links, size, mode)) = linux_cache_metadata(&resolved) {
         write_synthetic_stat(args[2], inode, links, size, mode)?;
         return Ok(0);
@@ -17468,6 +17756,14 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
                 )?;
                 return Ok(0);
             }
+            let resolved = if linux_cache_path(&resolved) {
+                linux_cache_resolve_symlinks(
+                    &resolved,
+                    args[2] & AT_SYMLINK_NOFOLLOW == 0,
+                )?
+            } else {
+                resolved
+            };
             if let Some((inode, links, size, mode)) = linux_cache_metadata(&resolved) {
                 write_synthetic_statx(args[4], inode, links as u32, size, mode)?;
                 return Ok(0);
@@ -20875,41 +21171,60 @@ fn linux_syncfs(pid: ObjId, raw_fd: u64) -> Result<u64, CompatErrno> {
     linux_sync_fd(pid, raw_fd, false)
 }
 
-/// Implements `readlink(2)` for `/proc/self/exe` and non-link VFS entries.
+/// Implements `readlink(2)` for `/proc/self/exe` and cache symlinks.
 ///
-/// 返回本进程真实执行路径。存在的普通文件或目录按 Linux 语义返回 `EINVAL`，
-/// 不存在的路径返回 `ENOENT`；glibc `realpath` 依赖这一区分。结果不加 NUL，
-/// 并返回放入用户缓冲区的字节数。
-fn linux_readlink(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    let path = linux_c_string(args[0], 4096)?;
-    if path != b"/proc/self/exe" {
-        return Err(if crate::linux_vfs::lookup_node(&path).is_some() {
-            CompatErrno::Invalid
-        } else {
-            CompatErrno::NoEntry
-        });
-    }
-    let capacity = usize::try_from(args[2]).map_err(|_| CompatErrno::Invalid)?;
-    if capacity > 4096 {
+/// 结果不加 NUL，并按用户缓冲区容量截断。存在的普通文件或目录按 Linux
+/// 语义返回 `EINVAL`，不存在的路径返回 `ENOENT`。
+fn linux_readlink_path(
+    pid: ObjId,
+    dirfd: u64,
+    path_address: u64,
+    buffer: u64,
+    capacity: u64,
+) -> Result<u64, CompatErrno> {
+    let capacity = usize::try_from(capacity).map_err(|_| CompatErrno::Invalid)?;
+    if capacity == 0 || capacity > 4096 {
         return Err(CompatErrno::Invalid);
+    }
+    let path = resolve_linux_at_path(pid, dirfd, path_address)?;
+    if path != b"/proc/self/exe" {
+        let resolved = linux_cache_resolve_symlinks(&path, false)?;
+        if let Some(target) = linux_cache_symlink_target(&resolved) {
+            let copied = capacity.min(target.len());
+            copy_to_user(buffer, &target[..copied], copied).map_err(|_| CompatErrno::Fault)?;
+            return Ok(copied as u64);
+        }
+        return Err(
+            if linux_cache_metadata(&resolved).is_some()
+                || crate::linux_vfs::lookup_node(&resolved).is_some()
+            {
+                CompatErrno::Invalid
+            } else {
+                CompatErrno::NoEntry
+            },
+        );
     }
     let mut target = [0u8; 128];
     let take = capacity.min(target.len());
     let copied = proc::linux_exec_path(pid, &mut target[..take]).ok_or(CompatErrno::NoEntry)?;
     if copied != 0 {
-        copy_to_user(args[1], &target[..copied], copied).map_err(|_| CompatErrno::Fault)?;
+        copy_to_user(buffer, &target[..copied], copied).map_err(|_| CompatErrno::Fault)?;
     }
     Ok(copied as u64)
 }
 
-/// Implements `readlinkat(AT_FDCWD, "/proc/self/exe")`.
-///
-/// 仅支持兼容根下的执行路径查询；其他目录 fd、flags 或路径失败关闭。
+fn linux_readlink(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
+    linux_readlink_path(
+        pid,
+        (-100i64) as u64,
+        args[0],
+        args[1],
+        args[2],
+    )
+}
+
 fn linux_readlinkat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
-    if !is_at_fdcwd(args[0]) {
-        return Err(CompatErrno::Invalid);
-    }
-    linux_readlink(pid, [args[1], args[2], args[3], 0, 0, 0])
+    linux_readlink_path(pid, args[0], args[1], args[2], args[3])
 }
 
 /// Implements bounded `sendfile(2)` from one virtual file to a writable stream.
@@ -21725,7 +22040,14 @@ fn linux_access(path: u64) -> Result<u64, CompatErrno> {
     let bytes = linux_c_string(path, 4096)?;
     #[cfg(feature = "compat-dynamic-libc-verify")]
     trace_path("access", &bytes);
-    if linux_cache_metadata(&bytes).is_some() || crate::linux_vfs::lookup_node(&bytes).is_some() {
+    let resolved = if linux_cache_path(&bytes) {
+        linux_cache_resolve_symlinks(&bytes, true)?
+    } else {
+        bytes
+    };
+    if linux_cache_metadata(&resolved).is_some()
+        || crate::linux_vfs::lookup_node(&resolved).is_some()
+    {
         Ok(0)
     } else {
         Err(CompatErrno::NoEntry)
@@ -21789,6 +22111,14 @@ fn linux_faccessat(
                     resolved.extend_from_slice(&path);
                     resolved
                 }
+            };
+            let resolved = if linux_cache_path(&resolved) {
+                linux_cache_resolve_symlinks(
+                    &resolved,
+                    flags & AT_SYMLINK_NOFOLLOW == 0,
+                )?
+            } else {
+                resolved
             };
             if linux_cache_metadata(&resolved).is_some() {
                 return Ok(0);
