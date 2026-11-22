@@ -435,6 +435,7 @@ const LINUX_CACHE_ROOTS: &[&[u8]] = &[
     b"/data/wineprefix",
     b"/data/runtimes/openjdk",
     b"/data/runtimes/dotnet",
+    b"/data/runtimes/darling",
 ];
 const LINUX_CACHE_FILE_HANDLE_BASE: u64 = 0x4a53_4346_0000_0000;
 const LINUX_CACHE_DIR_HANDLE_BASE: u64 = 0x4a53_4344_0000_0000;

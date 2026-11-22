@@ -59,6 +59,8 @@ const WINE_COLD_START_DEADLINE_TICKS: u64 = 12_000; // JASPER-HARDCODE-REVIEW: i
 const JVM_PROGRAM_DEADLINE_TICKS: u64 = 12_000; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=openjdk-startup-and-thread-cleanup-uefi-budget
 #[cfg(feature = "compat-dotnet-verify")]
 const DOTNET_PROGRAM_DEADLINE_TICKS: u64 = 12_000; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=coreclr-startup-and-thread-cleanup-uefi-budget
+#[cfg(feature = "compat-darling-verify")]
+const DARLING_PROGRAM_DEADLINE_TICKS: u64 = 2_000; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=darling-launch-gate-probe-uefi-budget
 
 static CONTROL_DEVICE: spin::Mutex<Option<Arc<IrqSpinLock<BlockDevice>>>> = spin::Mutex::new(None);
 static CONTROL_MUTATION: AtomicBool = AtomicBool::new(false);
@@ -1090,6 +1092,7 @@ fn run_root_android_program(
 }
 
 #[cfg(any(
+    feature = "compat-darling-verify",
     feature = "compat-jvm-verify",
     feature = "compat-dotnet-verify"
 ))]
@@ -1150,6 +1153,7 @@ fn install_root_runtime_cache(
 }
 
 #[cfg(any(
+    feature = "compat-darling-verify",
     feature = "compat-jvm-verify",
     feature = "compat-dotnet-verify"
 ))]
@@ -1249,6 +1253,43 @@ fn run_dotnet_probe_with_steady_state(
     )
 }
 
+#[cfg(feature = "compat-darling-verify")]
+fn run_darling_namespace_probe(
+    executable: &[u8],
+    interpreter: &[u8],
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) {
+    let _ = crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+        "darling-launcher",
+        "/data/runtimes/darling/usr/bin/darling",
+        executable,
+        interpreter,
+        "/lib64/ld-linux-x86-64.so.2",
+        argv,
+        envp,
+        crate::mm::frame::free_frames(),
+        false,
+        DARLING_PROGRAM_DEADLINE_TICKS,
+    );
+    if crate::mm::heap::ensure_free(2 * 1024 * 1024).is_err() {
+        return;
+    }
+    let frames_before = crate::mm::frame::free_frames();
+    let _ = crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+        "darling-launcher",
+        "/data/runtimes/darling/usr/bin/darling",
+        executable,
+        interpreter,
+        "/lib64/ld-linux-x86-64.so.2",
+        argv,
+        envp,
+        frames_before,
+        true,
+        DARLING_PROGRAM_DEADLINE_TICKS,
+    );
+}
+
 #[cfg(feature = "lifecycle-root-exec-verify")]
 fn execute_root_dynamic_programs(
     root: &Ext4Reader,
@@ -1264,6 +1305,37 @@ fn execute_root_dynamic_programs(
         return Err(HealthError::RootExecute);
     }
     install_root_libraries(root)?;
+    #[cfg(feature = "compat-darling-verify")]
+    {
+        install_root_runtime_cache(
+            root,
+            "/data/runtimes/darling/runtime.manifest.tsv",
+            "/data/runtimes/darling",
+        )?;
+        let executable = root
+            .read_file("/data/runtimes/darling/usr/bin/darling", 4 * 1024 * 1024)
+            .map_err(|_| HealthError::RootExecute)?;
+        let interpreter = root
+            .read_file("/lib64/ld-linux-x86-64.so.2", 4 * 1024 * 1024)
+            .map_err(|_| HealthError::RootExecute)?;
+        let darling_argv: [&[u8]; 3] = [
+            b"/data/runtimes/darling/usr/bin/darling",
+            b"/bin/echo",
+            b"DARLING_EXEC_OK",
+        ];
+        let darling_envp: [&[u8]; 3] = [
+            b"DPREFIX=/tmp/darlingprefix",
+            b"HOME=/data",
+            b"PATH=/usr/bin:/bin",
+        ];
+        run_darling_namespace_probe(
+            &executable,
+            &interpreter,
+            &darling_argv,
+            &darling_envp,
+        );
+        return Ok(());
+    }
     #[cfg(feature = "compat-dotnet-verify")]
     {
         install_root_runtime_cache(

@@ -67,9 +67,9 @@ image、Jasper VFS、资源核算或物理设备路径，因此不是 Jasper gue
 不存在任何 Jasper guest pass。
 
 容器启动阶段已记录
-`evidence/darling-namespace-capability-20261122/README.md`：固定 release
-在主机用户命名空间中仍被拒绝创建 UTS/IPC namespace。该证据只说明启动前置
-条件尚未满足，不构成 Jasper guest 结果。
+`evidence/darling-jasper-namespace-r3/README.md`：固定 release
+已在 Jasper guest 内实际运行 launcher，并被拒绝创建 UTS/IPC namespace。
+该证据只说明启动前置条件尚未满足，不构成 Darling/Mach-O guest 成功结果。
 
 ## 当前明确 blocker
 
