@@ -29,6 +29,12 @@ instead of rescanning the complete ABI surface.
 ## Positioned I/O
 
 - `evidence/compat-wine-pwrite-r40`
+- `evidence/compat-wine-positioned-io-r68`
+- Positive evidence: cache-file `pread64/pwrite64` use explicit offsets,
+  preserve the shared file cursor, and observe the updated file size.
+- Negative evidence: negative offsets return `EINVAL`, bad descriptors return
+  `EBADF`, invalid user buffers return `EFAULT`, and reads past EOF stop at
+  the bounded file length.
 - Environment: Jasper UEFI, Linux x86_64 compatibility ABI.
 
 ## Current directory

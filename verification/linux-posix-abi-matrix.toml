@@ -43,10 +43,10 @@ id = "linux-positioned-io"
 abi = "pread64/pwrite64 positioned I/O"
 positive_coverage = "bounded cache and regular-file reads and writes at an explicit offset"
 negative_coverage = "bad descriptors, invalid ranges, user faults, and allocation failure remain explicit errors"
-evidence = "verification/compat-abi-evidence.md"
-commit = "409c6e2"
+evidence = "verification/compat-abi-evidence.md; evidence/compat-wine-positioned-io-r68"
+commit = "5f8fa47"
 environment = "qemu-jasper-linux-abi"
-status = "partial"
+status = "verified"
 
 [[item]]
 id = "linux-process-cwd"

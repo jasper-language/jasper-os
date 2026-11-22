@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <string.h>
 #include <stdio.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -10,6 +11,7 @@ int main(void)
     struct stat st;
     mode_t old_mask;
     int mode_fd;
+    char io_buffer[4] = {0};
     int pipe_fds[2];
     int socket_fds[2];
     int fd = creat("/tmp/jasper-file-stdio", 0600);
@@ -36,6 +38,20 @@ int main(void)
     if ((fcntl(mode_fd, F_GETFD) & FD_CLOEXEC) == 0) return 22;
     if (write(mode_fd, "abc", 3) != 3 || fstat(mode_fd, &st) != 0 ||
         st.st_size != 3) return 23;
+    if (pwrite(mode_fd, "XYZ", 3, 8) != 3 ||
+        fstat(mode_fd, &st) != 0 || st.st_size != 11) return 26;
+    if (lseek(mode_fd, 0, SEEK_CUR) != 3) return 27;
+    if (pread(mode_fd, io_buffer, 3, 8) != 3 ||
+        memcmp(io_buffer, "XYZ", 3) != 0 ||
+        lseek(mode_fd, 0, SEEK_CUR) != 3) return 28;
+    errno = 0;
+    if (pwrite(mode_fd, "q", 1, -1) != -1 || errno != EINVAL) return 29;
+    errno = 0;
+    if (pread(mode_fd, (void *)1, 1, 0) != -1 || errno != EFAULT) return 30;
+    errno = 0;
+    if (pread(99, io_buffer, 1, 0) != -1 || errno != EBADF) return 31;
+    errno = 0;
+    if (pwrite(99, "q", 1, 0) != -1 || errno != EBADF) return 32;
     if (close(mode_fd) != 0) return 24;
     errno = 0;
     if (open("/tmp/jasper-missing-file", O_RDONLY) != -1 ||
@@ -49,6 +65,6 @@ int main(void)
     if (!file) return 11;
     if (fputs("fdopen-ok\n", file) < 0) return 12;
     if (fclose(file) != 0) return 13;
-    puts("FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true");
+    puts("FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true positioned_io=true");
     return 0;
 }

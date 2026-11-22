@@ -4314,6 +4314,48 @@ fn linux_pread64(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         io.commit();
         return Ok(read as u64);
     }
+    if let Some(id) = linux_cache_file_id(entry.handle) {
+        if !entry.rights.contains(kernel_core::object::Rights::READ) {
+            return Err(CompatErrno::BadFd);
+        }
+        let offset = usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
+        let (available, shared) = {
+            let state = COMPAT.lock();
+            let file = state
+                .cache_files
+                .iter()
+                .find(|file| file.id == id)
+                .ok_or(CompatErrno::BadFd)?;
+            (
+                file.bytes.len().saturating_sub(offset).min(len),
+                file.shared.clone(),
+            )
+        };
+        let mut bytes = alloc::vec::Vec::new();
+        bytes
+            .try_reserve_exact(available)
+            .map_err(|_| CompatErrno::NoMemory)?;
+        bytes.resize(available, 0);
+        if let Some(shared) = shared {
+            let read = proc::linux_shared_memory_read_into(&shared, offset as u64, &mut bytes)
+                .map_err(|_| CompatErrno::NoMemory)?;
+            bytes.truncate(read);
+        } else {
+            let state = COMPAT.lock();
+            let file = state
+                .cache_files
+                .iter()
+                .find(|file| file.id == id)
+                .ok_or(CompatErrno::BadFd)?;
+            bytes.copy_from_slice(&file.bytes[offset..offset + available]);
+        }
+        let io = admit_process_io(pid, bytes.len() as u64, 1)?;
+        if !bytes.is_empty() {
+            copy_to_user(args[1], &bytes, bytes.len()).map_err(|_| CompatErrno::Fault)?;
+        }
+        io.commit();
+        return Ok(bytes.len() as u64);
+    }
     let (handle, _) = proc::linux_file_state(pid, fd).ok_or(CompatErrno::BadFd)?;
     let file = crate::linux_vfs::FileId::from_handle(handle).ok_or(CompatErrno::BadFd)?;
     let offset = usize::try_from(args[3]).map_err(|_| CompatErrno::Invalid)?;
@@ -4804,6 +4846,22 @@ fn linux_lseek(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         let target =
             compat_core::syscall::seek_target(current, size, args[1] as i64, args[2])
                 .ok_or(CompatErrno::Invalid)?;
+        if !proc::set_linux_fd_offset(pid, fd, target) {
+            return Err(CompatErrno::BadFd);
+        }
+        return Ok(target);
+    }
+    if let Some(id) = linux_cache_file_id(entry.handle) {
+        let current = proc::linux_fd_offset(pid, fd).ok_or(CompatErrno::BadFd)?;
+        let size = COMPAT
+            .lock()
+            .cache_files
+            .iter()
+            .find(|file| file.id == id)
+            .map(|file| file.bytes.len() as u64)
+            .ok_or(CompatErrno::BadFd)?;
+        let target = compat_core::syscall::seek_target(current, size, args[1] as i64, args[2])
+            .ok_or(CompatErrno::Invalid)?;
         if !proc::set_linux_fd_offset(pid, fd, target) {
             return Err(CompatErrno::BadFd);
         }
