@@ -81,6 +81,14 @@ rolls back the mapping on metadata failure, and restores the reservation on
 failure. The generic regression marker is
 `materialized_fork_inherit=true`; the full `compat-wine` run remains green.
 
+The same test now replaces the materialized range with a new fixed
+`PROT_NONE` anonymous reservation. Jasper previously removed the reservation
+metadata but not the concrete pages, so `linux_reserve_range` reported an
+overlap and Wine retried low mappings while scanning the address space. The
+fixed path now honors `MAP_FIXED` by removing all previous private/shared pages
+and their Linux mapping metadata before publishing the replacement reservation.
+The regression marker is `fixed_prot_none_replace=true`.
+
 After that fix, Wine 11.22 can spawn and load Explorer through Jasper without
 the PEB fault. Direct3D is still not accepted: in a headless Jasper guest,
 Wine cannot create a desktop window, and the current test tree still lacks

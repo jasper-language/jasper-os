@@ -660,9 +660,14 @@ int main(void)
     if (mprotect(reservation_mapping, 8192,
                  PROT_READ | PROT_WRITE) != 0) return 166;
     ((char *)reservation_mapping)[0] = 'P';
+    if (mmap(reservation_mapping, 8192, PROT_NONE,
+             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0)
+            != reservation_mapping) return 168;
+    if (mprotect(reservation_mapping, 8192,
+                 PROT_READ | PROT_WRITE) != 0) return 169;
     child = fork();
     if (child == 0) {
-        if (((volatile char *)reservation_mapping)[0] != 'P') _exit(1);
+        if (((volatile char *)reservation_mapping)[0] != 0) _exit(1);
         _exit(0);
     }
     if (child < 0 || waitpid(child, &child_status, 0) != child ||
@@ -748,6 +753,6 @@ int main(void)
         rmdir("/tmp/jasper-vfs/a/b") != 0 ||
         rmdir("/tmp/jasper-vfs/a") != 0 ||
         rmdir("/tmp/jasper-vfs") != 0) return 14;
-    puts("FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true positioned_io=true vectored_fd=true cwd_status=true record_lock=true monotonic_time=true unix_socket=true socket_message=true epoll_status=true vfs_path=true unlink_lifetime=true shared_mmap=true materialized_fork_inherit=true low_window=true");
+    puts("FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true positioned_io=true vectored_fd=true cwd_status=true record_lock=true monotonic_time=true unix_socket=true socket_message=true epoll_status=true vfs_path=true unlink_lifetime=true shared_mmap=true materialized_fork_inherit=true fixed_prot_none_replace=true low_window=true");
     return 0;
 }

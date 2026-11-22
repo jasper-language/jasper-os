@@ -5651,6 +5651,17 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
         if args[3] & MAP_FIXED != 0 {
             let _ = proc::linux_remove_reserved_range(pid, requested, end);
+            let mut page = requested;
+            while page < end {
+                if proc::page_flags(pid, page).is_some() {
+                    if !proc::unmap_shared_page(pid, page)
+                        .map_err(|_| CompatErrno::NoMemory)?
+                    {
+                        proc::unmap_page(pid, page).map_err(|_| CompatErrno::NoMemory)?;
+                    }
+                }
+                page += PAGE;
+            }
         }
         if proc::linux_reserve_range(pid, requested, end).is_err() {
             #[cfg(any(
