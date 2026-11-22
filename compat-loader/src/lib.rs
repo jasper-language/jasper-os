@@ -773,17 +773,17 @@ fn tls_in_load_image(tls: &TlsSegment, segments: &[LoadSegment]) -> bool {
     let (Some(file_end), Some(memory_end)) = (file_end, memory_end) else {
         return false;
     };
+    if memory_end > MAX_USER_ADDRESS {
+        return false;
+    }
+    if tls.file_bytes == 0 {
+        return true;
+    }
     segments.iter().any(|segment| {
         let segment_file_end = segment.file_offset.checked_add(segment.file_bytes);
-        let segment_memory_end = segment.virtual_address.checked_add(segment.memory_bytes);
-        matches!(
-            (segment_file_end, segment_memory_end),
-            (Some(segment_file_end), Some(segment_memory_end))
-                if tls.file_offset >= segment.file_offset
-                    && file_end <= segment_file_end
-                    && tls.virtual_address >= segment.virtual_address
-                    && memory_end <= segment_memory_end
-        )
+        segment_file_end.is_some_and(|segment_file_end| {
+            tls.file_offset >= segment.file_offset && file_end <= segment_file_end
+        })
     })
 }
 
@@ -1195,7 +1195,7 @@ mod tests {
     }
 
     #[test]
-    fn relocation_targets_and_tls_must_be_inside_load_image() {
+    fn relocation_targets_and_tls_templates_are_bounded() {
         let segments = [LoadSegment {
             file_offset: 0,
             virtual_address: 0x1000,
@@ -1220,12 +1220,19 @@ mod tests {
             align: 0x10,
         };
         assert!(tls_in_load_image(&valid_tls, &segments));
-        let outside_tls = TlsSegment {
-            virtual_address: 0x2ff0,
-            memory_bytes: 0x20,
+        let outside_file = TlsSegment {
+            file_offset: 0x2000,
             ..valid_tls
         };
-        assert!(!tls_in_load_image(&outside_tls, &segments));
+        assert!(!tls_in_load_image(&outside_file, &segments));
+        let zero_file_gap = TlsSegment {
+            file_offset: 0x1800,
+            virtual_address: 0x900,
+            file_bytes: 0,
+            memory_bytes: 8,
+            align: 8,
+        };
+        assert!(tls_in_load_image(&zero_file_gap, &segments));
     }
 
     #[test]

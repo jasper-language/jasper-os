@@ -904,6 +904,7 @@ pub fn lookup_node(path: &[u8]) -> Option<Node> {
         b"/lib" => Some(DirectoryId::Lib),
         b"/lib/x86_64-linux-gnu" => Some(DirectoryId::LibX86_64),
         b"/lib64" => Some(DirectoryId::Lib64),
+        b"/bin" => Some(DirectoryId::UsrBin),
         b"/usr" => Some(DirectoryId::Usr),
         b"/usr/bin" => Some(DirectoryId::UsrBin),
         b"/usr/lib" => Some(DirectoryId::UsrLib),
@@ -972,6 +973,7 @@ pub fn lookup_node(path: &[u8]) -> Option<Node> {
         b"/lib" => Some(DirectoryId::Lib),
         b"/lib/x86_64-linux-gnu" => Some(DirectoryId::LibX86_64),
         b"/lib64" => Some(DirectoryId::Lib64),
+        b"/bin" => Some(DirectoryId::UsrBin),
         b"/usr" => Some(DirectoryId::Usr),
         b"/usr/bin" => Some(DirectoryId::UsrBin),
         b"/usr/lib" => Some(DirectoryId::UsrLib),
@@ -1033,6 +1035,10 @@ pub fn lookup_node(path: &[u8]) -> Option<Node> {
 /// 返回一个兼容目录的子项；`.` 与 `..` 由 `getdents64` 动态生成。
 pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
     const ROOT: &[DirEntry] = &[
+        DirEntry {
+            name: b"bin",
+            node: Node::Directory(DirectoryId::UsrBin),
+        },
         DirEntry {
             name: b"lib",
             node: Node::Directory(DirectoryId::Lib),

@@ -42,6 +42,7 @@ static SYSCALL_TRACE_REMAINING: AtomicU32 = AtomicU32::new(SYSCALL_TRACE_BUDGET)
     feature = "android-art-verify",
     feature = "compat-wine-verify",
     feature = "compat-jvm-verify",
+    feature = "compat-dotnet-verify",
     feature = "vulkan-metal2vulkan-verify"
 ))]
 static PATH_TRACE_REMAINING: AtomicU32 = AtomicU32::new(512);
@@ -433,6 +434,7 @@ const LINUX_CACHE_ROOTS: &[&[u8]] = &[
     b"/tmp",
     b"/data/wineprefix",
     b"/data/runtimes/openjdk",
+    b"/data/runtimes/dotnet",
 ];
 const LINUX_CACHE_FILE_HANDLE_BASE: u64 = 0x4a53_4346_0000_0000;
 const LINUX_CACHE_DIR_HANDLE_BASE: u64 = 0x4a53_4344_0000_0000;
@@ -487,6 +489,7 @@ fn trace_request(args: &SyscallArgs) {
     feature = "android-art-verify",
     feature = "compat-wine-verify",
     feature = "compat-jvm-verify",
+    feature = "compat-dotnet-verify",
     feature = "vulkan-metal2vulkan-verify"
 ))]
 fn trace_path(kind: &str, path: &[u8]) {
@@ -527,6 +530,7 @@ fn trace_path(kind: &str, path: &[u8]) {
     feature = "android-art-verify",
     feature = "compat-wine-verify",
     feature = "compat-jvm-verify",
+    feature = "compat-dotnet-verify",
     feature = "vulkan-metal2vulkan-verify"
 ))]
 fn trace_path_address(pid: ObjId, kind: &str, address: u64) {
@@ -6935,7 +6939,7 @@ fn linux_clone(
     const CLONE_VM: u64 = 0x0000_0100;
     const CLONE_VFORK: u64 = 0x0000_4000;
     if args[0] & CLONE_VM != 0 && args[0] & CLONE_VFORK != 0 {
-        return linux_vfork(pid, args, user_ip, user_preserved);
+        return linux_vfork_frame(pid, args[1], args, user_ip, user_preserved);
     }
     if args[0] & CLONE_VM == 0 {
         return linux_fork_clone(pid, args, user_ip, user_preserved);
@@ -6983,7 +6987,10 @@ fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<(u64, u64), CompatErrno> {
         "[JSR-WINE-EXEC] path={}",
         core::str::from_utf8(&resolved).unwrap_or("<non-utf8>")
     );
-    #[cfg(feature = "vulkan-metal2vulkan-verify")]
+    #[cfg(any(
+        feature = "vulkan-metal2vulkan-verify",
+        feature = "compat-dotnet-verify"
+    ))]
     trace_path("execve", &resolved);
     let argv = linux_string_vector(args[1])?;
     let envp = linux_string_vector(args[2])?;
@@ -7177,16 +7184,27 @@ fn linux_vfork(
     user_ip: Option<(u64, u64)>,
     preserved_regs: [u64; 6],
 ) -> Result<u64, CompatErrno> {
-    let (user_rip, user_stack) = user_ip.ok_or(CompatErrno::NoSys)?;
+    let (_, frame_stack) = user_ip.ok_or(CompatErrno::NoSys)?;
+    linux_vfork_frame(pid, frame_stack, args, user_ip, preserved_regs)
+}
+
+fn linux_vfork_frame(
+    pid: ObjId,
+    child_stack: u64,
+    syscall_args: [u64; 6],
+    user_ip: Option<(u64, u64)>,
+    preserved_regs: [u64; 6],
+) -> Result<u64, CompatErrno> {
+    let (user_rip, _) = user_ip.ok_or(CompatErrno::NoSys)?;
     let parent_space = proc::current_space_root(pid).ok_or(CompatErrno::NoSys)?;
     let (parent_task, _) = sched::current();
     let child = proc::vfork_linux_process(
         pid,
         user_rip,
-        user_stack,
+        child_stack,
         crate::arch::user_fs_base(),
         preserved_regs,
-        args,
+        syscall_args,
         parent_task,
     )
     .map_err(|error| {
@@ -7492,6 +7510,7 @@ fn linux_clone3(
     let cgroup = read(80);
     #[cfg(any(
         feature = "compat-dynamic-libc-verify",
+        feature = "compat-dotnet-verify",
         feature = "vulkan-metal2vulkan-verify"
     ))]
     crate::kprintln!(
@@ -7512,7 +7531,15 @@ fn linux_clone3(
     const CLONE_VM: u64 = 0x0000_0100;
     const CLONE_VFORK: u64 = 0x0000_4000;
     if flags & CLONE_VM != 0 && flags & CLONE_VFORK != 0 {
-        return linux_vfork(pid, args, user_ip, user_preserved);
+        let child_stack = if stack_size == 0 {
+            user_ip.ok_or(CompatErrno::NoSys)?.1
+        } else {
+            stack
+                .checked_add(stack_size)
+                .filter(|top| *top <= crate::arch::USER_WINDOW.1)
+                .ok_or(CompatErrno::Invalid)?
+        };
+        return linux_vfork_frame(pid, child_stack, args, user_ip, user_preserved);
     }
     if flags & CLONE_VM == 0 {
         return linux_fork_clone(
@@ -7531,6 +7558,7 @@ fn linux_clone3(
         .ok_or(CompatErrno::Invalid)?;
     #[cfg(any(
         feature = "compat-dynamic-libc-verify",
+        feature = "compat-dotnet-verify",
         feature = "vulkan-metal2vulkan-verify"
     ))]
     crate::kprintln!(
@@ -16958,6 +16986,7 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         feature = "compat-dynamic-libc-verify",
         feature = "android-art-verify",
         feature = "compat-jvm-verify",
+        feature = "compat-dotnet-verify",
         feature = "vulkan-metal2vulkan-verify"
     ))]
     trace_path_address(pid, "openat-address", args[1]);
@@ -16992,6 +17021,7 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         feature = "compat-dynamic-libc-verify",
         feature = "android-art-verify",
         feature = "compat-jvm-verify",
+        feature = "compat-dotnet-verify",
         feature = "vulkan-metal2vulkan-verify"
     ))]
     trace_path("openat", &path);
@@ -17946,7 +17976,8 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     #[cfg(any(
         feature = "compat-dynamic-libc-verify",
-        feature = "compat-jvm-verify"
+        feature = "compat-jvm-verify",
+        feature = "compat-dotnet-verify"
     ))]
     trace_path_address(pid, "newfstatat-address", args[1]);
     let raw_path = linux_c_string(args[1], 4096);
@@ -18016,7 +18047,8 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     };
     #[cfg(any(
         feature = "compat-dynamic-libc-verify",
-        feature = "compat-jvm-verify"
+        feature = "compat-jvm-verify",
+        feature = "compat-dotnet-verify"
     ))]
     trace_path("newfstatat", &path);
     let resolved = if path.starts_with(b"/") {
@@ -18101,7 +18133,8 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     #[cfg(any(
         feature = "compat-dynamic-libc-verify",
-        feature = "compat-jvm-verify"
+        feature = "compat-jvm-verify",
+        feature = "compat-dotnet-verify"
     ))]
     trace_path_address(pid, "statx-address", args[1]);
     let raw_path = linux_c_string(args[1], 4096);
@@ -18109,7 +18142,8 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         Ok(path) => {
             #[cfg(any(
                 feature = "compat-dynamic-libc-verify",
-                feature = "compat-jvm-verify"
+                feature = "compat-jvm-verify",
+                feature = "compat-dotnet-verify"
             ))]
             trace_path("statx", &path);
             let resolved = if path.starts_with(b"/") {
@@ -21608,7 +21642,8 @@ fn linux_readlink_path(
     let path = resolve_linux_at_path(pid, dirfd, path_address)?;
     #[cfg(any(
         feature = "compat-dynamic-libc-verify",
-        feature = "compat-jvm-verify"
+        feature = "compat-jvm-verify",
+        feature = "compat-dotnet-verify"
     ))]
     trace_path("readlink", &path);
     if path != b"/proc/self/exe" {
@@ -22464,7 +22499,8 @@ fn linux_access(path: u64) -> Result<u64, CompatErrno> {
     let bytes = linux_c_string(path, 4096)?;
     #[cfg(any(
         feature = "compat-dynamic-libc-verify",
-        feature = "compat-jvm-verify"
+        feature = "compat-jvm-verify",
+        feature = "compat-dotnet-verify"
     ))]
     trace_path("access", &bytes);
     let resolved = if linux_cache_path(&bytes) {
@@ -22472,9 +22508,9 @@ fn linux_access(path: u64) -> Result<u64, CompatErrno> {
     } else {
         bytes
     };
-    if linux_cache_metadata(&resolved).is_some()
-        || crate::linux_vfs::lookup_node(&resolved).is_some()
-    {
+    let present = linux_cache_metadata(&resolved).is_some()
+        || crate::linux_vfs::lookup_node(&resolved).is_some();
+    if present {
         Ok(0)
     } else {
         Err(CompatErrno::NoEntry)
@@ -22557,7 +22593,7 @@ fn linux_faccessat(
         }
         Err(error) => return Err(error),
     };
-    if mode & 1 != 0 && matches!(node, crate::linux_vfs::Node::Executable(_)) {
+    if mode & 1 != 0 && matches!(node, crate::linux_vfs::Node::File(_)) {
         return Err(CompatErrno::Access);
     }
     Ok(0)

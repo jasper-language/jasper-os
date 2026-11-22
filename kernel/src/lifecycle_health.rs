@@ -57,6 +57,8 @@ const ROOT_EXEC_PROBE_PATH: &str = "/usr/libexec/jasper/health-probe";
 const WINE_COLD_START_DEADLINE_TICKS: u64 = 12_000; // JASPER-HARDCODE-REVIEW: issue=35 source=compat-wine-verification-profile reason=cold-prefix-and-wineserver-uefi-budget
 #[cfg(feature = "compat-jvm-verify")]
 const JVM_PROGRAM_DEADLINE_TICKS: u64 = 12_000; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=openjdk-startup-and-thread-cleanup-uefi-budget
+#[cfg(feature = "compat-dotnet-verify")]
+const DOTNET_PROGRAM_DEADLINE_TICKS: u64 = 12_000; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=coreclr-startup-and-thread-cleanup-uefi-budget
 
 static CONTROL_DEVICE: spin::Mutex<Option<Arc<IrqSpinLock<BlockDevice>>>> = spin::Mutex::new(None);
 static CONTROL_MUTATION: AtomicBool = AtomicBool::new(false);
@@ -828,6 +830,7 @@ fn install_root_libraries(root: &Ext4Reader) -> Result<(), HealthError> {
         ),
     ];
     let mut total = 0usize;
+    let mut installed = 0usize;
     for (path, file) in libraries {
         let bytes = root
             .read_file(path, MAX_LIBRARY_BYTES)
@@ -836,10 +839,25 @@ fn install_root_libraries(root: &Ext4Reader) -> Result<(), HealthError> {
         if !crate::linux_vfs::install_root_library(file, bytes) {
             return Err(HealthError::RootExecute);
         }
+        installed += 1;
+    }
+    #[cfg(feature = "compat-dotnet-verify")]
+    for path in [
+        "/usr/lib/x86_64-linux-gnu/libdl.so.2",
+        "/usr/lib/x86_64-linux-gnu/libpthread.so.0",
+    ] {
+        let bytes = root
+            .read_file(path, MAX_LIBRARY_BYTES)
+            .map_err(|_| HealthError::RootExecute)?;
+        total = total.saturating_add(bytes.len());
+        if !crate::linux_vfs::install_root_android_file(path.as_bytes(), bytes) {
+            return Err(HealthError::RootExecute);
+        }
+        installed += 1;
     }
     crate::kprintln!(
         "[JSR-LIFE-ROOT-LIBS] count={} bytes={} source=system-ab",
-        libraries.len(),
+        installed,
         total
     );
     Ok(())
@@ -865,7 +883,7 @@ fn run_root_program(
     // selected, validated System A/B root and repeated paths must match exactly.
     // 注册表只保留健康链明确按名称启动的映像；字节仍来自已验证 System A/B 根卷，
     // 同路径重复注册必须完全一致。路径是查找键，不是权限凭证。
-    if matches!(path, "/usr/bin/printf" | "/usr/bin/jasper-getppid")
+    if matches!(path, "/bin/true" | "/usr/bin/printf" | "/usr/bin/jasper-getppid")
         && !crate::linux_vfs::install_root_program(
             origin,
             path.as_bytes(),
@@ -1071,7 +1089,10 @@ fn run_root_android_program(
     Ok(())
 }
 
-#[cfg(feature = "compat-jvm-verify")]
+#[cfg(any(
+    feature = "compat-jvm-verify",
+    feature = "compat-dotnet-verify"
+))]
 fn install_root_runtime_cache(
     root: &Ext4Reader,
     manifest_path: &str,
@@ -1128,7 +1149,10 @@ fn install_root_runtime_cache(
     Ok(())
 }
 
-#[cfg(feature = "compat-jvm-verify")]
+#[cfg(any(
+    feature = "compat-jvm-verify",
+    feature = "compat-dotnet-verify"
+))]
 fn decode_sha256(text: &str) -> Option<[u8; 32]> {
     let bytes = text.as_bytes();
     if bytes.len() != 64 {
@@ -1186,6 +1210,45 @@ fn run_jvm_probe_with_steady_state(
     )
 }
 
+#[cfg(feature = "compat-dotnet-verify")]
+fn run_dotnet_probe_with_steady_state(
+    executable: &[u8],
+    interpreter: &[u8],
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> bool {
+    if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+        "dotnet10-coreclr",
+        "/data/runtimes/dotnet/DotnetProbe",
+        executable,
+        interpreter,
+        "/lib64/ld-linux-x86-64.so.2",
+        argv,
+        envp,
+        crate::mm::frame::free_frames(),
+        false,
+        DOTNET_PROGRAM_DEADLINE_TICKS,
+    ) {
+        return false;
+    }
+    if crate::mm::heap::ensure_free(2 * 1024 * 1024).is_err() {
+        return false;
+    }
+    let frames_before = crate::mm::frame::free_frames();
+    crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+        "dotnet10-coreclr",
+        "/data/runtimes/dotnet/DotnetProbe",
+        executable,
+        interpreter,
+        "/lib64/ld-linux-x86-64.so.2",
+        argv,
+        envp,
+        frames_before,
+        true,
+        DOTNET_PROGRAM_DEADLINE_TICKS,
+    )
+}
+
 #[cfg(feature = "lifecycle-root-exec-verify")]
 fn execute_root_dynamic_programs(
     root: &Ext4Reader,
@@ -1201,6 +1264,53 @@ fn execute_root_dynamic_programs(
         return Err(HealthError::RootExecute);
     }
     install_root_libraries(root)?;
+    #[cfg(feature = "compat-dotnet-verify")]
+    {
+        install_root_runtime_cache(
+            root,
+            "/data/runtimes/dotnet/runtime.manifest.tsv",
+            "/data/runtimes/dotnet",
+        )?;
+        let executable = root
+            .read_file("/data/runtimes/dotnet/DotnetProbe", 4 * 1024 * 1024)
+            .map_err(|_| HealthError::RootExecute)?;
+        let interpreter = root
+            .read_file("/lib64/ld-linux-x86-64.so.2", 4 * 1024 * 1024)
+            .map_err(|_| HealthError::RootExecute)?;
+        let subprocess = root
+            .read_file("/bin/true", 4 * 1024 * 1024)
+            .map_err(|_| HealthError::RootExecute)?;
+        if !crate::linux_vfs::install_root_program(
+            origin,
+            b"/bin/true",
+            subprocess.len(),
+            interpreter.len(),
+        ) {
+            return Err(HealthError::RootExecute);
+        }
+        let dotnet_argv: [&[u8]; 1] = [b"/data/runtimes/dotnet/DotnetProbe"];
+        let dotnet_envp: [&[u8]; 10] = [
+            b"HOME=/data",
+            b"PATH=/usr/bin:/bin",
+            b"TMPDIR=/tmp",
+            b"DOTNET_ROOT=/data/runtimes/dotnet",
+            b"DOTNET_BUNDLE_EXTRACT_BASE_DIR=/data/runtimes/dotnet/.bundle",
+            b"DOTNET_EnableDiagnostics=0",
+            b"DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1",
+            b"LD_LIBRARY_PATH=/data/runtimes/dotnet:/usr/lib/x86_64-linux-gnu",
+            b"LANG=C.UTF-8",
+            b"TZ=UTC",
+        ];
+        if !run_dotnet_probe_with_steady_state(
+            &executable,
+            &interpreter,
+            &dotnet_argv,
+            &dotnet_envp,
+        ) {
+            return Err(HealthError::RootExecute);
+        }
+        return Ok(());
+    }
     #[cfg(feature = "compat-jvm-verify")]
     {
         install_root_runtime_cache(

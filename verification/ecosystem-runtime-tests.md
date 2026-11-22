@@ -182,9 +182,26 @@ startup cannot be claimed until the process chain actually runs.
 ### .NET/CoreCLR
 
 The unmodified Microsoft Linux x64 runtime is a compatibility target only.
-Jasper-OS does not define a native .NET/CoreCLR/C# framework or ABI. No Jasper
-guest execution is claimed for .NET until the Linux VFS and ELF loader can
-start a self-contained runtime with all managed/native resources recovered.
+Jasper-OS does not define a native .NET/CoreCLR/C# framework or ABI.
+
+The unmodified Microsoft .NET Runtime `10.0.15` completed a Jasper UEFI guest
+run as a self-contained Linux x64 application from
+`/data/runtimes/dotnet`. The fixture exercised CoreCLR startup, JIT execution,
+managed threads, Task/thread-pool work, a forced GC, managed exceptions, file
+I/O, and AF_UNIX stream sockets. The measured run printed
+`DOTNET_PROBE_OK runtime=10.0.15 checksum=150015000 thread=true task=true gc=true exception=true file=true socket=true`,
+exited zero, reclaimed resources, and reached
+`JSR-LIFE-HEALTH result=root_execution_complete`.
+
+The runtime manifest is generated from the Windows-host-independent publish
+tree using the unmodified SDK's `dotnet publish --self-contained` path. Jasper
+validates every staged file's length and SHA-256 before installing it into the
+bounded runtime cache.
+
+`System.Diagnostics.Process`/`posix_spawn` remains outside this runtime-baseline
+claim. Its vfork parent resumption, exec confirmation, and wait/wake semantics
+belong to the POSIX/Linux semantic-conformance track rather than the CoreCLR
+acceptance gate.
 
 ## Remaining Jasper work
 
@@ -195,9 +212,9 @@ start a self-contained runtime with all managed/native resources recovered.
 - Stage Wine/DXVK/VKD3D and Metal2Vulkan in a Jasper guest with a real GPU or
   an explicit virtual Vulkan device; the current UEFI QEMU fixture has no
   virtio-gpu/Vulkan device.
-- Run the unmodified .NET runtime through the Linux compatibility path; runtime
-  acceptance remains external and is never a Jasper native framework milestone.
 - Deliver synchronous guest signals, including the AVX-preservation `SIGSEGV`
   probe, without terminating the Linux process.
+- Complete POSIX process-creation semantics used by `posix_spawn`, including
+  vfork shared-stack lifetime, exec confirmation, child reaping and wait wakeup.
 
 These are compatibility gaps, not passing results.

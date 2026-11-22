@@ -240,6 +240,7 @@ compat-wine-d3d-verify = ["compat-wine-verify"]
 compat-wine-d3d12-verify = ["compat-wine-d3d-verify"]
 compat-wine-wsi-verify = ["compat-wine-d3d-verify"]
 compat-jvm-verify = ["lifecycle-root-exec-verify"]
+compat-dotnet-verify = ["lifecycle-root-exec-verify"]
 # Dedicated negative acceptance: lose the first virtio-blk completion and require
 # the hardware-counter timeout to fail the health gate without hanging silently.
 lifecycle-block-timeout-verify = ["lifecycle-root-exec-verify", "fault-inject"]
