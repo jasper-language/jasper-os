@@ -5783,7 +5783,16 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             .ok_or(CompatErrno::Invalid)?;
         if args[3] & MAP_SHARED != 0 {
             let object = linux_cache_shared_object(pid, id, minimum)?;
-            if proc::linux_shared_memory_map(pid, &object, start, rounded, writable).is_err() {
+            if proc::linux_shared_memory_map(
+                pid,
+                &object,
+                start,
+                args[5],
+                rounded,
+                writable,
+            )
+            .is_err()
+            {
                 #[cfg(feature = "compat-wine-verify")]
                 crate::kprintln!(
                     "[JSR-WINE-MMAP-CACHE] stage=shared-map-failed start={:#x} bytes={:#x}",
@@ -5865,6 +5874,7 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         if let Some(io) = io {
             io.commit();
         }
+        proc::clear_linux_truncated_range(pid, start, start + rounded);
         return Ok(start);
     }
     if let Some(handle) = ashmem_handle {
@@ -5907,12 +5917,13 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         if !advanced {
             return Err(CompatErrno::NoSys);
         }
+        proc::clear_linux_truncated_range(pid, start, start + rounded);
         return Ok(start);
     }
     if anonymous && args[3] & MAP_SHARED != 0 {
         let object =
             proc::linux_create_shared_memory(pid, rounded).ok_or(CompatErrno::NoMemory)?;
-        proc::linux_shared_memory_map(pid, &object, start, rounded, writable)
+        proc::linux_shared_memory_map(pid, &object, start, 0, rounded, writable)
             .map_err(|_| CompatErrno::NoMemory)?;
         let advanced = if use_low_window {
             proc::set_linux_mmap32_cursor(pid, start + rounded)
@@ -5927,6 +5938,7 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             }
             return Err(CompatErrno::NoSys);
         }
+        proc::clear_linux_truncated_range(pid, start, start + rounded);
         return Ok(start);
     }
     let mut mapped = alloc::vec::Vec::new();
@@ -6007,6 +6019,7 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if let Some(io) = io {
         io.commit();
     }
+    proc::clear_linux_truncated_range(pid, start, start + rounded);
     #[cfg(feature = "compat-wine-verify")]
     if args[3] & MAP_FIXED_NOREPLACE != 0 {
         crate::kprintln!("[JSR-WINE-MMAP] success start={:#x}", start);
@@ -6141,10 +6154,12 @@ fn linux_munmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     }
     let was_reserved = proc::linux_range_is_reserved(pid, args[0], end);
     if args[2] == 0 && was_reserved {
+        proc::clear_linux_truncated_range(pid, args[0], end);
         return Ok(0);
     }
     let _ = proc::linux_remove_reserved_range(pid, args[0], end);
     if proc::linux_unmap_private_range(pid, args[0], end).map_err(|_| CompatErrno::NoMemory)? {
+        proc::clear_linux_truncated_range(pid, args[0], end);
         return Ok(0);
     }
     let mut page = args[0];
@@ -6158,6 +6173,7 @@ fn linux_munmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
         page += PAGE;
     }
+    proc::clear_linux_truncated_range(pid, args[0], end);
     Ok(0)
 }
 
@@ -11247,6 +11263,7 @@ fn linux_shmat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             pid,
             &segment.0,
             candidate,
+            0,
             length,
             flags & SHM_RDONLY == 0,
         )
@@ -14309,16 +14326,23 @@ fn linux_ftruncate(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             return Err(CompatErrno::BadFd);
         }
         let size = usize::try_from(size).map_err(|_| CompatErrno::Invalid)?;
-        let mut state = COMPAT.lock();
-        let file = state
-            .cache_files
-            .iter_mut()
-            .find(|file| file.id == id)
-            .ok_or(CompatErrno::BadFd)?;
-        file.bytes
-            .try_reserve(size.saturating_sub(file.bytes.len()))
-            .map_err(|_| CompatErrno::NoSpace)?;
-        file.bytes.resize(size, 0);
+        let shared = {
+            let mut state = COMPAT.lock();
+            let file = state
+                .cache_files
+                .iter_mut()
+                .find(|file| file.id == id)
+                .ok_or(CompatErrno::BadFd)?;
+            file.bytes
+                .try_reserve(size.saturating_sub(file.bytes.len()))
+                .map_err(|_| CompatErrno::NoSpace)?;
+            file.bytes.resize(size, 0);
+            file.shared.clone()
+        };
+        if let Some(shared) = shared {
+            proc::linux_shared_memory_truncate(pid, &shared, size as u64)
+                .map_err(ashmem_compat_error)?;
+        }
         return Ok(0);
     }
     let Some((current, _, _)) = proc::linux_ashmem_state(pid, entry.handle) else {
@@ -21228,6 +21252,16 @@ fn linux_sync_fd(pid: ObjId, raw_fd: u64, _data_only: bool) -> Result<u64, Compa
 
 fn linux_syncfs(pid: ObjId, raw_fd: u64) -> Result<u64, CompatErrno> {
     linux_sync_fd(pid, raw_fd, false)
+}
+
+/// Classifies a user fault caused by accessing a file-mapped page beyond EOF.
+pub(crate) fn signal_truncated_mapping_fault(pid: ObjId, address: u64) -> bool {
+    const SIGBUS: u32 = 7;
+    if !proc::linux_truncated_shared_fault(pid, address) {
+        return false;
+    }
+    proc::set_linux_termination_signal(pid, SIGBUS);
+    true
 }
 
 /// Implements `readlink(2)` for `/proc/self/exe` and cache symlinks.

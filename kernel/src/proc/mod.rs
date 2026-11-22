@@ -190,6 +190,7 @@ struct LinuxProcessState {
     mappings: Vec<LinuxMapping>,
     reservations: Vec<LinuxReservation>,
     sealed_ranges: Vec<(u64, u64)>,
+    truncated_shared: Vec<(u64, u64)>,
     pipes: Vec<LinuxPipeHandle>,
     next_pipe_handle: u64,
     sockets: Vec<LinuxSocketHandle>,
@@ -939,6 +940,7 @@ struct SharedMapping {
     va: u64,
     page: Arc<crate::mm::memory_object::Page>,
     source: BackingIdentity,
+    file_offset: u64,
     flags: MapFlags,
 }
 
@@ -2641,6 +2643,139 @@ pub(crate) fn linux_create_shared_memory(
         })
     })
     .ok()
+}
+
+/// Resizes one file-backed shared object while retaining its page identity.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_shared_memory_resize(
+    pid: ObjId,
+    object: &LinuxSharedMemoryObject,
+    size: u64,
+) -> Result<(), LinuxAshmemError> {
+    let pages = usize::try_from(size.div_ceil(FRAME_SIZE))
+        .map_err(|_| LinuxAshmemError::NoMemory)?;
+    let current = object.buffer.pages.lock().len();
+    if pages > current {
+        let additional = pages - current;
+        let mut fresh = with_proc(pid, |p| {
+            let mut charge = p
+                .memory_account
+                .reserve(
+                    additional as u64,
+                    0,
+                    p.memory_owned_limit,
+                    p.memory_pin_limit,
+                )
+                .ok_or(ProcError::MemoryQuota)?;
+            let mut pages = Vec::new();
+            pages
+                .try_reserve_exact(additional)
+                .map_err(|_| ProcError::OutOfFrames)?;
+            for _ in 0..additional {
+                let charge = charge.take_page().ok_or(ProcError::OutOfFrames)?;
+                pages.push(
+                    crate::mm::memory_object::Page::zeroed(charge)
+                        .ok_or(ProcError::OutOfFrames)?,
+                );
+            }
+            Ok(pages)
+        })
+        .map_err(|_| LinuxAshmemError::NoMemory)?;
+        object.buffer.pages.lock().append(&mut fresh);
+    } else if pages < current {
+        let removed = {
+            let mut current_pages = object.buffer.pages.lock();
+            current_pages.split_off(pages)
+        };
+        object.buffer.size.store(size, Ordering::Release);
+        drop(removed);
+        return Ok(());
+    }
+    object.buffer.size.store(size, Ordering::Release);
+    Ok(())
+}
+
+/// Applies file truncation to every mapping of one file-backed shared object.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_shared_memory_truncate(
+    pid: ObjId,
+    object: &LinuxSharedMemoryObject,
+    size: u64,
+) -> Result<(), LinuxAshmemError> {
+    linux_shared_memory_resize(pid, object, size)?;
+    let backing = kernel_core::memory_capability::BackingIdentity::new(object.buffer.id, 1)
+        .ok_or(LinuxAshmemError::Invalid)?;
+    let processes = kobj::with(|table| {
+        let mut processes = Vec::new();
+        table.for_each_live(|id, object| {
+            if matches!(object, KObject::Process(process) if process.linux.is_some()) {
+                let _ = processes.try_reserve(1);
+                processes.push(id);
+            }
+            true
+        });
+        processes
+    });
+    for process in processes {
+        let expired = with_proc(process, |p| {
+            let mut addresses = Vec::new();
+            for mapping in &p.shared_maps {
+                if mapping.source == backing && mapping.file_offset >= size {
+                    addresses
+                        .try_reserve(1)
+                        .map_err(|_| ProcError::OutOfFrames)?;
+                    addresses.push(mapping.va);
+                }
+            }
+            Ok(addresses)
+        })
+        .unwrap_or_default();
+        for address in expired {
+            if unmap_shared_page(process, address).unwrap_or(false) {
+                let _ = with_proc(process, |p| {
+                    let Some(linux) = p.linux.as_mut() else {
+                        return Err(ProcError::NoSuchProcess);
+                    };
+                    linux
+                        .truncated_shared
+                        .try_reserve(1)
+                        .map_err(|_| ProcError::OutOfFrames)?;
+                    linux
+                        .truncated_shared
+                        .push((address, address.saturating_add(FRAME_SIZE)));
+                    Ok(())
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reports whether a fault targets a shared page invalidated by file truncation.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_truncated_shared_fault(pid: ObjId, address: u64) -> bool {
+    with_proc(pid, |p| {
+        Ok(p.linux.as_ref().is_some_and(|linux| {
+            linux
+                .truncated_shared
+                .iter()
+                .any(|(start, end)| address >= *start && address < *end)
+        }))
+    })
+    .unwrap_or(false)
+}
+
+/// Clears truncate tombstones when their address range is unmapped or replaced.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn clear_linux_truncated_range(pid: ObjId, start: u64, end: u64) {
+    let _ = with_proc(pid, |p| {
+        if let Some(linux) = p.linux.as_mut() {
+            linux
+                .truncated_shared
+                .retain(|(range_start, range_end)| *range_end <= start || *range_start >= end);
+        }
+        Ok(())
+    });
 }
 
 /// Copies one byte range into a shared-memory object without changing its
@@ -5048,6 +5183,7 @@ pub(crate) fn linux_ashmem_map(
                 va: address + index as u64 * PAGE,
                 page: Arc::clone(page),
                 source: backing,
+                file_offset: offset + index as u64 * PAGE,
                 flags,
             });
         }
@@ -5066,24 +5202,38 @@ pub(crate) fn linux_shared_memory_map(
     pid: ObjId,
     object: &LinuxSharedMemoryObject,
     address: u64,
+    backing_offset: u64,
     length: u64,
     writable: bool,
 ) -> Result<(), LinuxAshmemError> {
     const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
-    if address % PAGE != 0 || length == 0 || length % PAGE != 0 {
+    if address % PAGE != 0
+        || backing_offset % PAGE != 0
+        || length == 0
+        || length % PAGE != 0
+    {
         return Err(LinuxAshmemError::Invalid);
     }
     let pages_count = length / PAGE;
     let retained = {
         let guard = object.buffer.pages.lock();
         let count = usize::try_from(pages_count).map_err(|_| LinuxAshmemError::Invalid)?;
+        let start =
+            usize::try_from(backing_offset / PAGE).map_err(|_| LinuxAshmemError::Invalid)?;
+        let size = object.buffer.size.load(Ordering::Acquire);
+        if backing_offset
+            .checked_add(length)
+            .is_none_or(|end| end > size.div_ceil(PAGE) * PAGE)
+        {
+            return Err(LinuxAshmemError::Invalid);
+        }
         let mut retained = Vec::new();
         retained
             .try_reserve_exact(count)
             .map_err(|_| LinuxAshmemError::NoMemory)?;
         retained.extend(
             guard
-                .get(..count)
+                .get(start..start.checked_add(count).ok_or(LinuxAshmemError::Invalid)?)
                 .ok_or(LinuxAshmemError::Invalid)?
                 .iter()
                 .cloned(),
@@ -5169,6 +5319,7 @@ pub(crate) fn linux_shared_memory_map(
                 va: address + index as u64 * PAGE,
                 page: Arc::clone(page),
                 source: backing,
+                file_offset: backing_offset + index as u64 * PAGE,
                 flags,
             });
         }
@@ -7095,6 +7246,7 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         mappings: Vec::new(),
         reservations: Vec::new(),
         sealed_ranges: Vec::new(),
+        truncated_shared: Vec::new(),
         pipes: Vec::new(),
         next_pipe_handle: LINUX_PIPE_HANDLE_BASE,
         sockets: Vec::new(),
@@ -8001,6 +8153,7 @@ pub fn map_memory(
                 va: va + i as u64 * FRAME_SIZE,
                 page: Arc::clone(page),
                 source: memory_backing_identity(id),
+                file_offset: (offset as u64 + i as u64) * FRAME_SIZE,
                 flags,
             });
         }
@@ -9264,6 +9417,7 @@ pub fn fork_linux_process(
                         mapping.va,
                         Arc::clone(&mapping.page),
                         mapping.source,
+                        mapping.file_offset,
                         mapping.flags,
                     )
                 })
@@ -9324,8 +9478,10 @@ pub fn fork_linux_process(
             return Err(error);
         }
     }
-    for (va, page, source, flags) in shared_mappings {
-        if let Err(error) = copy_linux_shared_mapping(child, va, page, source, flags) {
+    for (va, page, source, file_offset, flags) in shared_mappings {
+        if let Err(error) =
+            copy_linux_shared_mapping(child, va, page, source, file_offset, flags)
+        {
             rollback(child, false);
             return Err(error);
         }
@@ -9401,6 +9557,7 @@ pub fn vfork_linux_process(
                             mapping.va,
                             Arc::clone(&mapping.page),
                             mapping.source,
+                            mapping.file_offset,
                             mapping.flags,
                         )
                     })
@@ -9469,11 +9626,12 @@ pub fn vfork_linux_process(
         p.shared_maps
             .try_reserve(shared_mappings.len())
             .map_err(|_| ProcError::OutOfFrames)?;
-        for (va, page, source, flags) in shared_mappings {
+        for (va, page, source, file_offset, flags) in shared_mappings {
             p.shared_maps.push(SharedMapping {
                 va,
                 page,
                 source,
+                file_offset,
                 flags,
             });
         }
@@ -9563,6 +9721,7 @@ fn copy_linux_shared_mapping(
     va: u64,
     page: Arc<crate::mm::memory_object::Page>,
     source: BackingIdentity,
+    file_offset: u64,
     flags: MapFlags,
 ) -> Result<(), ProcError> {
     with_proc(child, |process| {
@@ -9618,6 +9777,7 @@ fn copy_linux_shared_mapping(
             va,
             page,
             source,
+            file_offset,
             flags,
         });
         process.space.end_shootdown();

@@ -56,6 +56,7 @@ int main(void)
     int vectored_readonly_fd;
     int vectored_writeonly_fd;
     int vectored_pipe[2];
+    int offset_fd;
     int *fillers;
     size_t filler_count;
     ssize_t vectored_result;
@@ -595,6 +596,47 @@ int main(void)
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
     if (mapping == MAP_FAILED || (uintptr_t)mapping >= 0x80000000ULL) return 122;
     munmap(mapping, 4096);
+    offset_fd = open("/tmp/jasper-offset-shared",
+                     O_CREAT | O_TRUNC | O_RDWR, 0600);
+    if (offset_fd < 0 || ftruncate(offset_fd, 8192) != 0 ||
+        pwrite(offset_fd, "H", 1, 4096) != 1) return 156;
+    mapping = mmap((void *)0x160000000ULL, 4096,
+                   PROT_READ | PROT_WRITE,
+                   MAP_SHARED | MAP_FIXED_NOREPLACE, offset_fd, 4096);
+    if (mapping == MAP_FAILED || ((char *)mapping)[0] != 'H') return 157;
+    ((char *)mapping)[0] = 'I';
+    if (pread(offset_fd, path_buffer, 1, 4096) != 1 ||
+        path_buffer[0] != 'I') return 158;
+    private_mapping = mmap((void *)0x160000000ULL, 4096,
+                           PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    if (private_mapping != (void *)0x160000000ULL) return 159;
+    ((char *)private_mapping)[0] = 'R';
+    munmap(private_mapping, 4096);
+    mapping = mmap((void *)0x170000000ULL, 8192,
+                   PROT_READ | PROT_WRITE,
+                   MAP_SHARED | MAP_FIXED_NOREPLACE, offset_fd, 0);
+    if (mapping == MAP_FAILED) return 162;
+    if (ftruncate(offset_fd, 4096) != 0 ||
+        fstat(offset_fd, &st) != 0 || st.st_size != 4096 ||
+        pread(offset_fd, path_buffer, 1, 4096) != 0) return 160;
+    child = fork();
+    if (child == 0) {
+        volatile char truncated = ((volatile char *)mapping)[4096];
+        (void)truncated;
+        _exit(0);
+    }
+    if (child < 0 || waitpid(child, &child_status, 0) != child ||
+        !WIFSIGNALED(child_status) || WTERMSIG(child_status) != SIGBUS) return 163;
+    munmap(mapping, 8192);
+    mapping = mmap((void *)0x170000000ULL, 4096,
+                   PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+    if (mapping == MAP_FAILED) return 164;
+    ((char *)mapping)[0] = 'T';
+    munmap(mapping, 4096);
+    close(offset_fd);
+    if (unlink("/tmp/jasper-offset-shared") != 0) return 161;
     if (epoll_wait(epoll_fd, &epoll_event, 1, 0) != 0) return 83;
     memset(&epoll_event, 0, sizeof(epoll_event));
     epoll_event.events = EPOLLIN;

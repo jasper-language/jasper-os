@@ -83,6 +83,7 @@ extern "x86-interrupt" fn page_fault_handler(
     if from_user(&frame) {
         #[cfg(feature = "linux-abi")]
         if let Some(pid) = crate::proc::current_process() {
+            let _ = crate::linux_abi::signal_truncated_mapping_fault(pid, addr);
             if crate::proc::linux_userfault_wait(
                 pid,
                 addr,

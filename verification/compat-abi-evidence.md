@@ -129,6 +129,7 @@ instead of rescanning the complete ABI surface.
 
 - `evidence/compat-wine-mmap-cache-20261121-r7`
 - `evidence/compat-wine-cache-shared-run-20261121-r12`
+- `evidence/compat-wine-file-mmap-r101`
 - Positive evidence: writable cache files share one page-backed object across
   wineserver and the Wine client; `MAP_SHARED` maps `user_shared_data`.
 - `evidence/compat-wine-remaining-abi-r96`
@@ -138,6 +139,12 @@ instead of rescanning the complete ABI surface.
   descriptor and existing mapping.
 - Negative evidence: a writable `MAP_SHARED` request through a read-only
   descriptor returns `EACCES`.
+- Positive evidence: a file mapping at byte offset 4096 reads its own page;
+  mapping writes are visible through `pread`, and `MAP_FIXED` replaces an
+  existing shared range.
+- Negative evidence: after truncating an 8 KiB file to 4 KiB, `fstat` and
+  `pread` observe the new length and a child accessing the invalidated second
+  mapped page terminates with `SIGBUS`.
 
 ## Low private address window
 

@@ -141,12 +141,12 @@ status = "verified"
 [[item]]
 id = "linux-file-backed-shared-mmap"
 abi = "MAP_SHARED file-backed mmap and coherent write visibility"
-positive_coverage = "wineserver and a Wine client map the same writable cache-file pages, including KUSER_SHARED_DATA.SystemCall=1"
-negative_coverage = "truncate, private mapping, permission mismatch, stale length and range replacement"
-evidence = "verification/compat-abi-evidence.md"
-commit = "409c6e2 + compatibility ABI hardening"
+positive_coverage = "nonzero file offsets, parent/child shared visibility, fd and mapping coherence, private COW, wineserver shared data, and KUSER_SHARED_DATA.SystemCall=1"
+negative_coverage = "read-only write rejection, truncate invalidation with SIGBUS, stale file length removal, and MAP_FIXED range replacement"
+evidence = "verification/compat-abi-evidence.md; evidence/compat-wine-file-mmap-r101"
+commit = "file-backed mmap conformance r101"
 environment = "qemu-jasper-linux-abi"
-status = "partial"
+status = "verified"
 
 [[item]]
 id = "linux-low-private-address-window"
