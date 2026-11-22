@@ -1,6 +1,6 @@
 # UI Multi-window Transition Status
 
-Updated: 2026-11-21
+Updated: 2026-11-22
 
 Status: **done for the declared DAG gate: layout, CPL3 migration, dual-Surface
 framebuffer output, capability/budget rollback and a platform capability event
@@ -32,7 +32,7 @@ the same application/Scene model under Single, Split and MultiWindow layouts:
 
 ```text
 cargo test -p kernel-core ui_workspace --lib
-4 passed; 0 failed
+6 passed; 0 failed
 ```
 
 Tests cover single/split geometry, independent generation rotation, stale frame
