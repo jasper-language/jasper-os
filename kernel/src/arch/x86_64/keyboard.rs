@@ -36,6 +36,7 @@ const CODE_UP: u16 = 0x0110;
 const CODE_DOWN: u16 = 0x0111;
 const CODE_LEFT: u16 = 0x0112;
 const CODE_RIGHT: u16 = 0x0113;
+const CODE_F12: u16 = 0x012e;
 
 static MODIFIERS: AtomicU8 = AtomicU8::new(0);
 static EXTENDED: AtomicBool = AtomicBool::new(false);
@@ -144,6 +145,7 @@ fn key_code(make: u8, extended: bool) -> Option<u16> {
             Some(u16::from(scancode_letter(make).to_ascii_uppercase()))
         }
         0x39 => Some(u16::from(b' ')),
+        0x58 => Some(CODE_F12),
         _ => None,
     }
 }
@@ -164,5 +166,10 @@ mod tests {
         assert_eq!(scancode_letter(0x2C), b'z');
         assert_eq!(scancode_letter(0x39), b' ');
         assert_eq!(scancode_letter(u8::MAX), b'?');
+    }
+
+    #[test]
+    fn f12_is_an_explicit_native_key_event() {
+        assert_eq!(key_code(0x58, false), Some(CODE_F12));
     }
 }

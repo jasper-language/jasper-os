@@ -1,4 +1,5 @@
 # source	issue	kind	reference
+display-firmware-dpi	35	runtime	UEFI-GOP-framebuffer-does-not-report-physical-DPI
 AOSP-ART-RegionSpace	32	spec	AOSP-ART-3c05e56adf5b268ec5b20bf8aec460815e45161c-region-space
 avb-vbmeta-descriptor-bound	21	policy	Issue-21-bounded-AVB-descriptor-decoder
 aarch64-el2-retain-probe	22	build	EL2-vector-residency-verification-feature

@@ -28,7 +28,9 @@ use kernel_core::ui_service::{UiCapability, UiClientKey};
 use kernel_core::ui_session::{
     UiInputEnvelope, UiSceneFacts, UiSessionKind, UiSessionRegistry, UiSessionScope,
 };
-use kernel_core::ui_workspace::{UiCapabilityEvent, UiLayoutMode, UiWorkspace};
+use kernel_core::ui_workspace::{
+    UiCapabilityEvent, UiCapabilityProducer, UiCapabilitySource, UiLayoutMode, UiWorkspace,
+};
 
 use crate::proc::{self, ProcState};
 use crate::syscall::{table as abi, SyscallSet};
@@ -42,6 +44,7 @@ const TEST_SURFACE_WIDTH: u32 = 64;
 const TEST_SURFACE_HEIGHT: u32 = 64;
 const SERVICE_EXIT: i64 = 0;
 const NATIVE_ENTER_CODE: u16 = 0x0103;
+const NATIVE_HOTPLUG_CODE: u16 = 0x012e;
 const JSUI_ENTER_CODE: u32 = 28;
 const REQUEST_PAYLOAD: &[u8] = br##"{"ir_version":"0.1.0","identity_domain":"jasper-os/ui-probe","owner":"ui-host","session":"session-1","expected_revision":1,"next_revision":2,"ops":[{"op":"insert","parent":null,"index":0,"node":{"key":{"semantic_id":1,"generation":1},"element":{"kind":"container"},"semantics":{"role":"container","label":"Jasper OS","focusable":true},"style":{"box":{"width":{"unit":"px","value":64},"height":{"unit":"px","value":64}},"paint":{"background":"#0A84FFFF"}},"events":[{"event":"activate","action":"jasper.ui.activate"}],"children":[]}}]}"##;
 const PATCH_PAYLOAD: &[u8] = br##"{"ir_version":"0.1.0","identity_domain":"jasper-os/ui-probe","owner":"ui-host","session":"session-1","expected_revision":2,"next_revision":3,"ops":[{"op":"update","key":{"semantic_id":1,"generation":1},"fields":{"style":{"box":{"width":{"unit":"px","value":64},"height":{"unit":"px","value":64}},"paint":{"background":"#FF0000FF"}}}}]}"##;
@@ -230,6 +233,27 @@ fn wait_for_native_enter() -> Option<KeyInput> {
         let _ = crate::display::poll_input();
         if let Some(key) = crate::display::next_ui_key() {
             if key.pressed && key.code == NATIVE_ENTER_CODE {
+                return Some(key);
+            }
+        }
+        core::hint::spin_loop();
+    }
+    None
+}
+
+fn wait_for_native_hotplug() -> Option<KeyInput> {
+    if !crate::display::begin_ui_input_capture() {
+        return None;
+    }
+    kprintln!(
+        "[JSR-UI-HOTPLUG] waiting_hotplug=true native_f12=0x{:04x} source=platform",
+        NATIVE_HOTPLUG_CODE
+    );
+    let deadline = crate::clock::ticks().saturating_add(500);
+    while crate::clock::ticks() < deadline {
+        let _ = crate::display::poll_input();
+        if let Some(key) = crate::display::next_ui_key() {
+            if key.pressed && key.code == NATIVE_HOTPLUG_CODE {
                 return Some(key);
             }
         }
@@ -571,6 +595,106 @@ fn run_round(round: u32) -> bool {
         new_input_ok,
         failed()
     );
+    let Some((observed_surface, observed_keyboard, observed_dpi_x, observed_dpi_y)) =
+        crate::display::ui_capability_observation()
+    else {
+        check(false, "platform capability observation was unavailable");
+        return false;
+    };
+    let mut producer = UiCapabilityProducer::with_epoch(
+        2,
+        UiCapabilitySource {
+            policy_epoch: 2,
+            revocation_epoch: 2,
+            capabilities: workspace_capabilities(observed_keyboard),
+            surface: observed_surface,
+            dpi_x: observed_dpi_x,
+            dpi_y: observed_dpi_y,
+        },
+    )
+    .expect("platform capability producer");
+    let Some(hotplug_key) = wait_for_native_hotplug() else {
+        crate::display::end_ui_input_capture();
+        check(false, "native platform hotplug event was not delivered");
+        return false;
+    };
+    crate::display::end_ui_input_capture();
+    let changed_width = observed_surface.width.saturating_sub(64).max(1);
+    let changed_surface = SurfaceSpec {
+        width: changed_width,
+        height: observed_surface.height,
+        stride: changed_width,
+        bytes_per_pixel: observed_surface.bytes_per_pixel,
+        layout: observed_surface.layout,
+    };
+    let changed_keyboard = !observed_keyboard;
+    let changed_dpi = observed_dpi_x.saturating_add(32).max(1);
+    crate::display::observe_ui_capability_change(
+        changed_surface,
+        changed_keyboard,
+        changed_dpi,
+        changed_dpi,
+    )
+    .expect("record platform capability change");
+    let Some((reported_surface, reported_keyboard, reported_dpi_x, reported_dpi_y)) =
+        crate::display::ui_capability_observation()
+    else {
+        check(false, "changed platform capability observation was unavailable");
+        return false;
+    };
+    let changed_source = UiCapabilitySource {
+        policy_epoch: 3,
+        revocation_epoch: 3,
+        capabilities: workspace_capabilities(reported_keyboard),
+        surface: reported_surface,
+        dpi_x: reported_dpi_x,
+        dpi_y: reported_dpi_y,
+    };
+    let hotplug_event = producer
+        .poll(changed_source)
+        .ok()
+        .flatten()
+        .expect("platform capability change event");
+    let Some(hotplug_capability) =
+        pep_capability_at(subject, scope, Operation::ServiceUiFramePresent, 3, 3)
+    else {
+        check(false, "hotplug capability was not admitted");
+        return false;
+    };
+    let changed_budget = changed_surface
+        .validate()
+        .ok()
+        .and_then(|bytes| bytes.checked_mul(2))
+        .unwrap_or(0);
+    let hotplug_mode = workspace.reconfigure(
+        hotplug_event,
+        InteractionProfile::MultiWindow,
+        500,
+        changed_budget,
+        hotplug_capability,
+    );
+    let hotplug_old_frame_rejected = workspace.frame(0, 1, 2, 72, 3).is_err();
+    let hotplug_new_surface = workspace.surface() == changed_surface;
+    let hotplug_ok = hotplug_mode == Ok(UiLayoutMode::MultiWindow)
+        && hotplug_event.capability_epoch == 3
+        && hotplug_event.dpi_x == changed_dpi
+        && hotplug_event.capabilities.keyboard == changed_keyboard
+        && hotplug_old_frame_rejected
+        && hotplug_new_surface;
+    check(hotplug_ok, "platform capability transition failed");
+    kprintln!(
+        "[JSR-UI-HOTPLUG] observed=true source=platform key=0x{:04x} event_epoch={} surface={}x{} dpi={} keyboard={} committed={} old_frame_rejected={} failed={}",
+        hotplug_key.code,
+        hotplug_event.capability_epoch,
+        changed_surface.width,
+        changed_surface.height,
+        changed_dpi,
+        changed_keyboard,
+        hotplug_mode == Ok(UiLayoutMode::MultiWindow),
+        hotplug_old_frame_rejected,
+        failed()
+    );
+    crate::display::clear_ui_capability_observation();
     let peer_client = UiClientKey::from_raw(peer_key.raw()).expect("nonzero peer UI client");
     let client = UiClientKey::from_raw(session_key.raw()).expect("nonzero UI client");
     let header = request_header(client);

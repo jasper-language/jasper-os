@@ -39,6 +39,94 @@ pub struct UiCapabilityEvent {
     pub dpi_y: u32,
 }
 
+/// Observed display/input facts before the producer assigns a capability epoch.
+///
+/// 生产者分配 capability epoch 前观察到的显示/输入事实。策略与撤销世代仍由
+/// 权威策略源提供，不在这里推导。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UiCapabilitySource {
+    pub policy_epoch: u64,
+    pub revocation_epoch: u64,
+    pub capabilities: UiDeviceCapabilities,
+    pub surface: SurfaceSpec,
+    pub dpi_x: u32,
+    pub dpi_y: u32,
+}
+
+impl UiCapabilitySource {
+    fn validate(self) -> Result<(), UiWorkspaceError> {
+        if self.policy_epoch == 0
+            || !self.capabilities.display
+            || self.dpi_x == 0
+            || self.dpi_y == 0
+        {
+            return Err(UiWorkspaceError::Invalid);
+        }
+        self.surface
+            .validate()
+            .map(|_| ())
+            .map_err(|_| UiWorkspaceError::Invalid)
+    }
+}
+
+/// Change detector for display-size, DPI, input capability and policy epochs.
+///
+/// 把实际观察事实转换为单调 capability epoch 的唯一变化源；事实未变化时
+/// 不产生事件，避免轮询重复迁移 Surface 和取消帧票据。
+pub struct UiCapabilityProducer {
+    capability_epoch: u64,
+    last: UiCapabilitySource,
+}
+
+impl UiCapabilityProducer {
+    pub fn new(initial: UiCapabilitySource) -> Result<Self, UiWorkspaceError> {
+        Self::with_epoch(1, initial)
+    }
+
+    pub fn with_epoch(
+        capability_epoch: u64,
+        initial: UiCapabilitySource,
+    ) -> Result<Self, UiWorkspaceError> {
+        if capability_epoch == 0 {
+            return Err(UiWorkspaceError::Invalid);
+        }
+        initial.validate()?;
+        Ok(Self {
+            capability_epoch,
+            last: initial,
+        })
+    }
+
+    pub const fn capability_epoch(&self) -> u64 {
+        self.capability_epoch
+    }
+
+    pub fn poll(
+        &mut self,
+        observed: UiCapabilitySource,
+    ) -> Result<Option<UiCapabilityEvent>, UiWorkspaceError> {
+        observed.validate()?;
+        if observed == self.last {
+            return Ok(None);
+        }
+        let capability_epoch = self
+            .capability_epoch
+            .checked_add(1)
+            .ok_or(UiWorkspaceError::StaleCapability)?;
+        self.capability_epoch = capability_epoch;
+        self.last = observed;
+        Ok(Some(UiCapabilityEvent {
+            capability_epoch,
+            policy_epoch: observed.policy_epoch,
+            revocation_epoch: observed.revocation_epoch,
+            capabilities: observed.capabilities,
+            surface: observed.surface,
+            dpi_x: observed.dpi_x,
+            dpi_y: observed.dpi_y,
+        }))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SceneBinding {
     slot: u16,
@@ -616,5 +704,70 @@ mod tests {
             ),
             Err(UiWorkspaceError::StaleCapability)
         );
+    }
+
+    #[test]
+    fn capability_producer_emits_only_observed_changes_with_monotonic_epochs() {
+        let initial = UiCapabilitySource {
+            policy_epoch: 7,
+            revocation_epoch: 9,
+            capabilities: capabilities(true, true),
+            surface: SURFACE,
+            dpi_x: 160,
+            dpi_y: 160,
+        };
+        let mut producer = UiCapabilityProducer::new(initial).unwrap();
+        assert_eq!(producer.poll(initial), Ok(None));
+
+        let mut resized = initial;
+        resized.surface.width = 1024;
+        resized.surface.stride = 1024;
+        resized.dpi_x = 240;
+        resized.dpi_y = 240;
+        let event = producer.poll(resized).unwrap().unwrap();
+        assert_eq!(event.capability_epoch, 2);
+        assert_eq!(event.surface, resized.surface);
+        assert_eq!((event.dpi_x, event.dpi_y), (240, 240));
+        assert_eq!(producer.poll(resized), Ok(None));
+        assert_eq!(producer.capability_epoch(), 2);
+
+        let mut keyboard_removed = resized;
+        keyboard_removed.capabilities.keyboard = false;
+        keyboard_removed.policy_epoch = 8;
+        keyboard_removed.revocation_epoch = 10;
+        let event = producer.poll(keyboard_removed).unwrap().unwrap();
+        assert_eq!(event.capability_epoch, 3);
+        assert!(!event.capabilities.keyboard);
+        assert_eq!(event.policy_epoch, 8);
+        assert_eq!(event.revocation_epoch, 10);
+    }
+
+    #[test]
+    fn capability_producer_rejects_invalid_or_exhausted_observations() {
+        let initial = UiCapabilitySource {
+            policy_epoch: 1,
+            revocation_epoch: 0,
+            capabilities: capabilities(true, true),
+            surface: SURFACE,
+            dpi_x: 160,
+            dpi_y: 160,
+        };
+        let mut producer = UiCapabilityProducer::new(initial).unwrap();
+        assert_eq!(
+            producer.poll(UiCapabilitySource {
+                dpi_x: 0,
+                ..initial
+            }),
+            Err(UiWorkspaceError::Invalid)
+        );
+
+        producer.capability_epoch = u64::MAX;
+        let mut changed = initial;
+        changed.capabilities.keyboard = false;
+        assert_eq!(
+            producer.poll(changed),
+            Err(UiWorkspaceError::StaleCapability)
+        );
+        assert_eq!(producer.last, initial);
     }
 }

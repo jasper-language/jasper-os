@@ -55,11 +55,17 @@ else
   qemu_pid=$!
   remaining=$((LIMIT * 10))
   sent=0
+  sent_hotplug=0
   while [ "$remaining" -gt 0 ] && kill -0 "$qemu_pid" 2>/dev/null; do
     waits=$(grep -acF 'waiting_real_key=true' "$OUT/serial.log" 2>/dev/null || true)
     while [ "$sent" -lt "${waits:-0}" ]; do
       printf 'sendkey ret\n' | timeout 5 socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || break
       sent=$((sent + 1))
+    done
+    hotplug_waits=$(grep -acF 'waiting_hotplug=true' "$OUT/serial.log" 2>/dev/null || true)
+    while [ "$sent_hotplug" -lt "${hotplug_waits:-0}" ]; do
+      printf 'sendkey f12\n' | timeout 5 socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || break
+      sent_hotplug=$((sent_hotplug + 1))
     done
     sleep 0.1
     remaining=$((remaining - 1))
@@ -83,6 +89,7 @@ grep -aFq '[JSR-UI-SESSION] round=1 started=true channel=true request_queued=tru
 grep -aFq 'remote_channel=true session_key=true scope=true recovered=true scene=true focus=true input_capability=true replay_rejected=true failed=0' "$OUT/serial.log"
 grep -aFq 'primary_focus=true primary_input=true peer_resident=true peer_present=true ordinary_background_rejected=true background_grant=true background_revoked=true peer_failed=true display_layers=true resources=true failed=0' "$OUT/serial.log"
 grep -aFq 'layout=Ok(MultiWindow) source=framebuffer keyboard=true capability_rollback=true budget_rollback=true pending_canceled=true old_frame_rejected=true old_input_rejected=true new_surface_generation=true new_input_generation=true failed=0' "$OUT/serial.log"
+grep -aqE '^\[JSR-UI-HOTPLUG\] observed=true source=platform key=0x012e event_epoch=3 surface=[1-9][0-9]*x[1-9][0-9]* dpi=[1-9][0-9]* keyboard=(true|false) committed=true old_frame_rejected=true failed=0' "$OUT/serial.log"
 grep -aFq '[JSR-UI-PROCESS] rounds=2 started=true channel=true request_queued=true engine=cpu rendered=true present=true patch=true input=true native_keyboard=true frames=6 display=true exit=0 response=true terminal_alive=true restart=true resources=true' "$OUT/serial.log"
 grep -aFq '[JSR-DISPLAY-UI] presented_layers=2' "$OUT/serial.log"
 grep -aFq '[JSR-M25] multiprocess=true multicore=true service_restarts=2 traces=4 parent_links=4 retained=true' "$OUT/serial.log"
