@@ -55,7 +55,13 @@ if runtime_active; then
 fi
 
 available_kib=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
-disk_kib=$(df -Pk . | awk 'NR == 2 { print $4 }')
+disk_dir=${CARGO_TARGET_DIR:-.}
+case "$disk_dir" in
+    /*) ;;
+    *) disk_dir="$(pwd)/$disk_dir" ;;
+esac
+mkdir -p "$disk_dir"
+disk_kib=$(df -Pk "$disk_dir" | awk 'NR == 2 { print $4 }')
 if [ "${available_kib:-0}" -lt "$minimum_available_kib" ]; then
     echo "guarded-cargo: insufficient memory (${available_kib} KiB available)" >&2
     exit 75

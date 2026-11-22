@@ -2256,6 +2256,31 @@ pub fn root_executable(
     Ok((executable, interpreter))
 }
 
+#[cfg(feature = "lifecycle-root-exec-verify")]
+pub fn root_interpreter(pid: kernel_core::objtable::ObjId) -> Result<Vec<u8>, RootExecutableError> {
+    let source = ROOT_SOURCE
+        .lock()
+        .as_ref()
+        .cloned()
+        .ok_or(RootExecutableError::NotFound)?;
+    let root = Ext4Reader::open(source).map_err(|_| RootExecutableError::Io)?;
+    let metadata = root
+        .metadata(ROOT_INTERPRETER_PATH)
+        .map_err(|_| RootExecutableError::Io)?;
+    let bytes = usize::try_from(metadata.len).map_err(|_| RootExecutableError::Io)?;
+    let io =
+        crate::workload::begin_process_io(pid, metadata.len, 1).map_err(|error| match error {
+            kernel_core::workload::WorkloadError::Quota
+            | kernel_core::workload::WorkloadError::InvalidState => RootExecutableError::Quota,
+            _ => RootExecutableError::Io,
+        })?;
+    crate::mm::heap::ensure_free(bytes).map_err(|_| RootExecutableError::Quota)?;
+    let interpreter =
+        read_root_file(&root, ROOT_INTERPRETER_PATH, bytes).map_err(|_| RootExecutableError::Io)?;
+    io.commit();
+    Ok(interpreter)
+}
+
 /// Returns whether the verification slice contains any bytes.
 ///
 /// 验证据此明确真实 libc fixture 非空，而不是以空文件制造成功。

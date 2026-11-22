@@ -149,6 +149,20 @@ Metal/Vulkan and resource gates are frozen in
 The unmodified OpenJDK 21 host JVM ran a Java class and printed
 `JVM_OK value=499500`.
 
+The unmodified OpenJDK 21 runtime also completed a Jasper UEFI guest run from
+the bounded `/data/runtimes/openjdk` compatibility namespace. The fixture
+covered interpreted/JIT startup, Java threads, a 1 MiB allocation with real GC,
+and file output. The measured run printed
+`JVM_PROBE_OK value=499500 thread=true gc=true file=true java=21.0.13.1`,
+exited zero, reclaimed resources, and reached
+`JSR-LIFE-HEALTH result=root_execution_complete`.
+
+The JVM acceptance profile exposes the documented baseline `max,-avx,-avx2`
+CPU model. OpenJDK deliberately probes AVX signal preservation by faulting on a
+null pointer; the compatibility layer does not yet deliver synchronous
+`SIGSEGV` to guest handlers, so AVX-enabled JVM startup remains a separate ABI
+gate and is not claimed by this pass.
+
 An unmodified AOSP Android 34 ART runtime was extracted from the system image
 and APEX payload. Its `dalvikvm64 -showversion` baseline printed
 `ART version 2.1.0 x86_64`. The upstream multi-DEX APK
@@ -181,8 +195,9 @@ start a self-contained runtime with all managed/native resources recovered.
 - Stage Wine/DXVK/VKD3D and Metal2Vulkan in a Jasper guest with a real GPU or
   an explicit virtual Vulkan device; the current UEFI QEMU fixture has no
   virtio-gpu/Vulkan device.
-- Run unmodified JVM and .NET runtimes through the Linux compatibility path;
-  these remain external runtime acceptance tasks, never Jasper native framework
-  milestones.
+- Run the unmodified .NET runtime through the Linux compatibility path; runtime
+  acceptance remains external and is never a Jasper native framework milestone.
+- Deliver synchronous guest signals, including the AVX-preservation `SIGSEGV`
+  probe, without terminating the Linux process.
 
 These are compatibility gaps, not passing results.

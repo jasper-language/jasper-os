@@ -61,18 +61,19 @@ REUSE_ROOT="${ISSUE21_REUSE_ROOT:-0}"
 if [ -z "${ISSUE21_UEFI_TIMEOUT:-}" ] &&
   { [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] ||
     [ "$MODE" = compat-wine-d3d ] || [ "$MODE" = compat-wine-d3d12 ] ||
-    [ "$MODE" = compat-wine-wsi ]; }; then
+    [ "$MODE" = compat-wine-wsi ] || [ "$MODE" = compat-jvm ]; }; then
   LIMIT=900
 fi
 PREBUILT="${ISSUE21_UEFI_PREBUILT:-0}"
 QEMU_LOCK="${ISSUE21_QEMU_LOCK:-/tmp/jasper-os-qemu.lock}"
 QEMU_CPUS="${ISSUE21_QEMU_CPUS:-$($ROOT/scripts/qemu-cpu-set.sh)}"
+QEMU_ACCEL="${ISSUE21_QEMU_ACCEL:-tcg}"
 QEMU_SMP="${ISSUE21_QEMU_SMP:-1}"
 QEMU_MEMORY="${ISSUE21_QEMU_MEMORY:-}"
 if [ -z "$QEMU_MEMORY" ]; then
   if [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] ||
     [ "$MODE" = compat-wine-d3d ] || [ "$MODE" = compat-wine-d3d12 ] ||
-    [ "$MODE" = compat-wine-wsi ]; then
+    [ "$MODE" = compat-wine-wsi ] || [ "$MODE" = compat-jvm ]; then
     QEMU_MEMORY=2G
   else
     QEMU_MEMORY=512M
@@ -170,6 +171,7 @@ case "$MODE" in
   compat-wine-d3d) KERNEL_FEATURES=lifecycle-root-exec-verify,compat-wine-verify,compat-wine-d3d-verify ;;
   compat-wine-d3d12) KERNEL_FEATURES=lifecycle-root-exec-verify,compat-wine-verify,compat-wine-d3d-verify,compat-wine-d3d12-verify ;;
   compat-wine-wsi) KERNEL_FEATURES=lifecycle-root-exec-verify,compat-wine-verify,compat-wine-d3d-verify,compat-wine-wsi-verify ;;
+  compat-jvm) KERNEL_FEATURES=lifecycle-root-exec-verify,compat-jvm-verify ;;
   vulkan-metal2vulkan) KERNEL_FEATURES=lifecycle-root-exec-verify,vulkan-metal2vulkan-verify ;;
   vulkan-swiftshader) KERNEL_FEATURES=lifecycle-root-exec-verify,vulkan-metal2vulkan-verify,vulkan-compute-only ;;
   block-timeout) KERNEL_FEATURES=lifecycle-block-timeout-verify ;;
@@ -258,7 +260,7 @@ ROOT_ANDROID_TOYBOX="${JASPER_TOYBOX_BIN:-}"
 ROOT_AOSP_BINDER_TEST="${JASPER_AOSP_BINDER_TEST:-}"
 ROOT_ANDROID_TREE="${JASPER_ANDROID_TREE:-}"
 ROOT_ANDROID_LINKER_CONFIG=""
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = compat-wine ] || [ "$MODE" = compat-wine-d3d ] || [ "$MODE" = compat-wine-d3d12 ] || [ "$MODE" = compat-wine-wsi ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = compat-wine ] || [ "$MODE" = compat-wine-d3d ] || [ "$MODE" = compat-wine-d3d12 ] || [ "$MODE" = compat-wine-wsi ] || [ "$MODE" = compat-jvm ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
   ROOT_EXEC_PROBE=$(find "$BUILD_TARGET/x86_64-unknown-none/release/build" \
     -path '*/out/user-target/x86_64-unknown-none/release/user-linuxprobe' \
     -type f -print | sort | tail -n 1)
@@ -293,7 +295,7 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native
     echo "issue21-uefi-boot: JASPER_ANDROID_TREE is required for $MODE mode" >&2
     exit 64
   fi
-  if { [ "$MODE" = compat-wine ] || [ "$MODE" = compat-wine-d3d ] || [ "$MODE" = compat-wine-d3d12 ] || [ "$MODE" = compat-wine-wsi ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; } && [ -z "$ROOT_ANDROID_TREE" ]; then
+  if { [ "$MODE" = compat-wine ] || [ "$MODE" = compat-wine-d3d ] || [ "$MODE" = compat-wine-d3d12 ] || [ "$MODE" = compat-wine-wsi ] || [ "$MODE" = compat-jvm ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; } && [ -z "$ROOT_ANDROID_TREE" ]; then
     echo "issue21-uefi-boot: JASPER_ANDROID_TREE is required for $MODE mode" >&2
     exit 64
   fi
@@ -354,10 +356,14 @@ QEMU_EXTRA=(-monitor none)
 if [ -n "${ISSUE21_MONITOR_SOCKET:-}" ]; then
   QEMU_EXTRA=(-monitor "unix:$ISSUE21_MONITOR_SOCKET,server=on,wait=off")
 fi
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = compat-wine ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
-  CPU="${ISSUE21_QEMU_CPU:-max}"
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = compat-wine ] || [ "$MODE" = compat-jvm ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
+  if [ "$MODE" = compat-jvm ]; then
+    CPU="${ISSUE21_QEMU_CPU:-max,-avx,-avx2}"
+  else
+    CPU="${ISSUE21_QEMU_CPU:-max}"
+  fi
   if [ "${ISSUE21_DISABLE_RDRAND:-0}" = 1 ]; then
-    CPU=max,-rdrand,-rdseed
+    CPU="$CPU,-rdrand,-rdseed"
   fi
   QEMU_EXTRA+=(-cpu "$CPU")
   if [ "$MODE" = iommu-dma ]; then
@@ -438,7 +444,7 @@ if [ "${ISSUE21_QEMU_GDB:-0}" = 1 ]; then
 fi
 set +e
 nice -n 15 taskset -c "$QEMU_CPUS" timeout "$LIMIT" qemu-system-x86_64 \
-  -accel tcg \
+  -accel "$QEMU_ACCEL" \
   -machine q35 \
   -m "$QEMU_MEMORY" \
   -smp "$QEMU_SMP" \
@@ -451,7 +457,7 @@ rc=$?
 set -e
 exec 9>&-
 printf '%s\n' "$rc" >"$OUT/qemu.rc"
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = compat-wine ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = compat-wine ] || [ "$MODE" = compat-jvm ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
   [ "$rc" -eq 33 ]
 else
   [ "$rc" -eq 124 ]
@@ -680,6 +686,16 @@ fi
 if [ "$MODE" = compat-wine-wsi ]; then
   grep -aq '^D3D11_WSI_PROBE_OK .*present=1' "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=compat-wine-wsi path=/opt/wine-devel/lib/wine/x86_64-unix/wine interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true failed=0' \
+    "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"
+  ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' \
+    "$OUT/serial.log"
+  echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
+  exit 0
+fi
+if [ "$MODE" = compat-jvm ]; then
+  grep -aq '^JVM_PROBE_OK value=499500 thread=true gc=true file=true java=' "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=openjdk21-jvm path=/data/runtimes/openjdk/bin/java interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true failed=0' \
     "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"
   ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' \

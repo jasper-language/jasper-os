@@ -55,6 +55,8 @@ const ROOT_USERLAND_MANIFEST: &[u8] =
 const ROOT_EXEC_PROBE_PATH: &str = "/usr/libexec/jasper/health-probe";
 #[cfg(feature = "compat-wine-verify")]
 const WINE_COLD_START_DEADLINE_TICKS: u64 = 12_000; // JASPER-HARDCODE-REVIEW: issue=35 source=compat-wine-verification-profile reason=cold-prefix-and-wineserver-uefi-budget
+#[cfg(feature = "compat-jvm-verify")]
+const JVM_PROGRAM_DEADLINE_TICKS: u64 = 12_000; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=openjdk-startup-and-thread-cleanup-uefi-budget
 
 static CONTROL_DEVICE: spin::Mutex<Option<Arc<IrqSpinLock<BlockDevice>>>> = spin::Mutex::new(None);
 static CONTROL_MUTATION: AtomicBool = AtomicBool::new(false);
@@ -1069,6 +1071,121 @@ fn run_root_android_program(
     Ok(())
 }
 
+#[cfg(feature = "compat-jvm-verify")]
+fn install_root_runtime_cache(
+    root: &Ext4Reader,
+    manifest_path: &str,
+    vfs_root: &str,
+) -> Result<(), HealthError> {
+    let metadata = root
+        .metadata(manifest_path)
+        .map_err(|_| HealthError::RootExecute)?;
+    let max_bytes = usize::try_from(metadata.len).map_err(|_| HealthError::RootExecute)?;
+    crate::mm::heap::ensure_free(max_bytes).map_err(|_| HealthError::RootExecute)?;
+    let manifest = root
+        .read_file(manifest_path, max_bytes)
+        .map_err(|_| HealthError::RootExecute)?;
+    let text = core::str::from_utf8(&manifest).map_err(|_| HealthError::RootExecute)?;
+    for line in text.lines().skip(1) {
+        if line.is_empty() {
+            continue;
+        }
+        let mut fields = line.split('\t');
+        let relative = fields.next().ok_or(HealthError::RootExecute)?;
+        let declared = fields.next().ok_or(HealthError::RootExecute)?;
+        let digest = fields.next().ok_or(HealthError::RootExecute)?;
+        if fields.next().is_some() || digest.len() != 64 {
+            return Err(HealthError::RootExecute);
+        }
+        if relative.starts_with('/')
+            || relative
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
+        {
+            return Err(HealthError::RootExecute);
+        }
+        let declared = declared
+            .parse::<usize>()
+            .map_err(|_| HealthError::RootExecute)?;
+        let path = alloc::format!("{vfs_root}/{relative}");
+        let metadata = root.metadata(&path).map_err(|_| HealthError::RootExecute)?;
+        if usize::try_from(metadata.len).ok() != Some(declared) {
+            return Err(HealthError::RootExecute);
+        }
+        crate::mm::heap::ensure_free(declared).map_err(|_| HealthError::RootExecute)?;
+        let bytes = root
+            .read_file(&path, declared)
+            .map_err(|_| HealthError::RootExecute)?;
+        let expected = decode_sha256(digest).ok_or(HealthError::RootExecute)?;
+        let computed: [u8; 32] = Sha256::digest(&bytes).into();
+        if computed != expected {
+            return Err(HealthError::RootExecute);
+        }
+        if !crate::linux_abi::install_runtime_cache_file(path.as_bytes(), bytes) {
+            return Err(HealthError::RootExecute);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "compat-jvm-verify")]
+fn decode_sha256(text: &str) -> Option<[u8; 32]> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 64 {
+        return None;
+    }
+    let nibble = |value: u8| match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    };
+    let mut output = [0u8; 32];
+    for (byte, pair) in output.iter_mut().zip(bytes.chunks_exact(2)) {
+        *byte = (nibble(pair[0])? << 4) | nibble(pair[1])?;
+    }
+    Some(output)
+}
+
+#[cfg(feature = "compat-jvm-verify")]
+fn run_jvm_probe_with_steady_state(
+    executable: &[u8],
+    interpreter: &[u8],
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> bool {
+    if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+        "openjdk21-jvm",
+        "/data/runtimes/openjdk/bin/java",
+        executable,
+        interpreter,
+        "/lib64/ld-linux-x86-64.so.2",
+        argv,
+        envp,
+        crate::mm::frame::free_frames(),
+        false,
+        JVM_PROGRAM_DEADLINE_TICKS,
+    ) {
+        return false;
+    }
+    if crate::mm::heap::ensure_free(2 * 1024 * 1024).is_err() {
+        return false;
+    }
+    let frames_before = crate::mm::frame::free_frames();
+    crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+        "openjdk21-jvm",
+        "/data/runtimes/openjdk/bin/java",
+        executable,
+        interpreter,
+        "/lib64/ld-linux-x86-64.so.2",
+        argv,
+        envp,
+        frames_before,
+        true,
+        JVM_PROGRAM_DEADLINE_TICKS,
+    )
+}
+
 #[cfg(feature = "lifecycle-root-exec-verify")]
 fn execute_root_dynamic_programs(
     root: &Ext4Reader,
@@ -1084,6 +1201,42 @@ fn execute_root_dynamic_programs(
         return Err(HealthError::RootExecute);
     }
     install_root_libraries(root)?;
+    #[cfg(feature = "compat-jvm-verify")]
+    {
+        install_root_runtime_cache(
+            root,
+            "/data/runtimes/openjdk/runtime.manifest.tsv",
+            "/data/runtimes/openjdk",
+        )?;
+        let java = root
+            .read_file("/data/runtimes/openjdk/bin/java", 4 * 1024 * 1024)
+            .map_err(|_| HealthError::RootExecute)?;
+        let interpreter = root
+            .read_file("/lib64/ld-linux-x86-64.so.2", 4 * 1024 * 1024)
+            .map_err(|_| HealthError::RootExecute)?;
+        let jvm_argv: [&[u8]; 8] = [
+            b"/data/runtimes/openjdk/bin/java",
+            b"-Xmx64m",
+            b"-XX:-UsePerfData",
+            b"-Djava.home=/data/runtimes/openjdk",
+            b"-cp",
+            b"/data/runtimes/openjdk/probe",
+            b"JvmProbe",
+            b"-probe",
+        ];
+        let jvm_envp: [&[u8]; 6] = [
+            b"HOME=/data",
+            b"JAVA_HOME=/data/runtimes/openjdk",
+            b"PATH=/data/runtimes/openjdk/bin:/usr/bin:/bin",
+            b"LD_LIBRARY_PATH=/data/runtimes/openjdk/lib:/data/runtimes/openjdk/lib/server",
+            b"LANG=C.UTF-8",
+            b"TZ=UTC",
+        ];
+        if !run_jvm_probe_with_steady_state(&java, &interpreter, &jvm_argv, &jvm_envp) {
+            return Err(HealthError::RootExecute);
+        }
+        return Ok(());
+    }
     #[cfg(feature = "compat-wine-verify")]
     {
         install_root_android_files(root, origin)?;

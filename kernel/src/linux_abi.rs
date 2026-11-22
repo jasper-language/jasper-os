@@ -41,6 +41,7 @@ static SYSCALL_TRACE_REMAINING: AtomicU32 = AtomicU32::new(SYSCALL_TRACE_BUDGET)
     feature = "compat-dynamic-libc-verify",
     feature = "android-art-verify",
     feature = "compat-wine-verify",
+    feature = "compat-jvm-verify",
     feature = "vulkan-metal2vulkan-verify"
 ))]
 static PATH_TRACE_REMAINING: AtomicU32 = AtomicU32::new(512);
@@ -427,7 +428,12 @@ static COMPAT: IrqSpinLock<CompatState> =
     IrqSpinLock::ranked(crate::lockorder::LINUX_COMPAT, CompatState::new());
 
 const LINUX_CACHE_ROOT: &[u8] = b"/data/.cache/metal2vulkan";
-const LINUX_CACHE_ROOTS: &[&[u8]] = &[LINUX_CACHE_ROOT, b"/tmp", b"/data/wineprefix"];
+const LINUX_CACHE_ROOTS: &[&[u8]] = &[
+    LINUX_CACHE_ROOT,
+    b"/tmp",
+    b"/data/wineprefix",
+    b"/data/runtimes/openjdk",
+];
 const LINUX_CACHE_FILE_HANDLE_BASE: u64 = 0x4a53_4346_0000_0000;
 const LINUX_CACHE_DIR_HANDLE_BASE: u64 = 0x4a53_4344_0000_0000;
 const LINUX_CACHE_SYMLINK_HANDLE_BASE: u64 = 0x4a53_434c_0000_0000;
@@ -480,6 +486,7 @@ fn trace_request(args: &SyscallArgs) {
     feature = "compat-dynamic-libc-verify",
     feature = "android-art-verify",
     feature = "compat-wine-verify",
+    feature = "compat-jvm-verify",
     feature = "vulkan-metal2vulkan-verify"
 ))]
 fn trace_path(kind: &str, path: &[u8]) {
@@ -519,6 +526,7 @@ fn trace_path(kind: &str, path: &[u8]) {
     feature = "compat-dynamic-libc-verify",
     feature = "android-art-verify",
     feature = "compat-wine-verify",
+    feature = "compat-jvm-verify",
     feature = "vulkan-metal2vulkan-verify"
 ))]
 fn trace_path_address(pid: ObjId, kind: &str, address: u64) {
@@ -6933,7 +6941,17 @@ fn linux_clone(
         return linux_fork_clone(pid, args, user_ip, user_preserved);
     }
     linux_spawn_clone(
-        pid, args[0], args[1], args[2], args[3], args[4], user_ip, args[2], args[4],
+        pid,
+        args[0],
+        args[1],
+        args[2],
+        args[3],
+        args[4],
+        user_ip,
+        user_preserved,
+        args,
+        args[2],
+        args[4],
     )
 }
 
@@ -6984,13 +7002,29 @@ fn linux_execve(pid: ObjId, args: [u64; 6]) -> Result<(u64, u64), CompatErrno> {
         target_arch = "x86_64"
     ))]
     {
-        let (executable, interpreter) = crate::linux_vfs::root_executable(pid, &resolved).map_err(
-            |error| match error {
-                crate::linux_vfs::RootExecutableError::NotFound => CompatErrno::NoEntry,
-                crate::linux_vfs::RootExecutableError::Quota => CompatErrno::NoSpace,
-                crate::linux_vfs::RootExecutableError::Io => CompatErrno::Invalid,
-            },
-        )?;
+        let (executable, interpreter) = match crate::linux_vfs::root_executable(pid, &resolved) {
+            Ok(pair) => pair,
+            Err(crate::linux_vfs::RootExecutableError::NotFound)
+                if linux_cache_path(&resolved) =>
+            {
+                let executable =
+                    compat_cache_file_bytes(&resolved).ok_or(CompatErrno::NoEntry)?;
+                let interpreter =
+                    crate::linux_vfs::root_interpreter(pid).map_err(|error| match error {
+                        crate::linux_vfs::RootExecutableError::NotFound => CompatErrno::NoEntry,
+                        crate::linux_vfs::RootExecutableError::Quota => CompatErrno::NoSpace,
+                        crate::linux_vfs::RootExecutableError::Io => CompatErrno::Invalid,
+                    })?;
+                (executable, interpreter)
+            }
+            Err(error) => {
+                return Err(match error {
+                    crate::linux_vfs::RootExecutableError::NotFound => CompatErrno::NoEntry,
+                    crate::linux_vfs::RootExecutableError::Quota => CompatErrno::NoSpace,
+                    crate::linux_vfs::RootExecutableError::Io => CompatErrno::Invalid,
+                });
+            }
+        };
         let replaced = if jasper_compat_loader::parse(&executable)
             .ok()
             .is_some_and(|plan| plan.interpreter.is_none())
@@ -7518,6 +7552,8 @@ fn linux_clone3(
         child_tid,
         tls,
         user_ip,
+        user_preserved,
+        args,
         args[2],
         args[4],
     )
@@ -7531,6 +7567,8 @@ fn linux_spawn_clone(
     child_tid: u64,
     tls: u64,
     user_ip: Option<(u64, u64)>,
+    preserved_regs: [u64; 6],
+    arg_regs: [u64; 6],
     clone_rdx: u64,
     clone_r8: u64,
 ) -> Result<u64, CompatErrno> {
@@ -7581,8 +7619,8 @@ fn linux_spawn_clone(
         user_rip,
         child_stack,
         fs_base,
-        None,
-        None,
+        Some(preserved_regs),
+        Some(arg_regs),
         clear_child_tid,
         clone_rdx,
         clone_r8,
@@ -15932,6 +15970,15 @@ fn linux_cache_path(path: &[u8]) -> bool {
     linux_cache_root(path).is_some()
 }
 
+pub(crate) fn compat_cache_file_bytes(path: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+    let state = COMPAT.lock();
+    state
+        .cache_files
+        .iter()
+        .find(|file| file.path == path)
+        .map(|file| file.bytes.clone())
+}
+
 /// Reports retained allocation shapes for steady-state compatibility auditing.
 pub(crate) fn compat_cache_usage() -> [usize; 15] {
     let state = COMPAT.lock();
@@ -16283,6 +16330,11 @@ fn linux_cache_ensure_root(state: &mut CompatState, root: &[u8]) -> Option<u32> 
     {
         return Some(directory.id);
     }
+    if let Some(parent_end) = root.iter().rposition(|byte| *byte == b'/') {
+        if parent_end != 0 {
+            linux_cache_ensure_root(state, &root[..parent_end])?;
+        }
+    }
     // Keep the virtual cache's metadata capacity stable before the first
     // workload. Metal2Vulkan creates and removes several small cache entries;
     // allowing a later Vec growth would make otherwise complete executions fail
@@ -16299,6 +16351,70 @@ fn linux_cache_ensure_root(state: &mut CompatState, root: &[u8]) -> Option<u32> 
         mode: if root == b"/tmp" { 0o1777 } else { 0o755 },
     });
     Some(id)
+}
+
+fn linux_cache_ensure_dir(state: &mut CompatState, path: &[u8]) -> Option<()> {
+    if state
+        .cache_dirs
+        .iter()
+        .any(|directory| directory.path == path)
+    {
+        return Some(());
+    }
+    let root = linux_cache_root(path)?;
+    linux_cache_ensure_root(state, root)?;
+    if path == root {
+        return Some(());
+    }
+    let parent = linux_cache_parent(path, root)?;
+    linux_cache_ensure_dir(state, &parent)?;
+    let id = state.next_cache_node_id;
+    state.next_cache_node_id = state.next_cache_node_id.checked_add(1)?;
+    state.cache_dirs.try_reserve(1).ok()?;
+    state.cache_dirs.push(LinuxCacheDir {
+        id,
+        path: path.to_vec(),
+        mode: 0o755,
+    });
+    Some(())
+}
+
+/// Installs one verified root-image file into a writable runtime cache tree.
+pub(crate) fn install_runtime_cache_file(path: &[u8], bytes: alloc::vec::Vec<u8>) -> bool {
+    if path.last() == Some(&b'/') {
+        return false;
+    }
+    let Some(root) = linux_cache_root(path) else {
+        return false;
+    };
+    if path == root {
+        return false;
+    }
+    let mut state = COMPAT.lock();
+    let Some(parent) = linux_cache_parent(path, root) else {
+        return false;
+    };
+    if linux_cache_ensure_dir(&mut state, &parent).is_none()
+        || state.cache_files.iter().any(|file| file.path == path)
+    {
+        return false;
+    }
+    let id = state.next_cache_node_id;
+    let Some(next) = state.next_cache_node_id.checked_add(1) else {
+        return false;
+    };
+    if state.cache_files.try_reserve(1).is_err() {
+        return false;
+    }
+    state.next_cache_node_id = next;
+    state.cache_files.push(LinuxCacheFile {
+        id,
+        path: path.to_vec(),
+        bytes,
+        shared: None,
+        mode: 0o644,
+    });
+    true
 }
 
 fn linux_cache_parent(path: &[u8], root: &[u8]) -> Option<alloc::vec::Vec<u8>> {
@@ -16841,6 +16957,7 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     #[cfg(any(
         feature = "compat-dynamic-libc-verify",
         feature = "android-art-verify",
+        feature = "compat-jvm-verify",
         feature = "vulkan-metal2vulkan-verify"
     ))]
     trace_path_address(pid, "openat-address", args[1]);
@@ -16874,6 +16991,7 @@ fn linux_openat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     #[cfg(any(
         feature = "compat-dynamic-libc-verify",
         feature = "android-art-verify",
+        feature = "compat-jvm-verify",
         feature = "vulkan-metal2vulkan-verify"
     ))]
     trace_path("openat", &path);
@@ -17826,7 +17944,10 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     if args[3] & !ALLOWED_FLAGS != 0 {
         return Err(CompatErrno::Invalid);
     }
-    #[cfg(feature = "compat-dynamic-libc-verify")]
+    #[cfg(any(
+        feature = "compat-dynamic-libc-verify",
+        feature = "compat-jvm-verify"
+    ))]
     trace_path_address(pid, "newfstatat-address", args[1]);
     let raw_path = linux_c_string(args[1], 4096);
     let path = match raw_path {
@@ -17893,7 +18014,10 @@ fn linux_newfstatat(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         }
         Err(error) => return Err(error),
     };
-    #[cfg(feature = "compat-dynamic-libc-verify")]
+    #[cfg(any(
+        feature = "compat-dynamic-libc-verify",
+        feature = "compat-jvm-verify"
+    ))]
     trace_path("newfstatat", &path);
     let resolved = if path.starts_with(b"/") {
         if !is_at_fdcwd(args[0]) {
@@ -17975,12 +18099,18 @@ fn linux_statx(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     {
         return Err(CompatErrno::Invalid);
     }
-    #[cfg(feature = "compat-dynamic-libc-verify")]
+    #[cfg(any(
+        feature = "compat-dynamic-libc-verify",
+        feature = "compat-jvm-verify"
+    ))]
     trace_path_address(pid, "statx-address", args[1]);
     let raw_path = linux_c_string(args[1], 4096);
     let (node, size) = match raw_path {
         Ok(path) => {
-            #[cfg(feature = "compat-dynamic-libc-verify")]
+            #[cfg(any(
+                feature = "compat-dynamic-libc-verify",
+                feature = "compat-jvm-verify"
+            ))]
             trace_path("statx", &path);
             let resolved = if path.starts_with(b"/") {
                 if !is_at_fdcwd(args[0]) {
@@ -21476,6 +21606,11 @@ fn linux_readlink_path(
         return Err(CompatErrno::Invalid);
     }
     let path = resolve_linux_at_path(pid, dirfd, path_address)?;
+    #[cfg(any(
+        feature = "compat-dynamic-libc-verify",
+        feature = "compat-jvm-verify"
+    ))]
+    trace_path("readlink", &path);
     if path != b"/proc/self/exe" {
         let resolved = linux_cache_resolve_symlinks(&path, false)?;
         if let Some(target) = linux_cache_symlink_target(&resolved) {
@@ -22327,7 +22462,10 @@ fn linux_brk(pid: ObjId, requested: u64) -> Result<u64, CompatErrno> {
 /// `EFAULT`。不得把宿主文件系统可见性泄漏给 Linux 兼容进程。
 fn linux_access(path: u64) -> Result<u64, CompatErrno> {
     let bytes = linux_c_string(path, 4096)?;
-    #[cfg(feature = "compat-dynamic-libc-verify")]
+    #[cfg(any(
+        feature = "compat-dynamic-libc-verify",
+        feature = "compat-jvm-verify"
+    ))]
     trace_path("access", &bytes);
     let resolved = if linux_cache_path(&bytes) {
         linux_cache_resolve_symlinks(&bytes, true)?
