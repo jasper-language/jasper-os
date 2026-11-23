@@ -22,6 +22,8 @@ use crate::mm::frame::free_frames;
 use crate::proc::{self, ProcState};
 use crate::{arch, kobj, kprintln, sched};
 
+const ROOT_EXIT_SCHEDULE_SLICE_TICKS: u64 = 100;
+
 static TRUE: &[u8] = include_bytes!(env!("JSR_UBUNTU_TRUE"));
 static GETCONF: &[u8] = include_bytes!(env!("JSR_UBUNTU_GETCONF"));
 static PRINTF: &[u8] = include_bytes!(env!("JSR_UBUNTU_PRINTF"));
@@ -147,6 +149,20 @@ fn cleanup(pid: ObjId) {
             counts[18],
         );
     }
+}
+
+/// Reaps all remaining compatibility processes after a persistent runtime has
+/// completed its root-level acceptance command.
+#[cfg(feature = "compat-darling-verify")]
+pub(crate) fn cleanup_compat_processes() -> usize {
+    let processes = proc::linux_process_ids();
+    for pid in &processes {
+        let _ = proc::begin_exit(*pid, 137);
+    }
+    if let Some(pid) = processes.first().copied() {
+        cleanup(pid);
+    }
+    proc::linux_process_ids().len()
 }
 
 fn application_identity(name: &str, executable: &[u8]) -> ApplicationIdentity {
@@ -890,6 +906,7 @@ fn run_program(
         enforce_resources,
         PROGRAM_DEADLINE_TICKS,
         None,
+        false,
     )
 }
 
@@ -913,6 +930,7 @@ fn run_program_on(
         enforce_resources,
         PROGRAM_DEADLINE_TICKS,
         Some(affinity),
+        false,
     )
 }
 
@@ -927,6 +945,7 @@ fn run_program_with_interpreter(
     enforce_resources: bool,
     deadline_ticks: u64,
     affinity: Option<kernel_core::smp::CpuSet>,
+    return_on_root_exit: bool,
 ) -> ProgramResult {
     let calls_before = crate::syscall::call_count();
     let heap_before = crate::mm::heap::stats();
@@ -963,7 +982,10 @@ fn run_program_with_interpreter(
             return ProgramResult::FAILED;
         }
     };
-    check(executable_plan.interpreter.as_deref() == Some(interpreter_path), "pt_interp");
+    check(
+        executable_plan.interpreter.as_deref() == Some(interpreter_path),
+        "pt_interp",
+    );
     let dynamic = match plan_dynamic_program(
         &executable_plan,
         &interpreter_plan,
@@ -1029,7 +1051,23 @@ fn run_program_with_interpreter(
         thread = backend.task().is_some();
         check(thread, "thread");
         let deadline = sched::timer_ticks().saturating_add(deadline_ticks);
-        completed = sched::run_until(deadline);
+        if return_on_root_exit {
+            while sched::timer_ticks() < deadline {
+                let step = sched::timer_ticks()
+                    .saturating_add(ROOT_EXIT_SCHEDULE_SLICE_TICKS)
+                    .min(deadline);
+                let _ = sched::run_until(step);
+                if matches!(proc::state(pid), Some(ProcState::Exited { .. })) {
+                    completed = true;
+                    break;
+                }
+                if sched::timer_ticks() < step {
+                    sched::sleep_ticks(1);
+                }
+            }
+        } else {
+            completed = sched::run_until(deadline);
+        }
         if !completed {
             kprintln!(
                 "[JSR-COMPAT-DYNAMIC-FAIL] program={} stage=deadline_exceeded deadline={}",
@@ -1065,7 +1103,9 @@ fn run_program_with_interpreter(
             max
         );
     }
-    cleanup(pid);
+    if !return_on_root_exit {
+        cleanup(pid);
+    }
     let frames_after = free_frames();
     let heap_after = crate::mm::heap::stats();
     let heap_used_before = heap_before.0.saturating_sub(heap_before.1);
@@ -1132,7 +1172,9 @@ pub(crate) fn run_root_static_program(
         false
     };
     if proc::set_application(pid, application_identity(name, executable)).is_err()
-        || argv.first().is_none_or(|path| !proc::linux_set_exec_path(pid, path))
+        || argv
+            .first()
+            .is_none_or(|path| !proc::linux_set_exec_path(pid, path))
     {
         return failed();
     }
@@ -1540,6 +1582,74 @@ pub(crate) fn run_root_dynamic_program_with_deadline(
     enforce_resources: bool,
     deadline_ticks: u64,
 ) -> bool {
+    run_root_dynamic_program_with_policy(
+        name,
+        path,
+        executable,
+        interpreter,
+        interpreter_path,
+        argv,
+        envp,
+        frames_before,
+        enforce_resources,
+        deadline_ticks,
+        false,
+    )
+}
+
+/// Executes a root-backed launcher and returns as soon as that root process
+/// exits. A darlingserver started by the launcher is intentionally persistent,
+/// so waiting for every worker to settle would turn a successful launcher into
+/// a deadline failure.
+#[cfg(feature = "lifecycle-root-exec-verify")]
+pub(crate) fn run_root_dynamic_program_until_root_exit(
+    name: &'static str,
+    path: &'static str,
+    executable: &[u8],
+    interpreter: &[u8],
+    interpreter_path: &'static str,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    frames_before: usize,
+    enforce_resources: bool,
+    deadline_ticks: u64,
+) -> bool {
+    run_root_dynamic_program_with_policy(
+        name,
+        path,
+        executable,
+        interpreter,
+        interpreter_path,
+        argv,
+        envp,
+        frames_before,
+        enforce_resources,
+        deadline_ticks,
+        true,
+    )
+}
+
+#[cfg(feature = "lifecycle-root-exec-verify")]
+fn run_root_dynamic_program_with_policy(
+    name: &'static str,
+    path: &'static str,
+    executable: &[u8],
+    interpreter: &[u8],
+    interpreter_path: &'static str,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    frames_before: usize,
+    enforce_resources: bool,
+    deadline_ticks: u64,
+    return_on_root_exit: bool,
+) -> bool {
+    let affinity = if return_on_root_exit {
+        let mut workers = crate::smp::online_set();
+        workers.remove(0);
+        (!workers.is_empty()).then_some(workers)
+    } else {
+        None
+    };
     let result = run_program_with_interpreter(
         name,
         executable,
@@ -1550,7 +1660,8 @@ pub(crate) fn run_root_dynamic_program_with_deadline(
         frames_before,
         enforce_resources,
         deadline_ticks,
-        None,
+        affinity,
+        return_on_root_exit,
     );
     let verified = result.mapped
         && result.interpreter_entered

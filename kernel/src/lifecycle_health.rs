@@ -61,6 +61,16 @@ const JVM_PROGRAM_DEADLINE_TICKS: u64 = 12_000; // JASPER-HARDCODE-REVIEW: issue
 const DOTNET_PROGRAM_DEADLINE_TICKS: u64 = 12_000; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=coreclr-startup-and-thread-cleanup-uefi-budget
 #[cfg(feature = "compat-darling-verify")]
 const DARLING_PROGRAM_DEADLINE_TICKS: u64 = 30_000; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=darling-full-dyld-load-tcg-budget
+#[cfg(feature = "compat-darling-verify")]
+const DARLING_BOOTSTRAP_DEADLINE_TICKS: u64 = 30_000; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=darling-launchd-cold-start-tcg-budget
+#[cfg(feature = "compat-darling-verify")]
+const DARLING_RETRY_DEADLINE_TICKS: u64 = 6_000; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=darling-launchd-warm-retry
+#[cfg(feature = "compat-darling-verify")]
+const DARLING_RETRY_DELAY_TICKS: u64 = 12_000; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=darling-launchd-background-progress-between-probes
+#[cfg(feature = "compat-darling-verify")]
+const DARLING_PROGRESS_SLICE_TICKS: u64 = 100; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=darling-bounded-scheduler-slice
+#[cfg(feature = "compat-darling-verify")]
+const DARLING_LAUNCH_ATTEMPTS: u32 = 3; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=darling-cold-launchd-shellspawn-warm-retry
 
 static CONTROL_DEVICE: spin::Mutex<Option<Arc<IrqSpinLock<BlockDevice>>>> = spin::Mutex::new(None);
 static CONTROL_MUTATION: AtomicBool = AtomicBool::new(false);
@@ -896,14 +906,15 @@ fn run_root_program(
     // selected, validated System A/B root and repeated paths must match exactly.
     // 注册表只保留健康链明确按名称启动的映像；字节仍来自已验证 System A/B 根卷，
     // 同路径重复注册必须完全一致。路径是查找键，不是权限凭证。
-    if matches!(path, "/bin/true" | "/usr/bin/printf" | "/usr/bin/jasper-getppid")
-        && !crate::linux_vfs::install_root_program(
-            origin,
-            path.as_bytes(),
-            executable.len(),
-            interpreter.len(),
-        )
-    {
+    if matches!(
+        path,
+        "/bin/true" | "/usr/bin/printf" | "/usr/bin/jasper-getppid"
+    ) && !crate::linux_vfs::install_root_program(
+        origin,
+        path.as_bytes(),
+        executable.len(),
+        interpreter.len(),
+    ) {
         return Err(HealthError::RootExecute);
     }
     let warm_frames = crate::mm::frame::free_frames();
@@ -946,7 +957,9 @@ fn install_root_android_files(
     for path in crate::linux_vfs::ANDROID_FILE_PATHS {
         #[cfg(feature = "compat-wine-verify")]
         if path.ends_with(b"/wine/x86_64-unix/ntdll.so") {
-            crate::kprintln!("[JSR-WINE-VFS] load path=/usr/lib/x86_64-linux-gnu/wine/x86_64-unix/ntdll.so");
+            crate::kprintln!(
+                "[JSR-WINE-VFS] load path=/usr/lib/x86_64-linux-gnu/wine/x86_64-unix/ntdll.so"
+            );
         }
         let path_text = core::str::from_utf8(path).map_err(|_| HealthError::RootExecute)?;
         let max_bytes = match root.metadata(path_text) {
@@ -1271,7 +1284,7 @@ fn run_darling_namespace_probe(
     argv: &[&[u8]],
     envp: &[&[u8]],
 ) {
-    let _ = crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+    let _ = crate::compat_dynamic_demo::run_root_dynamic_program_until_root_exit(
         "darling-launcher",
         "/data/runtimes/darling/usr/bin/darling",
         executable,
@@ -1281,24 +1294,78 @@ fn run_darling_namespace_probe(
         envp,
         crate::mm::frame::free_frames(),
         false,
-        DARLING_PROGRAM_DEADLINE_TICKS,
+        DARLING_BOOTSTRAP_DEADLINE_TICKS,
     );
     if crate::mm::heap::ensure_free(2 * 1024 * 1024).is_err() {
         return;
     }
-    let frames_before = crate::mm::frame::free_frames();
-    let _ = crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
-        "darling-launcher",
-        "/data/runtimes/darling/usr/bin/darling",
-        executable,
-        interpreter,
-        "/lib64/ld-linux-x86-64.so.2",
-        argv,
-        envp,
-        frames_before,
-        true,
-        DARLING_PROGRAM_DEADLINE_TICKS,
-    );
+    let probe_frames_before = crate::mm::frame::free_frames();
+    for attempt in 0..DARLING_LAUNCH_ATTEMPTS {
+        crate::linux_abi::reset_darling_syscall_trace_budget();
+        let frames_before = crate::mm::frame::free_frames();
+        let exited_zero = crate::compat_dynamic_demo::run_root_dynamic_program_until_root_exit(
+            "darling-launcher",
+            "/data/runtimes/darling/usr/bin/darling",
+            executable,
+            interpreter,
+            "/lib64/ld-linux-x86-64.so.2",
+            argv,
+            envp,
+            frames_before,
+            false,
+            DARLING_RETRY_DEADLINE_TICKS,
+        );
+        crate::kprintln!(
+            "[JSR-DARLING-START] attempt={} exited_zero={}",
+            attempt,
+            exited_zero
+        );
+        for id in crate::proc::linux_process_ids() {
+            crate::kprintln!(
+                "[JSR-DARLING-PROC] attempt={} id={:#x} pid={} name={} state={:?}",
+                attempt,
+                id.raw(),
+                crate::proc::linux_pid(id).unwrap_or(0),
+                crate::proc::name(id).unwrap_or("<unknown>"),
+                crate::proc::state(id)
+            );
+            for (tid, task) in crate::linux_abi::darling_thread_tasks(id) {
+                crate::kprintln!(
+                    "[JSR-DARLING-TASK] attempt={} process={:#x} tid={} task={} snapshot={:?}",
+                    attempt,
+                    id.raw(),
+                    tid,
+                    task.0,
+                    crate::sched::task_snapshot(task)
+                );
+            }
+        }
+        if exited_zero {
+            let remaining_processes = crate::compat_dynamic_demo::cleanup_compat_processes();
+            let settle = crate::sched::timer_ticks().saturating_add(100);
+            let _ = crate::sched::run_until(settle);
+            let frames_after = crate::mm::frame::free_frames();
+            crate::kprintln!(
+                "[JSR-DARLING-CLEANUP] frames_before={} frames_after={} retained={} processes={}",
+                probe_frames_before,
+                frames_after,
+                probe_frames_before.saturating_sub(frames_after),
+                remaining_processes
+            );
+            break;
+        }
+        crate::linux_abi::reset_darling_syscall_trace_budget();
+        let deadline = crate::sched::timer_ticks().saturating_add(DARLING_RETRY_DELAY_TICKS);
+        while crate::sched::timer_ticks() < deadline {
+            let step = crate::sched::timer_ticks()
+                .saturating_add(DARLING_PROGRESS_SLICE_TICKS)
+                .min(deadline);
+            let _ = crate::sched::run_until(step);
+            if crate::sched::timer_ticks() < step {
+                crate::sched::sleep_ticks(1);
+            }
+        }
+    }
 }
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
@@ -1318,9 +1385,12 @@ fn execute_root_dynamic_programs(
     install_root_libraries(root)?;
     #[cfg(feature = "compat-darling-verify")]
     {
-        for path in [b"/etc/passwd".as_slice(), b"/etc/group".as_slice()] {
-            let text_path =
-                core::str::from_utf8(path).map_err(|_| HealthError::RootExecute)?;
+        for path in [
+            b"/etc/passwd".as_slice(),
+            b"/etc/group".as_slice(),
+            b"/data/runtimes/darling/usr/libexec/darling/System/Library/LaunchDaemons/org.darlinghq.shellspawn.plist".as_slice(),
+        ] {
+            let text_path = core::str::from_utf8(path).map_err(|_| HealthError::RootExecute)?;
             let bytes = root
                 .read_file(text_path, 16 * 1024)
                 .map_err(|_| HealthError::RootExecute)?;
@@ -1364,24 +1434,22 @@ fn execute_root_dynamic_programs(
         ) {
             return Err(HealthError::RootExecute);
         }
-        let darling_argv: [&[u8]; 3] = [
+        let darling_argv: [&[u8]; 4] = [
             b"/data/runtimes/darling/usr/bin/darling",
-            b"/bin/echo",
+            b"exec",
+            b"/data/runtimes/darling/usr/libexec/darling/bin/echo",
             b"DARLING_EXEC_OK",
         ];
-        let darling_envp: [&[u8]; 5] = [
+        let darling_envp: [&[u8]; 7] = [
             b"DPREFIX=/tmp/darlingprefix",
             b"HOME=/data",
             b"PATH=/usr/bin:/bin",
             b"DSERVER_LOG_STDERR=1",
             b"DSERVER_LOG_LEVEL=debug",
+            b"DARLING_NOOVERLAYFS=1",
+            b"DSERVER_INIT=/usr/libexec/shellspawn",
         ];
-        run_darling_namespace_probe(
-            &executable,
-            &interpreter,
-            &darling_argv,
-            &darling_envp,
-        );
+        run_darling_namespace_probe(&executable, &interpreter, &darling_argv, &darling_envp);
         return Ok(());
     }
     #[cfg(feature = "compat-dotnet-verify")]
@@ -1473,12 +1541,7 @@ fn execute_root_dynamic_programs(
         #[cfg(not(feature = "compat-wine-d3d-verify"))]
         {
             let stdio_argv: [&[u8]; 1] = [b"/usr/bin/jasper-file-stdio"];
-            run_root_program(
-                root,
-                origin,
-                "/usr/bin/jasper-file-stdio",
-                &stdio_argv,
-            )?;
+            run_root_program(root, origin, "/usr/bin/jasper-file-stdio", &stdio_argv)?;
         }
         #[cfg(not(feature = "compat-wine-d3d-verify"))]
         {
@@ -1558,8 +1621,7 @@ fn execute_root_dynamic_programs(
             }
             // A cold prefix initializes Wine and compatibility-cache metadata once.
             // Measure an immediately repeated command to prove steady-state release.
-            crate::mm::heap::ensure_free(2 * 1024 * 1024)
-                .map_err(|_| HealthError::RootExecute)?;
+            crate::mm::heap::ensure_free(2 * 1024 * 1024).map_err(|_| HealthError::RootExecute)?;
             crate::linux_abi::reset_wine_syscall_trace_budget();
             if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
                 "compat-wine-cmd",
@@ -1585,10 +1647,7 @@ fn execute_root_dynamic_programs(
                 .read_file("/opt/wine-devel/bin/wineserver", 4 * 1024 * 1024)
                 .map_err(|_| HealthError::RootExecute)?;
             let wine_loader = root
-                .read_file(
-                    "/opt/wine-devel/lib/wine/x86_64-unix/wine",
-                    4 * 1024 * 1024,
-                )
+                .read_file("/opt/wine-devel/lib/wine/x86_64-unix/wine", 4 * 1024 * 1024)
                 .map_err(|_| HealthError::RootExecute)?;
             let wine_preloader = root
                 .read_file(
@@ -1971,55 +2030,57 @@ fn execute_root_dynamic_programs(
     }
     #[cfg(not(feature = "android-apk-verify"))]
     {
-    let true_argv: [&[u8]; 1] = [b"/bin/true"];
-    run_root_program(root, origin, "/bin/true", &true_argv)?;
-    let getconf_argv: [&[u8]; 2] = [b"/usr/bin/getconf", b"GNU_LIBC_VERSION"];
-    run_root_program(root, origin, "/usr/bin/getconf", &getconf_argv)?;
-    let uname_argv: [&[u8]; 2] = [b"/usr/bin/uname", b"-a"];
-    run_root_program(root, origin, "/usr/bin/uname", &uname_argv)?;
-    let hostname_argv: [&[u8]; 1] = [b"/usr/bin/hostname"];
-    run_root_program(root, origin, "/usr/bin/hostname", &hostname_argv)?;
-    let basename_argv: [&[u8]; 2] = [b"/usr/bin/basename", b"/usr/lib/x86_64-linux-gnu/libc.so.6"];
-    run_root_program(root, origin, "/usr/bin/basename", &basename_argv)?;
-    let dirname_argv: [&[u8]; 2] = [b"/usr/bin/dirname", b"/usr/lib/x86_64-linux-gnu/libc.so.6"];
-    run_root_program(root, origin, "/usr/bin/dirname", &dirname_argv)?;
-    let id_argv: [&[u8]; 2] = [b"/usr/bin/id", b"-u"];
-    run_root_program(root, origin, "/usr/bin/id", &id_argv)?;
-    let pwd_argv: [&[u8]; 1] = [b"/usr/bin/pwd"];
-    run_root_program(root, origin, "/usr/bin/pwd", &pwd_argv)?;
-    let nproc_argv: [&[u8]; 1] = [b"/usr/bin/nproc"];
-    run_root_program(root, origin, "/usr/bin/nproc", &nproc_argv)?;
-    let sleep_argv: [&[u8]; 2] = [b"/usr/bin/sleep", b"0.05"];
-    run_root_program(root, origin, "/usr/bin/sleep", &sleep_argv)?;
-    let find_argv: [&[u8]; 6] = [
-        b"/usr/bin/find",
-        b"/",
-        b"-maxdepth",
-        b"1",
-        b"-mindepth",
-        b"1",
-    ];
-    run_root_program(root, origin, "/usr/bin/find", &find_argv)?;
-    let ls_argv: [&[u8]; 3] = [b"/usr/bin/ls", b"-1", b"/usr/bin"];
-    run_root_program(root, origin, "/usr/bin/ls", &ls_argv)?;
-    let wc_argv: [&[u8]; 3] = [
-        b"/usr/bin/wc",
-        b"-c",
-        b"/usr/lib/x86_64-linux-gnu/libc.so.6",
-    ];
-    run_root_program(root, origin, "/usr/bin/wc", &wc_argv)?;
-    let printf_argv: [&[u8]; 3] = [b"/usr/bin/printf", b"jasper-%s\n", b"dynamic"];
-    run_root_program(root, origin, "/usr/bin/printf", &printf_argv)?;
-    let ppid_argv: [&[u8]; 1] = [b"/usr/bin/jasper-getppid"];
-    run_root_program(root, origin, "/usr/bin/jasper-getppid", &ppid_argv)?;
-    let dash_argv: [&[u8]; 3] = [
-        b"/bin/dash",
-        b"-c",
-        b"echo jasper-shell-ok\ncd /usr\npwd\n/usr/bin/printf 'external-%s\\n' ok\n",
-    ];
-    run_root_program(root, origin, "/bin/dash", &dash_argv)?;
-    let signal_argv: [&[u8]; 1] = [b"/usr/bin/jasper-signal-basic"];
-    run_root_program(root, origin, "/usr/bin/jasper-signal-basic", &signal_argv)
+        let true_argv: [&[u8]; 1] = [b"/bin/true"];
+        run_root_program(root, origin, "/bin/true", &true_argv)?;
+        let getconf_argv: [&[u8]; 2] = [b"/usr/bin/getconf", b"GNU_LIBC_VERSION"];
+        run_root_program(root, origin, "/usr/bin/getconf", &getconf_argv)?;
+        let uname_argv: [&[u8]; 2] = [b"/usr/bin/uname", b"-a"];
+        run_root_program(root, origin, "/usr/bin/uname", &uname_argv)?;
+        let hostname_argv: [&[u8]; 1] = [b"/usr/bin/hostname"];
+        run_root_program(root, origin, "/usr/bin/hostname", &hostname_argv)?;
+        let basename_argv: [&[u8]; 2] =
+            [b"/usr/bin/basename", b"/usr/lib/x86_64-linux-gnu/libc.so.6"];
+        run_root_program(root, origin, "/usr/bin/basename", &basename_argv)?;
+        let dirname_argv: [&[u8]; 2] =
+            [b"/usr/bin/dirname", b"/usr/lib/x86_64-linux-gnu/libc.so.6"];
+        run_root_program(root, origin, "/usr/bin/dirname", &dirname_argv)?;
+        let id_argv: [&[u8]; 2] = [b"/usr/bin/id", b"-u"];
+        run_root_program(root, origin, "/usr/bin/id", &id_argv)?;
+        let pwd_argv: [&[u8]; 1] = [b"/usr/bin/pwd"];
+        run_root_program(root, origin, "/usr/bin/pwd", &pwd_argv)?;
+        let nproc_argv: [&[u8]; 1] = [b"/usr/bin/nproc"];
+        run_root_program(root, origin, "/usr/bin/nproc", &nproc_argv)?;
+        let sleep_argv: [&[u8]; 2] = [b"/usr/bin/sleep", b"0.05"];
+        run_root_program(root, origin, "/usr/bin/sleep", &sleep_argv)?;
+        let find_argv: [&[u8]; 6] = [
+            b"/usr/bin/find",
+            b"/",
+            b"-maxdepth",
+            b"1",
+            b"-mindepth",
+            b"1",
+        ];
+        run_root_program(root, origin, "/usr/bin/find", &find_argv)?;
+        let ls_argv: [&[u8]; 3] = [b"/usr/bin/ls", b"-1", b"/usr/bin"];
+        run_root_program(root, origin, "/usr/bin/ls", &ls_argv)?;
+        let wc_argv: [&[u8]; 3] = [
+            b"/usr/bin/wc",
+            b"-c",
+            b"/usr/lib/x86_64-linux-gnu/libc.so.6",
+        ];
+        run_root_program(root, origin, "/usr/bin/wc", &wc_argv)?;
+        let printf_argv: [&[u8]; 3] = [b"/usr/bin/printf", b"jasper-%s\n", b"dynamic"];
+        run_root_program(root, origin, "/usr/bin/printf", &printf_argv)?;
+        let ppid_argv: [&[u8]; 1] = [b"/usr/bin/jasper-getppid"];
+        run_root_program(root, origin, "/usr/bin/jasper-getppid", &ppid_argv)?;
+        let dash_argv: [&[u8]; 3] = [
+            b"/bin/dash",
+            b"-c",
+            b"echo jasper-shell-ok\ncd /usr\npwd\n/usr/bin/printf 'external-%s\\n' ok\n",
+        ];
+        run_root_program(root, origin, "/bin/dash", &dash_argv)?;
+        let signal_argv: [&[u8]; 1] = [b"/usr/bin/jasper-signal-basic"];
+        run_root_program(root, origin, "/usr/bin/jasper-signal-basic", &signal_argv)
     }
 }
 

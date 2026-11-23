@@ -722,14 +722,15 @@ if [ "$MODE" = compat-darling ]; then
   grep -aq 'Received call #1 (dserver_callnum_checkin)' "$OUT/serial.log"
   grep -aq 'dserver_callnum_vchroot_path' "$OUT/serial.log"
   grep -aq '^\[JSR-DARLING-MMAP\] addr=0x100000000 ' "$OUT/serial.log"
-  grep -aqE 'dyld: No shared cache present|stage=deadline_exceeded' "$OUT/serial.log"
-  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=darling-launcher path=/data/runtimes/darling/usr/bin/darling interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=false frames_before=[0-9]* resources=false failed=[1-9][0-9]*' \
+  grep -aq '^DARLING_EXEC_OK' "$OUT/serial.log"
+  grep -aq '^\[JSR-DARLING-START\] attempt=[0-9][0-9]* exited_zero=true' \
+    "$OUT/serial.log"
+  grep -aq '^\[JSR-DARLING-CLEANUP\] .* retained=0 processes=0$' \
     "$OUT/serial.log"
   grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"
-  ! grep -aq 'DARLING_JASPER_GUEST_OK' "$OUT/serial.log"
-  ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL)\]|panicked at|KERNEL PANIC' \
+  ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' \
     "$OUT/serial.log"
-  echo "issue21-uefi-boot: RECORDED mode=$MODE qemu_rc=$rc gate=dyld-macho-runtime-blocked evidence=$OUT"
+  echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc cli=true retained=0 processes=0 evidence=$OUT"
   exit 0
 fi
 if [ "$MODE" = android-art ]; then

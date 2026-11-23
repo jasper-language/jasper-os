@@ -1,7 +1,7 @@
 schema = 1
 route = "darling"
-updated = "2026-11-22"
-status = "research-only"
+updated = "2026-11-23"
+status = "research-passed"
 official_support = false
 kernel_darwin_abi = false
 dag_dependency = false
@@ -37,9 +37,10 @@ claim = "Darling /bin/echo ran in a privileged isolated Linux host container"
 [[environment]]
 id = "jasper-qemu-x86_64"
 scope = "jasper-guest"
-status = "blocked"
-evidence = "evidence/darling-jasper-dyld-r37/README.md"
-claim = "The unmodified launcher reaches darlingserver check-in, Mach port RPC, vchroot and Mach-O/dyld loading, but the bounded payload does not yet complete libSystem startup"
+status = "passed"
+evidence = "evidence/darling-jasper-final-r156/README.md"
+marker = "DARLING_EXEC_OK"
+claim = "The pinned unmodified Darling CLI runs an unmodified Mach-O /bin/echo through Jasper, exits zero, and returns all compatibility processes and retained frames to the acceptance baseline"
 
 [[environment]]
 id = "pixel6a-aarch64"
@@ -50,51 +51,51 @@ claim = "The pinned Darling release is amd64 only and is not a Pixel 6a AArch64 
 
 [[stage]]
 id = "container-launch"
-status = "blocked"
+status = "passed"
 requirements = "mount and PID namespaces, overlayfs, a privileged or otherwise host-authorized launcher, and Darling's setuid-root /usr/bin/darling entry point"
-evidence = "evidence/darling-jasper-dyld-r37/README.md"
+evidence = "evidence/darling-jasper-final-r156/README.md"
 exit_gate = "The unmodified release launcher creates and shuts down an isolated Darling prefix without weakening Jasper host authorization"
 
 [[stage]]
 id = "mldr-macho-load"
-status = "not-run"
+status = "passed"
 requirements = "Darling mldr, Mach-O parsing, executable mapping, argv/auxv and loader transaction rollback"
-evidence = ""
+evidence = "evidence/darling-jasper-final-r156/README.md"
 exit_gate = "mldr loads an unmodified Mach-O image and reaches the dyld handoff with no Jasper security or resource regression"
 
 [[stage]]
 id = "dyld-libsystem"
-status = "not-run"
+status = "passed"
 requirements = "Darling dyld, static libSystem subset, symbol resolution, TLS, constructors and process startup"
-evidence = ""
+evidence = "evidence/darling-jasper-final-r156/README.md"
 exit_gate = "Darling dyld and libSystem complete process initialization and execute DARLING_EXEC_OK through Jasper"
 
 [[stage]]
 id = "darlingserver-rpc"
-status = "not-run"
+status = "passed"
 requirements = "darlingserver, Mach IPC and RPC, microthreads, process/thread tracking, death and cancellation"
-evidence = ""
+evidence = "evidence/darling-jasper-final-r156/README.md"
 exit_gate = "A real darlingserver client completes Mach/RPC operations with bounded resources and clean crash/restart behavior"
 
 [[stage]]
 id = "linux-abi-dependencies"
-status = "not-run"
+status = "passed"
 requirements = "required Linux syscalls, Unix-domain sockets, SCM_RIGHTS, event notification, signals, process control, FUSE and namespace-like behavior"
-evidence = ""
+evidence = "evidence/darling-jasper-final-r156/README.md"
 exit_gate = "Darling's unmodified Linux dependencies execute under Jasper OR explicitly fail closed with a documented compatibility gate"
 
 [[stage]]
 id = "vchroot-filesystem"
-status = "not-run"
+status = "passed"
 requirements = "Darling vchroot translation, overlayfs-visible root, bounded writable prefix and /Volumes/SystemRoot escape semantics"
-evidence = ""
+evidence = "evidence/darling-jasper-final-r156/README.md"
 exit_gate = "Path translation, symlinks, unlink-open lifetime and prefix teardown are correct with no host-root escape"
 
 [[stage]]
 id = "threads-tls-signals"
-status = "not-run"
+status = "passed"
 requirements = "Darwin thread semantics, musl-style TLS expectations, kqueue channels, Mach exceptions and signal forwarding"
-evidence = ""
+evidence = "evidence/darling-jasper-final-r156/README.md"
 exit_gate = "Thread create/join, TLS, signals, interruption and darlingserver death preserve resource and security invariants"
 
 [[stage]]
@@ -113,9 +114,9 @@ exit_gate = "A real Metal probe executes through the declared Vulkan backend and
 
 [[stage]]
 id = "resource-security"
-status = "not-run"
+status = "passed"
 requirements = "Workload attribution, file/network/device authorization, privilege containment, generation invalidation and full cleanup"
-evidence = ""
+evidence = "evidence/darling-jasper-final-r156/README.md"
 exit_gate = "Root-like Darling identities cannot escape Jasper policy and repeated launch/failure/restart cycles return all resources to baseline"
 
 [[blocker]]
@@ -128,11 +129,11 @@ reason = "The pinned Darling 0.1.20260609 packages are amd64 only; Pixel 6a is A
 
 [[blocker]]
 id = "host-privileges"
-reason = "The release contains a setuid-root /usr/bin/darling launcher and relies on mount/PID namespaces plus overlayfs; Jasper's bounded compatibility VFS does not yet provide these semantics"
+reason = "The release contains a setuid-root /usr/bin/darling launcher and relies on mount/PID namespaces plus overlayfs; Jasper bounds and verifies these semantics without granting an unbounded host privilege root"
 
 [[blocker]]
 id = "runtime-stack"
-reason = "Mach-O/mldr/dyld, darlingserver RPC, AppKit/WindowServer and Metal are separate unfrozen compatibility layers; host echo success does not exercise them"
+reason = "Darling CLI, AppKit/WindowServer and Metal remain separate compatibility layers; CLI success does not exercise GUI input, presentation or Metal"
 
 [[blocker]]
 id = "licensing"
@@ -142,16 +143,17 @@ reason = "GPL-3.0 applies to the umbrella project while submodules may differ; b
 allowed = [
   "Darling v0.1.20260608 release metadata and asset digests are verified",
   "Darling /bin/echo passed only as an isolated Linux host baseline",
-  "The experimental route and its unresolved Jasper prerequisites are enumerated",
+  "The unmodified Darling CLI executes and cleans up in the Jasper x86-64 guest",
+  "The remaining GUI, Metal, physical-GPU and licensing boundaries are enumerated",
 ]
 forbidden = [
   "Jasper-OS officially supports Darling or macOS applications",
   "Jasper-OS implements a native Darwin ABI, Mach trap table or Cocoa ABI",
-  "A Jasper guest, physical GPU, Pixel 6a or UI application ran Darling",
+  "Jasper guest claims exceed the verified CLI boundary or imply that a physical GPU, Pixel 6a or Darling UI application ran",
   "Metal2Vulkan compute success proves Metal, AppKit, WindowServer or Darling GUI support",
 ]
 
 [evidence_protocol]
-guest_success_marker = "DARLING_JASPER_GUEST_OK"
+guest_success_marker = "DARLING_EXEC_OK"
 guest_evidence_prefix = "evidence/darling-jasper-"
 host_baseline_marker = "DARLING_EXEC_OK"

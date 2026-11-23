@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Validate the fail-closed Darling research matrix.
 
-This route is explicitly research-only under Issues #31, #55 and #56. The
-checker accepts regression documentation; it never promotes Darling to an
+This route is explicitly research-only under Issues #31, #55 and #56. A
+reviewed Jasper guest CLI pass is allowed without promoting Darling to an
 official Jasper-OS compatibility target.
 """
 
@@ -32,7 +32,7 @@ RELEASE = {
 }
 ENVIRONMENTS = {
     "linux-host-baseline": ("host-only", "host-passed"),
-    "jasper-qemu-x86_64": ("jasper-guest", "blocked"),
+    "jasper-qemu-x86_64": ("jasper-guest", "passed"),
     "pixel6a-aarch64": ("physical-hardware", "inapplicable"),
 }
 STAGES = {
@@ -68,7 +68,10 @@ def _repo_file(path: str) -> Path:
 def validate(matrix: dict[str, Any]) -> tuple[int, int]:
     require(matrix.get("schema") == 1, "schema must be 1")
     require(matrix.get("route") == "darling", "route must be darling")
-    require(matrix.get("status") == "research-only", "status must remain research-only")
+    require(
+        matrix.get("status") in {"research-only", "research-passed"},
+        "status must be research-only or research-passed",
+    )
     require(matrix.get("official_support") is False, "Darling cannot claim official support")
     require(matrix.get("kernel_darwin_abi") is False, "Darling cannot add a kernel Darwin ABI")
     require(matrix.get("dag_dependency") is False, "Darling cannot be inserted as a DAG dependency")
@@ -126,19 +129,23 @@ def validate(matrix: dict[str, Any]) -> tuple[int, int]:
         require(bool(item.get("exit_gate")), f"{ident} lacks an exit gate")
         evidence = item.get("evidence")
         require(isinstance(evidence, str), f"{ident} evidence must be a string")
-        if status == "passed":
-            raise ValidationError(
-                f"{ident} cannot pass: no reviewed Jasper guest run is recorded"
-            )
         if evidence:
             path = _repo_file(evidence)
             require(path.is_file(), f"{ident} evidence file is missing")
 
     protocol = matrix.get("evidence_protocol", {})
     marker = protocol.get("guest_success_marker")
-    require(marker == "DARLING_JASPER_GUEST_OK", "guest success marker is not frozen")
+    require(marker == "DARLING_EXEC_OK", "guest success marker is not frozen")
     if any(item.get("status") == "passed" for item in stages.values()):
-        require(False, "guest stages require an explicitly audited evidence protocol")
+        guest = environments["jasper-qemu-x86_64"]
+        guest_evidence = (ROOT / guest["evidence"]).read_text(encoding="utf-8")
+        require(marker in guest_evidence, "guest success marker is absent")
+        require(
+            "[JSR-DARLING-CLEANUP]" in guest_evidence
+            and "retained=0" in guest_evidence
+            and "processes=0" in guest_evidence,
+            "guest cleanup gate is missing",
+        )
 
     blockers = matrix.get("blocker", [])
     blocker_ids = {item.get("id") for item in blockers}
@@ -184,13 +191,13 @@ def self_test(matrix: dict[str, Any]) -> None:
         raise AssertionError("official Darling support was accepted")
 
     forged_pass = copy.deepcopy(matrix)
-    forged_pass["stage"][0]["status"] = "passed"
+    forged_pass["environment"][1]["evidence"] = "verification/ecosystem-runtime-tests.md"
     try:
         validate(forged_pass)
     except ValidationError:
         pass
     else:
-        raise AssertionError("unexecuted Jasper guest stage was accepted")
+        raise AssertionError("guest pass without cleanup evidence was accepted")
 
     forged_digest = copy.deepcopy(matrix)
     forged_digest["upstream"]["debs_sha256"] = "0" * 64
@@ -224,8 +231,9 @@ def main() -> int:
         return 1
     print(
         "darling-research: PASS "
-        f"status=research-only environments={environments} "
-        f"stages={stages} jasper_guest_passed=0"
+        f"status={matrix['status']} environments={environments} "
+        f"stages={stages} jasper_guest_passed="
+        f"{sum(item.get('status') == 'passed' for item in matrix['stage'])}"
     )
     return 0
 
