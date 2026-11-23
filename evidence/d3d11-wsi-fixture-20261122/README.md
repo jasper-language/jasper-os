@@ -3,7 +3,8 @@
 Date: 2026-11-22.
 
 This record proves that the bounded D3D11 WSI probe source cross-builds as a
-Windows x86-64 PE. It is not a Jasper guest or physical GPU result.
+Windows x86-64 PE. The Jasper guest result is recorded separately in
+`evidence/compat-wine-wsi-r125/README.md`.
 
 ## Toolchain
 
@@ -18,23 +19,23 @@ command=bash scripts/build-d3d11-wsi-probe.sh
 ```text
 target/windows/d3d11-wsi-probe.exe:
   PE32+ executable (GUI) x86-64
-bytes=928842
-sha256=4fd941c32312594a1986ed121ef56765eae8732a575bcb6070591fe78ea32779
+bytes=935481
+sha256=7851a8ac7a9bfb1c361c4457b6776ec67e50ee67b28d887287bb90976ccd6a1e
 ```
 
 The fixture was built with `--disable-dynamicbase` because Jasper's current
 bounded user window does not cover Wine's randomized PE base, and
 `--no-insert-timestamp` so the pinned binary digest is reproducible.
 
-No `D3D11_WSI_PROBE_OK` marker has been captured in Jasper. Swapchain
-presentation, input, resource reclamation, physical GPU and Pixel 6a remain
-open gates.
+The Jasper guest captured the marker, executed the Vulkan swapchain and present
+path, and passed the strict steady-state resource gate. Visible input/focus,
+physical GPU and Pixel 6a display remain open gates.
 
 ## Staging verification
 
 The pinned Wine/DXVK/lavapipe root was extended with VKD3D-Proton 3.1,
 `d3d12-probe.exe` and `d3d11-wsi-probe.exe`. The staging verifier checked all
-15 final file digests and the staged `wine --version` result:
+17 final file digests and the staged `wine --version` result:
 
 ```text
 wine-d3d-staging: VERIFY PASS

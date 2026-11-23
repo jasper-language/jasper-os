@@ -98,13 +98,13 @@
     "d3d11-wsi-probe-source": {
       "version": "jasper-os-c148400",
       "path": "verification/fixtures/windows/d3d11_wsi_probe.c",
-      "sha256": "8e979645aea992467a0779ca8841a700e3e7baec0d98f963f1b86e2aebaec2a3",
+      "sha256": "a09a89743343b7cdee2df7cee7deac6e627aa64d69aa718a46dd5251ba7f5180",
       "license": "Apache-2.0"
     },
     "d3d11-wsi-probe": {
       "version": "jasper-os-c148400-minw64",
-      "bytes": 928842,
-      "sha256": "4fd941c32312594a1986ed121ef56765eae8732a575bcb6070591fe78ea32779",
+      "bytes": 935481,
+      "sha256": "7851a8ac7a9bfb1c361c4457b6776ec67e50ee67b28d887287bb90976ccd6a1e",
       "build": "x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -Wl,--disable-dynamicbase,--no-insert-timestamp -o d3d11-wsi-probe.exe verification/fixtures/windows/d3d11_wsi_probe.c -lole32 -luuid",
       "license": "Apache-2.0"
     },
@@ -129,7 +129,7 @@
     "opt/wine-devel/lib/wine/x86_64-windows/d3d12.dll": "502694a5fd5e06381ef2cdb33359c5948b6a012938902ddc9e9b381841bc0ce7",
     "opt/wine-devel/lib/wine/x86_64-windows/d3d12core.dll": "0dfd690a39ef8361ca3b64e9fd8e945b27d2c568dac5dc0dce1a45abf65914cc",
     "opt/wine-devel/lib/wine/x86_64-windows/d3d12-probe.exe": "c7afa08984ccf91e715df0210c747ca323226217a6a17a30ad6a1ae0ddbb8412",
-    "opt/wine-devel/lib/wine/x86_64-windows/d3d11-wsi-probe.exe": "4fd941c32312594a1986ed121ef56765eae8732a575bcb6070591fe78ea32779",
+    "opt/wine-devel/lib/wine/x86_64-windows/d3d11-wsi-probe.exe": "7851a8ac7a9bfb1c361c4457b6776ec67e50ee67b28d887287bb90976ccd6a1e",
     "opt/wine-devel/lib/wine/x86_64-windows/uxtheme.dll": "71ec0d6c03d32ca1a148dcf36553bec3775ac76d5fe5fb2955611432df3ba478",
     "usr/lib/x86_64-linux-gnu/libvulkan_lvp.so": "d9a8bc5d4b3ec0e065562d362541c2a4cb3f3d6208ac715f7ff1dcf01289d164",
     "usr/lib/x86_64-linux-gnu/libvulkan.so.1": "def4af45e9e5784cf65eaaaa289530a5c73546b01015da4c0920ef0a144fe189",

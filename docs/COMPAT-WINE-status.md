@@ -111,11 +111,14 @@ package drift, archive or probe digest mismatch, missing final artifacts and
 an existing output directory. See `docs/WINE-D3D-STAGING.md`. This removes the
 manual-root dependency without changing the guest acceptance claim.
 
-The next WSI slice now has a separate fail-closed fixture and matrix. It must
-create a Wine service-desktop HWND, DXGI swapchain and backbuffer, clear and
-read back the backbuffer, and require `Present` to return `S_OK`. The offscreen
-D3D11 pass is never treated as WSI proof. See
-`docs/COMPAT-D3D11-WSI-status.md`.
+The WSI slice now passes in the Jasper guest. It creates a Wine service-desktop
+HWND, DXGI swapchain and backbuffer, clears and reads back the backbuffer, and
+executes DXVK `vkCreateSwapchainKHR`, `vkAcquireNextImageKHR` and
+`vkQueuePresentKHR`. The third mandatory steady-state run also passes
+`resources=true`. This remains a hidden Mesa lavapipe desktop result, not
+visible desktop or physical GPU acceptance. See
+`docs/COMPAT-D3D11-WSI-status.md` and
+`evidence/compat-wine-wsi-r125/README.md`.
 
 The reproducible staging root now also carries unmodified VKD3D-Proton 3.1,
 the D3D12 offscreen probe and the D3D11 WSI probe. Two separate verification
@@ -134,14 +137,11 @@ A generic unmodified C/POSIX fixture performs the same
 zero with resources recovered. Disabling tcache did not change the earlier
 failure, and removing the preload shim did not change it either.
 
-The next slices must:
+The remaining slices must:
 
-1. complete the unmodified Wine 11 display/module closure and establish the
-   desktop path required by `win32u`;
-2. make the offscreen D3D11 probe complete with its literal
-   `D3D11_PROBE_OK ... pixel=32,64,128,255` marker;
-3. then continue through VKD3D-Proton D3D12, WSI presentation and real GPU
-   acceptance.
+1. complete VKD3D-Proton D3D12 in the Jasper guest;
+2. add visible desktop input/focus and resize/revoke coverage;
+3. continue through real GPU, display and Pixel 6a acceptance.
 
 Every ABI discovered by this work is recorded in
 `verification/linux-posix-abi-matrix.toml`. Wine progress alone does not

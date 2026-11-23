@@ -72,14 +72,14 @@ def validate_source(source: str) -> None:
 def validate_manifest(manifest: dict[str, object]) -> None:
     require(manifest.get("schema") == 1, "manifest schema must be 1")
     require(manifest.get("id") == "COMPAT-D3D11-WSI-1", "WSI fixture identity mismatch")
-    require(manifest.get("status") == "verification-pending", "WSI fixture cannot claim a pass")
-    require(manifest.get("jasper_guest_passed") is False, "Jasper guest pass is not established")
+    require(manifest.get("status") == "passed", "WSI fixture status mismatch")
+    require(manifest.get("jasper_guest_passed") is True, "Jasper guest pass is missing")
     require(manifest.get("physical_gpu_passed") is False, "physical GPU pass is not established")
     require(manifest.get("source") == SOURCE.relative_to(ROOT).as_posix(), "source path mismatch")
-    require(manifest.get("binary_bytes") == 928842, "reference binary size mismatch")
+    require(manifest.get("binary_bytes") == 935481, "reference binary size mismatch")
     require(
         manifest.get("binary_sha256")
-        == "4fd941c32312594a1986ed121ef56765eae8732a575bcb6070591fe78ea32779",
+        == "7851a8ac7a9bfb1c361c4457b6776ec67e50ee67b28d887287bb90976ccd6a1e",
         "reference binary digest mismatch",
     )
     evidence = ROOT / str(manifest.get("build_evidence", ""))
@@ -119,8 +119,8 @@ def validate_manifest(manifest: dict[str, object]) -> None:
         "D3D11 WSI probe is not behind its verification feature",
     )
     require(
-        'run_root_dynamic_program_with_deadline(\n                    "compat-wine-wsi"'
-        in lifecycle,
+        "run_root_dynamic_program_with_deadline(" in lifecycle
+        and '"compat-wine-wsi",' in lifecycle,
         "D3D11 WSI program identity is missing",
     )
     boot = BOOT.read_text(encoding="utf-8")
@@ -142,10 +142,10 @@ def validate_manifest(manifest: dict[str, object]) -> None:
 def validate_binary(path: Path, *, enforce_reference: bool = True) -> None:
     data = path.read_bytes()
     if enforce_reference:
-        require(len(data) == 928842, f"reference PE size mismatch: {len(data)}")
+        require(len(data) == 935481, f"reference PE size mismatch: {len(data)}")
         require(
             hashlib.sha256(data).hexdigest()
-            == "4fd941c32312594a1986ed121ef56765eae8732a575bcb6070591fe78ea32779",
+            == "7851a8ac7a9bfb1c361c4457b6776ec67e50ee67b28d887287bb90976ccd6a1e",
             "reference PE digest mismatch",
         )
     require(data[:2] == b"MZ", "artifact is not a PE image")
@@ -178,9 +178,9 @@ def self_test() -> None:
         raise ValidationError("source without CreateWindowExW was accepted")
 
     premature_marker = source.replace(
-        "result = IDXGISwapChain1_Present(swapchain, 1, 0);",
+        "result = IDXGISwapChain1_Present(swapchain, 0, 0);",
         f'printf("{PASS_MARKER}\\n");\n'
-        "    result = IDXGISwapChain1_Present(swapchain, 1, 0);",
+        "    result = IDXGISwapChain1_Present(swapchain, 0, 0);",
         1,
     )
     try:
@@ -191,13 +191,13 @@ def self_test() -> None:
         raise ValidationError("pass marker before Present was accepted")
 
     bad = copy.deepcopy(manifest)
-    bad["jasper_guest_passed"] = True
+    bad["jasper_guest_passed"] = False
     try:
         validate_manifest(bad)
     except ValidationError:
         pass
     else:
-        raise ValidationError("unproven Jasper guest pass was accepted")
+        raise ValidationError("missing Jasper guest pass was accepted")
 
     image = bytearray(0x100)
     image[:2] = b"MZ"
@@ -233,7 +233,8 @@ def main() -> int:
         return 1
     print(
         f"d3d11-wsi-probe: PASS status={manifest['status']} "
-        f"layers={len(manifest['required_layer'])} guest_passed=false"
+        f"layers={len(manifest['required_layer'])} "
+        f"guest_passed={str(manifest['jasper_guest_passed']).lower()}"
     )
     return 0
 

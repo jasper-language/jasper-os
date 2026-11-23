@@ -1786,20 +1786,22 @@ fn execute_root_dynamic_programs(
                     b"VK_LOADER_DEBUG=error,warn",
                     b"DXVK_LOG_LEVEL=info",
                 ];
-                crate::linux_abi::reset_wine_syscall_trace_budget();
-                if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
-                    "compat-wine-wsi",
-                    "/opt/wine-devel/lib/wine/x86_64-unix/wine",
-                    &wine,
-                    &interpreter,
-                    "/lib64/ld-linux-x86-64.so.2",
-                    &wsi_argv,
-                    &wsi_envp,
-                    crate::mm::frame::free_frames(),
-                    false,
-                    WINE_COLD_START_DEADLINE_TICKS,
-                ) {
-                    return Err(HealthError::RootExecute);
+                for run in 0..3 {
+                    crate::linux_abi::reset_wine_syscall_trace_budget();
+                    if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+                        "compat-wine-wsi",
+                        "/opt/wine-devel/lib/wine/x86_64-unix/wine",
+                        &wine,
+                        &interpreter,
+                        "/lib64/ld-linux-x86-64.so.2",
+                        &wsi_argv,
+                        &wsi_envp,
+                        crate::mm::frame::free_frames(),
+                        run == 2,
+                        WINE_COLD_START_DEADLINE_TICKS,
+                    ) {
+                        return Err(HealthError::RootExecute);
+                    }
                 }
             }
         }

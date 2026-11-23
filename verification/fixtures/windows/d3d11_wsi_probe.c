@@ -17,11 +17,44 @@
  * DXGI swapchain/backbuffer, D3D11 clear/readback and Present returning S_OK.
  */
 
+static void write_line(const char *line)
+{
+    HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD written = 0;
+    if (output && output != INVALID_HANDLE_VALUE) {
+        WriteFile(output, line, (DWORD)strlen(line), &written, NULL);
+    }
+}
+
 static int fail(const char *stage, HRESULT result)
 {
-    printf("D3D11_WSI_PROBE_FAIL stage=%s hr=0x%08lx\n",
-           stage, (unsigned long)result);
+    char line[192];
+    snprintf(line, sizeof(line),
+             "D3D11_WSI_PROBE_FAIL stage=%s hr=0x%08lx\n",
+             stage, (unsigned long)result);
+    write_line(line);
     return 1;
+}
+
+static void stage_ok(const char *stage)
+{
+    printf("D3D11_WSI_STAGE stage=%s ok=true\n", stage);
+    fflush(stdout);
+}
+
+static LONG WINAPI log_exception(EXCEPTION_POINTERS *info)
+{
+    printf("D3D11_WSI_EXCEPTION code=0x%08lx address=%p\n",
+           (unsigned long)info->ExceptionRecord->ExceptionCode,
+           info->ExceptionRecord->ExceptionAddress);
+    fflush(stdout);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void log_atexit(void)
+{
+    printf("D3D11_WSI_EXIT atexit=true\n");
+    fflush(stdout);
 }
 
 static void pump_messages(void)
@@ -90,9 +123,9 @@ static int run_probe(void)
         0,
         class_name,
         window_name,
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
+        WS_POPUP | WS_VISIBLE,
+        0,
+        0,
         64,
         64,
         NULL,
@@ -101,6 +134,12 @@ static int run_probe(void)
         NULL);
     if (!window) {
         result = HRESULT_FROM_WIN32(GetLastError());
+        goto out;
+    }
+    if (!SetWindowPos(window, NULL, 0, 0, 64, 64,
+                      SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED)) {
+        result = HRESULT_FROM_WIN32(GetLastError());
+        stage = "set-window-geometry";
         goto out;
     }
     ShowWindow(window, SW_SHOWNOACTIVATE);
@@ -132,18 +171,22 @@ static int run_probe(void)
         &feature_level,
         &context);
     if (FAILED(result)) goto out;
+    stage_ok("create-device");
 
     stage = "query-dxgi-device";
     result = ID3D11Device_QueryInterface(
         device, &IID_IDXGIDevice, (void **)&dxgi_device);
     if (FAILED(result)) goto out;
+    stage_ok("query-dxgi-device");
     stage = "get-adapter";
     result = IDXGIDevice_GetAdapter(dxgi_device, &adapter);
     if (FAILED(result)) goto out;
+    stage_ok("get-adapter");
     stage = "get-factory";
     result = IDXGIAdapter_GetParent(
         adapter, &IID_IDXGIFactory2, (void **)&factory);
     if (FAILED(result)) goto out;
+    stage_ok("get-factory");
 
     stage = "create-swapchain";
     swap_desc.Width = 64;
@@ -164,15 +207,18 @@ static int run_probe(void)
         NULL,
         &swapchain);
     if (FAILED(result)) goto out;
+    stage_ok("create-swapchain");
 
     stage = "get-backbuffer";
     result = IDXGISwapChain1_GetBuffer(
         swapchain, 0, &IID_ID3D11Texture2D, (void **)&backbuffer);
     if (FAILED(result)) goto out;
+    stage_ok("get-backbuffer");
     stage = "create-render-target";
     result = ID3D11Device_CreateRenderTargetView(
         device, (ID3D11Resource *)backbuffer, NULL, &render_target);
     if (FAILED(result)) goto out;
+    stage_ok("create-render-target");
     ID3D11DeviceContext_ClearRenderTargetView(
         context, render_target, clear_color);
 
@@ -188,6 +234,7 @@ static int run_probe(void)
     result = ID3D11Device_CreateTexture2D(
         device, &staging_desc, NULL, &staging);
     if (FAILED(result)) goto out;
+    stage_ok("create-staging");
     ID3D11DeviceContext_CopyResource(
         context,
         (ID3D11Resource *)staging,
@@ -196,6 +243,7 @@ static int run_probe(void)
     result = ID3D11DeviceContext_Map(
         context, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(result)) goto out;
+    stage_ok("map-backbuffer");
     pixel = (const unsigned char *)mapped.pData;
     if (pixel[0] != 32 || pixel[1] != 64 ||
         pixel[2] != 128 || pixel[3] != 255) {
@@ -212,15 +260,37 @@ static int run_probe(void)
     ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)staging, 0);
     mapped.pData = NULL;
 
-    result = IDXGISwapChain1_Present(swapchain, 1, 0);
+    stage_ok("unmap-staging");
+    {
+        RECT client = {0};
+        GetClientRect(window, &client);
+        printf("D3D11_WSI_WINDOW visible=%u iconic=%u client=%ldx%ld\n",
+               (unsigned)IsWindowVisible(window),
+               (unsigned)IsIconic(window),
+               (long)(client.right - client.left),
+               (long)(client.bottom - client.top));
+        fflush(stdout);
+    }
+    printf("D3D11_WSI_VTABLE present=%p next=%p\n",
+           (void *)swapchain->lpVtbl->Present,
+           (void *)swapchain->lpVtbl->GetBuffer);
+    fflush(stdout);
+    stage_ok("before-present");
+    result = IDXGISwapChain1_Present(swapchain, 0, 0);
     if (result != S_OK) goto out;
+    stage_ok("present");
     pump_messages();
 
-    printf(
-        "D3D11_WSI_PROBE_OK feature=0x%x hwnd=1 swapchain=1 "
-        "buffer=1 present=1 pixel=%u,%u,%u,%u size=64x64\n",
-        (unsigned)feature_level,
-        pixel_r, pixel_g, pixel_b, pixel_a);
+    {
+        char line[192];
+        snprintf(
+            line, sizeof(line),
+            "D3D11_WSI_PROBE_OK feature=0x%x hwnd=1 swapchain=1 "
+            "buffer=1 present=1 pixel=%u,%u,%u,%u size=64x64\n",
+            (unsigned)feature_level,
+            pixel_r, pixel_g, pixel_b, pixel_a);
+        write_line(line);
+    }
 
 out:
     if (mapped.pData && context && staging) {
@@ -293,6 +363,9 @@ static int run_on_service_desktop(void)
 int main(int argc, char **argv)
 {
     (void)argv;
+    setvbuf(stdout, NULL, _IONBF, 0);
+    atexit(log_atexit);
+    AddVectoredExceptionHandler(1, log_exception);
     if (argc == 1) return run_on_service_desktop();
     return fail("arguments", E_INVALIDARG);
 }

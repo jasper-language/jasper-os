@@ -9930,17 +9930,28 @@ fn linux_pipe(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
 fn linux_memfd_create(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const MFD_CLOEXEC: u64 = 0x1;
     const MFD_ALLOW_SEALING: u64 = 0x2;
-    if args[1] & !(MFD_CLOEXEC | MFD_ALLOW_SEALING) != 0 {
-        return Err(CompatErrno::NoSys);
+    const MFD_NOEXEC_SEAL: u64 = 0x8;
+    const MFD_EXEC: u64 = 0x10;
+    const F_SEAL_EXEC: u32 = 0x20;
+    if args[1] & !(MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL | MFD_EXEC) != 0
+        || args[1] & MFD_NOEXEC_SEAL != 0 && args[1] & MFD_EXEC != 0
+    {
+        return Err(CompatErrno::Invalid);
     }
     let name = linux_c_string(args[0], 249)?;
     let fd = proc::linux_create_memfd(
         pid,
         args[1] & MFD_CLOEXEC != 0,
-        args[1] & MFD_ALLOW_SEALING != 0,
+        args[1] & (MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL) != 0,
     )
     .ok_or(CompatErrno::NoSpace)?;
     let entry = proc::linux_fd(pid, fd).ok_or(CompatErrno::BadFd)?;
+    if args[1] & MFD_NOEXEC_SEAL != 0
+        && proc::linux_ashmem_add_seals(pid, entry.handle, F_SEAL_EXEC).is_err()
+    {
+        let _ = proc::linux_close_fd(pid, fd);
+        return Err(CompatErrno::NoMemory);
+    }
     if proc::linux_ashmem_set_name(pid, entry.handle, &name).is_err() {
         let _ = proc::linux_close_fd(pid, fd);
         return Err(CompatErrno::NoMemory);
@@ -17555,6 +17566,74 @@ pub(crate) fn reclaim_unlinked_cache_files() {
     }
     // Page-backed backing objects acquire the memory pin lock when dropped.
     // Destroy them after releasing the ranked compatibility lock.
+    drop(removed);
+}
+
+/// Reclaims synthetic `/proc/<pid>` cache nodes owned by one exited process.
+pub(crate) fn reclaim_proc_cache_nodes(pid: u32) {
+    fn owned_by(path: &[u8], pid: u32) -> bool {
+        let Some(rest) = path.strip_prefix(b"/proc/") else {
+            return false;
+        };
+        let digits = rest
+            .iter()
+            .position(|byte| *byte == b'/')
+            .map_or(rest, |end| &rest[..end]);
+        core::str::from_utf8(digits)
+            .ok()
+            .and_then(|digits| digits.parse::<u32>().ok())
+            == Some(pid)
+    }
+
+    let (file_ids, dir_ids, symlink_ids) = {
+        let state = COMPAT.lock();
+        let files = state
+            .cache_files
+            .iter()
+            .filter(|file| owned_by(&file.path, pid))
+            .map(|file| (file.id, LINUX_CACHE_FILE_HANDLE_BASE | u64::from(file.id)))
+            .collect::<alloc::vec::Vec<_>>();
+        let dirs = state
+            .cache_dirs
+            .iter()
+            .filter(|directory| owned_by(&directory.path, pid))
+            .map(|directory| directory.id)
+            .collect::<alloc::vec::Vec<_>>();
+        let symlinks = state
+            .cache_symlinks
+            .iter()
+            .filter(|symlink| owned_by(&symlink.path, pid))
+            .map(|symlink| symlink.id)
+            .collect::<alloc::vec::Vec<_>>();
+        (files, dirs, symlinks)
+    };
+    let mut reclaim_files = alloc::vec::Vec::new();
+    for (id, handle) in file_ids {
+        if !proc::linux_handle_in_use_globally(handle) && reclaim_files.try_reserve(1).is_ok() {
+            reclaim_files.push(id);
+        }
+    }
+    let mut removed = alloc::vec::Vec::new();
+    if removed.try_reserve_exact(reclaim_files.len()).is_err() {
+        return;
+    }
+    {
+        let mut state = COMPAT.lock();
+        for id in reclaim_files {
+            if let Some(index) = state.cache_files.iter().position(|file| file.id == id) {
+                removed.push(state.cache_files.swap_remove(index));
+            }
+        }
+        state
+            .cache_dirs
+            .retain(|directory| !dir_ids.contains(&directory.id));
+        state
+            .cache_symlinks
+            .retain(|symlink| !symlink_ids.contains(&symlink.id));
+        state.cache_files.shrink_to_fit();
+        state.cache_dirs.shrink_to_fit();
+        state.cache_symlinks.shrink_to_fit();
+    }
     drop(removed);
 }
 

@@ -12000,6 +12000,8 @@ pub(crate) fn destroy_task_object(object: KObject) {
 /// 正常路径上句柄表在 exited 时已被关闭；这里**不依赖该假设**：仍有残余句柄则逐个释放其外部所有权，
 /// 并输出诊断标记（出现即说明某条路径漏了检查）。
 fn destroy_process(p: Box<Process>) {
+    #[cfg(feature = "linux-abi")]
+    let linux_pid = p.linux.as_ref().map(|linux| linux.pid);
     let Process {
         space,
         frames,
@@ -12066,6 +12068,10 @@ fn destroy_process(p: Box<Process>) {
     let _ = kobj::release_internal(exit_state); // 进程 → 退出状态（在飞 wait 仍可持有它）
     #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
     crate::linux_abi::reclaim_unlinked_cache_files();
+    #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+    if let Some(linux_pid) = linux_pid {
+        crate::linux_abi::reclaim_proc_cache_nodes(linux_pid);
+    }
 }
 
 /// Dedicated subscription-count/queue-slot admission. Does not share memory quota.

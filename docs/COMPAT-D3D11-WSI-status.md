@@ -1,9 +1,8 @@
 # COMPAT-D3D-1 WSI/present fixture status
 
-Updated: 2026-11-22.
+Updated: 2026-11-23.
 
-Status: **verification-pending**. The offscreen D3D11 pixel pass does not cover
-window creation, DXGI swapchains, WSI or presentation.
+Status: **passed for the hidden Wine service desktop on Mesa lavapipe**.
 
 The tracked fixture
 `verification/fixtures/windows/d3d11_wsi_probe.c` requires this complete chain:
@@ -41,33 +40,28 @@ The source/static checker is part of CI. Binary compilation requires
 `x86_64-w64-mingw32-gcc`; it fails explicitly with exit status 69 when the
 toolchain is absent.
 
-## Current diagnostic boundary
+## Verified path
 
 The fixture binds directly to `__wineservice_winstation` and dynamically loads
 `d3d11.dll` after that binding. The Wine profile disables explorer launch and
-tracks `uxtheme.dll` as part of the tested module closure. This isolates WSI
-from the earlier explorer PE relocation fault.
+tracks `uxtheme.dll` as part of the tested module closure.
 
-The guest now proceeds through both the D3D11 import closure and `uxtheme.dll`,
-but Wine still cannot create the service-desktop top-level window:
+The Vulkan transcript contains the real WSI path:
 
 ```text
-D3D11_WSI_DESKTOP service=true
-get_desktop_window failed to create desktop window
-NtUserRegisterClassExWOW Failed to get shared session object for window class
-D3D11_WSI_PROBE_FAIL stage=register-window-class
+vkCreateSwapchainKHR
+vkAcquireNextImageKHR
+vkQueuePresentKHR
+D3D11_WSI_PROBE_OK feature=0xb000 hwnd=1 swapchain=1 buffer=1 present=1 pixel=32,64,128,255 size=64x64
 ```
 
-The failure is before `CreateSwapChainForHwnd`; it is not yet a DXVK, Vulkan
-surface or Present semantic verdict. Evidence:
-`evidence/compat-wine-wsi-r106/README.md`.
+The service-desktop HWND reports `visible=1 iconic=0 client=64x64`. Three
+consecutive guest runs passed; the second and third runs also passed the strict
+resource gate with `resources=true`, and the third run was required by the
+verification profile. Evidence:
+`evidence/compat-wine-wsi-r125/README.md`.
 
 ## Remaining gates
 
-- Run the binary through the fixed Wine 11.22/DXVK/lavapipe Jasper staging root.
-- Provide the Wine desktop display-driver bridge that creates the service
-  desktop and its shared session object from a Jasper display surface.
-- Require a literal `D3D11_WSI_PROBE_OK ... present=1` serial transcript.
-- Require `exit_zero=true`, `resources=true` and `failed=0`.
 - Add visible desktop input/focus and resize/revoke coverage.
 - Keep physical GPU, display and Pixel 6a acceptance separate.
