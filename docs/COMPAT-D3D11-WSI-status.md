@@ -41,9 +41,32 @@ The source/static checker is part of CI. Binary compilation requires
 `x86_64-w64-mingw32-gcc`; it fails explicitly with exit status 69 when the
 toolchain is absent.
 
+## Current diagnostic boundary
+
+The fixture binds directly to `__wineservice_winstation` and dynamically loads
+`d3d11.dll` after that binding. The Wine profile disables explorer launch and
+tracks `uxtheme.dll` as part of the tested module closure. This isolates WSI
+from the earlier explorer PE relocation fault.
+
+The guest now proceeds through both the D3D11 import closure and `uxtheme.dll`,
+but Wine still cannot create the service-desktop top-level window:
+
+```text
+D3D11_WSI_DESKTOP service=true
+get_desktop_window failed to create desktop window
+NtUserRegisterClassExWOW Failed to get shared session object for window class
+D3D11_WSI_PROBE_FAIL stage=register-window-class
+```
+
+The failure is before `CreateSwapChainForHwnd`; it is not yet a DXVK, Vulkan
+surface or Present semantic verdict. Evidence:
+`evidence/compat-wine-wsi-r106/README.md`.
+
 ## Remaining gates
 
 - Run the binary through the fixed Wine 11.22/DXVK/lavapipe Jasper staging root.
+- Provide the Wine desktop display-driver bridge that creates the service
+  desktop and its shared session object from a Jasper display surface.
 - Require a literal `D3D11_WSI_PROBE_OK ... present=1` serial transcript.
 - Require `exit_zero=true`, `resources=true` and `failed=0`.
 - Add visible desktop input/focus and resize/revoke coverage.

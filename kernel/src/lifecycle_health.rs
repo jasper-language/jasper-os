@@ -1778,7 +1778,7 @@ fn execute_root_dynamic_programs(
                     b"WINEDEBUG=+module",
                     b"WINEDLLPATH=/opt/wine-devel/lib/wine/x86_64-windows:/opt/wine-devel/lib/wine/x86_64-unix",
                     b"WINEDLLDIR0=/opt/wine-devel/lib/wine",
-                    b"WINEDLLOVERRIDES=d3d11=n,b;dxgi=n,b;winemenubuilder.exe=d;mscoree=d;mshtml=d",
+                    b"WINEDLLOVERRIDES=d3d11=n,b;dxgi=n,b;explorer.exe=d;winemenubuilder.exe=d;mscoree=d;mshtml=d",
                     b"LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/opt/wine-devel/lib/wine/x86_64-unix",
                     b"LANG=C.UTF-8",
                     b"VK_DRIVER_FILES=/usr/lib/x86_64-linux-gnu/lvp_icd.json",

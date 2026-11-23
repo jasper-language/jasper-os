@@ -9,7 +9,7 @@ Windows x86-64 PE. It is not a Jasper guest or physical GPU result.
 
 ```text
 container=debian:bookworm-slim
-compiler=x86_64-w64-mingw32-gcc from Debian bookworm mingw-w64
+compiler=x86_64-w64-mingw32-gcc-posix 13
 command=bash scripts/build-d3d11-wsi-probe.sh
 ```
 
@@ -18,8 +18,8 @@ command=bash scripts/build-d3d11-wsi-probe.sh
 ```text
 target/windows/d3d11-wsi-probe.exe:
   PE32+ executable (GUI) x86-64
-bytes=659156
-sha256=22cbfb78baf265730235bbba58bf56f5fcaa519309a9f85a4835b926014c2138
+bytes=928842
+sha256=4fd941c32312594a1986ed121ef56765eae8732a575bcb6070591fe78ea32779
 ```
 
 The fixture was built with `--disable-dynamicbase` because Jasper's current

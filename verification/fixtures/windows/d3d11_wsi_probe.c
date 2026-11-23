@@ -36,6 +36,17 @@ static void pump_messages(void)
 
 static int run_probe(void)
 {
+    typedef HRESULT (WINAPI *CreateDeviceFn)(
+        IDXGIAdapter *,
+        D3D_DRIVER_TYPE,
+        HMODULE,
+        UINT,
+        const D3D_FEATURE_LEVEL *,
+        UINT,
+        UINT,
+        ID3D11Device **,
+        D3D_FEATURE_LEVEL *,
+        ID3D11DeviceContext **);
     static const WCHAR class_name[] = L"JasperD3D11WsiProbe";
     static const WCHAR window_name[] = L"Jasper D3D11 WSI Probe";
     DXGI_SWAP_CHAIN_DESC1 swap_desc = {0};
@@ -51,6 +62,8 @@ static int run_probe(void)
     ID3D11Texture2D *backbuffer = NULL;
     ID3D11Texture2D *staging = NULL;
     ID3D11Device *device = NULL;
+    HMODULE d3d11_module = NULL;
+    CreateDeviceFn create_device = NULL;
     HINSTANCE instance = GetModuleHandleW(NULL);
     const FLOAT clear_color[4] = {0.125f, 0.25f, 0.5f, 1.0f};
     const unsigned char *pixel;
@@ -95,7 +108,19 @@ static int run_probe(void)
     pump_messages();
 
     stage = "create-device";
-    result = D3D11CreateDevice(
+    d3d11_module = LoadLibraryW(L"d3d11.dll");
+    if (!d3d11_module) {
+        result = HRESULT_FROM_WIN32(GetLastError());
+        goto out;
+    }
+    create_device = (CreateDeviceFn)(void *)GetProcAddress(
+        d3d11_module, "D3D11CreateDevice");
+    if (!create_device) {
+        result = HRESULT_FROM_WIN32(GetLastError());
+        stage = "resolve-d3d11";
+        goto out;
+    }
+    result = create_device(
         NULL,
         D3D_DRIVER_TYPE_HARDWARE,
         NULL,
@@ -212,73 +237,62 @@ out:
     if (device) ID3D11Device_Release(device);
     if (window) DestroyWindow(window);
     if (class_atom) UnregisterClassW(class_name, instance);
+    if (d3d11_module) FreeLibrary(d3d11_module);
 
     if (SUCCEEDED(result)) return 0;
     return fail(stage, result);
 }
 
 /*
- * Run on Wine's service desktop so this probe exercises win32u and a real
- * HWND/swapchain without requiring explorer.exe or an X11/Wayland launcher.
+ * Bind the current process and thread to Wine's service window station before
+ * creating any user objects. Wine handles this desktop without launching
+ * explorer.exe, while still exercising the real win32u HWND path.
  */
 static int run_on_service_desktop(void)
 {
-    STARTUPINFOW startup = {0};
-    PROCESS_INFORMATION process = {0};
-    WCHAR module[MAX_PATH];
-    WCHAR command[MAX_PATH + 32];
-    HANDLE standard_handles[3];
-    DWORD exit_code = 1;
+    static const WCHAR station_name[] = L"__wineservice_winstation";
+    static const WCHAR desktop_name[] = L"Default";
+    HWINSTA station;
+    HDESK desktop;
+    DWORD error;
 
-    if (!GetModuleFileNameW(NULL, module, ARRAYSIZE(module))) {
-        return fail("locate-self", HRESULT_FROM_WIN32(GetLastError()));
+    station = CreateWindowStationW(station_name, 0, WINSTA_ALL_ACCESS, NULL);
+    if (!station && GetLastError() == ERROR_OBJECT_ALREADY_EXISTS) {
+        station = OpenWindowStationW(station_name, FALSE, WINSTA_ALL_ACCESS);
     }
-    if (swprintf(command, ARRAYSIZE(command), L"\"%ls\" --service-child", module) < 0) {
-        return fail("build-service-command",
-                    HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER));
-    }
-
-    standard_handles[0] = GetStdHandle(STD_INPUT_HANDLE);
-    standard_handles[1] = GetStdHandle(STD_OUTPUT_HANDLE);
-    standard_handles[2] = GetStdHandle(STD_ERROR_HANDLE);
-    for (size_t i = 0; i < ARRAYSIZE(standard_handles); i++) {
-        if (standard_handles[i] && standard_handles[i] != INVALID_HANDLE_VALUE) {
-            SetHandleInformation(
-                standard_handles[i], HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
-        }
-    }
-
-    startup.cb = sizeof(startup);
-    startup.dwFlags = STARTF_USESTDHANDLES;
-    startup.hStdInput = standard_handles[0];
-    startup.hStdOutput = standard_handles[1];
-    startup.hStdError = standard_handles[2];
-    startup.lpDesktop = L"__wineservice_winstation\\Default";
-
-    if (!CreateProcessW(
-            NULL,
-            command,
-            NULL,
-            NULL,
-            TRUE,
-            0,
-            NULL,
-            NULL,
-            &startup,
-            &process)) {
-        return fail("spawn-service-child",
+    if (!station) {
+        return fail("open-service-winstation",
                     HRESULT_FROM_WIN32(GetLastError()));
     }
-    WaitForSingleObject(process.hProcess, INFINITE);
-    GetExitCodeProcess(process.hProcess, &exit_code);
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
-    return exit_code == 0 ? 0 : 1;
+    if (!SetProcessWindowStation(station)) {
+        error = GetLastError();
+        CloseHandle(station);
+        return fail("set-service-winstation", HRESULT_FROM_WIN32(error));
+    }
+    CloseHandle(station);
+
+    desktop = CreateDesktopW(desktop_name, NULL, NULL, 0, GENERIC_ALL, NULL);
+    if (!desktop && GetLastError() == ERROR_OBJECT_ALREADY_EXISTS) {
+        desktop = OpenDesktopW(desktop_name, 0, FALSE, GENERIC_ALL);
+    }
+    if (!desktop) {
+        return fail("open-service-desktop",
+                    HRESULT_FROM_WIN32(GetLastError()));
+    }
+    if (!SetThreadDesktop(desktop)) {
+        error = GetLastError();
+        CloseHandle(desktop);
+        return fail("set-service-desktop", HRESULT_FROM_WIN32(error));
+    }
+    CloseHandle(desktop);
+
+    printf("D3D11_WSI_DESKTOP service=true\n");
+    return run_probe();
 }
 
 int main(int argc, char **argv)
 {
+    (void)argv;
     if (argc == 1) return run_on_service_desktop();
-    if (argc == 2 && !strcmp(argv[1], "--service-child")) return run_probe();
     return fail("arguments", E_INVALIDARG);
 }

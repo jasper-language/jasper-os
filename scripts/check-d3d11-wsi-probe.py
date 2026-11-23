@@ -38,13 +38,19 @@ def require(condition: bool, message: str) -> None:
 def validate_source(source: str) -> None:
     required = (
         "CreateWindowExW(",
-        "D3D11CreateDevice(",
+        "LoadLibraryW(L\"d3d11.dll\")",
+        "GetProcAddress(",
         "IDXGIFactory2_CreateSwapChainForHwnd(",
         "IDXGISwapChain1_GetBuffer(",
         "ClearRenderTargetView(",
         "IDXGISwapChain1_Present(",
         "result != S_OK",
-        "__wineservice_winstation",
+        "OpenWindowStationW(",
+        "CreateWindowStationW(",
+        "SetProcessWindowStation(",
+        "OpenDesktopW(",
+        "CreateDesktopW(",
+        "SetThreadDesktop(",
     )
     for token in required:
         require(token in source, f"required WSI operation is missing: {token}")
@@ -70,10 +76,10 @@ def validate_manifest(manifest: dict[str, object]) -> None:
     require(manifest.get("jasper_guest_passed") is False, "Jasper guest pass is not established")
     require(manifest.get("physical_gpu_passed") is False, "physical GPU pass is not established")
     require(manifest.get("source") == SOURCE.relative_to(ROOT).as_posix(), "source path mismatch")
-    require(manifest.get("binary_bytes") == 659156, "reference binary size mismatch")
+    require(manifest.get("binary_bytes") == 928842, "reference binary size mismatch")
     require(
         manifest.get("binary_sha256")
-        == "22cbfb78baf265730235bbba58bf56f5fcaa519309a9f85a4835b926014c2138",
+        == "4fd941c32312594a1986ed121ef56765eae8732a575bcb6070591fe78ea32779",
         "reference binary digest mismatch",
     )
     evidence = ROOT / str(manifest.get("build_evidence", ""))
@@ -136,10 +142,10 @@ def validate_manifest(manifest: dict[str, object]) -> None:
 def validate_binary(path: Path, *, enforce_reference: bool = True) -> None:
     data = path.read_bytes()
     if enforce_reference:
-        require(len(data) == 659156, f"reference PE size mismatch: {len(data)}")
+        require(len(data) == 928842, f"reference PE size mismatch: {len(data)}")
         require(
             hashlib.sha256(data).hexdigest()
-            == "22cbfb78baf265730235bbba58bf56f5fcaa519309a9f85a4835b926014c2138",
+            == "4fd941c32312594a1986ed121ef56765eae8732a575bcb6070591fe78ea32779",
             "reference PE digest mismatch",
         )
     require(data[:2] == b"MZ", "artifact is not a PE image")

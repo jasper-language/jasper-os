@@ -152,7 +152,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         )
 
     final_files = manifest.get("final_files", {})
-    require(len(final_files) == 16, "final file set is incomplete")
+    require(len(final_files) == 17, "final file set is incomplete")
     for path, digest in final_files.items():
         _validate_relative_path(path, "final file")
         require(isinstance(digest, str) and len(digest) == 64, f"{path} digest missing")

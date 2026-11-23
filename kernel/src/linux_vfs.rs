@@ -227,6 +227,7 @@ pub(crate) const ANDROID_FILE_PATHS: &[&[u8]] = &[
     b"/opt/wine-devel/lib/wine/x86_64-windows/shlwapi.dll",
     b"/opt/wine-devel/lib/wine/x86_64-windows/ucrtbase.dll",
     b"/opt/wine-devel/lib/wine/x86_64-windows/user32.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/uxtheme.dll",
     b"/opt/wine-devel/lib/wine/x86_64-windows/version.dll",
     b"/opt/wine-devel/lib/wine/x86_64-windows/vulkan-1.dll",
     b"/opt/wine-devel/lib/wine/x86_64-windows/win32u.dll",
@@ -1904,6 +1905,10 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         DirEntry {
             name: b"user32.dll",
             node: Node::File(FileId::AndroidFile(165)),
+        },
+        DirEntry {
+            name: b"uxtheme.dll",
+            node: Node::File(FileId::AndroidFile(214)),
         },
         DirEntry {
             name: b"version.dll",
