@@ -26,7 +26,7 @@ trap 'rm -f "$temporary"' EXIT
   -Wall \
   -Wextra \
   -Werror \
-  -Wl,--disable-dynamicbase \
+  -Wl,--disable-dynamicbase,--no-insert-timestamp \
   -o "$temporary" \
   "$source_file" \
   -ld3d11 \

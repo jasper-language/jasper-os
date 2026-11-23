@@ -91,8 +91,8 @@
     "d3d12-probe": {
       "version": "jasper-os-9db1700-minw64",
       "bytes": 354689,
-      "sha256": "95b5bf0e1531b18a300d13c92972aa52a4d8d6c78b99f9c8ee5fbf0aa7485634",
-      "build": "x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -Wl,--disable-dynamicbase -o d3d12-probe.exe verification/fixtures/windows/d3d12_probe.c -ld3d12 -ldxguid -luuid",
+      "sha256": "40a2b68edbc8b5e1cf272164e66f6fe2af664516c673671f6ca9c4f337eca51d",
+      "build": "x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -Wl,--disable-dynamicbase,--no-insert-timestamp -o d3d12-probe.exe verification/fixtures/windows/d3d12_probe.c -ld3d12 -ldxguid -luuid",
       "license": "Apache-2.0"
     },
     "d3d11-wsi-probe-source": {
@@ -104,8 +104,8 @@
     "d3d11-wsi-probe": {
       "version": "jasper-os-c148400-minw64",
       "bytes": 659156,
-      "sha256": "cbd9bb9aa7298fdd90d32abdc25df21ea98452a198fbe20e49bc088dc153da11",
-      "build": "x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -Wl,--disable-dynamicbase -o d3d11-wsi-probe.exe verification/fixtures/windows/d3d11_wsi_probe.c -ld3d11 -ldxgi -lole32 -luuid",
+      "sha256": "22cbfb78baf265730235bbba58bf56f5fcaa519309a9f85a4835b926014c2138",
+      "build": "x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -Wl,--disable-dynamicbase,--no-insert-timestamp -o d3d11-wsi-probe.exe verification/fixtures/windows/d3d11_wsi_probe.c -ld3d11 -ldxgi -lole32 -luuid",
       "license": "Apache-2.0"
     },
     "vkd3d-proton": {
@@ -128,9 +128,10 @@
     "opt/wine-devel/lib/wine/x86_64-windows/d3d11-probe.exe": "16a255dc0124be7ffde1fc27fedf2f0a608ca1a4f52a8a077feb2e81ed682b96",
     "opt/wine-devel/lib/wine/x86_64-windows/d3d12.dll": "502694a5fd5e06381ef2cdb33359c5948b6a012938902ddc9e9b381841bc0ce7",
     "opt/wine-devel/lib/wine/x86_64-windows/d3d12core.dll": "0dfd690a39ef8361ca3b64e9fd8e945b27d2c568dac5dc0dce1a45abf65914cc",
-    "opt/wine-devel/lib/wine/x86_64-windows/d3d12-probe.exe": "95b5bf0e1531b18a300d13c92972aa52a4d8d6c78b99f9c8ee5fbf0aa7485634",
-    "opt/wine-devel/lib/wine/x86_64-windows/d3d11-wsi-probe.exe": "cbd9bb9aa7298fdd90d32abdc25df21ea98452a198fbe20e49bc088dc153da11",
+    "opt/wine-devel/lib/wine/x86_64-windows/d3d12-probe.exe": "40a2b68edbc8b5e1cf272164e66f6fe2af664516c673671f6ca9c4f337eca51d",
+    "opt/wine-devel/lib/wine/x86_64-windows/d3d11-wsi-probe.exe": "22cbfb78baf265730235bbba58bf56f5fcaa519309a9f85a4835b926014c2138",
     "usr/lib/x86_64-linux-gnu/libvulkan_lvp.so": "d9a8bc5d4b3ec0e065562d362541c2a4cb3f3d6208ac715f7ff1dcf01289d164",
+    "usr/lib/x86_64-linux-gnu/libvulkan.so.1": "def4af45e9e5784cf65eaaaa289530a5c73546b01015da4c0920ef0a144fe189",
     "usr/lib/x86_64-linux-gnu/lvp_icd.json": "8c55cd4279a21911e97beff1bd2bd30a779ac5ca390ccfb241ef317f8bb0b3fb",
     "usr/lib/x86_64-linux-gnu/libLLVM.so.21.1": "12dca1fc2d9f5d4ff35315fc2aa3a97b615b41ec6a71d3ce545efb62c075d902"
   }

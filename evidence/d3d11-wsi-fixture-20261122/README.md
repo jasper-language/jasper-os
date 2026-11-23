@@ -19,11 +19,12 @@ command=bash scripts/build-d3d11-wsi-probe.sh
 target/windows/d3d11-wsi-probe.exe:
   PE32+ executable (GUI) x86-64
 bytes=659156
-sha256=cbd9bb9aa7298fdd90d32abdc25df21ea98452a198fbe20e49bc088dc153da11
+sha256=22cbfb78baf265730235bbba58bf56f5fcaa519309a9f85a4835b926014c2138
 ```
 
-The fixture was built with `--disable-dynamicbase` only because Jasper's
-current bounded user window does not cover Wine's randomized PE base.
+The fixture was built with `--disable-dynamicbase` because Jasper's current
+bounded user window does not cover Wine's randomized PE base, and
+`--no-insert-timestamp` so the pinned binary digest is reproducible.
 
 No `D3D11_WSI_PROBE_OK` marker has been captured in Jasper. Swapchain
 presentation, input, resource reclamation, physical GPU and Pixel 6a remain

@@ -19,11 +19,12 @@ command=bash scripts/build-d3d12-probe.sh
 ```text
 target/compat-d3d12/d3d12-probe.exe:
   PE32+ executable (console) x86-64, for MS Windows, 19 sections
-sha256=95b5bf0e1531b18a300d13c92972aa52a4d8d6c78b99f9c8ee5fbf0aa7485634
+sha256=40a2b68edbc8b5e1cf272164e66f6fe2af664516c673671f6ca9c4f337eca51d
 ```
 
-The build uses `--disable-dynamicbase` only because Jasper's current bounded
-user window does not cover Wine's randomized PE base.
+The build uses `--disable-dynamicbase` because Jasper's current bounded user
+window does not cover Wine's randomized PE base, and
+`--no-insert-timestamp` so the pinned binary digest is reproducible.
 
 ## VKD3D-Proton baseline
 

@@ -32,6 +32,10 @@ D3D11_WSI_PROBE_SOURCE = REPO / "verification/fixtures/windows/d3d11_wsi_probe.c
 DEFAULT_OUTPUT = REPO / "target/wine-d3d-staging"
 MESA_FILES = (
     (
+        Path("/usr/lib/x86_64-linux-gnu/libvulkan.so.1"),
+        Path("usr/lib/x86_64-linux-gnu/libvulkan.so.1"),
+    ),
+    (
         Path("/usr/lib/x86_64-linux-gnu/libvulkan_lvp.so"),
         Path("usr/lib/x86_64-linux-gnu/libvulkan_lvp.so"),
     ),
@@ -148,7 +152,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         )
 
     final_files = manifest.get("final_files", {})
-    require(len(final_files) == 15, "final file set is incomplete")
+    require(len(final_files) == 16, "final file set is incomplete")
     for path, digest in final_files.items():
         _validate_relative_path(path, "final file")
         require(isinstance(digest, str) and len(digest) == 64, f"{path} digest missing")

@@ -73,7 +73,7 @@ def validate_manifest(manifest: dict[str, object]) -> None:
     require(manifest.get("binary_bytes") == 659156, "reference binary size mismatch")
     require(
         manifest.get("binary_sha256")
-        == "cbd9bb9aa7298fdd90d32abdc25df21ea98452a198fbe20e49bc088dc153da11",
+        == "22cbfb78baf265730235bbba58bf56f5fcaa519309a9f85a4835b926014c2138",
         "reference binary digest mismatch",
     )
     evidence = ROOT / str(manifest.get("build_evidence", ""))
@@ -139,7 +139,7 @@ def validate_binary(path: Path, *, enforce_reference: bool = True) -> None:
         require(len(data) == 659156, f"reference PE size mismatch: {len(data)}")
         require(
             hashlib.sha256(data).hexdigest()
-            == "cbd9bb9aa7298fdd90d32abdc25df21ea98452a198fbe20e49bc088dc153da11",
+            == "22cbfb78baf265730235bbba58bf56f5fcaa519309a9f85a4835b926014c2138",
             "reference PE digest mismatch",
         )
     require(data[:2] == b"MZ", "artifact is not a PE image")

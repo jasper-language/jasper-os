@@ -1,6 +1,6 @@
 # COMPAT-D3D-1 D3D12 状态
 
-更新日期：2026-11-22。
+更新日期：2026-11-23。
 
 状态：**core-passed；D3D12 fixture 已建立，Jasper 运行时尚未通过。**
 
@@ -50,6 +50,21 @@ ISSUE21_UEFI_MODE=compat-wine-d3d12
 2026-11-22 已在隔离 Debian bookworm 容器中使用 MinGW-w64 GCC 12.2 实际交叉
 编译，产物为 x86-64 PE32+ console executable。该结果仅证明 fixture 可构建。
 证据见 `evidence/compat-d3d12-fixture-20261122/README.md`。
+
+2026-11-23 的复现收敛修复：
+
+- staging 最终文件清单加入固定版本的 `libvulkan.so.1`。此前只安装 lavapipe
+  ICD 和 ICD JSON，Wine 的 `vulkan_init_once` 会直接报
+  `Failed to load libvulkan.so.1`；
+- D3D12/D3D11 WSI probe 使用 `--no-insert-timestamp` 构建，消除 PE 时间戳
+  导致的不可复现摘要漂移；
+- D3D12 probe 使用 `--service-child` 直接执行离屏路径，避免父进程服务桌面
+  初始化成为前置失败。
+
+最新诊断结果仍为失败：加载 `d3d12.dll`、`d3d12core.dll`、DXVK 和 lavapipe
+后，进程停在 DXVK/Vulkan 设备初始化，触发 12,076-tick deadline，退出码 124。
+这发生在有意义的 VKD3D API 语义验收之前，不能据此宣称 Linux ABI 语义不一致。
+证据见 `evidence/compat-wine-d3d12-r78/README.md`。
 
 ## 当前证据边界
 

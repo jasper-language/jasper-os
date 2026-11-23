@@ -13,7 +13,7 @@ if ! command -v "$CC" >/dev/null 2>&1; then
 fi
 mkdir -p "$(dirname "$OUT")"
 "$CC" -O2 -Wall -Wextra -Werror \
-    -Wl,--disable-dynamicbase \
+    -Wl,--disable-dynamicbase,--no-insert-timestamp \
     -o "$OUT" "$SOURCE" -ld3d12 -ldxguid -luuid
 file "$OUT"
 sha256sum "$OUT"
