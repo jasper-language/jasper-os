@@ -69,6 +69,12 @@ D3D12_PROBE_OK pixel=32,64,128,255 observed=32,64,128,255 row_pitch=256
 
 该结果证明 fixture、Wine/DXVK/VKD3D 和 lavapipe 在宿主控制路径上可用。
 
+offscreen probe 的启动桌面修正为 Wine 当前桌面，不再强制首次 explorer
+服务桌面。宿主仍通过；Jasper guest 在 2 GiB 和 4 GiB 下都越过 explorer
+初始化，但 `D3D12CreateDevice` 仍失败为 `E_OUTOFMEMORY`。因此后续问题已经
+收敛到 guest 内 D3D12/Vulkan 设备资源准入，而不是服务桌面或 VKD3D API
+语义。
+
 Jasper guest 仍为失败：在直接 service-child 诊断轮次中，加载
 `d3d12.dll`、`d3d12core.dll`、DXVK 和 lavapipe 后，进程停在 DXVK/Vulkan
 设备初始化，触发 12,076-tick deadline，退出码 124。该诊断发生在有意义的

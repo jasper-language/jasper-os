@@ -258,9 +258,10 @@ static int run_probe(void)
 }
 
 /*
- * Execute on Wine's service desktop so the offscreen probe does not require
- * explorer.exe or X11/Wayland. This is still a real Wine window station and
- * win32u/driver initialization path.
+ * Run the offscreen probe on Wine's current desktop. The probe does not
+ * require explorer.exe, X11 or Wayland; forcing the service desktop would
+ * additionally exercise the first explorer launch and obscure device-only
+ * failures.
  */
 static int run_on_service_desktop(void)
 {
@@ -293,7 +294,7 @@ static int run_on_service_desktop(void)
     startup.hStdInput = standard_handles[0];
     startup.hStdOutput = standard_handles[1];
     startup.hStdError = standard_handles[2];
-    startup.lpDesktop = L"__wineservice_winstation\\Default";
+    startup.lpDesktop = NULL;
 
     if (!CreateProcessW(
             NULL,
