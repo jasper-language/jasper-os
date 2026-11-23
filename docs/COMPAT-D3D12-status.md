@@ -58,12 +58,21 @@ ISSUE21_UEFI_MODE=compat-wine-d3d12
   `Failed to load libvulkan.so.1`；
 - D3D12/D3D11 WSI probe 使用 `--no-insert-timestamp` 构建，消除 PE 时间戳
   导致的不可复现摘要漂移；
-- D3D12 probe 使用 `--service-child` 直接执行离屏路径，避免父进程服务桌面
-  初始化成为前置失败。
+- D3D12 probe 的宿主对照和 guest 诊断轮次使用 `--service-child` 直接执行
+  离屏路径，以便把图形栈问题与服务桌面初始化问题分开。
 
-最新诊断结果仍为失败：加载 `d3d12.dll`、`d3d12core.dll`、DXVK 和 lavapipe
-后，进程停在 DXVK/Vulkan 设备初始化，触发 12,076-tick deadline，退出码 124。
-这发生在有意义的 VKD3D API 语义验收之前，不能据此宣称 Linux ABI 语义不一致。
+同日的宿主对照运行修复了 probe 的 allocator 使用顺序，得到：
+
+```text
+D3D12_PROBE_OK pixel=32,64,128,255 observed=32,64,128,255 row_pitch=256
+```
+
+该结果证明 fixture、Wine/DXVK/VKD3D 和 lavapipe 在宿主控制路径上可用。
+
+Jasper guest 仍为失败：在直接 service-child 诊断轮次中，加载
+`d3d12.dll`、`d3d12core.dll`、DXVK 和 lavapipe 后，进程停在 DXVK/Vulkan
+设备初始化，触发 12,076-tick deadline，退出码 124。该诊断发生在有意义的
+VKD3D API 语义验收之前，不能据此宣称 Linux ABI 语义不一致。
 证据见 `evidence/compat-wine-d3d12-r78/README.md`。
 
 ## 当前证据边界

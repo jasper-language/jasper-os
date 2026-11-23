@@ -19,12 +19,22 @@ command=bash scripts/build-d3d12-probe.sh
 ```text
 target/compat-d3d12/d3d12-probe.exe:
   PE32+ executable (console) x86-64, for MS Windows, 19 sections
-sha256=40a2b68edbc8b5e1cf272164e66f6fe2af664516c673671f6ca9c4f337eca51d
+sha256=fb2c62e36178a1a2c7a2e2094328e4d7ab4463a273029c6934940832b80e7f77
 ```
 
 The build uses `--disable-dynamicbase` because Jasper's current bounded user
 window does not cover Wine's randomized PE base, and
 `--no-insert-timestamp` so the pinned binary digest is reproducible.
+
+The host control run now completes after closing the command list created by
+`CreateCommandList` before resetting its allocator:
+
+```text
+D3D12_PROBE_OK pixel=32,64,128,255 observed=32,64,128,255 row_pitch=256
+```
+
+This proves the fixture and the Wine/DXVK/VKD3D/lavapipe host path. It does not
+prove Jasper guest execution or physical GPU/WSI acceptance.
 
 ## VKD3D-Proton baseline
 

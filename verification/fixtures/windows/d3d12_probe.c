@@ -9,7 +9,8 @@
 /*
  * Verification build:
  *   x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror \
- *     -Wl,--disable-dynamicbase -o d3d12-probe.exe d3d12_probe.c \
+ *     -Wl,--disable-dynamicbase,--no-insert-timestamp \
+ *     -o d3d12-probe.exe d3d12_probe.c \
  *     -ld3d12 -ldxguid -luuid
  *
  * The fixed image base is required only by the current bounded Jasper user
@@ -105,6 +106,8 @@ static int run_probe(void)
         &IID_ID3D12GraphicsCommandList,
         (void **)&list);
     if (FAILED(result)) return fail("create-command-list", result);
+    result = ID3D12GraphicsCommandList_Close(list);
+    if (FAILED(result)) return fail("close-created-command-list", result);
 
     default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
     default_heap.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
