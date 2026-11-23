@@ -75,6 +75,19 @@ Jasper guest 仍为失败：在直接 service-child 诊断轮次中，加载
 VKD3D API 语义验收之前，不能据此宣称 Linux ABI 语义不一致。
 证据见 `evidence/compat-wine-d3d12-r78/README.md`。
 
+服务桌面路径的 guest 日志进一步定位到 PE 重定位不一致：
+
+```text
+explorer.exe: dynamic base 140000000 -> 7ff600000000 mapped at 0x300000000
+[JSR-USER] task.faulted ... ip=0x7ff600011300 addr=0x7ff600011300
+get_desktop_window failed to create desktop window
+```
+
+即 `explorer.exe` 的实际映射基址是 `0x300000000`，但服务桌面线程仍从原首选
+基址下的入口 `0x7ff600011300` 启动。该失败发生在 PE 重定位/服务桌面入口一致性
+验收，而不是 VKD3D 的设备语义；在修复并把错误映射变为 fail-closed 前，D3D12
+和可见桌面都不能标为完成。
+
 ## 当前证据边界
 
 已通过的是 D3D11 离屏核心：
