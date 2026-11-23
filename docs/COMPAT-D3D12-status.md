@@ -75,6 +75,12 @@ offscreen probe 的启动桌面修正为 Wine 当前桌面，不再强制首次 
 收敛到 guest 内 D3D12/Vulkan 设备资源准入，而不是服务桌面或 VKD3D API
 语义。
 
+后续 r109 在 D3D12 验证环境中禁用 explorer，并把虚拟文件物化从逐页加锁
+写改为有界批量写。本轮不再得到先前的 `E_OUTOFMEMORY`，但 Wine 在
+headless desktop fallback 后停在等待路径，最终触发 12,076-tick deadline。
+由于没有 `D3D12_PROBE_OK` 或 `D3D12_PROBE_FAIL`，本轮仍不是 VKD3D/Vulkan
+语义结论。证据见 `evidence/compat-wine-d3d12-r109/README.md`。
+
 Jasper guest 仍为失败：在直接 service-child 诊断轮次中，加载
 `d3d12.dll`、`d3d12core.dll`、DXVK 和 lavapipe 后，进程停在 DXVK/Vulkan
 设备初始化，触发 12,076-tick deadline，退出码 124。该诊断发生在有意义的

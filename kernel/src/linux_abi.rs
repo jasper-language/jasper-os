@@ -5749,6 +5749,7 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
     const PROT_READ: u64 = 0x1;
     const PROT_WRITE: u64 = 0x2;
     const PROT_EXEC: u64 = 0x4;
+    const FILE_MAP_COPY_BYTES: usize = 256 * 1024; // JASPER-HARDCODE-REVIEW: issue=35 source=linux-mmap-materialize-chunk reason=bounded-bulk-file-materialization
 
     #[cfg(feature = "compat-wine-verify")]
     if claim_wine_trace(&WINE_MMAP_TRACE_REMAINING) {
@@ -6342,7 +6343,7 @@ fn linux_mmap(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             let end = source.len().min(offset.saturating_add(copy_bytes));
             let mut copied = 0usize;
             while offset + copied < end {
-                let chunk = (end - offset - copied).min(PAGE as usize);
+                let chunk = (end - offset - copied).min(FILE_MAP_COPY_BYTES);
                 if proc::write(
                     pid,
                     start + copied as u64,
@@ -6799,7 +6800,8 @@ fn linux_mprotect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             #[cfg(any(
                 feature = "android-ecosystem-verify",
                 feature = "android-art-verify",
-                feature = "vulkan-metal2vulkan-verify"
+                feature = "vulkan-metal2vulkan-verify",
+                feature = "compat-wine-d3d12-verify"
             ))]
             crate::kprintln!(
                 "[JSR-ANDROID-MPROTECT] materialize-fail start={} end={} error={:?} free_frames={} usable_frames={} memory_caps={:?}",
@@ -6845,7 +6847,8 @@ fn linux_mprotect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         #[cfg(any(
             feature = "android-ecosystem-verify",
             feature = "android-art-verify",
-            feature = "vulkan-metal2vulkan-verify"
+            feature = "vulkan-metal2vulkan-verify",
+            feature = "compat-wine-d3d12-verify"
         ))]
         crate::kprintln!(
             "[JSR-ANDROID-MPROTECT] protect-fail start={:#x} end={:#x} flags={} error={:?} page_flags={:?} mapping_flags={:?} shared={}",
