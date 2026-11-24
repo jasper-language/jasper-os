@@ -937,6 +937,8 @@ const FULL: &[Step] = &[
     feature = "workload-verify",
     feature = "native-install-abi-verify",
     feature = "update-agent-verify",
+    feature = "terminal-session-verify",
+    feature = "service-info-verify",
     feature = "driver-host-journal-verify",
     feature = "iommu-dma-verify",
 )))]
@@ -2195,6 +2197,83 @@ mod dedicated {
     pub const PLAN: &[&[Step]] = &[PREFIX, SMP_UP, &[PlanItem::Finish(finish)]];
 }
 
+#[cfg(all(
+    feature = "terminal-session-verify",
+    target_arch = "x86_64",
+    not(any(
+        feature = "native-install-list-cli-verify",
+        feature = "native-install-abi-verify",
+        feature = "update-agent-verify",
+        feature = "service-info-verify"
+    ))
+))]
+mod dedicated {
+    use super::*;
+
+    pub const NAME: &str = "native-terminal";
+
+    fn finish(_: &mut BootCtx) {
+        let (state, reclaimed) = crate::first_program::run();
+        kprintln!(
+            "[JSR-PROD] first_program state={:?} reclaimed={}",
+            state,
+            reclaimed
+        );
+        let ok = state == Some(crate::proc::ProcState::Exited { code: 0 }) && reclaimed;
+        exit_on(u64::from(!ok));
+    }
+
+    pub const PLAN: &[&[Step]] = &[
+        PREFIX,
+        &[
+            st(Stage::Space),
+            case("mm-space", Stage::Space, "mm", mm_space),
+            st(Stage::Smp),
+            case("smp-checks", Stage::Smp, "smp", smp_checks),
+        ],
+        &[
+            st(Stage::HighRes),
+            st(Stage::IdleTick),
+            st(Stage::UserRuntime),
+            PlanItem::Finish(finish),
+        ],
+    ];
+}
+
+#[cfg(all(feature = "service-info-verify", target_arch = "x86_64"))]
+mod dedicated {
+    use super::*;
+
+    pub const NAME: &str = "service-info";
+
+    fn finish(_: &mut BootCtx) {
+        let (state, reclaimed) = crate::first_program::run();
+        kprintln!(
+            "[JSR-PROD] first_program state={:?} reclaimed={}",
+            state,
+            reclaimed
+        );
+        let ok = state == Some(crate::proc::ProcState::Exited { code: 0 }) && reclaimed;
+        exit_on(u64::from(!ok));
+    }
+
+    pub const PLAN: &[&[Step]] = &[
+        PREFIX,
+        &[
+            st(Stage::Space),
+            case("mm-space", Stage::Space, "mm", mm_space),
+            st(Stage::Smp),
+            case("smp-checks", Stage::Smp, "smp", smp_checks),
+        ],
+        &[
+            st(Stage::HighRes),
+            st(Stage::IdleTick),
+            st(Stage::UserRuntime),
+            PlanItem::Finish(finish),
+        ],
+    ];
+}
+
 #[cfg(all(feature = "update-agent-verify", target_arch = "x86_64"))]
 mod dedicated {
     use super::*;
@@ -2483,6 +2562,8 @@ mod dedicated {
     feature = "workload-verify",
     feature = "native-install-abi-verify",
     feature = "update-agent-verify",
+    feature = "terminal-session-verify",
+    feature = "service-info-verify",
     feature = "driver-host-journal-verify",
     feature = "iommu-dma-verify",
 ))]

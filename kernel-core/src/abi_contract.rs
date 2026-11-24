@@ -21,6 +21,7 @@ use crate::extension_abi;
 use crate::memory_abi;
 use crate::ring_abi;
 use crate::rt_abi;
+use crate::service_protocol;
 use crate::spawn_abi;
 use crate::subscription_abi;
 use crate::syscall_set;
@@ -903,7 +904,7 @@ pub const LAYOUTS: &[LayoutContract] = &[
     LayoutContract {
         name: "extension.service_header",
         version: 1,
-        size: extension_abi::SERVICE_HEADER_BYTES as u32,
+        size: service_protocol::HEADER_BYTES as u32,
         magic: 0,
         fields: EXT_SERVICE_FIELDS,
     },

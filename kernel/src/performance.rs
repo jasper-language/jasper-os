@@ -37,6 +37,12 @@ fn finish(ctx: &mut BootCtx) {
         emit(line.as_str());
         bench_demo::publish_results(failed, timing_failed);
         arch::irq_enable();
+        #[cfg(feature = "bench-exit")]
+        if failed == 0 {
+            arch::exit_emulator(ExitStatus::Success);
+        } else {
+            arch::exit_emulator(ExitStatus::Failure);
+        }
         let mut ticks = 0u64;
         let mut pet_countdown = 0u32;
         loop {
@@ -80,6 +86,12 @@ fn finish(ctx: &mut BootCtx) {
         emit(line.as_str());
         bench_demo::publish_results(failed, timing_failed);
         arch::irq_enable();
+        #[cfg(feature = "bench-exit")]
+        if failed == 0 {
+            arch::exit_emulator(ExitStatus::Success);
+        } else {
+            arch::exit_emulator(ExitStatus::Failure);
+        }
         let mut ticks = 0u64;
         let mut pet_countdown = 0u32;
         loop {

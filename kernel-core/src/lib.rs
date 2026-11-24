@@ -245,6 +245,9 @@ pub mod event_wait;
 pub mod file_event;
 
 pub mod extension_abi;
+pub mod service_protocol;
+pub mod clock_contract;
+pub mod service_info;
 
 pub mod cpu_time;
 pub mod cpu_identity;

@@ -50,6 +50,49 @@ for current callers. Wire service IDs are unchanged, and the old name remains
 available as an explicit migration label. This is a naming vertical, not yet an
 independently deployed Info/Process/Module service.
 
+The shared eight-byte `ServiceHeader` wire shape has moved from the historical
+`extension_abi` reservation file to `kernel_core::service_protocol`. Its
+protocol/version/bytes layout is unchanged, and it carries no authority or
+dispatch semantics.
+
+The first independently deployed service vertical is `service.info`:
+
+- `kernel_core::service_info` defines request/response discovery, idempotency
+  identity, protocol/version and bounded response records;
+- `user/infod` is a separate least-capability process receiving only one
+  bootstrap Channel and the process/module read capabilities it needs;
+- `user/infoprobe` exercises discovery, projected process/module counts,
+  replay, deadline failure, malformed-version rejection, request-ID conflict,
+  clean stop/restart and missing-capability denial;
+- the service does not call the legacy `system.info.get` aggregation operation;
+  it projects facts supplied by the existing process and module kernel
+  boundaries, preserving SEC/PEP and avoiding a second registry.
+
+The legacy operations remain registered for current callers. Their eventual
+retirement still requires caller migration and ABI snapshot handling.
+
+The external QEMU/OVMF gate now passes all ten checks:
+
+```text
+[JSR-SERVICE-INFO] describe=true snapshot=true replay=true deadline=true
+protocol=true conflict=true conflict_status=1 restart=true
+denied_capability=true ok=true
+```
+
+Evidence: `evidence/issue60-service-info-20261124-r8`. The test uses a real
+child process, native Channel transport, process/module kernel read
+boundaries, fresh restart, request replay/conflict and a deliberately reduced
+capability set for denial.
+
+## Framework updates incorporated
+
+The latest #24/#61/#77/#82/#84 constraints establish one shared Charset and
+content-revision fact owned by File Provider and interpreted by Globalization.
+Logical directory views, search indexes and application interoperability consume
+that authorized projection; they do not create parallel metadata authorities.
+These constraints will be reused when File Service lands and do not justify new
+kernel Charset, search or application-registry operations.
+
 Run:
 
 ```text

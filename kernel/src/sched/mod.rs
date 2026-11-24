@@ -639,6 +639,12 @@ pub fn leaf_finish_count() -> u32 { scheduler::leaf_finish_count() }
 #[cfg(feature = "krn3-fast-tick-verify")]
 pub fn leaf_worker_finish_count() -> u32 { scheduler::leaf_worker_finish_count() }
 pub fn leaf_local_switch_count() -> u32 { scheduler::leaf_local_switch_count() }
+pub fn completed_switch_count(cpu: usize) -> u64 {
+    scheduler::completed_switch_count(cpu)
+}
+pub fn completed_switch_last(cpu: usize) -> Option<(usize, u64)> {
+    scheduler::completed_switch_last(cpu)
+}
 #[cfg(feature = "krn3-fast-tick-verify")]
 pub fn local_tick_batch_peak(cpu: usize) -> u8 {
     tick_lease(cpu).map_or(0, |lease| lease.lock().peak())

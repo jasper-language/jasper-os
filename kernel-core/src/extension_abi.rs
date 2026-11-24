@@ -35,16 +35,6 @@ impl Segment {
 
 /// Reserved SQE bit. Submission remains unsupported until registered-buffer lifetimes are implemented.
 pub const SQE_REGISTERED_BUFFER: u32 = 1 << 31;
-pub const SERVICE_HEADER_BYTES: usize = 8;
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ServiceHeader { pub protocol: u32, pub version: u16, pub bytes: u16 }
-impl ServiceHeader {
-    pub fn decode(b: &[u8; SERVICE_HEADER_BYTES]) -> Option<Self> {
-        let h = Self { protocol:u32::from_le_bytes(b[..4].try_into().ok()?),
-            version:u16::from_le_bytes(b[4..6].try_into().ok()?), bytes:u16::from_le_bytes(b[6..8].try_into().ok()?) };
-        (h.protocol != 0 && h.version != 0 && h.bytes as usize >= SERVICE_HEADER_BYTES).then_some(h)
-    }
-}
 /// Reserved v2 capability set: version=2, bytes=40, four u64 words, bit index is operation ID.
 /// This wire shape does not authorize any live thread or alter v1's 64-bit entry.
 pub const SYSCALL_SET_V2_BYTES: usize = 40;

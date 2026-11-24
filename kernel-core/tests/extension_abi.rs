@@ -18,9 +18,7 @@ fn segments_preserve_full_handles_and_reject_unknown_or_wrapping_shapes() {
     b[..4].fill(0); b[4]=1; assert!(Segment::decode(&b).is_none());
 }
 #[test]
-fn reserved_service_and_syscall_v2_boundaries() {
-    let mut s=[0u8;8]; s[..4].copy_from_slice(&1u32.to_le_bytes());s[4..6].copy_from_slice(&1u16.to_le_bytes());s[6..8].copy_from_slice(&8u16.to_le_bytes());
-    assert!(ServiceHeader::decode(&s).is_some());s[6]=7;assert!(ServiceHeader::decode(&s).is_none());
+fn reserved_syscall_v2_boundary() {
     let mut b=[0u8;40];b[..4].copy_from_slice(&2u32.to_le_bytes());b[4..8].copy_from_slice(&40u32.to_le_bytes());
     for id in [1usize,63,64,127,128,255] { b[8+id/8] |= 1 << (id%8); }
     let set=SyscallSetV2::decode(&b).unwrap();for id in [1,63,64,127,128,255] { assert!(set.contains(id)); }

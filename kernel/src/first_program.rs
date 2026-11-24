@@ -31,6 +31,9 @@ static USER_INSTALLPROBE: &[u8] = include_bytes!(env!("JSR_USER_INSTALLPROBE"));
 #[cfg(feature = "update-agent-verify")]
 static USER_AGENTPROBE: &[u8] = include_bytes!(env!("JSR_USER_AGENTPROBE"));
 
+#[cfg(feature = "service-info-verify")]
+static USER_INFOPROBE: &[u8] = include_bytes!(env!("JSR_USER_INFOPROBE"));
+
 #[cfg(feature = "native-install-list-cli-verify")]
 static USER_UPDATE_LIST_CLI: &[u8] = include_bytes!(env!("JSR_USER_CLI"));
 
@@ -48,6 +51,10 @@ static USER_CLI: &[u8] = include_bytes!(env!("JSR_USER_CLI"));
 /// 返回生产首程序使用的同一份不可变 ELF 镜像。
 /// Returns the same immutable ELF image used by the production first program.
 pub(crate) fn image() -> &'static [u8] {
+    #[cfg(feature = "service-info-verify")]
+    {
+        return USER_INFOPROBE;
+    }
     #[cfg(feature = "native-install-list-cli-verify")]
     {
         return USER_UPDATE_LIST_CLI;
@@ -85,6 +92,7 @@ pub(crate) fn image() -> &'static [u8] {
         return USER_CLI;
     }
     #[cfg(not(any(
+        feature = "service-info-verify",
         feature = "terminal-session-verify",
         feature = "sandbox-launch-verify",
         feature = "native-install-abi-verify",
@@ -169,6 +177,22 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         abi::SYSTEM_UPDATE_AUDIT_QUERY,
         abi::SYSTEM_INSTALL_UPDATE_LIST,
     ]));
+    #[cfg(feature = "service-info-verify")]
+    let allowed = SyscallSet::of(&[
+        abi::SYSTEM_CONSOLE_WRITE,
+        abi::SYSTEM_ABI_GET,
+        abi::SYSTEM_MEMORY_MAP,
+        abi::SYSTEM_MEMORY_UNMAP,
+        abi::SYSTEM_PROCESS_EXIT,
+        abi::SYSTEM_PROCESS_SPAWN,
+        abi::SYSTEM_PROCESS_WAIT,
+        abi::SYSTEM_PROCESS_LIST,
+        abi::SYSTEM_MODULE_LIST,
+        abi::SYSTEM_HANDLE_CLOSE,
+        abi::SYSTEM_CHANNEL_SEND,
+        abi::SYSTEM_CHANNEL_RECV,
+        abi::SYSTEM_TIME_NOW,
+    ]);
     #[cfg(feature = "sandbox-launch-verify")]
     #[cfg(not(feature = "native-install-abi-verify"))]
     let allowed = SyscallSet::of(&[
@@ -241,6 +265,7 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         abi::SYSTEM_INSTALL_UPDATE_LIST,
     ]));
     #[cfg(not(any(
+        feature = "service-info-verify",
         feature = "terminal-session-verify",
         feature = "sandbox-launch-verify",
         feature = "native-install-abi-verify"
@@ -289,6 +314,13 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
     }
     #[cfg(feature = "update-agent-verify")]
     if proc::set_app(pid, 0x5541_4447).is_err() {
+        kprintln!("[JSR-PROD-DIAG] first_program application_bind=false");
+        let _ = proc::reap(pid);
+        kobj::run_cleanup(usize::MAX);
+        return (None, false);
+    }
+    #[cfg(feature = "service-info-verify")]
+    if proc::set_app(pid, 0x4f46_4e49).is_err() {
         kprintln!("[JSR-PROD-DIAG] first_program application_bind=false");
         let _ = proc::reap(pid);
         kobj::run_cleanup(usize::MAX);

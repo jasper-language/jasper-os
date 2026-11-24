@@ -64,6 +64,8 @@ use super::policy::{
 use super::KernelPolicy;
 use super::slots::{BootSlots, TrackedSlots};
 use kernel_core::sched::{Link, RunLists};
+#[cfg(feature = "bench-profile")]
+use kernel_core::sync::Atomic64;
 use super::stack::{ReserveError, StackPool, STATIC_STACKS};
 use spin::Once;
 
@@ -256,6 +258,72 @@ static LEAF_FINISHES: core::sync::atomic::AtomicU32 = core::sync::atomic::Atomic
 #[cfg(feature = "krn3-fast-tick-verify")]
 static WORKER_LEAF_FINISHES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static LEAF_LOCAL_SWITCHES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+#[cfg(feature = "bench-profile")]
+static COMPLETED_SWITCHES: [Atomic64; MAX_CPUS] = [const { Atomic64::new(0) }; MAX_CPUS];
+#[cfg(feature = "bench-profile")]
+static LAST_SWITCH_SLOT: [Atomic64; MAX_CPUS] =
+    [const { Atomic64::new(u64::MAX) }; MAX_CPUS];
+#[cfg(feature = "bench-profile")]
+static LAST_SWITCH_GENERATION: [Atomic64; MAX_CPUS] = [const { Atomic64::new(0) }; MAX_CPUS];
+
+#[cfg(feature = "bench-profile")]
+fn record_completed_switch(
+    cpu: usize,
+    previous: usize,
+    token: Option<kernel_core::task_index::Token>,
+) {
+    if let Some(counter) = COMPLETED_SWITCHES.get(cpu) {
+        counter.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(slot) = LAST_SWITCH_SLOT.get(cpu) {
+        slot.store(previous as u64, core::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(generation) = LAST_SWITCH_GENERATION.get(cpu) {
+        generation.store(
+            token.map_or(0, |token| token.generation),
+            core::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
+pub(super) fn completed_switch_count(cpu: usize) -> u64 {
+    #[cfg(not(feature = "bench-profile"))]
+    {
+        let _ = cpu;
+        0
+    }
+    #[cfg(feature = "bench-profile")]
+    {
+    COMPLETED_SWITCHES
+        .get(cpu)
+        .map_or(0, |counter| counter.load(core::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+pub(super) fn completed_switch_last(cpu: usize) -> Option<(usize, u64)> {
+    #[cfg(not(feature = "bench-profile"))]
+    {
+        let _ = cpu;
+        None
+    }
+    #[cfg(feature = "bench-profile")]
+    {
+    let slot = LAST_SWITCH_SLOT
+        .get(cpu)?
+        .load(core::sync::atomic::Ordering::Relaxed);
+    (slot != u64::MAX).then(|| {
+        (
+            slot as usize,
+            LAST_SWITCH_GENERATION
+                .get(cpu)
+                .map_or(0, |generation| {
+                    generation.load(core::sync::atomic::Ordering::Relaxed)
+                }),
+        )
+    })
+    }
+}
 
 /// Complete the owner-local half of a context switch without taking the
 /// global scheduler lock.  IRQs are disabled by the caller, and the saved
@@ -4835,6 +4903,8 @@ impl Scheduler {
     /// Complete a switch: the previous task's context is saved, release it.
     pub fn finish_switch(&mut self, c: usize, completed: Option<(usize, Option<kernel_core::task_index::Token>)>) {
         if let Some((p, hot_token)) = completed {
+            #[cfg(feature = "bench-profile")]
+            record_completed_switch(c, p, hot_token);
             let mut released_remote_hot = false;
             if let Some(t) = self.task_mut(p).filter(|_| is_worker(p)) {
                 if t.on_cpu == Some(c) {
@@ -4855,8 +4925,36 @@ impl Scheduler {
                     "finished leaf switch changed generation before cold detach");
                 if let Some(t) = self.task(p) {
                     let hot = with_leaf(c, |leaf| *leaf.hot[p].get(token).expect("finished hot owner retained"));
-                    assert_eq!(hot.state, t.state, "finished leaf state diverged");
-                    assert_eq!(hot.on_cpu, t.on_cpu, "finished leaf execution owner diverged");
+                    #[cfg(feature = "bench-profile")]
+                    if hot.state != t.state || hot.on_cpu != t.on_cpu {
+                        crate::kprintln!(
+                            "[JSR-SW-STATE] cpu={} prev={} hot={:?}/{:?} cold={:?}/{:?}",
+                            c,
+                            p,
+                            hot.state,
+                            hot.on_cpu,
+                            t.state,
+                            t.on_cpu
+                        );
+                    }
+                    assert_eq!(
+                        hot.state,
+                        t.state,
+                        "finished leaf state diverged hot={:?} cold={:?} cpu={} prev={}",
+                        hot.state,
+                        t.state,
+                        c,
+                        p
+                    );
+                    assert_eq!(
+                        hot.on_cpu,
+                        t.on_cpu,
+                        "finished leaf execution owner diverged hot={:?} cold={:?} cpu={} prev={}",
+                        hot.on_cpu,
+                        t.on_cpu,
+                        c,
+                        p
+                    );
                 }
             }
             if is_worker(p) {

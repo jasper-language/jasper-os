@@ -29,6 +29,25 @@ negative epochs, representative round trips and fixed 8/16-byte layout. This
 is not yet wired into the native ABI or scheduler, and no provider or physical
 accuracy claim follows from it.
 
+`kernel_core::clock_contract` now supplies the first coherent clock contract:
+
+- semantic scale and epoch are separate typed facts;
+- raw counters remain bound to their hardware domain and boot generation;
+- quality distinguishes measured nanosecond resolution/uncertainty/age from
+  explicitly unknown values, so unknown is never serialized as zero;
+- unsigned monotonic and signed Unix facts each expose Time64 and Time128 views
+  produced from one source value;
+- a `ClockSnapshotCell` publishes the complete identity and width pair under
+  one lock, avoiding a torn 64/128 read on CPUs without a 128-bit atomic;
+- non-monotonic publications, stale boot generations, invalid scale/epoch
+  combinations, untrusted TAI/UTC publication and sequence exhaustion fail
+  closed.
+
+This still does not create a running multi-source time service. The cell must be
+fed by the existing kernel monotonic source and future providers, and
+RTC/NTP/NTS/PTP/GNSS access, TAI/UTC leap-second policy, uncertainty estimation
+and physical accuracy evidence remain open.
+
 Time sources will be layered without a new time authority:
 
 - Kernel: clock reads, counter domains, deadlines/wakeups and controlled
@@ -40,9 +59,9 @@ Time sources will be layered without a new time authority:
 - Compatibility: preserves POSIX/Linux layouts and maps them to the same
   facts.
 
-The following are open: frozen serialization and epoch, 64/128 tear-free
-snapshot, TAI/UTC and leap-second policy, multi-source authentication and
-fault matrix, drift/uncertainty contracts, real provider integration, and
-physical accuracy tests. Required candidate classes are ≤1 ms general,
-≤1 μs high precision and ≤10 ns professional, with the stated uncertainty
-and reference-clock evidence; none is claimed here.
+The following are open: frozen external serialization, live kernel/provider
+wiring, TAI/UTC and leap-second policy, multi-source authentication and fault
+matrix, drift/uncertainty estimation, and physical accuracy tests. Required
+candidate classes are ≤1 ms general, ≤1 μs high precision and ≤10 ns
+professional, with the stated uncertainty and reference-clock evidence; none is
+claimed here.

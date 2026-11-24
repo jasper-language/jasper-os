@@ -1,9 +1,9 @@
 # Issue #43 驱动兼容域退出门台账
 
-更新时间：2026-11-20。
+更新时间：2026-11-24。
 
 状态：**software contracts and inventory only; no real compatibility driver domain**。
-当前 12 项为 5 partial、3 software-contract、2 missing、2 blocked-hardware。
+当前 12 项为 4 partial、4 software-contract、2 missing、2 blocked-hardware。
 
 ## 台账
 
@@ -25,6 +25,10 @@
 `scripts/check-issue43-driver-ledger.py` 校验 ID、状态、分层和证据路径，CI
 同时运行 self-test 与全表检查。
 
+`scripts/check-issue43-compatibility-profiles.py` 交叉校验 profile 版本、
+执行域、证据、build fingerprint 和内核 release；任何把 Compatibility
+改成宿主权威或引用不存在的设备事实都会失败关闭。
+
 D12 另由 `verification/issue43-pixel6a-support-matrix.tsv` 与
 `scripts/check-issue43-support-matrix.py` 固化逐组件 source/license/firmware/
 redistribution/security/EOL 字段。未核实事实不得标为 `approved`，再分发许可也
@@ -37,6 +41,11 @@ redistribution/security/EOL 字段。未核实事实不得标为 `approved`，�
   已只读盘点；
 - `kernel-core::linux_device_uapi` 与 `kernel-core::android_hal` 是软件契约，
   复用 Driver Host pass、统一授权、generation、death 和 quiescence；
+- D01 已增加 `verification/issue43-compatibility-profiles.toml`：原生 Linux
+  Device UAPI、Pixel 6a 隔离 Linux 驱动域与 Pixel 6a Android HAL 分别拥有
+  独立版本、build fingerprint、内核/接口范围、兼容执行域、Device Broker
+  权威和晋级门。当前状态分别为 software-contract / inventory-only，不能作为
+  驱动或 HAL 已执行证据；
 - 尚无真实 Linux/Android 驱动域、真实 Binder/HAL 执行、真实 ioctl 设备链、
   物理 IOMMU/reset 或启动 UFS 路径；
 - D12 的失败关闭治理矩阵已冻结，但完整模块来源、许可证、firmware 哈希、

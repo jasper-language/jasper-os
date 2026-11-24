@@ -206,6 +206,7 @@ krn1-soak = ["user-programs"]
 s4-soak = ["fault-inject", "krn2-observe"]
 # Explicit QEMU BM-1 profile: RTL8139 log link, IB700 watchdog and CF9 reset.
 bm1-vm = ["dep:noto-sans-mono-bitmap"]
+noto-terminal = ["dep:noto-sans-mono-bitmap"]
 bm1-hang = ["bm1-vm"]
 # Physical/debug boot recovery: reset on panic and enforce a TSC-based overall
 # boot deadline at stage boundaries.
@@ -215,6 +216,15 @@ boot-autorecovery = ["panic-reboot"]
 # microbenchmarks, display memory totals and latency/throughput results, then
 # remain alive for inspection.
 bench-profile = []
+# QEMU-only sample-scale discriminator. Physical/formal benchmarks always use
+# the full one-million-sample contract.
+bench-smoke = []
+# Fast scheduler-correctness iteration: retain topology, TSC skew, context
+# switch and resource gates while omitting unrelated memory/scalar metrics.
+bench-switch-only = []
+# Verification-only completion: exit through the emulator debug port after the
+# benchmark has published final results. Never enabled in a physical profile.
+bench-exit = []
 bench-only = ["user-programs", "smp-bsp-only", "bench-profile"]
 # Same measurement and startup behavior as bench-only, but keeps firmware SMP
 # online so single-core and multi-core runs use identical binaries.
@@ -281,6 +291,9 @@ update-agent-verify = [
     "terminal-session-verify",
     "native-install-abi-verify",
 ]
+# End-to-end independently deployed service.info process, discovery, projected
+# process/module counts, idempotency, restart and capability-denial gates.
+service-info-verify = ["user-programs"]
 # Native Sandbox launch-plan guest acceptance as the first user program.
 sandbox-launch-verify = ["user-programs"]
 # Pixel 6a (Google Tensor GS101) early-boot probe: Samsung UART only, no scheduler/IRQ start.

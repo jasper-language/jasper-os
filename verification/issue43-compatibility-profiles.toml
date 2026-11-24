@@ -1,0 +1,76 @@
+schema = 1
+native_abi = "3.22.0"
+authority = "kernel-device-broker"
+updated = "2026-11-24"
+
+# A profile fixes the versions and execution scope that may be presented to a
+# compatibility component. Declaring a profile does not make its runtime,
+# drivers, HALs or physical resources verified.
+
+[[profile]]
+id = "native-linux-uapi-adapter@1"
+kind = "linux-device-uapi"
+execution_domain = "compatibility"
+runtime_status = "software-contract"
+architecture = "x86_64,aarch64"
+linux_user_abi = "Ubuntu Linux baseline selected by the active compatibility Profile"
+device_uapi_contract = "1.0"
+linux_kernel = "not-required"
+android_release = "not-applicable"
+host_authority = "kernel-device-broker"
+device_path = "/dev endpoint modelled by linux_device_uapi"
+promotion_gate = "real unmodified userspace device lifecycle through the adapter"
+evidence = [
+  "kernel-core/src/linux_device_uapi.rs",
+  "docs/DC-2-LINUX-UAPI-status.md",
+  "verification/linux-posix-abi-matrix.toml",
+]
+
+[[profile]]
+id = "pixel6a-gs101-android16-linux-driver@1"
+kind = "isolated-linux-driver-domain"
+execution_domain = "compatibility"
+runtime_status = "inventory-only"
+architecture = "arm64-v8a"
+device = "Google Pixel 6a bluejay"
+android_release = "16"
+build_fingerprint = "google/bluejay/bluejay:16/BP4A.251205.006/14401865:user/release-keys"
+linux_kernel = "6.1.145-android14-11-gc1de4747ac59-ab14219743"
+gki_kmi_status = "declared-by-device, not independently verified"
+host_authority = "kernel-device-broker"
+module_source = "/vendor_dlkm/lib/modules and /vendor/lib/modules"
+supported_scope = "matched isolated guest profile only"
+promotion_gate = "matching GKI/KMI boot, module signature and firmware provenance, real device operation, and quiesced revoke/reset"
+evidence = [
+  "verification/issue43-pixel6a-binary-inventory.tsv",
+  "verification/issue43-pixel6a-support-matrix.tsv",
+  "docs/ISSUE-43-PIXEL6A-DRIVER-INVENTORY.md",
+]
+
+[[profile]]
+id = "pixel6a-gs101-android16-hal@1"
+kind = "android-hal-user-service"
+execution_domain = "compatibility"
+runtime_status = "inventory-only"
+architecture = "arm64-v8a"
+device = "Google Pixel 6a bluejay"
+android_release = "16"
+build_fingerprint = "google/bluejay/bluejay:16/BP4A.251205.006/14401865:user/release-keys"
+hal_contract = "1"
+observed_interface_versions = [
+  "android.hardware.audio@7.1",
+  "android.hardware.audio.effect@7.0",
+  "android.hardware.gnss@2.1",
+  "android.hardware.soundtrigger@2.3",
+  "android.hidl.memory@1.0",
+  "vendor.google.whitechapel.audio.audioext@4.0",
+]
+host_authority = "kernel-device-broker"
+binder_identity = "projection of existing Jasper security subject"
+supported_scope = "declared HAL interface and instance only"
+promotion_gate = "real Binder/HAL execution, death/restart, SELinux authority mapping, device access and resource recovery"
+evidence = [
+  "kernel-core/src/android_hal.rs",
+  "docs/DC-4-ANDROID-HAL-status.md",
+  "verification/issue43-pixel6a-binary-inventory.tsv",
+]

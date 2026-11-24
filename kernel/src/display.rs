@@ -23,6 +23,8 @@ use kernel_core::display_input::{
 
 use crate::sync::IrqSpinLock;
 use crate::{kprintln, mm};
+#[cfg(all(feature = "noto-terminal", target_arch = "x86_64"))]
+use noto_sans_mono_bitmap::{get_raster, FontWeight, RasterHeight};
 
 const TEXT_COLUMNS: usize = 96;
 const TEXT_ROWS: usize = 32;
@@ -935,6 +937,32 @@ impl Runtime {
                 let character = self.text[row * TEXT_COLUMNS + column];
                 if character == b' ' || character == 0 {
                     continue;
+                }
+                #[cfg(all(feature = "noto-terminal", target_arch = "x86_64"))]
+                {
+                    if let Some(glyph) = get_raster(
+                        char::from(character),
+                        FontWeight::Regular,
+                        RasterHeight::Size20,
+                    ) {
+                        for (glyph_row, row_pixels) in glyph.raster().iter().enumerate() {
+                            for (glyph_column, value) in row_pixels.iter().copied().enumerate() {
+                                if value == 0 {
+                                    continue;
+                                }
+                                self.rect(
+                                    origin_x + column as u32 * cell_width + glyph_column as u32,
+                                    origin_y + row as u32 * cell_height + glyph_row as u32,
+                                    1,
+                                    1,
+                                    value,
+                                    value,
+                                    value,
+                                );
+                            }
+                        }
+                        continue;
+                    }
                 }
                 let glyph = glyph(character);
                 for (glyph_row, bits) in glyph.iter().copied().enumerate() {
