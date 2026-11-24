@@ -294,7 +294,6 @@ pub fn send_init_startup(dest: u32, start_page: u8) -> bool {
                 return false;
             }
             crate::early::mark("AP INIT DEASSERT WRITE DONE");
-            pit::delay_us(INIT_ASSERT_HOLD_US);
             crate::early::mark("AP INIT DEASSERT OK");
         }
         #[cfg(feature = "smp-skip-init-deassert")]
@@ -302,7 +301,6 @@ pub fn send_init_startup(dest: u32, start_page: u8) -> bool {
     }
     #[cfg(feature = "smp-skip-init")]
     crate::early::mark("AP INIT SKIP");
-    pit::delay_us(200);
     for sipi in 1..=2 {
         let marker = alloc::format!("AP SIPI {sipi}");
         crate::early::mark(&marker);
