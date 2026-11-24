@@ -87,6 +87,26 @@ observed an unexpected QEMU process status instead of its usual debug-exit
 success value, so that evidence does not close the exit-code gate. Physical
 mode/DPI, full CJK coverage and `os-terminal + Swash` remain open.
 
+The normal framebuffer terminal and the early Boot Console now derive font
+metrics from the actual framebuffer height:
+
+- 16 px Noto bitmap raster with 10x20 px cells for 800x600-class modes;
+- 20 px raster with 12x24 px cells for 1080p-and-larger modes.
+
+Rows, columns, line origin, status footer and emergency glyph scaling use the
+selected metrics instead of fixed 12/20/24 constants. The focused
+`terminal-ui` QEMU/OVMF gate passes native CLI startup, help, update status,
+history, Ctrl-C, EOF, exit code zero and complete first-program resource
+reclamation:
+
+```text
+issue21-uefi-boot: PASS mode=terminal-ui qemu_rc=33
+```
+
+Evidence: `evidence/issue93-adaptive-font-qemu-20261124-r5`. This closes the
+bounded 16/20 px adaptive text-metric slice; EDID/DPI/mode selection, physical
+visual comparison, full CJK coverage and `os-terminal + Swash` remain open.
+
 This closes the bounded native framebuffer font/terminal integration gate. It
 does not claim that `os-terminal` + Swash or Ratatui are yet the production
 userspace terminal stack.

@@ -2206,7 +2206,8 @@ mod dedicated {
         feature = "native-install-abi-verify",
         feature = "update-agent-verify",
         feature = "service-info-verify",
-        feature = "service-time-verify"
+        feature = "service-time-verify",
+        feature = "lifecycle-health-fail-verify"
     ))
 ))]
 mod dedicated {

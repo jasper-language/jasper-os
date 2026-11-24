@@ -26,10 +26,6 @@ use crate::{kprintln, mm};
 #[cfg(all(feature = "noto-terminal", target_arch = "x86_64"))]
 use noto_sans_mono_bitmap::{get_raster, FontWeight, RasterHeight};
 
-const TEXT_CELL_WIDTH: u32 = 12;
-const TEXT_LINE_HEIGHT: u32 = 24;
-const TEXT_GLYPH_HEIGHT: u32 = 20;
-const TEXT_MARGIN: u32 = 16;
 const TEXT_WIDE_CONTINUATION: char = '\0';
 const OVERLAY_WIDTH: u32 = 16;
 const OVERLAY_HEIGHT: u32 = 8;
@@ -52,6 +48,18 @@ const ACCENT_SURFACE: SurfaceSpec = SurfaceSpec {
     bytes_per_pixel: 4,
     layout: PixelLayout::Bgr,
 };
+
+/// Select the normal terminal raster and cell metrics from the real
+/// framebuffer height. 16px is the compact default for 800x600-class modes;
+/// 20px remains the readable fallback for 1080p and larger.
+const fn text_metrics(height: u32) -> (u32, u32, u32, u32) {
+    if height <= 900 {
+        (16, 10, 20, 12)
+    } else {
+        (20, 12, 24, 16)
+    }
+}
+
 struct Runtime {
     base: usize,
     len: usize,
@@ -78,6 +86,10 @@ struct Runtime {
     text: Vec<char>,
     text_columns: usize,
     text_rows: usize,
+    text_cell_width: u32,
+    text_line_height: u32,
+    text_glyph_height: u32,
+    text_margin: u32,
     cursor: usize,
     utf8: kernel_core::utf8_stream::Utf8StreamDecoder,
     prompt_reported: bool,
@@ -206,13 +218,15 @@ pub fn start() -> Result<(), DisplayInputError> {
     if prepared.len < frame_len {
         return Err(DisplayInputError::InvalidSurface);
     }
+    let (text_glyph_height, text_cell_width, text_line_height, text_margin) =
+        text_metrics(surface.height);
     let text_columns =
-        (surface.width.saturating_sub(TEXT_MARGIN * 2) / TEXT_CELL_WIDTH).max(1) as usize;
+        (surface.width.saturating_sub(text_margin * 2) / text_cell_width).max(1) as usize;
     let text_rows = (surface
         .height
-        .saturating_sub(TEXT_MARGIN * 2)
-        .saturating_sub(TEXT_GLYPH_HEIGHT)
-        / TEXT_LINE_HEIGHT)
+        .saturating_sub(text_margin * 2)
+        .saturating_sub(text_glyph_height)
+        / text_line_height)
         .max(1) as usize;
     let mut text = Vec::new();
     text.try_reserve_exact(text_columns.saturating_mul(text_rows))
@@ -244,6 +258,10 @@ pub fn start() -> Result<(), DisplayInputError> {
         text,
         text_columns,
         text_rows,
+        text_cell_width,
+        text_line_height,
+        text_glyph_height,
+        text_margin,
         cursor: 0,
         utf8: kernel_core::utf8_stream::Utf8StreamDecoder::new(),
         prompt_reported: false,
@@ -1007,8 +1025,8 @@ impl Runtime {
     }
 
     fn paint_text(&mut self) {
-        let origin_x = TEXT_MARGIN;
-        let origin_y = TEXT_MARGIN;
+        let origin_x = self.text_margin;
+        let origin_y = self.text_margin;
         for row in 0..self.text_rows {
             for column in 0..self.text_columns {
                 let character = self.text[row * self.text_columns + column];
@@ -1017,8 +1035,15 @@ impl Runtime {
                 }
                 #[cfg(all(feature = "noto-terminal", target_arch = "x86_64"))]
                 {
-                    if let Some(glyph) =
-                        get_raster(character, FontWeight::Regular, RasterHeight::Size20)
+                    if let Some(glyph) = get_raster(
+                        character,
+                        FontWeight::Regular,
+                        if self.text_glyph_height == 16 {
+                            RasterHeight::Size16
+                        } else {
+                            RasterHeight::Size20
+                        },
+                    )
                     {
                         for (glyph_row, row_pixels) in glyph.raster().iter().enumerate() {
                             for (glyph_column, value) in row_pixels.iter().copied().enumerate() {
@@ -1027,9 +1052,11 @@ impl Runtime {
                                 }
                                 self.blend_pixel(
                                     origin_x
-                                        + column as u32 * TEXT_CELL_WIDTH
+                                        + column as u32 * self.text_cell_width
                                         + glyph_column as u32,
-                                    origin_y + row as u32 * TEXT_LINE_HEIGHT + glyph_row as u32,
+                                    origin_y
+                                        + row as u32 * self.text_line_height
+                                        + glyph_row as u32,
                                     0xd8,
                                     0xf3,
                                     0xea,
@@ -1051,9 +1078,15 @@ impl Runtime {
                         if bits & (1u8 << (4 - glyph_column as u8)) == 0 {
                             continue;
                         }
-                        let x = origin_x + column as u32 * TEXT_CELL_WIDTH + glyph_column * 2;
-                        let y = origin_y + row as u32 * TEXT_LINE_HEIGHT + glyph_row as u32 * 2 + 3;
-                        self.rect(x, y, 2, 2, 0xd8, 0xf3, 0xea);
+                        let scale = if self.text_glyph_height == 16 { 1 } else { 2 };
+                        let x = origin_x
+                            + column as u32 * self.text_cell_width
+                            + glyph_column * scale;
+                        let y = origin_y
+                            + row as u32 * self.text_line_height
+                            + glyph_row as u32 * scale
+                            + 3;
+                        self.rect(x, y, scale, scale, 0xd8, 0xf3, 0xea);
                     }
                 }
             }

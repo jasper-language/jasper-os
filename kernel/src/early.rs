@@ -14,12 +14,6 @@ use bootloader_api::info::{FrameBuffer, PixelFormat};
 use noto_sans_mono_bitmap::{get_raster, FontWeight, RasterHeight};
 
 #[cfg(target_arch = "x86_64")]
-const TEXT_CELL_WIDTH: u32 = 12;
-#[cfg(target_arch = "x86_64")]
-const TEXT_GLYPH_HEIGHT: u32 = 20;
-#[cfg(target_arch = "x86_64")]
-const TEXT_LINE_HEIGHT: u32 = 24;
-#[cfg(target_arch = "x86_64")]
 const TEXT_LEFT: u32 = 12;
 #[cfg(target_arch = "x86_64")]
 const TEXT_RIGHT_MARGIN: u32 = 12;
@@ -57,6 +51,29 @@ static FRAMEBUFFER_STRIDE: AtomicUsize = AtomicUsize::new(0);
 static FRAMEBUFFER_BPP: AtomicUsize = AtomicUsize::new(0);
 #[cfg(target_arch = "x86_64")]
 static FRAMEBUFFER_FORMAT: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+#[cfg(target_arch = "x86_64")]
+fn text_glyph_height() -> u32 {
+    if FRAMEBUFFER_HEIGHT.load(Ordering::Relaxed) <= 900 {
+        16
+    } else {
+        20
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn text_cell_width() -> u32 {
+    if FRAMEBUFFER_HEIGHT.load(Ordering::Relaxed) <= 900 {
+        10
+    } else {
+        12
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn text_line_height() -> u32 {
+    text_glyph_height() + 4
+}
 /// Initialize the raw serial console once.
 pub fn serial_init() {
     if !SERIAL_READY.swap(true, Ordering::Relaxed) {
@@ -223,19 +240,20 @@ pub fn append_progress(text: &str) {
     }
     let height = FRAMEBUFFER_HEIGHT.load(Ordering::Relaxed) as u32;
     let width = FRAMEBUFFER_WIDTH.load(Ordering::Relaxed) as u32;
-    let y = height.saturating_sub(TEXT_LINE_HEIGHT);
+    let line_height = text_line_height();
+    let y = height.saturating_sub(line_height);
     fill_rect(
         TEXT_LEFT.saturating_sub(4),
         y.saturating_sub(1),
         width.saturating_sub(TEXT_LEFT + TEXT_RIGHT_MARGIN - 4),
-        TEXT_LINE_HEIGHT,
+        line_height,
         TEXT_BACKGROUND.0,
         TEXT_BACKGROUND.1,
         TEXT_BACKGROUND.2,
     );
     draw_text(
         TEXT_LEFT,
-        y + (TEXT_LINE_HEIGHT - TEXT_GLYPH_HEIGHT) / 2,
+        y + (line_height - text_glyph_height()) / 2,
         width.saturating_sub(TEXT_LEFT + TEXT_RIGHT_MARGIN),
         text,
     );
@@ -343,7 +361,8 @@ fn append_text(prefix: &str, text: &str) {
     let width = FRAMEBUFFER_WIDTH.load(Ordering::Relaxed) as u32;
     let right = width.saturating_sub(TEXT_RIGHT_MARGIN);
     let available = right.saturating_sub(TEXT_LEFT);
-    let columns = available / TEXT_CELL_WIDTH;
+    let cell_width = text_cell_width();
+    let columns = available / cell_width;
     if columns == 0 {
         return;
     }
@@ -358,11 +377,11 @@ fn append_text(prefix: &str, text: &str) {
                 continue;
             }
             '\t' => {
-                let column = x.saturating_sub(TEXT_LEFT) / TEXT_CELL_WIDTH;
+                let column = x.saturating_sub(TEXT_LEFT) / cell_width;
                 let next_stop = (column / 4 + 1) * 4;
-                while x.saturating_sub(TEXT_LEFT) / TEXT_CELL_WIDTH < next_stop {
-                    x = x.saturating_add(TEXT_CELL_WIDTH);
-                    if x + TEXT_CELL_WIDTH > right {
+                while x.saturating_sub(TEXT_LEFT) / cell_width < next_stop {
+                    x = x.saturating_add(cell_width);
+                    if x + cell_width > right {
                         x = TEXT_LEFT;
                         y = begin_text_row();
                     }
@@ -373,7 +392,7 @@ fn append_text(prefix: &str, text: &str) {
                 if !draw_character(x, y, '?', 1) {
                     return;
                 }
-                x = x.saturating_add(TEXT_CELL_WIDTH);
+                x = x.saturating_add(cell_width);
                 continue;
             }
             _ => {}
@@ -385,7 +404,7 @@ fn append_text(prefix: &str, text: &str) {
             // string remains available on the independent serial/log path.
             continue;
         }
-        let character_width = TEXT_CELL_WIDTH.saturating_mul(cell_columns as u32);
+        let character_width = cell_width.saturating_mul(cell_columns as u32);
         if x.saturating_add(character_width) > right {
             x = TEXT_LEFT;
             y = begin_text_row();
@@ -408,7 +427,8 @@ fn begin_text_row() -> u32 {
         row
     };
     TEXT_ROW.store(row.saturating_add(1), Ordering::Release);
-    let y = TEXT_TOP.saturating_add(row * TEXT_LINE_HEIGHT);
+    let line_height = text_line_height();
+    let y = TEXT_TOP.saturating_add(row * line_height);
     clear_text_row(y);
     y
 }
@@ -416,10 +436,11 @@ fn begin_text_row() -> u32 {
 #[cfg(target_arch = "x86_64")]
 fn text_rows() -> u32 {
     let height = FRAMEBUFFER_HEIGHT.load(Ordering::Relaxed) as u32;
+    let line_height = text_line_height();
     height
         .saturating_sub(TEXT_TOP)
-        .saturating_sub(TEXT_LINE_HEIGHT)
-        .checked_div(TEXT_LINE_HEIGHT)
+        .saturating_sub(line_height)
+        .checked_div(line_height)
         .unwrap_or(1)
         .max(1)
 }
@@ -427,11 +448,12 @@ fn text_rows() -> u32 {
 #[cfg(target_arch = "x86_64")]
 fn clear_text_row(y: u32) {
     let width = FRAMEBUFFER_WIDTH.load(Ordering::Relaxed) as u32;
+    let line_height = text_line_height();
     fill_rect(
         TEXT_LEFT.saturating_sub(4),
         y.saturating_sub(2),
         width.saturating_sub(TEXT_LEFT + TEXT_RIGHT_MARGIN - 4),
-        TEXT_LINE_HEIGHT,
+        line_height,
         TEXT_BACKGROUND.0,
         TEXT_BACKGROUND.1,
         TEXT_BACKGROUND.2,
@@ -448,9 +470,10 @@ fn scroll_text_rows() {
     let len = FRAMEBUFFER_LEN.load(Ordering::Relaxed);
     let stride = FRAMEBUFFER_STRIDE.load(Ordering::Relaxed);
     let bpp = FRAMEBUFFER_BPP.load(Ordering::Relaxed);
+    let line_height = text_line_height();
     let Some(row_bytes) = stride
         .checked_mul(bpp)
-        .and_then(|value| value.checked_mul(TEXT_LINE_HEIGHT as usize))
+        .and_then(|value| value.checked_mul(line_height as usize))
     else {
         return;
     };
@@ -478,7 +501,7 @@ fn scroll_text_rows() {
         );
     }
     clear_text_row(
-        TEXT_TOP.saturating_add(rows.saturating_sub(1).saturating_mul(TEXT_LINE_HEIGHT)),
+        TEXT_TOP.saturating_add(rows.saturating_sub(1).saturating_mul(line_height)),
     );
 }
 
@@ -496,7 +519,7 @@ fn draw_text(x: u32, y: u32, max_width: u32, text: &str) -> bool {
         if columns == 0 {
             continue;
         }
-        let width = TEXT_CELL_WIDTH.saturating_mul(columns as u32);
+        let width = text_cell_width().saturating_mul(columns as u32);
         if cursor.saturating_add(width) > right {
             return true;
         }
@@ -514,7 +537,15 @@ fn draw_character(x: u32, y: u32, character: char, columns: u8) -> bool {
         return true;
     }
     #[cfg(feature = "noto-console")]
-    if let Some(glyph) = get_raster(character, FontWeight::Regular, RasterHeight::Size20) {
+    if let Some(glyph) = get_raster(
+        character,
+        FontWeight::Regular,
+        if text_glyph_height() == 16 {
+            RasterHeight::Size16
+        } else {
+            RasterHeight::Size20
+        },
+    ) {
         for (row, pixels) in glyph.raster().iter().enumerate() {
             for (column, coverage) in pixels.iter().copied().enumerate() {
                 if coverage != 0 {
@@ -538,8 +569,10 @@ fn draw_character(x: u32, y: u32, character: char, columns: u8) -> bool {
         b'?'
     };
     let glyph = crate::display::glyph(fallback);
-    let scale = 2;
-    let origin_x = x.saturating_add((TEXT_CELL_WIDTH.saturating_mul(columns as u32) - 10) / 2);
+    let scale = if text_glyph_height() == 16 { 1 } else { 2 };
+    let origin_x = x.saturating_add(
+        (text_cell_width().saturating_mul(columns as u32) - 5 * scale) / 2,
+    );
     let origin_y = y.saturating_add(3);
     for (row, bits) in glyph.iter().copied().enumerate() {
         for column in 0..5u8 {
