@@ -664,6 +664,16 @@ fn next_tick_edge() -> Option<u64> {
 /// 在 [`CALIBRATION_TICKS`] 个 tick 内数周期计数器走了多少，得到每 tick 周期数。
 fn calibrate() -> Option<Calibration> {
     let hz = config::ACTIVE.clock.timer_hz;
+    if let Some(cycles_per_second) = early::tsc_frequency_hz() {
+        let cal = Calibration::per_second(cycles_per_second)?;
+        kprintln!(
+            "[JSR-BENCH] calibrate source={} cycles_per_second={} timer_hz={}",
+            early::tsc_frequency_source(),
+            cycles_per_second,
+            hz
+        );
+        return Some(cal);
+    }
     let t0 = next_tick_edge()?;
     kprintln!("[JSR-BENCH] stage=calibration_tick_edge tick={}", t0);
     let c0 = arch::cycles();
