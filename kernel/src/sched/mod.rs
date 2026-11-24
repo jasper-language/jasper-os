@@ -880,6 +880,10 @@ pub fn init_runtime(tasks: usize) -> bool {
         crate::kprintln!("[JSR-SCHED] reject=qos_not_quiescent");
         return false;
     }
+    if !scheduler::publish_bootstrap_context() {
+        crate::kprintln!("[JSR-SCHED] reject=bootstrap_context_inconsistent");
+        return false;
+    }
     crate::kprintln!(
         "[JSR-SCHED] qos quantum={:?} decay={} owed_cap={} timer_hz={} tasks={} dynamic=true",
         plan.quantum,
@@ -949,6 +953,16 @@ pub fn ran_on(id: TaskId) -> Option<CpuSet> {
 /// Number of live worker tasks.
 pub fn live_workers() -> usize {
     with(|s| s.live_workers())
+}
+
+/// Scheduler leaf's published current task slot for `cpu`.
+pub fn leaf_current(cpu: usize) -> Option<usize> {
+    scheduler::leaf_current_slot(cpu)
+}
+
+/// Whether the bootstrap task is currently running in the task table.
+pub fn bootstrap_running() -> Option<bool> {
+    scheduler::task_is_running(TaskId(0))
 }
 
 /// 参与调度的处理器集合。

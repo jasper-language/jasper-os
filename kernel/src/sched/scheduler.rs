@@ -912,6 +912,39 @@ pub(super) fn fast_leaf_tick(cpu: usize, token: kernel_core::task_index::Token) 
 fn leaf_current(cpu: usize) -> usize {
     with_leaf(cpu, |leaf| leaf.current)
 }
+
+/// Publish the scheduler's initial BSP execution context into the per-CPU
+/// runtime view. The boot task is already current in the scheduler leaf from
+/// construction; this closes the window where per-CPU data still reports the
+/// IDLE_SLOT sentinel before the first context switch.
+pub(super) fn publish_bootstrap_context() -> bool {
+    let valid = super::with(|scheduler| {
+        let boot_running = scheduler
+            .task(BOOT_SLOT)
+            .is_some_and(|task| task.state == TaskState::Running && task.home == 0);
+        let leaf_boot = with_leaf(0, |leaf| leaf.current == BOOT_SLOT);
+        boot_running && leaf_boot
+    });
+    if valid {
+        if let Some(cpu) = crate::smp::percpu::get(0) {
+            cpu.set_current(BOOT_SLOT);
+        }
+    }
+    valid
+}
+
+pub(super) fn leaf_current_slot(cpu: usize) -> Option<usize> {
+    leaf(cpu).map(|leaf| leaf.lock().current)
+}
+
+pub(super) fn task_is_running(id: TaskId) -> Option<bool> {
+    super::with(|scheduler| {
+        scheduler
+            .task(scheduler.live_slot(id)?)
+            .map(|task| task.state == TaskState::Running)
+    })
+}
+
 fn leaf_run_state(cpu: usize) -> (usize, u32, u32, Option<usize>) {
     with_leaf(cpu, |leaf| {
         (

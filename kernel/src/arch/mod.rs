@@ -411,6 +411,10 @@ pub trait Platform {
 
     /// 关中断并返回之前是否开着。
     fn irq_save_disable() -> bool;
+    /// Current interrupt-enable state when the platform exposes it.
+    fn irq_enabled() -> Option<bool> {
+        None
+    }
     /// 按 [`Platform::irq_save_disable`] 的返回值恢复中断状态。
     fn irq_restore(was_enabled: bool);
     /// 开中断。
@@ -770,6 +774,10 @@ pub fn irq_enable() {
 #[inline(always)]
 pub fn irq_disable() {
     Current::irq_disable()
+}
+/// 当前中断使能状态（平台无法无副作用读取时为 `None`）。
+pub fn irq_enabled() -> Option<bool> {
+    Current::irq_enabled()
 }
 /// 在关中断状态下执行 `f`，结束后恢复原状态（单 CPU 临界区）。
 #[inline(always)]

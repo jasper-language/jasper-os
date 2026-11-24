@@ -1425,7 +1425,7 @@ fn report_general_switch_state(
                 continue;
             };
             let line = alloc::format!(
-                "{} SWITCH AP cpu={} hw={} tick={} rsc={} call={} wake={} pending={} current={} q={}",
+                "{} SWITCH AP cpu={} hw={} tick={} rsc={} call={} wake={} pending={} current={} leaf={} boot_running={} irq={} q={}",
                 mode,
                 cpu,
                 per_cpu.hw_id(),
@@ -1435,6 +1435,13 @@ fn report_general_switch_state(
                 per_cpu.idle_wakeups(),
                 per_cpu.resched_pending(),
                 per_cpu.current(),
+                sched::leaf_current(cpu).map_or(usize::MAX, |slot| slot),
+                if cpu == 0 {
+                    sched::bootstrap_running().map_or(false, |running| running)
+                } else {
+                    false
+                },
+                crate::arch::irq_enabled().map_or(false, |enabled| enabled),
                 sched::runnable_workers_on(cpu)
             );
             kprintln!("[JSR-SMP-SW] {}", line);

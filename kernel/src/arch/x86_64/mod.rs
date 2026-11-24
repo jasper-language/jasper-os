@@ -265,6 +265,11 @@ impl Platform for X86_64 {
     }
 
     #[inline(always)]
+    fn irq_enabled() -> Option<bool> {
+        Some(::x86_64::instructions::interrupts::are_enabled())
+    }
+
+    #[inline(always)]
     fn irq_restore(was_enabled: bool) {
         if was_enabled {
             ::x86_64::instructions::interrupts::enable();
