@@ -258,23 +258,10 @@ pub fn run() {
         publish_checkpoint();
         user_program(&cal);
         arch::watchdog_pet_force();
-        #[cfg(feature = "bench-long-run")]
-        {
-            // Tick-driven sampling needs one interrupt per retained observation,
-            // so the dedicated long-run image owns this phase.
-            let tick = timer_irq(&cal);
-            arch::watchdog_pet_force();
-            if let (Some(tick), Some(switch)) = (tick, switch) {
-                tuning(&cal, tick.p50, switch.p50);
-            }
-        }
-        #[cfg(not(feature = "bench-long-run"))]
-        {
-            let _ = switch;
-            kprintln!("[JSR-BENCH] SKIP name=kernel.timer_irq reason=long_run_profile_required");
-            record_result(format_args!(
-                "kernel.timer_irq SKIPPED reason=long_run_profile_required"
-            ));
+        let tick = timer_irq(&cal);
+        arch::watchdog_pet_force();
+        if let (Some(tick), Some(switch)) = (tick, switch) {
+            tuning(&cal, tick.p50, switch.p50);
         }
     }
     let end = baseline();
@@ -365,20 +352,15 @@ pub fn publish_results(failed: u32, timing_failed: u32) {
         };
         let _ = write!(
             writer,
-            "SMP DISCOVERED={} ONLINE={} PARALLEL_MATRIX={} LONG_RUN={}",
+            "SMP DISCOVERED={} ONLINE={} PARALLEL_MATRIX={}",
             discovered,
             online,
-            if online > 1 { "measured" } else { "not_run" },
-            if cfg!(feature = "bench-long-run") {
-                "complete"
-            } else {
-                "pending"
-            }
+            if online > 1 { "measured" } else { "not_run" }
         );
         early::append_line(smp.text());
     }
     kprintln!(
-        "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"summary\",\"metrics\":{},\"failed\":{},\"timing_failed\":{},\"checks\":{},\"resources_reclaimed\":{},\"discovered_cpus\":{},\"online_cpus\":{},\"parallel_matrix_run\":{},\"long_run_complete\":{}}}",
+        "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"summary\",\"metrics\":{},\"failed\":{},\"timing_failed\":{},\"checks\":{},\"resources_reclaimed\":{},\"discovered_cpus\":{},\"online_cpus\":{},\"parallel_matrix_run\":{}}}",
         report.len,
         failed,
         timing_failed,
@@ -386,8 +368,7 @@ pub fn publish_results(failed: u32, timing_failed: u32) {
         LAST_RECLAIMED.load(Ordering::Acquire),
         crate::smp::unique_enabled_cpu_count().max(1),
         crate::smp::online_set().len(),
-        crate::smp::online_set().len() > 1,
-        cfg!(feature = "bench-long-run")
+        crate::smp::online_set().len() > 1
     );
 }
 
@@ -968,8 +949,7 @@ fn user_program(cal: &Calibration) {
     let before = baseline();
     let before_heap_mapped = heap::stats().3;
     let trace = crate::syscall::set_trace(false);
-    let role = if cfg!(feature = "bench-long-run") { 1 } else { 0 };
-    let res = run_program_arg("bench", USER_BENCH, role, cal.cycles_per_second(), rt_calls());
+    let res = run_program_arg("bench", USER_BENCH, 0, cal.cycles_per_second(), rt_calls());
     crate::syscall::set_trace(trace);
     let ok_exit = matches!(res, Some((Some(ProcState::Exited { code: 0 }), Some(0))));
     check(ok_exit, "user/bench 未以 0 退出");

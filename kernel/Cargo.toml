@@ -216,9 +216,6 @@ boot-autorecovery = ["panic-reboot"]
 # remain alive for inspection.
 bench-profile = []
 bench-only = ["user-programs", "smp-bsp-only", "bench-profile"]
-# Keep tick-bound million-sample paths in a dedicated long-running image so
-# they cannot hide all fast results behind hours of timer-driven sampling.
-bench-long-run = ["bench-only"]
 # Same measurement and startup behavior as bench-only, but keeps firmware SMP
 # online so single-core and multi-core runs use identical binaries.
 bench-smp = ["user-programs", "bench-profile"]
