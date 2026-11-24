@@ -11,7 +11,7 @@
 //! 引导处理器的设备中断仍经 8259（虚拟线连接到本地 APIC 的 LINT0，不改动）；
 //! 其他处理器屏蔽 LINT0/LINT1，只接收核间中断与自己的本地定时器。
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use x86_64::registers::model_specific::Msr;
 
@@ -29,7 +29,20 @@ pub const IPI_CALL_VECTOR: u8 = 0xF2;
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
 
 const MSR_APIC_BASE: u32 = 0x1B;
+const MSR_X2APIC_ID: u32 = 0x802;
+const MSR_X2APIC_TPR: u32 = 0x808;
+const MSR_X2APIC_EOI: u32 = 0x80B;
+const MSR_X2APIC_SVR: u32 = 0x80F;
+const MSR_X2APIC_ICR: u32 = 0x830;
+const MSR_X2APIC_LVT_TIMER: u32 = 0x832;
+const MSR_X2APIC_LVT_LINT0: u32 = 0x835;
+const MSR_X2APIC_LVT_LINT1: u32 = 0x836;
+const MSR_X2APIC_LVT_ERROR: u32 = 0x837;
+const MSR_X2APIC_TIMER_INIT: u32 = 0x838;
+const MSR_X2APIC_TIMER_CURRENT: u32 = 0x839;
+const MSR_X2APIC_TIMER_DIVIDE: u32 = 0x83E;
 const APIC_BASE_ENABLE: u64 = 1 << 11;
+const APIC_BASE_X2APIC: u64 = 1 << 10;
 
 const REG_ID: u64 = 0x20;
 const REG_TPR: u64 = 0x80;
@@ -37,6 +50,7 @@ const REG_EOI: u64 = 0xB0;
 const REG_SVR: u64 = 0xF0;
 const REG_ICR_LOW: u64 = 0x300;
 const REG_ICR_HIGH: u64 = 0x310;
+const REG_ESR: u64 = 0x280;
 const REG_LVT_TIMER: u64 = 0x320;
 const REG_LVT_LINT0: u64 = 0x350;
 const REG_LVT_LINT1: u64 = 0x360;
@@ -65,20 +79,76 @@ static BASE: AtomicU64 = AtomicU64::new(0);
 static COUNTS_PER_MS: AtomicU32 = AtomicU32::new(0);
 /// 每个 tick 的计数（start_periodic 时算好，空闲停表与恢复复用）。
 static COUNTS_PER_TICK: AtomicU32 = AtomicU32::new(0);
+static SYSTEM_X2APIC: AtomicBool = AtomicBool::new(false);
 
 fn read(reg: u64) -> u32 {
-    // SAFETY：BASE 指向本地 APIC 寄存器窗口（调用前已初始化），寄存器 32 位对齐。
-    unsafe { ((BASE.load(Ordering::Relaxed) + reg) as *const u32).read_volatile() }
+    if is_x2apic() {
+        // SAFETY: x2APIC is enabled on this CPU and the register is defined by
+        // the architecture.
+        unsafe { Msr::new(x2apic_msr(reg)).read() as u32 }
+    } else {
+        // SAFETY：BASE 指向本地 APIC 寄存器窗口（调用前已初始化），寄存器 32 位对齐。
+        unsafe { ((BASE.load(Ordering::Relaxed) + reg) as *const u32).read_volatile() }
+    }
 }
 
 fn write(reg: u64, value: u32) {
-    // SAFETY：同上；写入是标准寄存器编程。
-    unsafe { ((BASE.load(Ordering::Relaxed) + reg) as *mut u32).write_volatile(value) }
+    if is_x2apic() {
+        // SAFETY: x2APIC is enabled on this CPU and the register is defined by
+        // the architecture.
+        unsafe { Msr::new(x2apic_msr(reg)).write(u64::from(value)) }
+    } else {
+        // SAFETY：同上；写入是标准寄存器编程。
+        unsafe { ((BASE.load(Ordering::Relaxed) + reg) as *mut u32).write_volatile(value) }
+    }
+}
+
+fn is_x2apic() -> bool {
+    // SAFETY: IA32_APIC_BASE exists on every x86_64 processor.
+    unsafe { Msr::new(MSR_APIC_BASE).read() & APIC_BASE_X2APIC != 0 }
+}
+
+const fn x2apic_msr(reg: u64) -> u32 {
+    match reg {
+        REG_ID => MSR_X2APIC_ID,
+        REG_TPR => MSR_X2APIC_TPR,
+        REG_EOI => MSR_X2APIC_EOI,
+        REG_SVR => MSR_X2APIC_SVR,
+        REG_LVT_TIMER => MSR_X2APIC_LVT_TIMER,
+        REG_LVT_LINT0 => MSR_X2APIC_LVT_LINT0,
+        REG_LVT_LINT1 => MSR_X2APIC_LVT_LINT1,
+        REG_LVT_ERROR => MSR_X2APIC_LVT_ERROR,
+        REG_TIMER_INIT => MSR_X2APIC_TIMER_INIT,
+        REG_TIMER_CURRENT => MSR_X2APIC_TIMER_CURRENT,
+        REG_TIMER_DIVIDE => MSR_X2APIC_TIMER_DIVIDE,
+        // ICR is handled as one 64-bit MSR in `send`.
+        REG_ICR_LOW | REG_ICR_HIGH => MSR_X2APIC_ICR,
+        _ => MSR_X2APIC_ID,
+    }
 }
 
 /// 寄存器窗口是否已就绪。
 pub fn ready() -> bool {
     BASE.load(Ordering::Relaxed) != 0
+}
+
+/// APIC programming mode selected by firmware/OS.
+pub fn mode_name() -> &'static str {
+    // SAFETY: IA32_APIC_BASE exists on every x86_64 processor.
+    let raw = unsafe { Msr::new(MSR_APIC_BASE).read() };
+    if raw & (1 << 10) != 0 {
+        "x2apic"
+    } else if raw & APIC_BASE_ENABLE != 0 {
+        "xapic"
+    } else {
+        "disabled"
+    }
+}
+
+/// Physical APIC register base declared in IA32_APIC_BASE.
+pub fn physical_base() -> u64 {
+    // SAFETY: IA32_APIC_BASE exists on every x86_64 processor.
+    unsafe { Msr::new(MSR_APIC_BASE).read() & 0x000F_FFFF_FFFF_F000 }
 }
 
 /// 记录寄存器窗口位置（引导处理器上调用一次）；返回其物理地址。地址超出已映射的低 4 GiB 时返回 `None`。
@@ -89,10 +159,11 @@ pub fn init_base(phys_offset: u64) -> Option<u64> {
     if phys >= 1 << 32 {
         return None;
     }
-    if raw & APIC_BASE_ENABLE == 0 {
-        // SAFETY：只置全局启用位，基址不变。
-        unsafe { Msr::new(MSR_APIC_BASE).write(raw | APIC_BASE_ENABLE) };
-    }
+    let mode = raw & APIC_BASE_X2APIC;
+    SYSTEM_X2APIC.store(mode != 0, Ordering::Release);
+    unsafe {
+        Msr::new(MSR_APIC_BASE).write(raw | APIC_BASE_ENABLE)
+    };
     BASE.store(phys_offset + phys, Ordering::Release);
     Some(phys)
 }
@@ -103,7 +174,12 @@ pub fn enable_local(boot_processor: bool) {
         // SAFETY：其他处理器的 IA32_APIC_BASE 与引导处理器同址；只置全局启用位。
         unsafe {
             let raw = Msr::new(MSR_APIC_BASE).read();
-            Msr::new(MSR_APIC_BASE).write(raw | APIC_BASE_ENABLE);
+            let mode = if SYSTEM_X2APIC.load(Ordering::Acquire) {
+                APIC_BASE_X2APIC
+            } else {
+                0
+            };
+            Msr::new(MSR_APIC_BASE).write((raw & !APIC_BASE_X2APIC) | APIC_BASE_ENABLE | mode);
         }
         write(REG_LVT_LINT0, LVT_MASKED);
         write(REG_LVT_LINT1, LVT_MASKED);
@@ -119,7 +195,11 @@ pub fn enable_local(boot_processor: bool) {
 
 /// 本处理器的 APIC 标识。
 pub fn id() -> u32 {
-    read(REG_ID) >> 24
+    if is_x2apic() {
+        read(REG_ID)
+    } else {
+        read(REG_ID) >> 24
+    }
 }
 
 /// 中断结束确认。
@@ -129,8 +209,21 @@ pub fn eoi() {
 
 /// 写中断命令寄存器并等待投递完成（有界：硬件异常时不永远自旋）。
 fn send(dest: u32, low: u32) -> bool {
-    write(REG_ICR_HIGH, dest << 24);
-    write(REG_ICR_LOW, low);
+    if !wait_icr_idle() {
+        return false;
+    }
+    if is_x2apic() {
+        let icr = (u64::from(dest) << 32) | u64::from(low);
+        // SAFETY: x2APIC is enabled on this CPU.
+        unsafe { Msr::new(MSR_X2APIC_ICR).write(icr) };
+    } else {
+        write(REG_ICR_HIGH, (dest & 0xff) << 24);
+        write(REG_ICR_LOW, low);
+    }
+    wait_icr_idle()
+}
+
+fn wait_icr_idle() -> bool {
     for _ in 0..1_000_000 {
         if read(REG_ICR_LOW) & ICR_PENDING == 0 {
             return true;
@@ -138,6 +231,16 @@ fn send(dest: u32, low: u32) -> bool {
         core::hint::spin_loop();
     }
     false
+}
+
+fn clear_and_read_esr() -> u32 {
+    if is_x2apic() {
+        return 0;
+    }
+    write(REG_ESR, 0);
+    let first = read(REG_ESR);
+    let second = read(REG_ESR);
+    first | second
 }
 
 /// 发送固定向量核间中断。
@@ -149,18 +252,48 @@ pub fn send_fixed(dest: u32, vector: u8) -> bool {
 /// the xAPIC protocol and is not tolerated consistently by all physical AMD
 /// chipsets, even though QEMU accepts the shorter sequence.
 pub fn send_init_startup(dest: u32, start_page: u8) -> bool {
-    if !send(dest, ICR_INIT | ICR_LEVEL_ASSERT) {
-        return false;
+    #[cfg(not(feature = "smp-skip-init"))]
+    {
+        // Clear stale delivery errors before the INIT sequence in xAPIC mode.
+        let _ = clear_and_read_esr();
+        crate::early::mark("AP INIT ASSERT");
+        // INIT uses level-triggered delivery: assert INIT with both
+        // LEVEL_TRIGGER and LEVEL_ASSERT, then deassert with LEVEL_TRIGGER alone.
+        if !send(dest, ICR_INIT | ICR_LEVEL_TRIGGER | ICR_LEVEL_ASSERT) {
+            return false;
+        }
+        crate::early::mark("AP INIT ASSERT OK");
+        let esr = clear_and_read_esr();
+        if esr != 0 {
+            let marker = alloc::format!("AP INIT ASSERT ESR={esr:#x}");
+            crate::early::mark(&marker);
+            return false;
+        }
+        // Modern AMD and Intel integrated APICs do not require the legacy MP 1.4
+        // 10 ms INIT hold. Keep a short guard interval.
+        pit::delay_us(200);
+        #[cfg(not(feature = "smp-skip-init-deassert"))]
+        {
+            crate::early::mark("AP INIT DEASSERT");
+            if !send(dest, ICR_INIT | ICR_LEVEL_TRIGGER) {
+                return false;
+            }
+            crate::early::mark("AP INIT DEASSERT OK");
+        }
+        #[cfg(feature = "smp-skip-init-deassert")]
+        crate::early::mark("AP INIT DEASSERT SKIP");
     }
-    pit::delay_us(10_000);
-    if !send(dest, ICR_INIT | ICR_LEVEL_TRIGGER) {
-        return false;
-    }
+    #[cfg(feature = "smp-skip-init")]
+    crate::early::mark("AP INIT SKIP");
     pit::delay_us(200);
-    for _ in 0..2 {
+    for sipi in 1..=2 {
+        let marker = alloc::format!("AP SIPI {sipi}");
+        crate::early::mark(&marker);
         if !send(dest, ICR_STARTUP | ICR_LEVEL_ASSERT | start_page as u32) {
             return false;
         }
+        let marker = alloc::format!("AP SIPI {sipi} OK");
+        crate::early::mark(&marker);
         pit::delay_us(200);
     }
     true

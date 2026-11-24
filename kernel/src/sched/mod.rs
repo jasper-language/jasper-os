@@ -895,7 +895,9 @@ pub fn idle_loop(c: usize) -> ! {
                 IdleStep::Run(cause)=>yield_with_cause(cause),
                 _=>{cpu::wait_for_interrupt();with_mut(|s|s.idle_exit(c));}
             }
-            cpu::irq_restore(was_enabled);continue;
+            crate::smp::percpu::this().count_idle_wakeup();
+            cpu::irq_restore(was_enabled);
+            continue;
         }
         let needs_tick = crate::irq::device::cpu_needs_tick();
         match with_mut(|s| s.idle_enter(c, needs_tick)) {

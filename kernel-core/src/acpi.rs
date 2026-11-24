@@ -1,12 +1,12 @@
-//! ACPI 表的只读解析（处理器与设备发现所需的子集）：RSDP → RSDT/XSDT → MADT / MCFG / DMAR。
-//! Read-only ACPI parsing for processor and device discovery: RSDP → RSDT/XSDT → MADT / MCFG / DMAR.
+//! ACPI 表的只读解析（处理器、平台与设备发现所需的子集）：
+//! RSDP → RSDT/XSDT → MADT / FACP / SRAT / SLIT / MCFG / DMAR / WDAT。
+//! Read-only ACPI parsing for processor, platform and device discovery.
 //!
 //! # 职责与边界
 //! * 只读解析；物理内存经调用者注入的 [`PhysRead`] 读取（内核经全物理内存映射实现，
 //!   宿主测试用内存数组）。完整发现清单按实际条目分配，分配失败明确拒绝。
 //! * 固件表是**不可信输入**：校验签名与校验和，长度设上限，条目长度为 0 或越界即报错，绝不越界或死循环。
-//! * 只覆盖处理器、中断路由和 DMA 重映射枚举：MADT、MCFG 以及 DMAR 的
-//!   hardware unit/device scope。不解析 AML、不写 IOMMU 寄存器。
+//! * 处理器、NUMA、固件标识、中断路由和 DMA 重映射；不解析 AML、不写 IOMMU 寄存器。
 //!
 //! # 为什么放在 kernel-core
 //! 表格式与指令集无关（x86_64 与部分 AArch64 服务器都用 ACPI），放在这里可以在宿主上用构造的表测试。
@@ -45,6 +45,10 @@ pub enum AcpiError {
     BadLength,
     /// 根表中没有 MADT。
     NoMadt,
+    /// 根表中没有 FACP（不符合 ACPI 固定平台描述要求）。
+    NoFacp,
+    /// 根表中没有 SRAT（平台未声明 NUMA affinity）。
+    NoSrat,
     /// 根表中没有 MCFG（平台不提供 ECAM）。
     NoMcfg,
     /// 根表中没有 DMAR（平台不暴露 Intel DMA remapping）。
@@ -65,6 +69,8 @@ impl AcpiError {
             AcpiError::BadChecksum => "system.firmware.error.bad_checksum",
             AcpiError::BadLength => "system.firmware.error.bad_length",
             AcpiError::NoMadt => "system.firmware.error.no_madt",
+            AcpiError::NoFacp => "system.firmware.error.no_facp",
+            AcpiError::NoSrat => "system.firmware.error.no_srat",
             AcpiError::NoMcfg => "system.firmware.error.no_mcfg",
             AcpiError::NoDmar => "system.firmware.error.no_dmar",
             AcpiError::NoWdat => "system.firmware.error.no_wdat",
@@ -151,9 +157,38 @@ pub struct Madt {
     pub local_controller: u64,
     /// 已启用处理器的硬件标识（引导处理器排在下标 0）。
     pub topology: Topology,
+    /// Raw and reconciled firmware processor record counts.
+    pub cpu_inventory: CpuInventory,
     io: Vec<IoController>,
     /// (ISA 中断号, 路由)。
     overrides: Vec<(u8, IsaRoute)>,
+}
+
+/// Firmware CPU records before and after duplicate reconciliation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CpuInventory {
+    /// Local APIC records (MADT type 0).
+    pub local_apic_records: usize,
+    /// x2APIC records (MADT type 9).
+    pub x2apic_records: usize,
+    /// Records whose firmware enabled bit is set.
+    pub enabled_records: usize,
+    /// Records whose firmware enabled bit is clear.
+    pub disabled_records: usize,
+    /// Repeated hardware IDs across local/x2APIC records.
+    pub duplicate_records: usize,
+    /// Duplicate records that disagreed on the enabled bit.
+    pub conflicting_duplicates: usize,
+    /// Distinct hardware IDs enabled by firmware.
+    pub unique_enabled: usize,
+    /// Distinct hardware IDs reported only as disabled.
+    pub unique_disabled: usize,
+}
+
+impl CpuInventory {
+    pub const fn raw_records(self) -> usize {
+        self.local_apic_records.saturating_add(self.x2apic_records)
+    }
 }
 
 impl Madt {
@@ -316,6 +351,228 @@ fn find_table(
     Ok(None)
 }
 
+/// Read-only platform identity facts from the ACPI fixed platform table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirmwareInfo {
+    pub acpi_oem_id: Vec<u8>,
+    pub acpi_oem_table_id: Vec<u8>,
+    pub acpi_oem_revision: u32,
+    pub creator_id: Vec<u8>,
+    pub creator_revision: u32,
+}
+
+impl FirmwareInfo {
+    pub fn acpi_oem_id_text(&self) -> Vec<u8> {
+        trimmed(&self.acpi_oem_id)
+    }
+
+    pub fn acpi_oem_table_id_text(&self) -> Vec<u8> {
+        trimmed(&self.acpi_oem_table_id)
+    }
+
+    pub fn creator_id_text(&self) -> Vec<u8> {
+        trimmed(&self.creator_id)
+    }
+}
+
+fn trimmed(bytes: &[u8]) -> Vec<u8> {
+    let start = bytes
+        .iter()
+        .position(|byte| *byte != 0 && !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|byte| *byte != 0 && !byte.is_ascii_whitespace())
+        .map_or(start, |index| index + 1);
+    bytes[start..end].to_vec()
+}
+
+fn read_vec(m: &dyn PhysRead, at: u64, len: usize) -> Result<Vec<u8>, AcpiError> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(len).map_err(|_| AcpiError::Capacity)?;
+    out.resize(len, 0);
+    if !m.read(at, &mut out) {
+        return Err(AcpiError::Unreadable);
+    }
+    Ok(out)
+}
+
+/// Parse the ACPI FACP/FADT platform identity fields.
+pub fn parse_firmware_info(m: &dyn PhysRead, rsdp: u64) -> Result<FirmwareInfo, AcpiError> {
+    let (root, width) = root_table(m, rsdp)?;
+    let at = find_table(m, root, width, b"FACP")?.ok_or(AcpiError::NoFacp)?;
+    let len = table(m, at, b"FACP")?;
+    if len < SDT_HEADER_LEN {
+        return Err(AcpiError::BadLength);
+    }
+    Ok(FirmwareInfo {
+        acpi_oem_id: read_vec(m, at + 10, 6)?,
+        acpi_oem_table_id: read_vec(m, at + 16, 8)?,
+        acpi_oem_revision: read_u32(m, at + 24)?,
+        creator_id: read_vec(m, at + 28, 4)?,
+        creator_revision: read_u32(m, at + 32)?,
+    })
+}
+
+/// One SRAT processor-affinity record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NumaCpuAffinity {
+    pub hardware_id: u32,
+    pub proximity_domain: u32,
+    pub enabled: bool,
+}
+
+/// One SRAT memory-affinity record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NumaMemoryAffinity {
+    pub proximity_domain: u32,
+    pub base: u64,
+    pub length: u64,
+    pub enabled: bool,
+    pub hot_pluggable: bool,
+    pub non_volatile: bool,
+}
+
+/// Firmware NUMA affinity plus optional SLIT distance matrix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumaTopology {
+    cpus: Vec<NumaCpuAffinity>,
+    memory: Vec<NumaMemoryAffinity>,
+    localities: Option<usize>,
+    distances: Vec<u8>,
+    /// SRAT records whose type is recognized but whose length is unsafe.
+    pub malformed_records: usize,
+}
+
+impl NumaTopology {
+    pub fn cpus(&self) -> &[NumaCpuAffinity] {
+        &self.cpus
+    }
+
+    pub fn memory(&self) -> &[NumaMemoryAffinity] {
+        &self.memory
+    }
+
+    pub fn localities(&self) -> Option<usize> {
+        self.localities
+    }
+
+    pub fn distance(&self, from: usize, to: usize) -> Option<u8> {
+        let count = self.localities?;
+        if from >= count || to >= count {
+            return None;
+        }
+        self.distances.get(from * count + to).copied()
+    }
+
+    pub fn domain_count(&self) -> usize {
+        let max = self
+            .cpus
+            .iter()
+            .map(|cpu| cpu.proximity_domain)
+            .chain(self.memory.iter().map(|memory| memory.proximity_domain))
+            .max()
+            .map_or(0, |domain| domain as usize + 1);
+        max.max(self.localities.unwrap_or(0))
+    }
+}
+
+/// Parse SRAT affinity records and, when present, the SLIT distance matrix.
+///
+/// SRAT and SLIT are firmware declarations. Callers must still report which
+/// CPUs and memory ranges the kernel admitted and used.
+pub fn parse_numa(m: &dyn PhysRead, rsdp: u64) -> Result<NumaTopology, AcpiError> {
+    const SRAT_ENTRIES_OFFSET: u32 = 48;
+    let (root, width) = root_table(m, rsdp)?;
+    let at = find_table(m, root, width, b"SRAT")?.ok_or(AcpiError::NoSrat)?;
+    let len = table(m, at, b"SRAT")?;
+    if len < SRAT_ENTRIES_OFFSET {
+        return Err(AcpiError::BadLength);
+    }
+    let mut cpus = Vec::new();
+    let mut memory = Vec::new();
+    let mut malformed_records = 0;
+    let mut off = SRAT_ENTRIES_OFFSET;
+    while off < len {
+        if len - off < 2 {
+            return Err(AcpiError::BadLength);
+        }
+        let entry = at + off as u64;
+        let kind = read_u8(m, entry)?;
+        let entry_len = read_u8(m, entry + 1)? as u32;
+        if entry_len < 2 || entry_len > len - off {
+            return Err(AcpiError::BadLength);
+        }
+        match (kind, entry_len) {
+            (0, 16..) => {
+                let flags = read_u32(m, entry + 4)?;
+                cpus.try_reserve(1).map_err(|_| AcpiError::Capacity)?;
+                cpus.push(NumaCpuAffinity {
+                    hardware_id: read_u8(m, entry + 3)? as u32,
+                    proximity_domain: u32::from(read_u8(m, entry + 2)?)
+                        | (u32::from(read_u8(m, entry + 9)?) << 8)
+                        | (u32::from(read_u8(m, entry + 10)?) << 16)
+                        | (u32::from(read_u8(m, entry + 11)?) << 24),
+                    enabled: flags & 1 != 0,
+                });
+            }
+            (2, 24..) => {
+                cpus.try_reserve(1).map_err(|_| AcpiError::Capacity)?;
+                cpus.push(NumaCpuAffinity {
+                    hardware_id: read_u32(m, entry + 8)?,
+                    proximity_domain: read_u32(m, entry + 4)?,
+                    enabled: read_u32(m, entry + 12)? & 1 != 0,
+                });
+            }
+            (1, 40..) => {
+                let flags = read_u32(m, entry + 28)?;
+                memory.try_reserve(1).map_err(|_| AcpiError::Capacity)?;
+                memory.push(NumaMemoryAffinity {
+                    proximity_domain: read_u32(m, entry + 2)?,
+                    base: read_u64(m, entry + 8)?,
+                    length: read_u64(m, entry + 16)?,
+                    enabled: flags & 1 != 0,
+                    hot_pluggable: flags & 2 != 0,
+                    non_volatile: flags & 4 != 0,
+                });
+            }
+            (1 | 2, _) => return Err(AcpiError::BadLength),
+            (0, _) => malformed_records += 1,
+            _ => {}
+        }
+        off += entry_len;
+    }
+
+    let mut localities = None;
+    let mut distances = Vec::new();
+    if let Some(slit) = find_table(m, root, width, b"SLIT")? {
+        let slit_len = table(m, slit, b"SLIT")?;
+        if slit_len < 44 {
+            return Err(AcpiError::BadLength);
+        }
+        let count = read_u64(m, slit + 36)?;
+        let count = usize::try_from(count).map_err(|_| AcpiError::BadLength)?;
+        let bytes = count
+            .checked_mul(count)
+            .ok_or(AcpiError::BadLength)?;
+        if 44u32
+            .checked_add(u32::try_from(bytes).map_err(|_| AcpiError::BadLength)?)
+            .is_none_or(|end| end > slit_len)
+        {
+            return Err(AcpiError::BadLength);
+        }
+        distances = read_vec(m, slit + 44, bytes)?;
+        localities = Some(count);
+    }
+    Ok(NumaTopology {
+        cpus,
+        memory,
+        localities,
+        distances,
+        malformed_records,
+    })
+}
+
 /// 从 RSDP 出发解析 MADT。`boot_hw_id` 是引导处理器的硬件标识（排在拓扑下标 0）。
 /// Parse the MADT starting from the RSDP at `rsdp`.
 pub fn parse_madt(m: &dyn PhysRead, rsdp: u64, boot_hw_id: u32) -> Result<Madt, AcpiError> {
@@ -326,7 +583,8 @@ pub fn parse_madt(m: &dyn PhysRead, rsdp: u64, boot_hw_id: u32) -> Result<Madt, 
         return Err(AcpiError::BadLength);
     }
     let mut local_controller = read_u32(m, madt + 36)? as u64;
-    let mut topology = Topology::boot_only(boot_hw_id);
+    let mut cpu_records: Vec<(u32, bool)> = Vec::new();
+    let mut cpu_inventory = CpuInventory::default();
     let mut io = Vec::new();
     let mut overrides = Vec::new();
     let mut off = MADT_ENTRIES_OFFSET;
@@ -344,7 +602,13 @@ pub fn parse_madt(m: &dyn PhysRead, rsdp: u64, boot_hw_id: u32) -> Result<Madt, 
             // 本地中断控制器：处理器 UID(1) 硬件标识(1) 标志(4)
             (0, 8..) => {
                 let id = read_u8(m, at + 3)? as u32;
-                add_cpu(&mut topology, id, read_u32(m, at + 4)?);
+                cpu_inventory.local_apic_records += 1;
+                reconcile_cpu_record(
+                    &mut cpu_records,
+                    &mut cpu_inventory,
+                    id,
+                    read_u32(m, at + 4)? & 1 != 0,
+                )?;
             }
             // I/O 中断控制器：标识(1) 保留(1) 地址(4) 全局中断号起点(4)
             (1, 12..) => {
@@ -372,16 +636,36 @@ pub fn parse_madt(m: &dyn PhysRead, rsdp: u64, boot_hw_id: u32) -> Result<Madt, 
             // x2 扩展本地中断控制器：保留(2) 硬件标识(4) 标志(4) UID(4)
             (9, 16..) => {
                 let id = read_u32(m, at + 4)?;
-                add_cpu(&mut topology, id, read_u32(m, at + 8)?);
+                cpu_inventory.x2apic_records += 1;
+                reconcile_cpu_record(
+                    &mut cpu_records,
+                    &mut cpu_inventory,
+                    id,
+                    read_u32(m, at + 8)? & 1 != 0,
+                )?;
             }
             (0 | 1 | 2 | 5 | 9, _) => return Err(AcpiError::BadLength),
             _ => {}
         }
         off += elen;
     }
+    let mut topology = Topology::boot_only(boot_hw_id);
+    for &(id, enabled) in &cpu_records {
+        if enabled {
+            topology.push(id);
+        }
+    }
+    for &(id, enabled) in &cpu_records {
+        if !enabled && !cpu_records.iter().any(|&(other, on)| other == id && on) {
+            topology.push_disabled(id);
+        }
+    }
+    cpu_inventory.unique_enabled = cpu_records.iter().filter(|(_, enabled)| *enabled).count();
+    cpu_inventory.unique_disabled = cpu_records.iter().filter(|(_, enabled)| !*enabled).count();
     Ok(Madt {
         local_controller,
         topology,
+        cpu_inventory,
         io,
         overrides,
     })
@@ -760,13 +1044,37 @@ pub fn parse_dmar(m: &dyn PhysRead, rsdp: u64) -> Result<Dmar, AcpiError> {
     Ok(out)
 }
 
-/// 标志位 0 = 已启用；未启用的（含仅「可上线」的热插拔位）只计数。
-fn add_cpu(t: &mut Topology, id: u32, flags: u32) {
-    if flags & 1 != 0 {
-        t.push(id);
+/// Reconcile duplicate Local APIC/x2APIC records by hardware ID.
+///
+/// Firmware can publish both legacy and extended records during the x2APIC
+/// transition. A disabled compatibility record for a CPU that is enabled by
+/// another record is a duplicate fact, not an absent CPU.
+fn reconcile_cpu_record(
+    records: &mut Vec<(u32, bool)>,
+    inventory: &mut CpuInventory,
+    id: u32,
+    enabled: bool,
+) -> Result<(), AcpiError> {
+    if enabled {
+        inventory.enabled_records += 1;
     } else {
-        t.push_disabled(id);
+        inventory.disabled_records += 1;
     }
+    match records.iter_mut().find(|(existing, _)| *existing == id) {
+        Some((_, prior)) => {
+            inventory.duplicate_records += 1;
+            if *prior != enabled {
+                inventory.conflicting_duplicates += 1;
+            }
+            // An enabled record wins over a disabled compatibility record.
+            *prior |= enabled;
+        }
+        None => {
+            records.try_reserve(1).map_err(|_| AcpiError::Capacity)?;
+            records.push((id, enabled));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -895,6 +1203,33 @@ mod tests {
         let madt = parse_madt(&m, 0x100, 5).unwrap();
         assert_eq!(madt.local_controller, 0xFED0_0000);
         assert_eq!(madt.topology.iter().collect::<Vec<_>>(), vec![5, 0, 300]);
+    }
+
+    #[test]
+    fn duplicate_legacy_and_x2apic_records_are_not_disabled_cpus() {
+        let m = image(
+            2,
+            &[
+                lapic(0, 1),
+                lapic(1, 1),
+                lapic(2, 0),
+                x2apic(1, 0),
+                x2apic(2, 0),
+                x2apic(3, 1),
+            ],
+        );
+        let madt = parse_madt(&m, 0x100, 0).unwrap();
+        assert_eq!(madt.topology.iter().collect::<Vec<_>>(), vec![0, 1, 3]);
+        assert_eq!(madt.topology.disabled_ids(), &[2]);
+        assert_eq!(madt.cpu_inventory.local_apic_records, 3);
+        assert_eq!(madt.cpu_inventory.x2apic_records, 3);
+        assert_eq!(madt.cpu_inventory.raw_records(), 6);
+        assert_eq!(madt.cpu_inventory.enabled_records, 3);
+        assert_eq!(madt.cpu_inventory.disabled_records, 3);
+        assert_eq!(madt.cpu_inventory.duplicate_records, 2);
+        assert_eq!(madt.cpu_inventory.conflicting_duplicates, 1);
+        assert_eq!(madt.cpu_inventory.unique_enabled, 3);
+        assert_eq!(madt.cpu_inventory.unique_disabled, 1);
     }
 
     #[test]
@@ -1041,6 +1376,100 @@ mod tests {
         let root = sdt(b"XSDT", &root_body);
         m.0[0x200..0x200 + root.len()].copy_from_slice(&root);
         m
+    }
+
+    fn image_with_platform_and_numa() -> Mem {
+        let mut m = image(2, &[lapic(0, 1)]);
+        let mut facp = sdt(b"FACP", &[0u8; 8]);
+        facp[10..16].copy_from_slice(b"JASPER");
+        facp[16..24].copy_from_slice(b"AMD TEST");
+        facp[24..28].copy_from_slice(&7u32.to_le_bytes());
+        facp[28..32].copy_from_slice(b"JSR ");
+        facp[32..36].copy_from_slice(&9u32.to_le_bytes());
+        fix_checksum(&mut facp, 9);
+        m.0[0x400..0x400 + facp.len()].copy_from_slice(&facp);
+
+        let mut srat_body = vec![0u8; 12];
+        let mut cpu0 = vec![0, 16, 0, 0];
+        cpu0.extend_from_slice(&1u32.to_le_bytes());
+        cpu0.push(0);
+        cpu0.extend_from_slice(&[0, 0, 0]);
+        cpu0.extend_from_slice(&0u32.to_le_bytes());
+        srat_body.extend_from_slice(&cpu0);
+
+        let mut cpu1 = vec![2, 24, 0, 0];
+        cpu1.extend_from_slice(&1u32.to_le_bytes());
+        cpu1.extend_from_slice(&1u32.to_le_bytes());
+        cpu1.extend_from_slice(&1u32.to_le_bytes());
+        cpu1.extend_from_slice(&0u32.to_le_bytes());
+        cpu1.extend_from_slice(&0u32.to_le_bytes());
+        srat_body.extend_from_slice(&cpu1);
+
+        let mut cpu2 = vec![2, 24, 0, 0];
+        cpu2.extend_from_slice(&1u32.to_le_bytes());
+        cpu2.extend_from_slice(&2u32.to_le_bytes());
+        cpu2.extend_from_slice(&0u32.to_le_bytes());
+        cpu2.extend_from_slice(&0u32.to_le_bytes());
+        cpu2.extend_from_slice(&0u32.to_le_bytes());
+        srat_body.extend_from_slice(&cpu2);
+
+        let mut memory = vec![1, 40];
+        memory.extend_from_slice(&1u32.to_le_bytes());
+        memory.extend_from_slice(&[0, 0]);
+        memory.extend_from_slice(&0x4_0000_0000u64.to_le_bytes());
+        memory.extend_from_slice(&0x8000_0000u64.to_le_bytes());
+        memory.extend_from_slice(&0u32.to_le_bytes());
+        memory.extend_from_slice(&5u32.to_le_bytes());
+        memory.extend_from_slice(&0u64.to_le_bytes());
+        srat_body.extend_from_slice(&memory);
+
+        let srat = sdt(b"SRAT", &srat_body);
+        m.0[0x1000..0x1000 + srat.len()].copy_from_slice(&srat);
+
+        let mut slit_body = 2u64.to_le_bytes().to_vec();
+        slit_body.extend_from_slice(&[10, 20, 20, 10]);
+        let slit = sdt(b"SLIT", &slit_body);
+        m.0[0x1800..0x1800 + slit.len()].copy_from_slice(&slit);
+
+        let mut root_body = Vec::new();
+        for address in [0x400u64, 0x800, 0x1000, 0x1800] {
+            root_body.extend_from_slice(&address.to_le_bytes());
+        }
+        let root = sdt(b"XSDT", &root_body);
+        m.0[0x200..0x200 + root.len()].copy_from_slice(&root);
+        m
+    }
+
+    #[test]
+    fn facp_srat_and_slit_report_real_platform_facts() {
+        let m = image_with_platform_and_numa();
+        let firmware = parse_firmware_info(&m, 0x100).unwrap();
+        assert_eq!(firmware.acpi_oem_id_text(), b"JASPER");
+        assert_eq!(firmware.acpi_oem_table_id_text(), b"AMD TEST");
+        assert_eq!(firmware.acpi_oem_revision, 7);
+        assert_eq!(firmware.creator_id_text(), b"JSR");
+        assert_eq!(firmware.creator_revision, 9);
+
+        let numa = parse_numa(&m, 0x100).unwrap();
+        assert_eq!(numa.domain_count(), 2);
+        assert_eq!(numa.cpus().len(), 3);
+        assert_eq!(
+            numa.cpus()[0],
+            NumaCpuAffinity {
+                hardware_id: 0,
+                proximity_domain: 0,
+                enabled: true
+            }
+        );
+        assert_eq!(numa.cpus()[2].enabled, false);
+        assert_eq!(numa.memory().len(), 1);
+        assert_eq!(numa.memory()[0].base, 0x4_0000_0000);
+        assert!(numa.memory()[0].non_volatile);
+        assert_eq!(numa.localities(), Some(2));
+        assert_eq!(numa.distance(0, 0), Some(10));
+        assert_eq!(numa.distance(0, 1), Some(20));
+        assert_eq!(numa.distance(1, 0), Some(20));
+        assert_eq!(numa.distance(2, 0), None);
     }
 
     #[test]

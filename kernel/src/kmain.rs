@@ -254,7 +254,7 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
             if !crate::terminal::init() {
                 return None;
             }
-            #[cfg(not(feature = "bench-only"))]
+            #[cfg(not(feature = "bench-profile"))]
             {
                 if crate::display::start().is_err() {
                     kprintln!("[JSR-DISPLAY] runtime=unsupported");
@@ -305,12 +305,12 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
         }),
         // DRV-1B：硬件顺序阶段只取得 PCI 配置空间访问者（ECAM 或传统端口）。总线枚举和
         // 只读设备表属于 `devices` 模块激活；平台没有 PCI 时激活出空表，不算失败。
-        Stage::Devices => stage(ctx, s, |_ctx| {
-            #[cfg(feature = "bench-only")]
+        Stage::Devices => stage(ctx, s, |ctx| {
+            #[cfg(feature = "bench-profile")]
             {
                 crate::early::mark("DEVICES SKIP PROFILE");
             }
-            #[cfg(not(feature = "bench-only"))]
+            #[cfg(not(feature = "bench-profile"))]
             {
                 pci::prepare(ctx.boot);
                 crate::display::report();

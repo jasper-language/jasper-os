@@ -161,6 +161,7 @@ pub fn init_boot(boot_hart: u32) -> CpuDiscovery {
             return CpuDiscovery {
                 topology: Topology::boot_only(boot_hart),
                 source: "system.firmware.sbi.error.no_hsm",
+                inventory: kernel_core::acpi::CpuInventory::default(),
                 inventory_complete: false,
             };
         }
@@ -168,6 +169,7 @@ pub fn init_boot(boot_hart: u32) -> CpuDiscovery {
             return CpuDiscovery {
                 topology: Topology::boot_only(boot_hart),
                 source: "system.firmware.sbi.error.no_ipi",
+                inventory: kernel_core::acpi::CpuInventory::default(),
                 inventory_complete: false,
             };
         }
@@ -175,6 +177,7 @@ pub fn init_boot(boot_hart: u32) -> CpuDiscovery {
     CpuDiscovery {
         topology,
         source,
+        inventory: kernel_core::acpi::CpuInventory::default(),
         inventory_complete,
     }
 }

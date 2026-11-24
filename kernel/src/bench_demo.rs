@@ -45,7 +45,7 @@ use crate::proc::ProcState;
 use crate::baseline::baseline;
 use crate::rt_demo::{rt_calls, run_program_arg};
 use crate::task::TaskId;
-use crate::{arch, config, kprintln, sched};
+use crate::{arch, config, early, kprintln, sched};
 
 static CHECKS: AtomicU32 = AtomicU32::new(0);
 static FAILED: AtomicU32 = AtomicU32::new(0);
@@ -123,6 +123,11 @@ const TASK_ID_BASE: u64 = 9800;
 /// 运行全部基准。演练期间关闭时间片抢占；结束时恢复进入前的设置与中断状态。
 /// Run every benchmark; preemption is off during the drill and restored afterwards.
 pub fn run() {
+    kprintln!(
+        "[JSR-BENCH] stage=calibration_begin timer_hz={} target_ticks={}",
+        config::ACTIVE.clock.timer_hz,
+        CALIBRATION_TICKS
+    );
     let prev_preemption = sched::set_preemption(false);
     let was_enabled = arch::irq_save_disable();
     let start = baseline();
@@ -182,13 +187,13 @@ fn resources_reclaimed(
     if start.objects != end.objects || start.pending != end.pending || start.pins != end.pins {
         return false;
     }
-    #[cfg(feature = "bench-only")]
+    #[cfg(feature = "bench-profile")]
     {
         let retained_heap_pages = end_heap_mapped.saturating_sub(start_heap_mapped)
             / kernel_core::frame::FRAME_SIZE;
         end.free_frames.saturating_add(retained_heap_pages as usize) == start.free_frames
     }
-    #[cfg(not(feature = "bench-only"))]
+    #[cfg(not(feature = "bench-profile"))]
     {
         let _ = (start_heap_mapped, end_heap_mapped);
         end.free_frames == start.free_frames
@@ -292,9 +297,9 @@ fn confidence(count: usize, recommended: usize) -> &'static str {
 }
 
 fn screen_line(line: &str) {
-    #[cfg(feature = "bench-only")]
+    #[cfg(feature = "bench-profile")]
     crate::early::append_line(line);
-    #[cfg(not(feature = "bench-only"))]
+    #[cfg(not(feature = "bench-profile"))]
     crate::display::terminal_write(line.as_bytes());
 }
 
@@ -391,12 +396,25 @@ fn counter_read_overhead(cal: &Calibration) {
 }
 
 /// 开中断等到下一个 tick 的边沿，返回边沿处的 tick 数。
-fn next_tick_edge() -> u64 {
+fn next_tick_edge() -> Option<u64> {
     let t = sched::timer_ticks();
+    let deadline = arch::measure_cycles().saturating_add(
+        early::tsc_frequency_hz().unwrap_or(3_000_000_000).saturating_mul(2),
+    );
+    arch::irq_enable();
     while sched::timer_ticks() == t {
-        arch::wait_for_interrupt();
+        if arch::measure_cycles() >= deadline {
+            kprintln!(
+                "[JSR-BENCH] timeout stage=next_tick tick={} timer_hz={}",
+                t,
+                config::ACTIVE.clock.timer_hz
+            );
+            arch::irq_disable();
+            return None;
+        }
+        core::hint::spin_loop();
     }
-    sched::timer_ticks()
+    Some(sched::timer_ticks())
 }
 
 // ---------------------------------------------------------------------------
@@ -406,10 +424,27 @@ fn next_tick_edge() -> u64 {
 /// 在 [`CALIBRATION_TICKS`] 个 tick 内数周期计数器走了多少，得到每 tick 周期数。
 fn calibrate() -> Option<Calibration> {
     let hz = config::ACTIVE.clock.timer_hz;
-    let t0 = next_tick_edge();
+    let t0 = next_tick_edge()?;
+    kprintln!("[JSR-BENCH] stage=calibration_tick_edge tick={}", t0);
     let c0 = arch::cycles();
+    let wait_seconds = CALIBRATION_TICKS.div_ceil(u64::from(hz.max(1))).saturating_add(2);
+    let deadline = arch::measure_cycles().saturating_add(
+        early::tsc_frequency_hz()
+            .unwrap_or(3_000_000_000)
+            .saturating_mul(wait_seconds),
+    );
+    arch::irq_enable();
     while sched::timer_ticks() < t0 + CALIBRATION_TICKS {
-        arch::wait_for_interrupt();
+        if arch::measure_cycles() >= deadline {
+            kprintln!(
+                "[JSR-BENCH] timeout stage=calibration tick={} target={}",
+                sched::timer_ticks(),
+                t0 + CALIBRATION_TICKS
+            );
+            arch::irq_disable();
+            return None;
+        }
+        core::hint::spin_loop();
     }
     let c1 = arch::cycles();
     arch::irq_disable();
@@ -451,7 +486,7 @@ fn timer_irq(cal: &Calibration) -> Option<Summary> {
         return None;
     };
     let mut irqs = Vec::with_capacity(TIMER_IRQ_SAMPLES);
-    let t0 = next_tick_edge();
+    let t0 = next_tick_edge()?;
     arch::irq_disable();
     let end = t0 + TIMER_IRQ_SAMPLES as u64;
     let mut last = sched::timer_ticks();

@@ -49,6 +49,11 @@ static CPU_RUNTIME: Once<IrqSpinLock<CpuRuntimeRegistry>> = Once::new();
 static CPU_ADMITTED_COUNT: AtomicUsize = AtomicUsize::new(0);
 static CPU_DISCOVERED_COUNT: AtomicUsize = AtomicUsize::new(0);
 static CPU_DISABLED_COUNT: AtomicUsize = AtomicUsize::new(0);
+static CPU_FIRMWARE_ENABLED_RECORDS: AtomicUsize = AtomicUsize::new(0);
+static CPU_FIRMWARE_DISABLED_RECORDS: AtomicUsize = AtomicUsize::new(0);
+static CPU_FIRMWARE_DUPLICATE_RECORDS: AtomicUsize = AtomicUsize::new(0);
+static CPU_FIRMWARE_CONFLICTING_RECORDS: AtomicUsize = AtomicUsize::new(0);
+static CPU_FIRMWARE_UNIQUE_ENABLED: AtomicUsize = AtomicUsize::new(0);
 /// 平台要求的低端启动帧（只预留一次，永久保留供以后再次启动处理器）。
 static START_FRAME: Once<Option<PhysFrame>> = Once::new();
 /// One board per initiating logical CPU. The vector is allocated after the
@@ -246,14 +251,30 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
         };
     };
     let discovery = arch::cpu_init_boot(boot);
-    CPU_DISCOVERED_COUNT.store(
-        discovery
-            .topology
-            .count()
-            .saturating_add(discovery.topology.disabled),
+    CPU_DISCOVERED_COUNT.store(discovery.inventory.raw_records(), Ordering::Release);
+    CPU_DISABLED_COUNT.store(discovery.inventory.unique_disabled, Ordering::Release);
+    CPU_FIRMWARE_ENABLED_RECORDS.store(discovery.inventory.enabled_records, Ordering::Release);
+    CPU_FIRMWARE_DISABLED_RECORDS.store(discovery.inventory.disabled_records, Ordering::Release);
+    CPU_FIRMWARE_DUPLICATE_RECORDS.store(discovery.inventory.duplicate_records, Ordering::Release);
+    CPU_FIRMWARE_CONFLICTING_RECORDS.store(
+        discovery.inventory.conflicting_duplicates,
         Ordering::Release,
     );
-    CPU_DISABLED_COUNT.store(discovery.topology.disabled, Ordering::Release);
+    CPU_FIRMWARE_UNIQUE_ENABLED.store(
+        discovery.inventory.unique_enabled,
+        Ordering::Release,
+    );
+    crate::kprintln!(
+        "[JSR-SMP] firmware raw={} enabled_records={} disabled_records={} duplicate_records={} conflicting_duplicates={} unique_enabled={} unique_disabled={} source={}",
+        discovery.inventory.raw_records(),
+        discovery.inventory.enabled_records,
+        discovery.inventory.disabled_records,
+        discovery.inventory.duplicate_records,
+        discovery.inventory.conflicting_duplicates,
+        discovery.inventory.unique_enabled,
+        discovery.inventory.unique_disabled,
+        discovery.source
+    );
     #[cfg(feature = "smp-bsp-only")]
     let discovery = {
         let present = discovery.topology.count().saturating_add(discovery.topology.disabled);
@@ -267,6 +288,7 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
         arch::CpuDiscovery {
             topology: Topology::boot_only(boot_hw_id),
             source: "bsp_only",
+            inventory: discovery.inventory,
             inventory_complete: true,
         }
     };
@@ -559,6 +581,26 @@ pub fn admitted_cpu_count() -> usize {
 
 pub fn disabled_cpu_count() -> usize {
     CPU_DISABLED_COUNT.load(Ordering::Acquire)
+}
+
+pub fn firmware_enabled_cpu_record_count() -> usize {
+    CPU_FIRMWARE_ENABLED_RECORDS.load(Ordering::Acquire)
+}
+
+pub fn firmware_disabled_cpu_record_count() -> usize {
+    CPU_FIRMWARE_DISABLED_RECORDS.load(Ordering::Acquire)
+}
+
+pub fn duplicate_cpu_record_count() -> usize {
+    CPU_FIRMWARE_DUPLICATE_RECORDS.load(Ordering::Acquire)
+}
+
+pub fn conflicting_cpu_record_count() -> usize {
+    CPU_FIRMWARE_CONFLICTING_RECORDS.load(Ordering::Acquire)
+}
+
+pub fn unique_enabled_cpu_count() -> usize {
+    CPU_FIRMWARE_UNIQUE_ENABLED.load(Ordering::Acquire)
 }
 
 fn runtime_hw_id(cpu: usize) -> Option<u32> {

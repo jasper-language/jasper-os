@@ -27,7 +27,7 @@ use crate::{config::ACTIVE as CONFIG, kprintln};
 /// 参数部分直接取 `crate::config::ACTIVE`（受 `profile-compact` 特性影响），
 /// 模块表与运行保证取 headless。这样「参数档」与「模块面」共享同一份声明，
 /// 不会出现两份互相矛盾的配置。
-#[cfg(feature = "bench-only")]
+#[cfg(feature = "bench-profile")]
 const BASE: SystemProfile = SystemProfile {
     name: "bench-head",
     display_zh: "无头性能基准",
@@ -37,9 +37,9 @@ const BASE: SystemProfile = SystemProfile {
     guarantees: profile::HEADLESS_GUARANTEES,
     hot_load: false,
 };
-#[cfg(all(not(feature = "bench-only"), feature = "rt1-no-realtime"))]
+#[cfg(all(not(feature = "bench-profile"), feature = "rt1-no-realtime"))]
 const BASE: SystemProfile = profile::HEADLESS_MIN;
-#[cfg(all(not(feature = "bench-only"), not(feature = "rt1-no-realtime")))]
+#[cfg(all(not(feature = "bench-profile"), not(feature = "rt1-no-realtime")))]
 const BASE: SystemProfile = profile::HEADLESS;
 pub const ACTIVE: SystemProfile = SystemProfile {
     name: BASE.name,

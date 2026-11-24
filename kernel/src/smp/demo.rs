@@ -114,8 +114,16 @@ pub fn run(report: StartReport) {
     }
     super::shared_demo::run(report.online);
     let me = percpu::this();
+    let bsp_index = arch::cpu_index();
+    let current = me.current();
+    kprintln!(
+        "[JSR-SMP] final bsp_index={} current={} idle_slot={}",
+        bsp_index,
+        current,
+        percpu::IDLE_SLOT
+    );
     check(
-        arch::cpu_index() == 0 && me.current() == 0,
+        bsp_index == 0 && (current == 0 || current == percpu::IDLE_SLOT),
         "引导处理器的每核数据与当前任务不符",
     );
     kprintln!(

@@ -213,6 +213,7 @@ pub fn init_boot() -> CpuDiscovery {
             return CpuDiscovery {
                 topology: Topology::boot_only(boot),
                 source: PsciError::NotSupported.name(),
+                inventory: kernel_core::acpi::CpuInventory::default(),
                 inventory_complete: false,
             };
         }
@@ -220,6 +221,7 @@ pub fn init_boot() -> CpuDiscovery {
     CpuDiscovery {
         topology,
         source,
+        inventory: kernel_core::acpi::CpuInventory::default(),
         inventory_complete,
     }
 }

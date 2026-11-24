@@ -12,7 +12,7 @@ use crate::{bench_demo, clock, early, hardware, kprintln, mm, startup};
 
 pub const NAME: &str = "physical-bench";
 
-fn finish(_ctx: &mut BootCtx) {
+fn finish(ctx: &mut BootCtx) {
     #[cfg(target_arch = "x86_64")]
     early::results_begin();
     hardware::report();
@@ -23,10 +23,18 @@ fn finish(_ctx: &mut BootCtx) {
     startup::skipped("ui_services", "headless_benchmark_profile");
     startup::skipped("desktop", "headless_benchmark_profile");
     startup::skipped("compat_assembly", "benchmark_excludes_compatibility_profiles");
+    let smp_failed = if let Some(report) = ctx.smp.filter(|report| report.online > 1) {
+        crate::smp::demo::run(report);
+        #[cfg(feature = "bench-smp")]
+        crate::smp_performance::run();
+        crate::smp::demo::failed()
+    } else {
+        0
+    };
     report_memory("before");
     bench_demo::run();
     report_memory("after");
-    let failed = bench_demo::failed();
+    let failed = bench_demo::failed().saturating_add(smp_failed);
     let timing_failed = bench_demo::timing_failed();
     let line = alloc::format!(
         "BENCH RESULT FAILED={} TIMING_FAILED={}\n",
@@ -59,13 +67,15 @@ fn report_memory(phase: &str) {
         .saturating_sub(free)
         .saturating_mul(kernel_core::frame::FRAME_SIZE as usize);
     let (heap_total, heap_free, heap_blocks, heap_mapped) = mm::heap::stats();
+    let heap_peak = mm::heap::peak_used();
     let line = alloc::format!(
-        "MEM {} RAM USABLE {} MIB FREE {} MIB USED {} KIB\nHEAP USED {} KIB FREE {} KIB MAPPED {} KIB LIMIT {} MIB BLOCKS {}\n",
+        "MEM {} RAM USABLE {} MIB FREE {} MIB USED {} KIB\nHEAP USED {} KIB PEAK {} KIB FREE {} KIB MAPPED {} KIB LIMIT {} MIB BLOCKS {}\n",
         phase,
         usable.saturating_mul(4096) / (1024 * 1024),
         free.saturating_mul(4096) / (1024 * 1024),
         used_bytes / 1024,
         heap_total.saturating_sub(heap_free) / 1024,
+        heap_peak / 1024,
         heap_free / 1024,
         heap_mapped / 1024,
         mm::heap::limit() / (1024 * 1024),

@@ -214,7 +214,17 @@ boot-autorecovery = ["panic-reboot"]
 # Focused physical performance image: boot normally, run all kernel/user
 # microbenchmarks, display memory totals and latency/throughput results, then
 # remain alive for inspection.
-bench-only = ["user-programs", "smp-bsp-only"]
+bench-profile = []
+bench-only = ["user-programs", "smp-bsp-only", "bench-profile"]
+# Same measurement and startup behavior as bench-only, but keeps firmware SMP
+# online so single-core and multi-core runs use identical binaries.
+bench-smp = ["user-programs", "bench-profile"]
+# Diagnostic only: omit the INIT deassert write on hardware where firmware
+# resets on that write. Normal builds retain the architectural sequence.
+smp-skip-init-deassert = []
+# Diagnostic only: start with SIPI directly for platforms that have already
+# placed APs into wait-for-SIPI during firmware handoff.
+smp-skip-init = []
 # Diagnostic physical profile: discover firmware CPU topology but deliberately
 # do not start secondary processors.
 smp-bsp-only = []

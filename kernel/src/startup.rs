@@ -34,8 +34,12 @@ pub fn headless_ready() -> bool {
         && published != 0;
     if ready {
         let line = alloc::format!(
-            "[READY] HEADLESS bsp=0 discovered={} online={} participating={} usable_frames={} free_frames={} heap_mapped={} ticks={} capabilities={:#x}",
+            "[READY] HEADLESS bsp=0 raw_records={} enabled_records={} unique_enabled={} unique_disabled={} admitted={} online={} participating={} usable_frames={} free_frames={} heap_mapped={} ticks={} capabilities={:#x}",
             crate::smp::discovered_cpu_count(),
+            crate::smp::firmware_enabled_cpu_record_count(),
+            crate::smp::unique_enabled_cpu_count(),
+            crate::smp::disabled_cpu_count(),
+            crate::smp::admitted_cpu_count(),
             crate::smp::online_set().len(),
             crate::smp::online_set().len(),
             frames,
@@ -101,22 +105,26 @@ pub fn stage_ok(component: &str, start: StageStart) {
         .unwrap_or(0);
     let (heap_total, heap_free, _, heap_mapped) = mm::heap::stats();
     let heap_used = heap_total.saturating_sub(heap_free);
+    let heap_peak = mm::heap::peak_used();
     let free_frames = mm::frame::free_frames();
     kprintln!(
-        "[ OK ] {} elapsed_ns={} heap_delta={} mapped_delta={} frame_delta={}",
+        "[ OK ] {} elapsed_ns={} heap_used={} heap_peak={} heap_delta={} mapped_delta={} frame_delta={}",
         component,
         elapsed_ns,
+        heap_used,
+        heap_peak,
         heap_used as i64 - start.heap_used as i64,
         heap_mapped as i64 - start.heap_mapped as i64,
         start.free_frames as i64 - free_frames as i64
     );
     early::append_status("[ OK ] ", component);
     crate::kprintln!(
-        "{{\"schema\":\"jasper.boot.v1\",\"kind\":\"stage\",\"boot_id\":{},\"component\":\"{}\",\"status\":\"ok\",\"elapsed_ns\":{},\"heap_used\":{},\"heap_mapped\":{},\"free_frames\":{},\"heap_delta\":{},\"mapped_delta\":{},\"frame_delta\":{}}}",
+        "{{\"schema\":\"jasper.boot.v1\",\"kind\":\"stage\",\"boot_id\":{},\"component\":\"{}\",\"status\":\"ok\",\"elapsed_ns\":{},\"heap_used\":{},\"heap_peak\":{},\"heap_mapped\":{},\"free_frames\":{},\"heap_delta\":{},\"mapped_delta\":{},\"frame_delta\":{}}}",
         early::boot_id(),
         component,
         elapsed_ns,
         heap_used,
+        heap_peak,
         heap_mapped,
         free_frames,
         heap_used as i64 - start.heap_used as i64,
@@ -136,21 +144,25 @@ pub fn stage_fail(component: &str, start: StageStart, reason: &str) {
         .unwrap_or(0);
     let (heap_total, heap_free, _, heap_mapped) = mm::heap::stats();
     let heap_used = heap_total.saturating_sub(heap_free);
+    let heap_peak = mm::heap::peak_used();
     let free_frames = mm::frame::free_frames();
     kprintln!(
-        "[FAIL] {} elapsed_ns={} reason={}",
+        "[FAIL] {} elapsed_ns={} heap_used={} heap_peak={} reason={}",
         component,
         elapsed_ns,
+        heap_used,
+        heap_peak,
         reason
     );
     early::append_status("[FAIL] ", component);
     crate::kprintln!(
-        "{{\"schema\":\"jasper.boot.v1\",\"kind\":\"stage\",\"boot_id\":{},\"component\":\"{}\",\"status\":\"failed\",\"reason\":\"{}\",\"elapsed_ns\":{},\"heap_used\":{},\"heap_mapped\":{},\"free_frames\":{},\"heap_delta\":{},\"mapped_delta\":{},\"frame_delta\":{}}}",
+        "{{\"schema\":\"jasper.boot.v1\",\"kind\":\"stage\",\"boot_id\":{},\"component\":\"{}\",\"status\":\"failed\",\"reason\":\"{}\",\"elapsed_ns\":{},\"heap_used\":{},\"heap_peak\":{},\"heap_mapped\":{},\"free_frames\":{},\"heap_delta\":{},\"mapped_delta\":{},\"frame_delta\":{}}}",
         early::boot_id(),
         component,
         reason,
         elapsed_ns,
         heap_used,
+        heap_peak,
         heap_mapped,
         free_frames,
         heap_used as i64 - start.heap_used as i64,

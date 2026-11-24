@@ -214,6 +214,7 @@ pub fn init_boot(boot: &BootSpec) -> CpuDiscovery {
         return CpuDiscovery {
             topology: Topology::boot_only(0),
             source: "system.firmware.error.unreadable",
+            inventory: kernel_core::acpi::CpuInventory::default(),
             inventory_complete: false,
         };
     };
@@ -221,27 +222,45 @@ pub fn init_boot(boot: &BootSpec) -> CpuDiscovery {
         return CpuDiscovery {
             topology: Topology::boot_only(0),
             source: "system.firmware.error.unreadable",
+            inventory: kernel_core::acpi::CpuInventory::default(),
             inventory_complete: false,
         };
     }
     apic::enable_local(true);
     let boot_id = apic::id();
     BOOTSTRAP_ID.store(boot_id, Ordering::Release);
+    crate::kprintln!(
+        "[JSR-SMP] apic mode={} base={:#x} bsp_id={}",
+        apic::mode_name(),
+        apic::physical_base(),
+        boot_id
+    );
     apic::calibrate_timer();
-    let (topology, source, inventory_complete) = match boot.acpi_rsdp {
+    let (topology, inventory, source, inventory_complete) = match boot.acpi_rsdp {
         Some(rsdp) => match acpi::parse_madt(&PhysWindow(offset), rsdp, boot_id) {
             Ok(m) => {
                 super::ioapic::configure(&m, offset, boot_id);
-                (m.topology, "acpi.madt", true)
+                (m.topology, m.cpu_inventory, "acpi.madt", true)
             }
-            Err(e) => (Topology::boot_only(boot_id), e.name(), false),
+            Err(e) => (
+                Topology::boot_only(boot_id),
+                kernel_core::acpi::CpuInventory::default(),
+                e.name(),
+                false,
+            ),
         },
-        None => (Topology::boot_only(boot_id), "boot_only", false),
+        None => (
+            Topology::boot_only(boot_id),
+            kernel_core::acpi::CpuInventory::default(),
+            "boot_only",
+            false,
+        ),
     };
     if let Err(error) = prepare(topology.count()) {
         return CpuDiscovery {
             topology,
             source: error.name(),
+            inventory,
             inventory_complete: false,
         };
     }
@@ -260,6 +279,7 @@ pub fn init_boot(boot: &BootSpec) -> CpuDiscovery {
         return CpuDiscovery {
             topology,
             source: "system.cpu.error.apic_id_storage",
+            inventory,
             inventory_complete: false,
         };
     }
@@ -267,6 +287,7 @@ pub fn init_boot(boot: &BootSpec) -> CpuDiscovery {
     CpuDiscovery {
         topology,
         source,
+        inventory,
         inventory_complete,
     }
 }
@@ -306,6 +327,13 @@ pub unsafe fn start(req: &CpuStart<space::SpaceRoot>, frame: Option<PhysFrame>) 
     });
     AP_TIMER_HZ.store(req.timer_hz, Ordering::Relaxed);
     core::sync::atomic::fence(Ordering::SeqCst);
+    let sending = alloc::format!(
+        "AP SEND {} apic={} vector={:#x}",
+        req.index,
+        req.hw_id,
+        frame.start()
+    );
+    crate::early::mark(&sending);
     if apic::send_init_startup(req.hw_id, (frame.start() >> 12) as u8) {
         Ok(())
     } else {
@@ -316,19 +344,31 @@ pub unsafe fn start(req: &CpuStart<space::SpaceRoot>, frame: Option<PhysFrame>) 
 /// 其他处理器进入 Rust 的第一站（由启动代码以 System V 约定调用，`index` 在 rdi）。
 extern "C" fn ap_entry(index: u64) -> ! {
     let index = index as usize;
+    ap_mark(index, "RUST ENTRY");
     if !gdt::init_cpu(index) {
         crate::arch::halt_forever();
     }
+    ap_mark(index, "GDT");
     idt::load();
+    ap_mark(index, "IDT");
     // AP 以自己的 CR0/CR4 状态启动，不继承 BSP 的 OSFXSR 设置。
     // APs reset with their own CR0/CR4 state; they do not inherit the BSP OSFXSR setup.
     let xsave = super::enable_sse();
+    ap_mark(index, "XSAVE");
     if !syscall::init(index, xsave) {
         crate::arch::halt_forever();
     }
+    ap_mark(index, "SYSCALL");
     apic::enable_local(false);
+    ap_mark(index, "APIC");
     apic::start_periodic(AP_TIMER_HZ.load(Ordering::Relaxed));
+    ap_mark(index, "TIMER");
     crate::smp::secondary_main(index)
+}
+
+fn ap_mark(index: usize, stage: &str) {
+    let line = alloc::format!("AP {} {} apic={:#x}", index, stage, apic::id());
+    crate::early::mark(&line);
 }
 
 /// 逻辑下标 `cpu` 的 APIC 标识（未登记时为 `None`）。

@@ -223,6 +223,8 @@ pub struct CpuDiscovery {
     pub topology: kernel_core::smp::Topology,
     /// 信息来源或失败原因的规范名（例如固件表名、解析错误名）。
     pub source: &'static str,
+    /// Raw firmware records and reconciled duplicate/disabled facts.
+    pub inventory: kernel_core::acpi::CpuInventory,
     /// Whether the firmware topology was actually read and validated.
     ///
     /// 是否真实读取并验证了固件拓扑；false 表示只能使用引导处理器，调用方必须

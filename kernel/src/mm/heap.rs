@@ -13,6 +13,7 @@
 //! 堆锁 → 映射器锁 → 页帧锁。映射与页帧服务本身不使用堆，因此不存在反向依赖。
 
 use core::alloc::{GlobalAlloc, Layout};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kernel_core::frame::{PhysFrame, FRAME_SIZE};
 use kernel_core::heap::LinkedListHeap;
@@ -40,6 +41,7 @@ struct HeapState {
 static HEAP: IrqSpinLock<HeapState> =
     IrqSpinLock::ranked(crate::lockorder::MEMORY_HEAP, HeapState { heap: LinkedListHeap::empty(), mapped_end: HEAP_START });
 static HEAP_LIMIT: Once<u64> = Once::new();
+static HEAP_PEAK_USED: AtomicUsize = AtomicUsize::new(0);
 
 /// 增长失败的原因（诊断用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,6 +245,11 @@ pub fn stats() -> (usize, usize, usize, u64) {
     (s.heap.total_bytes(), s.heap.free_bytes(), s.heap.free_blocks(), s.mapped_end - HEAP_START)
 }
 
+/// Peak bytes ever allocated from the kernel heap in this boot.
+pub fn peak_used() -> usize {
+    HEAP_PEAK_USED.load(Ordering::Acquire)
+}
+
 /// 内核全局分配器。
 pub struct KernelHeap;
 
@@ -253,6 +260,7 @@ unsafe impl GlobalAlloc for KernelHeap {
         let mut s = HEAP.lock();
         let p = s.heap.allocate(layout.size(), layout.align());
         if !p.is_null() {
+            record_peak(&s);
             return p;
         }
         // 不够：增长「大小 + 对齐余量」后重试一次
@@ -260,12 +268,24 @@ unsafe impl GlobalAlloc for KernelHeap {
         if grow(&mut s, need).is_err() {
             return core::ptr::null_mut();
         }
-        s.heap.allocate(layout.size(), layout.align())
+        let p = s.heap.allocate(layout.size(), layout.align());
+        if !p.is_null() {
+            record_peak(&s);
+        }
+        p
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         HEAP.lock().heap.deallocate(ptr, layout.size());
     }
+}
+
+fn record_peak(state: &HeapState) {
+    let used = state
+        .heap
+        .total_bytes()
+        .saturating_sub(state.heap.free_bytes());
+    HEAP_PEAK_USED.fetch_max(used, Ordering::AcqRel);
 }
 
 #[global_allocator]

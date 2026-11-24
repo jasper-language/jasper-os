@@ -34,38 +34,40 @@ pub mod pixel6a_runtime;
 pub use pixel6a_runtime as plan;
 #[cfg(all(
     not(feature = "pixel6a-runtime-verify"),
-    feature = "bench-only",
+    feature = "bench-profile",
     target_arch = "x86_64"
 ))]
 pub mod performance;
+#[cfg(all(feature = "bench-smp", target_arch = "x86_64"))]
+pub mod smp_performance;
 #[cfg(all(
     not(feature = "pixel6a-runtime-verify"),
-    feature = "bench-only",
+    feature = "bench-profile",
     target_arch = "x86_64"
 ))]
 pub use performance as plan;
 #[cfg(all(
     not(feature = "production"),
     not(feature = "pixel6a-runtime-verify"),
-    not(feature = "bench-only")
+    not(feature = "bench-profile")
 ))]
 pub mod acceptance;
 #[cfg(all(
     not(feature = "production"),
     not(feature = "pixel6a-runtime-verify"),
-    not(feature = "bench-only")
+    not(feature = "bench-profile")
 ))]
 pub use acceptance as plan;
 #[cfg(all(
     feature = "production",
     not(feature = "pixel6a-runtime-verify"),
-    not(feature = "bench-only")
+    not(feature = "bench-profile")
 ))]
 pub mod production;
 #[cfg(all(
     feature = "production",
     not(feature = "pixel6a-runtime-verify"),
-    not(feature = "bench-only")
+    not(feature = "bench-profile")
 ))]
 pub use production as plan;
 

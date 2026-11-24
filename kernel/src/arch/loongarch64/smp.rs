@@ -264,6 +264,7 @@ pub fn init_boot() -> super::CpuDiscovery {
         return super::CpuDiscovery {
             topology: Topology::boot_only(super::cpu::cpuid() as u32),
             source: "boot_only",
+            inventory: kernel_core::acpi::CpuInventory::default(),
             inventory_complete: false,
         };
     };
@@ -282,6 +283,7 @@ pub fn init_boot() -> super::CpuDiscovery {
     super::CpuDiscovery {
         topology,
         source,
+        inventory: kernel_core::acpi::CpuInventory::default(),
         inventory_complete,
     }
 }

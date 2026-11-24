@@ -420,11 +420,11 @@ pub(crate) fn console_write(ptr: u64, len: u64) -> i64 {
                 buf.len(),
                 text
             );
-            #[cfg(feature = "bench-only")]
+            #[cfg(feature = "bench-profile")]
             if let Ok(text) = core::str::from_utf8(&buf) {
                 crate::early::append_line(text);
             }
-            #[cfg(not(feature = "bench-only"))]
+            #[cfg(not(feature = "bench-profile"))]
             crate::display::terminal_write(&buf);
             buf.len() as i64
         }

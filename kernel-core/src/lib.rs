@@ -193,6 +193,8 @@ pub mod sbi;
 pub mod sched;
 pub mod shard;
 pub mod smp;
+#[cfg(any(test, feature = "acpi-dynamic"))]
+pub mod smbios;
 pub mod spawn_abi;
 pub mod syscall_set;
 pub mod object;

@@ -116,6 +116,14 @@ fn main() -> Status {
         }
     );
 
+    // UEFI firmware may arm its watchdog before handing control to a PXE
+    // application. The kernel owns boot-progress recovery and firmware WDAT
+    // after ExitBootServices; leaving the firmware timer armed would reset the
+    // machine during AP bring-up with no useful fault record.
+    if let Err(error) = boot::set_watchdog_timer(0, 0, None) {
+        log::warn!("Failed to disable UEFI watchdog: {error:?}");
+    }
+
     log::trace!("exiting boot services");
     let mut memory_map = unsafe { boot::exit_boot_services(None) };
 
