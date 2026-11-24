@@ -237,6 +237,7 @@ mod fv1;
 pub mod raw_timing;
 
 pub mod publication_credit;
+pub mod raster;
 
 pub mod pi_work;
 pub mod percpu_migration;
