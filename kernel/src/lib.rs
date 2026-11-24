@@ -83,6 +83,7 @@ pub mod boot;
 pub mod capability_matrix;
 pub mod bootcap;
 pub mod clock;
+pub mod clock_fact;
 pub mod config;
 #[cfg(feature = "lifecycle-ab-health")]
 pub mod lifecycle_health;
