@@ -72,20 +72,25 @@ impl Screen {
         self.len = 0;
     }
     fn byte(&mut self, b: u8) {
+        const CHARACTER_WIDTH: usize = 12;
+        const LINE_HEIGHT: usize = 20;
         let i = self.fb.info();
         if b == b'\r' { return; }
-        if b == b'\n' || self.x + 9 > i.width { self.x = 0; self.y += 16; }
-        if self.y + 16 > i.height {
+        if b == b'\n' || self.x + CHARACTER_WIDTH > i.width {
+            self.x = 0;
+            self.y += LINE_HEIGHT;
+        }
+        if self.y + LINE_HEIGHT > i.height {
             // Scroll in place so the final result remains on screen.
-            let row = i.stride * i.bytes_per_pixel * 16;
+            let row = i.stride * i.bytes_per_pixel * LINE_HEIGHT;
             let end = i.stride * i.bytes_per_pixel * i.height;
             self.fb.buffer_mut().copy_within(row..end, 0);
             self.fb.buffer_mut()[end-row..end].fill(0);
-            self.y -= 16;
+            self.y -= LINE_HEIGHT;
         }
         if b == b'\n' { return; }
         let c = if b.is_ascii_graphic() || b == b' ' { b as char } else { '?' };
-        if let Some(g) = get_raster(c, FontWeight::Regular, RasterHeight::Size16) {
+        if let Some(g) = get_raster(c, FontWeight::Regular, RasterHeight::Size20) {
             for (dy, row) in g.raster().iter().enumerate() {
                 for (dx, v) in row.iter().enumerate() {
                     let at = ((self.y+dy)*i.stride + self.x+dx)*i.bytes_per_pixel;

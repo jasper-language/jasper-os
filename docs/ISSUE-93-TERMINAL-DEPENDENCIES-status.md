@@ -2,8 +2,8 @@
 
 Updated: 2026-11-24.
 
-Status: **candidate selection recorded; normal terminal integration remains
-engineering work.**
+Status: **early font dependency upgraded and checked; normal terminal
+integration remains engineering work.**
 
 The early console must remain independent from the normal terminal and UI
 stack. Candidate libraries are:
@@ -19,6 +19,11 @@ to create a second session/input/display authority. The current framebuffer
 diagnostic path remains the emergency path until the userspace terminal
 adapter and font dependency checks are actually integrated.
 
+The BM-1 early framebuffer path now pins `noto-sans-mono-bitmap =0.3.2` with
+the 20-pixel raster, regular/bold weights, basic Latin and Unicode specials.
+It remains an independent emergency renderer. Normal `os-terminal` + Swash
+and Ratatui are not yet integrated.
+
 Required before promotion:
 
 - fetch and lock exact crate versions and full transitive dependency graph;
@@ -29,4 +34,5 @@ Required before promotion:
 - validate real screenshots across supported display modes;
 - retain `qemu_rc`, process exit, framebuffer checksum and input evidence.
 
-No dependency has been promoted to the normal-console path by this record.
+Only the early pre-rasterized font has been promoted. No normal-console or TUI
+dependency has been promoted by this record.

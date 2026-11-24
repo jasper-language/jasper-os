@@ -28,7 +28,7 @@ xts-mode = { version = "=0.6.0", default-features = false }
 bootloader_api = "0.11.17"
 x86_64 = "0.15.5"
 pic8259 = "0.11.0"
-noto-sans-mono-bitmap = { version = "0.2.0", optional = true, default-features = false, features = ["regular", "size_16", "unicode-basic-latin"] }
+noto-sans-mono-bitmap = { version = "=0.3.2", optional = true, default-features = false, features = ["regular", "bold", "size_16", "size_20", "unicode-basic-latin", "unicode-specials"] }
 
 [features]
 rt3-verify = ["user-programs"]
