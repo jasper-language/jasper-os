@@ -86,6 +86,8 @@ jobs:
             --check docs/hardcode-inventory-ledger.json
           python3 scripts/check-hardcode-platform-profiles.py --self-test
           python3 scripts/check-hardcode-platform-profiles.py
+      - name: Issue #19 验证模块分类门 / demo path classification
+        run: python3 scripts/check-issue19-demo-paths.py
       - name: Android Framework namespace 前置门 / Android framework preflight
         run: python3 scripts/android-framework-preflight.py --self-test
       - name: Issue #42 syscall 枚举与分发表完整性 / syscall disposition inventory
@@ -95,19 +97,41 @@ jobs:
       - name: Issue #42 25 类机制审计台账 / mechanism-family ledger
         run: |
           python3 scripts/check-issue42-mechanism-ledger.py --self-test
-          python3 scripts/check-issue42-mechanism-ledger.py
+          python3 scripts/check-issue42-mechanism-ledger.py --final
       - name: Issue #43 驱动兼容域退出门 / compatibility driver-domain ledger
         run: |
           python3 scripts/check-issue43-driver-ledger.py --self-test
           python3 scripts/check-issue43-driver-ledger.py
+          python3 scripts/generate-issue43-support-matrix.py --check
           python3 scripts/check-issue43-support-matrix.py --self-test
           python3 scripts/check-issue43-support-matrix.py
           python3 scripts/check-issue43-binary-inventory.py --self-test
           python3 scripts/check-issue43-binary-inventory.py
+      - name: Issue #56 跨生态宿主治理矩阵 / host-governance matrix
+        run: |
+          python3 scripts/check-issue56-host-governance.py --self-test
+          python3 scripts/check-issue56-host-governance.py
+      - name: Issue #31/#55 Darling 研究边界 / Darling research matrix
+        run: |
+          python3 scripts/check-darling-research.py --self-test
+          python3 scripts/check-darling-research.py
+      - name: COMPAT-D3D-1 D3D12 fixture 与资产边界 / D3D12 fixture boundary
+        run: python3 scripts/check-compat-d3d12.py
+      - name: Wine D3D runtime feature 接线编译 / D3D runtime feature wiring
+        run: |
+          CARGO_BUILD_JOBS=2 cargo check -p jasper-kernel \
+            --target x86_64-unknown-none \
+            --features lifecycle-root-exec-verify,compat-wine-verify,compat-wine-d3d-verify,compat-wine-d3d12-verify,compat-wine-wsi-verify
       - name: Issue #47 CPU 固定消费者清单 / CPU consumer inventory
         run: |
           python3 scripts/check-cpu-dynamic-consumers.py --self-test
           python3 scripts/check-cpu-dynamic-consumers.py
+      - name: Issue #46 Trust Framework v1 规范边界 / trust protocol specification
+        run: |
+          python3 scripts/check-trust-framework-spec.py --self-test
+          python3 scripts/check-trust-framework-spec.py
+      - name: Issue #46 软件证据纵向切片 / software attestation vertical
+        run: cargo test -p jasper-trust-service
       - name: 原生 Profile 与兼容依赖隔离 / native profile isolation
         run: python3 scripts/check-native-ecosystem.py --dependency-tree
       - name: Issue #36/#37 GPU 与 UI ABI 边界 / GPU-UI boundary
@@ -160,6 +184,12 @@ jobs:
         run: CARGO_BUILD_JOBS=2 bash scripts/compat-package-real.sh
         env:
           COMPAT_PACKAGE_REAL_DIRECT_CARGO: "1"
+      - name: Wine D3D/lavapipe staging manifest / reproducible staging
+        run: python3 scripts/prepare-wine-d3d-staging.py --self-test
+      - name: D3D11 WSI fixture boundary / fail-closed fixture
+        run: |
+          python3 scripts/check-d3d11-wsi-probe.py --self-test
+          python3 scripts/check-d3d11-wsi-probe.py
       - name: jaso 格式与打包测试 / jaso tests
         run: cargo test -p jaso --features pack
       - name: kernel-core 单元测试（32 位 i686、AArch64、RISC-V64） / cross-ISA unit tests

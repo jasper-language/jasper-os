@@ -8,12 +8,11 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use kernel_core::address_sync::{
-    AddressGrant, AddressState, AddressSync, AddressWait,
-};
+use kernel_core::address_sync::{AddressGrant, AddressState, AddressSync, AddressWait};
 use kernel_core::memory_capability::MemoryRights;
 use kernel_core::object::{HandleId, ObjectType, Rights};
 use kernel_core::objtable::ObjId;
+use kernel_core::sched::Qos;
 use kernel_core::smp::CpuSet;
 
 use crate::kobj;
@@ -42,13 +41,15 @@ static PROCESS_EXITED: AtomicBool = AtomicBool::new(false);
 static REMAPPED: AtomicBool = AtomicBool::new(false);
 static SYNC: IrqSpinLock<Option<AddressSync<4>>> = IrqSpinLock::new(None);
 static GRANTS: IrqSpinLock<[Option<AddressGrant>; 2]> = IrqSpinLock::new([None; 2]);
-static TARGETS: IrqSpinLock<[Option<(ObjId, u64)>; 2]> =
-    IrqSpinLock::new([None; 2]);
+static TARGETS: IrqSpinLock<[Option<(ObjId, u64)>; 2]> = IrqSpinLock::new([None; 2]);
 static REMAP: IrqSpinLock<Option<(HandleId, u64)>> = IrqSpinLock::new(None);
 
 fn fail() {
     FAILED.fetch_add(1, Ordering::Relaxed);
-    kprintln!("[JSR-ADDRESS-SYNC-FAIL] stage={}", STAGE.load(Ordering::Relaxed));
+    kprintln!(
+        "[JSR-ADDRESS-SYNC-FAIL] stage={}",
+        STAGE.load(Ordering::Relaxed)
+    );
 }
 
 fn finish(index: usize, ok: bool) {
@@ -57,6 +58,21 @@ fn finish(index: usize, ok: bool) {
     }
     DONE.fetch_add(1, Ordering::Release);
     let _ = index;
+}
+
+fn wait_until_parked(expected: u32) -> bool {
+    loop {
+        if PARKED.load(Ordering::Acquire) == expected {
+            return true;
+        }
+        if DONE.load(Ordering::Acquire) != 0 {
+            return false;
+        }
+        // Sleep rather than spin-yield on a Background task. Under a loaded TCG host,
+        // a background yield could repeatedly re-enter before the lower-id waiters
+        // completed their arm/store sequence and left the acceptance run spinning.
+        sched::sleep_ticks(1);
+    }
 }
 
 fn only(cpu: usize) -> CpuSet {
@@ -102,7 +118,6 @@ fn waiter(index: usize) {
             value,
         }
     };
-
     loop {
         {
             let sync = SYNC.lock();
@@ -161,13 +176,8 @@ fn waiter(index: usize) {
                 finish(index, false);
                 return;
             };
-            let revoked = proc::memory_capability_use(
-                pid,
-                va,
-                WORD_BYTES,
-                MemoryRights::READ,
-            )
-            .is_none();
+            let revoked =
+                proc::memory_capability_use(pid, va, WORD_BYTES, MemoryRights::READ).is_none();
             finish(index, revoked && ready.is_some());
             return;
         }
@@ -201,13 +211,11 @@ fn publisher() {
         finish(2, false);
     }
 
-    for _ in 0..100 {
-        if PARKED.load(Ordering::Acquire) == 2 {
-            break;
-        }
-        sched::sleep_ticks(1);
+    if sched::set_current_qos(Qos::Background).is_err() {
+        abort();
+        return;
     }
-    if PARKED.load(Ordering::Acquire) != 2 {
+    if !wait_until_parked(2) {
         abort();
         return;
     }
@@ -240,13 +248,11 @@ fn publisher() {
 }
 
 fn revoker() {
-    for _ in 0..100 {
-        if PARKED.load(Ordering::Acquire) == 1 {
-            break;
-        }
-        sched::sleep_ticks(1);
+    if sched::set_current_qos(Qos::Background).is_err() {
+        finish(2, false);
+        return;
     }
-    if PARKED.load(Ordering::Acquire) != 1 {
+    if !wait_until_parked(1) {
         finish(2, false);
         return;
     }
@@ -280,13 +286,7 @@ fn revoker() {
     } else {
         proc::unmap_memory(pid, va, 1).is_ok()
     };
-    let revoked = proc::memory_capability_use(
-        pid,
-        va,
-        WORD_BYTES,
-        MemoryRights::READ,
-    )
-    .is_none();
+    let revoked = proc::memory_capability_use(pid, va, WORD_BYTES, MemoryRights::READ).is_none();
     REVOKED.store(released && revoked, Ordering::Release);
     let mut wake = [None; 4];
     {
@@ -345,7 +345,8 @@ fn run_pass(pass: u64, revoke_mode: bool, exit_mode: bool, remap_mode: bool) -> 
         return false;
     };
     STAGE.store(3, Ordering::Relaxed);
-    let Some(memory_id) = proc::handle_info(a, memory).and_then(|info| ObjId::from_raw(info.0.id.0))
+    let Some(memory_id) =
+        proc::handle_info(a, memory).and_then(|info| ObjId::from_raw(info.0.id.0))
     else {
         fail();
         return false;
@@ -388,21 +389,13 @@ fn run_pass(pass: u64, revoke_mode: bool, exit_mode: bool, remap_mode: bool) -> 
         return false;
     };
     STAGE.store(7, Ordering::Relaxed);
-    let Ok(a_grant) = AddressGrant::from_use(
-        a_use,
-        0,
-        WORD_BYTES as u32,
-        MemoryRights::READ,
-    ) else {
+    let Ok(a_grant) = AddressGrant::from_use(a_use, 0, WORD_BYTES as u32, MemoryRights::READ)
+    else {
         fail();
         return false;
     };
-    let Ok(b_grant) = AddressGrant::from_use(
-        b_use,
-        0,
-        WORD_BYTES as u32,
-        MemoryRights::READ,
-    ) else {
+    let Ok(b_grant) = AddressGrant::from_use(b_use, 0, WORD_BYTES as u32, MemoryRights::READ)
+    else {
         fail();
         return false;
     };
@@ -431,10 +424,7 @@ fn run_pass(pass: u64, revoke_mode: bool, exit_mode: bool, remap_mode: bool) -> 
     let cpu_p = online.get(2).copied().unwrap_or(cpu_a);
     PASS_CPUS.store(online.len() as u32, Ordering::Relaxed);
     DISTRIBUTED.store(cpu_a != cpu_b, Ordering::Relaxed);
-    PUBLISHER_DISTRIBUTED.store(
-        cpu_p != cpu_a && cpu_p != cpu_b,
-        Ordering::Relaxed,
-    );
+    PUBLISHER_DISTRIBUTED.store(cpu_p != cpu_a && cpu_p != cpu_b, Ordering::Relaxed);
     let spawned = if revoke_mode {
         sched::spawn_on(
             TaskId(base + 1),
@@ -453,14 +443,7 @@ fn run_pass(pass: u64, revoke_mode: bool, exit_mode: bool, remap_mode: bool) -> 
             )
             .is_ok()
     } else {
-        sched::spawn_on(
-            TaskId(base),
-            "address-sync-a",
-            waiter0,
-            None,
-            only(cpu_a),
-        )
-        .is_ok()
+        sched::spawn_on(TaskId(base), "address-sync-a", waiter0, None, only(cpu_a)).is_ok()
             && sched::spawn_on(
                 TaskId(base + 1),
                 "address-sync-b",
@@ -500,8 +483,8 @@ fn run_pass(pass: u64, revoke_mode: bool, exit_mode: bool, remap_mode: bool) -> 
     if DONE.load(Ordering::Acquire) != expected_done || FAILED.load(Ordering::Relaxed) != 0 {
         fail();
     }
-    let exited = proc::exit_idle(a, 0)
-        && (proc::exit_idle(b, 0) || PROCESS_EXITED.load(Ordering::Acquire));
+    let exited =
+        proc::exit_idle(a, 0) && (proc::exit_idle(b, 0) || PROCESS_EXITED.load(Ordering::Acquire));
     let a_reaped = proc::reap(a).is_some();
     let b_reaped = proc::reap(b).is_some()
         || (EXIT_MODE.load(Ordering::Acquire) && PROCESS_EXITED.load(Ordering::Acquire));

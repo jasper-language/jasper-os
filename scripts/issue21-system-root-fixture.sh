@@ -16,6 +16,7 @@ ROOT_ANDROID_TOYBOX="${10:-}"
 ROOT_AOSP_BINDER_TEST="${11:-}"
 ROOT_ANDROID_TREE="${12:-}"
 ROOT_ANDROID_LINKER_CONFIG="${13:-}"
+ROOT_STDIO_FIXTURE="${14:-}"
 [[ "$SLOT" == A || "$SLOT" == B ]]
 [[ "$RELEASE" =~ ^[1-9][0-9]*$ ]]
 mkdir -p "$WORK"
@@ -127,6 +128,11 @@ if [ -n "$ROOT_PPID_FIXTURE" ]; then
   write_file "$ROOT_PPID_FIXTURE" /usr/bin/jasper-getppid
   debugfs -w -R 'sif /usr/bin/jasper-getppid mode 0100755' "$PARTITION" >/dev/null
 fi
+if [ -n "$ROOT_STDIO_FIXTURE" ]; then
+  [[ -x "$ROOT_STDIO_FIXTURE" ]]
+  write_file "$ROOT_STDIO_FIXTURE" /usr/bin/jasper-file-stdio
+  debugfs -w -R 'sif /usr/bin/jasper-file-stdio mode 0100755' "$PARTITION" >/dev/null
+fi
 if [ -n "$ROOT_ANDROID_TOYBOX" ]; then
   [[ -x "$ROOT_ANDROID_TOYBOX" ]]
   write_file "$ROOT_ANDROID_TOYBOX" /usr/bin/toybox
@@ -156,6 +162,15 @@ if [ -n "$ROOT_ANDROID_TREE" ]; then
       debugfs -w -R "sif $destination mode 0100644" "$PARTITION" >/dev/null
     fi
   done < <(find "$ROOT_ANDROID_TREE" -type f -print0)
+  while IFS= read -r -d '' source; do
+    relative=${source#"$ROOT_ANDROID_TREE"/}
+    destination="/$relative"
+    target=$(readlink "$source")
+    debugfs -w -R "rm $destination" "$PARTITION" >/dev/null 2>&1 || true
+    debugfs -w -R "symlink $destination $target" "$PARTITION" >/dev/null
+    debugfs -R "stat $destination" "$PARTITION" 2>/dev/null |
+      grep -q 'Type: symlink'
+  done < <(find "$ROOT_ANDROID_TREE" -type l -print0)
 fi
 if [ -n "$ROOT_ANDROID_LINKER_CONFIG" ]; then
   [[ -f "$ROOT_ANDROID_LINKER_CONFIG" ]]
@@ -191,6 +206,9 @@ if [ -n "$ROOT_SIGNAL_FIXTURE" ]; then
 fi
 if [ -n "$ROOT_PPID_FIXTURE" ]; then
   verify_payload /usr/bin/jasper-getppid "$ROOT_PPID_FIXTURE"
+fi
+if [ -n "$ROOT_STDIO_FIXTURE" ]; then
+  verify_payload /usr/bin/jasper-file-stdio "$ROOT_STDIO_FIXTURE"
 fi
 if [ -n "$ROOT_ANDROID_TOYBOX" ]; then
   verify_payload /usr/bin/toybox "$ROOT_ANDROID_TOYBOX"

@@ -1,8 +1,35 @@
 schema = 1
 stage = "NATIVE-ECOSYSTEM-1"
 status = "core-passed"
-updated = "2026-11-21"
-evidence = "docs/native-ecosystem-independence.md; scripts/check-native-ecosystem.py; no-default/default/production and syscall-only/ELF-only/dynamic-libc dependency trees; jasper-compat-packages install/upgrade/rollback/uninstall tests"
+updated = "2026-11-22"
+evidence = "docs/native-ecosystem-independence.md; scripts/check-native-ecosystem.py; no-default/default/production and syscall-only/ELF-only/dynamic-libc dependency trees; jasper-compat-packages install/stop/start/upgrade/rollback/uninstall tests; pinned DXVK 3.1.1 package lifecycle evidence/compat-package-real-dxvk-3.1.1-r2"
+
+[runtime_framework_policy]
+version = 1
+policy = "compatibility-only"
+native_frameworks = []
+kernel_abi_expansion = "forbidden"
+required_claim = "running under compatibility is not native framework support"
+
+[[runtime_framework_policy.framework]]
+id = "jvm"
+execution_path = "linux-compat"
+examples = "OpenJDK, JVM and Java applications"
+
+[[runtime_framework_policy.framework]]
+id = "dotnet"
+execution_path = "linux-compat"
+examples = ".NET Runtime, CoreCLR and C# applications"
+
+[[runtime_framework_policy.framework]]
+id = "android-framework"
+execution_path = "android-userland-over-linux-compat"
+examples = "Android Framework, ActivityManager, ART and APK lifecycle"
+
+[[runtime_framework_policy.framework]]
+id = "win32"
+execution_path = "wine-over-linux-compat"
+examples = "Win32, PE and Direct3D applications"
 
 [[acceptance]]
 id = "optional-compat-dependencies"
@@ -32,7 +59,7 @@ evidence = "compat-elf-backend-verify -> compat-elf; compat-dynamic-libc-verify 
 id = "runtime-install-stop-uninstall"
 statement = "Compatibility components install, update, stop and uninstall independently while native services continue operating."
 state = "pending"
-evidence = "Component installer lifecycle tests pass; a real default-distribution install, stop, uninstall and post-removal native service run is not yet accepted end to end"
+evidence = "Component installer tests are 26/26 and a pinned unmodified DXVK 3.1.1 package passes install, stop, start, upgrade, rollback, uninstall, offline install and transient-state cleanup; the enabled state is durable and stopped dependencies cannot be hidden by an enabled dependent. A real default-distribution install, stop, uninstall and post-removal native service run is still not accepted end to end"
 
 [[acceptance]]
 id = "default-distribution-exclusion"

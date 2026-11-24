@@ -1,0 +1,29 @@
+schema = 1
+id = "COMPAT-D3D11-WSI-1"
+status = "passed"
+jasper_guest_passed = true
+physical_gpu_passed = false
+source = "verification/fixtures/windows/d3d11_wsi_probe.c"
+binary_bytes = 935481
+binary_sha256 = "7851a8ac7a9bfb1c361c4457b6776ec67e50ee67b28d887287bb90976ccd6a1e"
+build_evidence = "evidence/d3d11-wsi-fixture-20261122/README.md"
+pass_marker = "D3D11_WSI_PROBE_OK"
+fail_marker = "D3D11_WSI_PROBE_FAIL"
+
+required_layer = [
+  "wine-service-desktop",
+  "win32u-window",
+  "dxgi-swapchain",
+  "dxvk-vulkan-wsi",
+  "jasper-vulkan-surface",
+  "present",
+]
+
+exit_gate = "The unmodified fixture creates a Wine service-desktop HWND and DXGI swapchain, clears and reads back its backbuffer, Present returns S_OK, and both process exit and Jasper resource accounting return to baseline."
+
+blockers = [
+  "A successful service-desktop window does not establish visible desktop input or focus.",
+  "Mesa lavapipe and QEMU do not establish physical GPU, display or Pixel 6a acceptance.",
+]
+
+claim_limit = "Jasper guest hidden-service-desktop HWND, DXGI swapchain, DXVK Vulkan WSI, readback and Present are verified on Mesa lavapipe; physical GPU, visible desktop input/focus and Pixel 6a display remain separate."

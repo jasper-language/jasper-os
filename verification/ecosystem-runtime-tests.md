@@ -3,6 +3,10 @@
 This report separates host baselines from execution on Jasper-OS. A host
 baseline is not evidence that the Jasper kernel supports the same program.
 
+JVM, .NET/CoreCLR and Android Framework are external user-space frameworks.
+They may run only under the Linux compatibility stack and never imply a native
+Jasper framework ABI. See `docs/native-ecosystem-independence.md`.
+
 ## Jasper-OS UEFI
 
 ### Upstream Toybox
@@ -73,6 +77,22 @@ the current Jasper glibc/static-PIE teardown path faults at `ip=0x202` after
 the test suite returns. The AOSP test code and Binder assertions are unchanged;
 this wrapper is recorded as a separate exit-path gap.
 
+### Wine command execution on Jasper
+
+Unmodified Ubuntu Wine 10.0 executed under the Jasper Linux/POSIX ABI through
+the real UEFI/root-image path. Wine loaded its preloader, wineserver, PE
+`start.exe`, `ntdll.dll`, `kernel32.dll`, `kernelbase.dll`, `win32u.dll`,
+`imm32.dll`, and `cmd.exe`. The command `cmd.exe /c echo WINE_CMD_OK` executed
+the built-in, wrote through the inherited standard-output handle, and exited
+zero.
+
+Evidence: `evidence/compat-wine-steady-r116`.
+
+The immediately repeated command also completed with `resources=true`,
+including zero retained frames and zero shared-mapping growth. This establishes
+the POSIX runtime steady state separately from the still-pending D3D/Vulkan
+execution path.
+
 ## Host baselines
 
 ### Wine
@@ -113,12 +133,36 @@ Darling `v0.1.20260608` was extracted. The official launcher requires
 setuid-root/namespace privileges, so a privileged isolated container was used
 as the host baseline. Darling's `/bin/echo` ran and printed `DARLING_EXEC_OK`.
 The host user-space launcher without container privileges was blocked before
-that point. No Darling result is claimed for Jasper yet.
+that point. A separate Jasper guest launcher/mount diagnostic is recorded in
+`evidence/darling-jasper-mount-r12/README.md`; No complete Darling result is claimed for Jasper.
+
+The release's `debs_20260608.zip` asset was downloaded and verified as
+`sha256=27469ef3932da2e91dd7fb34b70e3628a3e54b7af9fb5480051f44af35eca1fd`;
+its observed packages are `amd64` `0.1.20260609~noble`. Darling remains
+excluded by Issue #31 and research-only under Issue #55. The separate
+container, Mach-O/mldr/dyld, darlingserver/RPC, Linux ABI, GUI/WindowServer,
+Metal/Vulkan and resource gates are frozen in
+`verification/darling-research.toml` and
+`docs/DARLING-RESEARCH-MATRIX.md`; none is claimed as a Jasper guest pass.
 
 ### Java VM
 
 The unmodified OpenJDK 21 host JVM ran a Java class and printed
 `JVM_OK value=499500`.
+
+The unmodified OpenJDK 21 runtime also completed a Jasper UEFI guest run from
+the bounded `/data/runtimes/openjdk` compatibility namespace. The fixture
+covered interpreted/JIT startup, Java threads, a 1 MiB allocation with real GC,
+and file output. The measured run printed
+`JVM_PROBE_OK value=499500 thread=true gc=true file=true java=21.0.13.1`,
+exited zero, reclaimed resources, and reached
+`JSR-LIFE-HEALTH result=root_execution_complete`.
+
+The JVM acceptance profile exposes the documented baseline `max,-avx,-avx2`
+CPU model. OpenJDK deliberately probes AVX signal preservation by faulting on a
+null pointer; the compatibility layer does not yet deliver synchronous
+`SIGSEGV` to guest handlers, so AVX-enabled JVM startup remains a separate ABI
+gate and is not claimed by this pass.
 
 An unmodified AOSP Android 34 ART runtime was extracted from the system image
 and APEX payload. Its `dalvikvm64 -showversion` baseline printed
@@ -136,6 +180,30 @@ not required by modern Android. The static preflight follows the stock
 passwd file, so `container_ready=true` with no static omissions. Activity
 startup cannot be claimed until the process chain actually runs.
 
+### .NET/CoreCLR
+
+The unmodified Microsoft Linux x64 runtime is a compatibility target only.
+Jasper-OS does not define a native .NET/CoreCLR/C# framework or ABI.
+
+The unmodified Microsoft .NET Runtime `10.0.15` completed a Jasper UEFI guest
+run as a self-contained Linux x64 application from
+`/data/runtimes/dotnet`. The fixture exercised CoreCLR startup, JIT execution,
+managed threads, Task/thread-pool work, a forced GC, managed exceptions, file
+I/O, and AF_UNIX stream sockets. The measured run printed
+`DOTNET_PROBE_OK runtime=10.0.15 checksum=150015000 thread=true task=true gc=true exception=true file=true socket=true`,
+exited zero, reclaimed resources, and reached
+`JSR-LIFE-HEALTH result=root_execution_complete`.
+
+The runtime manifest is generated from the Windows-host-independent publish
+tree using the unmodified SDK's `dotnet publish --self-contained` path. Jasper
+validates every staged file's length and SHA-256 before installing it into the
+bounded runtime cache.
+
+`System.Diagnostics.Process`/`posix_spawn` remains outside this runtime-baseline
+claim. Its vfork parent resumption, exec confirmation, and wait/wake semantics
+belong to the POSIX/Linux semantic-conformance track rather than the CoreCLR
+acceptance gate.
+
 ## Remaining Jasper work
 
 - Provide a general root-image namespace for Android `/system`, `/apex` and
@@ -145,5 +213,9 @@ startup cannot be claimed until the process chain actually runs.
 - Stage Wine/DXVK/VKD3D and Metal2Vulkan in a Jasper guest with a real GPU or
   an explicit virtual Vulkan device; the current UEFI QEMU fixture has no
   virtio-gpu/Vulkan device.
+- Deliver synchronous guest signals, including the AVX-preservation `SIGSEGV`
+  probe, without terminating the Linux process.
+- Complete POSIX process-creation semantics used by `posix_spawn`, including
+  vfork shared-stack lifetime, exec confirmation, child reaping and wait wakeup.
 
 These are compatibility gaps, not passing results.

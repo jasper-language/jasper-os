@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MATRIX = ROOT / "verification" / "issue43-pixel6a-support-matrix.tsv"
+INVENTORY = ROOT / "verification" / "issue43-pixel6a-binary-inventory.tsv"
 HEADER = [
     "component",
     "kind",
@@ -103,6 +104,25 @@ def self_test() -> None:
     print("issue43-support-matrix: self-test PASS")
 
 
+def check_inventory_coverage(rows: list[dict[str, str]]) -> int:
+    with INVENTORY.open(newline="", encoding="utf-8") as source:
+        inventory = list(csv.DictReader(source, delimiter="\t"))
+    expected = {
+        (row["kind"], row["observed_name"])
+        for row in inventory
+        if row["kind"] in {"linux-module", "android-hal"}
+    }
+    covered = {
+        (row["kind"], row["observed_name"])
+        for row in rows
+        if row["kind"] in {"linux-module", "android-hal"}
+    }
+    missing = expected - covered
+    if missing:
+        raise ValueError(f"support matrix lacks {len(missing)} inventory entries")
+    return len(expected)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
@@ -112,11 +132,13 @@ def main() -> int:
         return 0
     try:
         with MATRIX.open(newline="", encoding="utf-8") as source:
-            validate(list(csv.DictReader(source, delimiter="\t")))
+            rows = list(csv.DictReader(source, delimiter="\t"))
+        validate(rows)
+        covered = check_inventory_coverage(rows)
     except (OSError, ValueError, csv.Error) as error:
         print(f"issue43-support-matrix: FAIL {error}")
         return 1
-    print("issue43-support-matrix: PASS fail-closed")
+    print(f"issue43-support-matrix: PASS fail-closed inventory={covered}")
     return 0
 
 

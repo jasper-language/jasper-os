@@ -4,9 +4,18 @@
 
 ## 原则
 
-Jasper 以独立语言生态、应用框架、系统接口、设备驱动框架和运行环境为长期建设
-主体。POSIX、Linux ABI、Android、Windows 与外部驱动适配是生态迁移和互操作
-设施，不是 Jasper 原生体系的永久基础依赖。
+Jasper-OS 提供稳定、语言中立的系统执行环境。Jasper 语言生态独立开发，发行版
+负责选择和集成 Jasper 运行时及应用框架；编译器、语法、标准库、工具链和自举
+工作不进入 Jasper-OS 内核与系统机制 DAG。
+
+Jasper-OS **不会提供 JVM/Java 原生框架 ABI**，也**不会提供 .NET/CoreCLR/C#
+原生框架 ABI**。这些框架及其运行时只能作为外部用户态组件，通过 Linux 兼容层
+（Android Framework 可在 Linux ABI 之上叠加 Android 用户态适配）运行。这里
+“可以运行”表示兼容验收，不表示 Jasper 原生生态支持该框架，也不授权为框架扩张
+内核 ABI。它们不是 Jasper 原生框架。
+
+POSIX、Linux ABI、Android、Windows 与外部驱动适配是生态迁移和互操作设施，
+不是 Jasper 原生体系的永久基础依赖。
 
 兼容能力可以长期存在，但必须同时满足以下条件：
 
@@ -15,6 +24,22 @@ Jasper 以独立语言生态、应用框架、系统接口、设备驱动框架�
 3. 停用或卸载后，Jasper 原生应用、系统接口、服务和驱动框架仍可独立构建与运行；
 4. 不向原生 ABI 注入 fd、fork、errno、Linux syscall 编号或其他历史语义；
 5. 服从 Handle/Rights、PEP、配额、审计、撤销和资源生命周期规则。
+
+## 外部语言与应用框架边界
+
+| 外部框架/运行时 | 合法执行路径 | Jasper 原生 ABI/框架 |
+| --- | --- | --- |
+| OpenJDK/JVM、Java 应用 | Linux ABI 兼容层中的未修改 Linux 用户态运行时 | 不新增 JVM、Java 或 JNI 内核 ABI；不是原生框架 |
+| .NET Runtime/CoreCLR、C# 应用 | Linux ABI 兼容层中的未修改 Linux x64 用户态运行时 | 不新增 CLR、.NET 或 C# 内核 ABI；不是原生框架 |
+| Android Framework/Activity、ART/APK | Linux ABI 之上由可选 Android 用户态兼容组件执行 | 不新增 Android Framework、ActivityManager 或 ART 内核 ABI；不是原生框架 |
+| Win32/Direct3D 应用 | Wine 经 Linux ABI，DXVK/VKD3D 再经 Jasper Vulkan/GPU 服务 | 不新增 Win32、PE 或 Direct3D 内核 ABI；不是原生框架 |
+
+兼容层可以因为真实运行时需求修复通用 Linux 机制，但不得据此把该框架的对象、
+API、错误码、生命周期或权限模型升级成 Jasper 原生能力。只有与具体框架无关、
+经过独立 ABI 审查的通用缺口，才能进入 Jasper `system.*` 或 `service.*`。
+
+桌面、Terminal、系统设置和系统级应用使用 Jasper 技术栈；外部语言框架即使能
+通过兼容层启动，也不能把“兼容运行”记作“Jasper 原生框架已支持”。
 
 ## 当前实现边界
 
@@ -40,12 +65,20 @@ Linux fd 表、兼容 pid、Linux 调用权限和 ELF 后端模块只在对应�
 | Native 发行 Profile | `release/native-profile.toml` 精确使用默认内核特性且兼容组件列表为空 | passed |
 | syscall 显式启用 | 启用 `compat-syscall-verify` 后引入并编译 `jasper-compat-core` | passed |
 | ELF 后端显式启用 | 启用 `compat-elf-backend-verify` 后引入并编译 `jasper-compat-loader` | passed |
+| 组件独立停用/恢复 | 固定上游 DXVK 3.1.1 安装后依次 stop/start，并验证 enabled 状态持久化 | passed (component lifecycle) |
 | 发行组件卸载 | 安装、停用、卸载后原生 Profile 启动与设备服务不回退 | pending |
 | 默认发行退出 | 兼容组件不在默认发行配置，且原生应用生态可替代迁移需求 | pending |
 
 机器检查脚本读取本矩阵、内核清单和源码门控锚点。`core-passed` 只表示默认依赖
 隔离、显式装配和组件管理软件侧闭环，不表示真实默认发行退出与完整原生生态
 迁移已经完成。
+
+组件管理器现在持久化每个已安装组件的 `enabled` 状态；`stop` 不删除已验证
+文件，`start` 重新验证版本、摘要和依赖闭包。启用的依赖方会阻止其依赖被隐式
+停用，旧状态文件缺省为 `enabled=true`，因此升级不会静默改变运行能力。
+固定 DXVK 3.1.1 包的在线安装、停用、恢复、升级、回滚、卸载和离线安装证据在
+`evidence/compat-package-real-dxvk-3.1.1-r2/`。这关闭软件组件生命周期缺口，
+但没有替代真实默认发行上的原生服务持续运行与回滚证据。
 
 ## 演进规则
 

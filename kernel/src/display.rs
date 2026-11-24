@@ -40,6 +40,7 @@ const OVERLAY_SURFACE: SurfaceSpec = SurfaceSpec {
 const ACCENT_WIDTH: u32 = 16;
 const ACCENT_HEIGHT: u32 = 8;
 const ACCENT_BYTES: usize = ACCENT_WIDTH as usize * ACCENT_HEIGHT as usize * 4;
+const DEFAULT_DPI: u32 = 96; // JASPER-HARDCODE-REVIEW: issue=35 source=display-firmware-dpi reason=firmware-gop-does-not-expose-physical-dpi
 const ACCENT_SURFACE: SurfaceSpec = SurfaceSpec {
     width: ACCENT_WIDTH,
     height: ACCENT_HEIGHT,
@@ -51,6 +52,8 @@ struct Runtime {
     base: usize,
     len: usize,
     surface: SurfaceSpec,
+    dpi_x: u32,
+    dpi_y: u32,
     session: DynamicDisplayInputSession,
     compositor: Compositor<3>,
     overlay: [u8; OVERLAY_BYTES],
@@ -84,6 +87,9 @@ struct Prepared {
 }
 
 static PREPARED: IrqSpinLock<Option<Prepared>> =
+    IrqSpinLock::ranked(crate::lockorder::DISPLAY, None);
+#[cfg(feature = "ui-process-verify")]
+static UI_CAPABILITY_OBSERVATION: IrqSpinLock<Option<(SurfaceSpec, bool, u32, u32)>> =
     IrqSpinLock::ranked(crate::lockorder::DISPLAY, None);
 
 /// Bind and immediately paint one boot frame from the firmware framebuffer.
@@ -197,6 +203,8 @@ pub fn start() -> Result<(), DisplayInputError> {
         base: prepared.base,
         len: frame_len,
         surface,
+        dpi_x: DEFAULT_DPI,
+        dpi_y: DEFAULT_DPI,
         session,
         compositor,
         overlay,
@@ -370,10 +378,56 @@ pub fn primary_surface() -> Option<(u32, u32)> {
 
 /// Current display/keyboard facts for UI capability-event construction.
 pub fn ui_capability_facts() -> Option<(SurfaceSpec, bool)> {
+    #[cfg(feature = "ui-process-verify")]
+    if let Some((surface, keyboard, _, _)) = *UI_CAPABILITY_OBSERVATION.lock() {
+        return Some((surface, keyboard));
+    }
     DISPLAY
         .lock()
         .as_ref()
         .map(|runtime| (runtime.surface, runtime.session.keyboard_available()))
+}
+
+/// Observe a display/input change from a real platform event source.
+///
+/// 记录真实平台事件源观察到的新 Surface、keyboard、DPI 事实；事件生产者
+/// 会在下次轮询时把它转换为唯一 capability event。该入口不直接迁移 UI
+/// Workspace，也不授予任何权限。
+#[cfg(feature = "ui-process-verify")]
+pub fn observe_ui_capability_change(
+    surface: SurfaceSpec,
+    keyboard: bool,
+    dpi_x: u32,
+    dpi_y: u32,
+) -> Result<(), DisplayInputError> {
+    surface.validate()?;
+    if dpi_x == 0 || dpi_y == 0 {
+        return Err(DisplayInputError::InvalidSurface);
+    }
+    *UI_CAPABILITY_OBSERVATION.lock() = Some((surface, keyboard, dpi_x, dpi_y));
+    Ok(())
+}
+
+/// Current detailed facts retained by the platform event observation.
+#[cfg(feature = "ui-process-verify")]
+pub fn ui_capability_observation() -> Option<(SurfaceSpec, bool, u32, u32)> {
+    if let Some(observed) = *UI_CAPABILITY_OBSERVATION.lock() {
+        return Some(observed);
+    }
+    DISPLAY.lock().as_ref().map(|runtime| {
+        (
+            runtime.surface,
+            runtime.session.keyboard_available(),
+            runtime.dpi_x,
+            runtime.dpi_y,
+        )
+    })
+}
+
+/// Drop the verification observation and return to the live framebuffer facts.
+#[cfg(feature = "ui-process-verify")]
+pub fn clear_ui_capability_observation() {
+    *UI_CAPABILITY_OBSERVATION.lock() = None;
 }
 
 /// Register one Engine-produced Surface as a native compositor layer, then

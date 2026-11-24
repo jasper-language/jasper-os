@@ -343,6 +343,14 @@ impl UnixSocketEndpoint {
             .unwrap_or(0)
     }
 
+    pub fn outbound_buffered_bytes(&self) -> usize {
+        self.link
+            .lock()
+            .as_ref()
+            .map(|link| link.tx.buffered_bytes())
+            .unwrap_or(0)
+    }
+
     /// Current admitted byte capacity of the outbound pipe.
     pub fn capacity(&self) -> usize {
         self.link

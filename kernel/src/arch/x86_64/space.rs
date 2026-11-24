@@ -24,14 +24,20 @@ pub const USER_FIRST: usize = 32;
 pub const USER_LAST: usize = 64;
 /// 私有窗口对应的虚拟地址区间 `[start, end)`。
 pub const USER_WINDOW: (u64, u64) = ((USER_FIRST as u64) << 39, (USER_LAST as u64) << 39);
-/// Dedicated below-2 GiB private window for Linux `MAP_32BIT` users.
+/// Private low-half window for Linux ABI users.
 ///
-/// AOSP ART reserves its RegionSpace at low addresses such as 236–812 MiB.
-/// The lower 128 MiB remain the kernel's shared low mappings; user-space page
-/// directories above that boundary are private.
-pub const LOW_USER_WINDOW: (u64, u64) = (128 << 20, 2 << 30); // JASPER-HARDCODE-REVIEW: issue=32 source=AOSP-ART-RegionSpace reason=ART-requires-preferred-and-fallback-maps-below-one-GiB
+/// The lower 128 MiB remain the kernel's shared low mappings. All remaining
+/// PML4[0] entries are private to the compatibility address space, covering
+/// Wine PE preferred images and `MAP_32BIT` users such as AOSP ART.
+pub const LOW_USER_WINDOW: (u64, u64) = (128 << 20, 1 << 39); // JASPER-HARDCODE-REVIEW: issue=32 source=linux-x86_64-low-private-window reason=wine-pe-images-and-map32bit-share-pml4-zero
+/// Sparse private PML4 slot reserved for ABI-defined fixed pages such as the
+/// Darwin commpage. It remains separate from the contiguous native window.
+pub const COMPAT_FIXED_FIRST: usize = 255;
+pub const COMPAT_FIXED_LAST: usize = 256;
+pub const COMPAT_FIXED_WINDOW: (u64, u64) =
+    ((COMPAT_FIXED_FIRST as u64) << 39, (COMPAT_FIXED_LAST as u64) << 39);
 const LOW_USER_PDPT_FIRST: usize = 0;
-const LOW_USER_PDPT_LAST: usize = 2;
+const LOW_USER_PDPT_LAST: usize = 512;
 const LOW_KERNEL_PD_ENTRIES: usize = (LOW_USER_WINDOW.0 as usize) >> 21;
 // 用户态运行时与用户程序的链接地址按同一数值布局：两边必须一致。
 const _: () = assert!(USER_WINDOW.0 == kernel_core::user_layout::WINDOW_BASE_X86_64);
@@ -58,7 +64,10 @@ pub fn current() -> SpaceRoot {
 /// `phys_offset` 必须是全物理内存映射偏移；`template` 是有效的 PML4。
 pub unsafe fn create(template: SpaceRoot, phys_offset: u64, frames: &mut dyn FrameAllocator) -> Result<SpaceRoot, MapError> {
     let cur = table_at(phys_offset, template.0);
-    if (USER_FIRST..USER_LAST).any(|i| !cur[i].is_unused()) {
+    if (USER_FIRST..USER_LAST)
+        .chain(COMPAT_FIXED_FIRST..COMPAT_FIXED_LAST)
+        .any(|i| !cur[i].is_unused())
+    {
         return Err(MapError::InvalidAddress);
     }
     if !cur[0].is_unused() {
@@ -130,7 +139,10 @@ pub unsafe fn create(template: SpaceRoot, phys_offset: u64, frames: &mut dyn Fra
             | PageTableFlags::USER_ACCESSIBLE,
     );
     for i in 0..512 {
-        if i != 0 && !(USER_FIRST..USER_LAST).contains(&i) {
+        if i != 0
+            && !(USER_FIRST..USER_LAST).contains(&i)
+            && !(COMPAT_FIXED_FIRST..COMPAT_FIXED_LAST).contains(&i)
+        {
             new[i] = cur[i].clone();
         }
     }
@@ -236,16 +248,13 @@ pub unsafe fn destroy(root: SpaceRoot, phys_offset: u64, frames: &mut dyn FrameA
             }
             low[LOW_USER_PDPT_FIRST].set_unused();
         }
-        free_subtree(
-            &mut low[LOW_USER_PDPT_FIRST + 1],
-            2,
-            phys_offset,
-            frames,
-        );
+        for entry in low.iter_mut().skip(LOW_USER_PDPT_FIRST + 1) {
+            free_subtree(entry, 2, phys_offset, frames);
+        }
         deallocate_aligned_frame(frames, low_phys);
         pml4[0].set_unused();
     }
-    for i in USER_FIRST..USER_LAST {
+    for i in (USER_FIRST..USER_LAST).chain(COMPAT_FIXED_FIRST..COMPAT_FIXED_LAST) {
         free_subtree(&mut pml4[i], 3, phys_offset, frames);
     }
     deallocate_aligned_frame(frames, root.0);

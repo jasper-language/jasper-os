@@ -1,8 +1,13 @@
 # Issue #42：macOS/NT 机制原生化吸收跟踪
 
-更新时间：2026-11-19。
+更新时间：2026-11-21。
 
-状态：**架构审计与候选机制矩阵；不批准兼容 ABI，不新增第二对象或权限权威。**
+状态：**最终裁决完成；不批准兼容 ABI，不新增第二对象或权限权威。**
+
+本文保留 macOS/NT 经验来源和架构边界。Issue #42 的 25 个正式机制族已由
+`docs/ISSUE-42-FINAL-DISPOSITION.md` 收口：15 个 `implemented-tested`、
+10 个 `compat-retained`、0 个 `partial`、0 个 `research`。下列早期“部分具备”
+描述属于候选调研历史；最终分类以机器台账为准。
 
 机器可查的 25 机制族台账为 `verification/issue42-mechanism-ledger.tsv`，
 由 `scripts/check-issue42-mechanism-ledger.py` 强制校验完整 ID、状态、分层、
@@ -84,15 +89,16 @@ Issue #42 的所有外部内核经验只作为问题域来源：
 `docs/ISSUE-42-NATIVE-ADDRESS-SYNC-status.md` 与
 `docs/ISSUE-42-NATIVE-PAGER-status.md`。
 
-## 尚未关闭
+## 转入专项而非 Issue #42 未决
 
-- Native userspace address synchronization 的 check/register/park 原子性；
-- 用户态 Pager 到真实 MemoryObject/页表/调度临界区的接线与 CPL3 压力矩阵；
-- FS/NET/device/graphics 四类 AsyncRing backend 的 quiescence 与取消完成证明；
-- 385 项 syscall disposition 到原生后端的完整矩阵；当前枚举包含 2 个显式
+- 原生地址条件同步已由 M02 关闭，futex/rseq 协议仍永久属于兼容适配；
+- userfaultfd/Mach pager 已裁决为兼容保留，`fault_pager` 仅为 proof-only；
+- FS/NET/device/graphics 四类 AsyncRing backend 的软件静止矩阵已由 M09 关闭，
+  物理 DMA/IRQ/IOMMU 属于 #43；
+- 385 项 syscall disposition 只证明分发表完整性；当前枚举包含 2 个显式
   Jasper 扩展 `RseqSliceYield`（471）与 `Uprobe`（336），不得混入 Linux 兼容语义；
-- 关闭兼容层后的 native Profile 全链路；
-- NT-03/04/05 的代码与生产调用链专项审计。
+- 关闭兼容层后的 native Profile 依赖隔离由 M17/M20/M21 的最终边界约束；
+- NT-03/04/05 的剩余生产强化由 Diagnostics、Memory/Storage 与验证专项承接。
 
 ## Syscall disposition 基础门
 

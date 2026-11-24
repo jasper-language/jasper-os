@@ -53,6 +53,24 @@ const ROOT_USERLAND_MANIFEST: &[u8] =
     b"arch=x86_64\nabi=linux\nentry=/bin/true\ninterpreter=/lib64/ld-linux-x86-64.so.2\nlibrary=/usr/lib/x86_64-linux-gnu/libc.so.6\n";
 #[cfg(feature = "lifecycle-root-exec-verify")]
 const ROOT_EXEC_PROBE_PATH: &str = "/usr/libexec/jasper/health-probe";
+#[cfg(feature = "compat-wine-verify")]
+const WINE_COLD_START_DEADLINE_TICKS: u64 = 12_000; // JASPER-HARDCODE-REVIEW: issue=35 source=compat-wine-verification-profile reason=cold-prefix-and-wineserver-uefi-budget
+#[cfg(feature = "compat-jvm-verify")]
+const JVM_PROGRAM_DEADLINE_TICKS: u64 = 12_000; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=openjdk-startup-and-thread-cleanup-uefi-budget
+#[cfg(feature = "compat-dotnet-verify")]
+const DOTNET_PROGRAM_DEADLINE_TICKS: u64 = 12_000; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=coreclr-startup-and-thread-cleanup-uefi-budget
+#[cfg(feature = "compat-darling-verify")]
+const DARLING_PROGRAM_DEADLINE_TICKS: u64 = 30_000; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=darling-full-dyld-load-tcg-budget
+#[cfg(feature = "compat-darling-verify")]
+const DARLING_BOOTSTRAP_DEADLINE_TICKS: u64 = 30_000; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=darling-launchd-cold-start-tcg-budget
+#[cfg(feature = "compat-darling-verify")]
+const DARLING_RETRY_DEADLINE_TICKS: u64 = 6_000; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=darling-launchd-warm-retry
+#[cfg(feature = "compat-darling-verify")]
+const DARLING_RETRY_DELAY_TICKS: u64 = 12_000; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=darling-launchd-background-progress-between-probes
+#[cfg(feature = "compat-darling-verify")]
+const DARLING_PROGRESS_SLICE_TICKS: u64 = 100; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=darling-bounded-scheduler-slice
+#[cfg(feature = "compat-darling-verify")]
+const DARLING_LAUNCH_ATTEMPTS: u32 = 3; // JASPER-HARDCODE-REVIEW: issue=35 source=lifecycle-health-verification-profile reason=darling-cold-launchd-shellspawn-warm-retry
 
 static CONTROL_DEVICE: spin::Mutex<Option<Arc<IrqSpinLock<BlockDevice>>>> = spin::Mutex::new(None);
 static CONTROL_MUTATION: AtomicBool = AtomicBool::new(false);
@@ -824,6 +842,7 @@ fn install_root_libraries(root: &Ext4Reader) -> Result<(), HealthError> {
         ),
     ];
     let mut total = 0usize;
+    let mut installed = 0usize;
     for (path, file) in libraries {
         let bytes = root
             .read_file(path, MAX_LIBRARY_BYTES)
@@ -832,10 +851,36 @@ fn install_root_libraries(root: &Ext4Reader) -> Result<(), HealthError> {
         if !crate::linux_vfs::install_root_library(file, bytes) {
             return Err(HealthError::RootExecute);
         }
+        installed += 1;
+    }
+    #[cfg(feature = "compat-dotnet-verify")]
+    for path in [
+        "/usr/lib/x86_64-linux-gnu/libdl.so.2",
+        "/usr/lib/x86_64-linux-gnu/libpthread.so.0",
+    ] {
+        let bytes = root
+            .read_file(path, MAX_LIBRARY_BYTES)
+            .map_err(|_| HealthError::RootExecute)?;
+        total = total.saturating_add(bytes.len());
+        if !crate::linux_vfs::install_root_android_file(path.as_bytes(), bytes) {
+            return Err(HealthError::RootExecute);
+        }
+        installed += 1;
+    }
+    #[cfg(feature = "compat-darling-verify")]
+    for path in ["/usr/lib/x86_64-linux-gnu/libstdc++.so.6"] {
+        let bytes = root
+            .read_file(path, MAX_LIBRARY_BYTES)
+            .map_err(|_| HealthError::RootExecute)?;
+        total = total.saturating_add(bytes.len());
+        if !crate::linux_vfs::install_root_android_file(path.as_bytes(), bytes) {
+            return Err(HealthError::RootExecute);
+        }
+        installed += 1;
     }
     crate::kprintln!(
         "[JSR-LIFE-ROOT-LIBS] count={} bytes={} source=system-ab",
-        libraries.len(),
+        installed,
         total
     );
     Ok(())
@@ -861,14 +906,15 @@ fn run_root_program(
     // selected, validated System A/B root and repeated paths must match exactly.
     // 注册表只保留健康链明确按名称启动的映像；字节仍来自已验证 System A/B 根卷，
     // 同路径重复注册必须完全一致。路径是查找键，不是权限凭证。
-    if matches!(path, "/usr/bin/printf" | "/usr/bin/jasper-getppid")
-        && !crate::linux_vfs::install_root_program(
-            origin,
-            path.as_bytes(),
-            executable.len(),
-            interpreter.len(),
-        )
-    {
+    if matches!(
+        path,
+        "/bin/true" | "/usr/bin/printf" | "/usr/bin/jasper-getppid"
+    ) && !crate::linux_vfs::install_root_program(
+        origin,
+        path.as_bytes(),
+        executable.len(),
+        interpreter.len(),
+    ) {
         return Err(HealthError::RootExecute);
     }
     let warm_frames = crate::mm::frame::free_frames();
@@ -909,26 +955,44 @@ fn install_root_android_files(
     origin: compat_core::executable::SystemImage,
 ) -> Result<(), HealthError> {
     for path in crate::linux_vfs::ANDROID_FILE_PATHS {
-        let bytes = match root.read_file(
-            core::str::from_utf8(path).map_err(|_| HealthError::RootExecute)?,
-            64 * 1024 * 1024,
-        ) {
+        #[cfg(feature = "compat-wine-verify")]
+        if path.ends_with(b"/wine/x86_64-unix/ntdll.so") {
+            crate::kprintln!(
+                "[JSR-WINE-VFS] load path=/usr/lib/x86_64-linux-gnu/wine/x86_64-unix/ntdll.so"
+            );
+        }
+        let path_text = core::str::from_utf8(path).map_err(|_| HealthError::RootExecute)?;
+        let max_bytes = match root.metadata(path_text) {
+            Ok(metadata) => match usize::try_from(metadata.len) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    log_root_android_file_skip(path);
+                    continue;
+                }
+            },
+            Err(_) => {
+                log_root_android_file_skip(path);
+                continue;
+            }
+        };
+        if crate::mm::heap::ensure_free(max_bytes).is_err() {
+            log_root_android_file_skip(path);
+            continue;
+        }
+        let bytes = match root.read_file(path_text, max_bytes) {
             Ok(bytes) => bytes,
             Err(_) => {
-                #[cfg(any(
-                    feature = "android-apk-verify",
-                    feature = "android-art-verify",
-                    feature = "vulkan-metal2vulkan-verify"
-                ))]
-                crate::kprintln!(
-                    "[JSR-ANDROID-ART] file-skip path={}",
-                    core::str::from_utf8(path).unwrap_or("<non-utf8>")
-                );
+                log_root_android_file_skip(path);
                 continue;
             }
         };
         let byte_len = bytes.len();
+        #[cfg(feature = "compat-wine-verify")]
+        if path.ends_with(b"/wine/x86_64-unix/ntdll.so") {
+            crate::kprintln!("[JSR-WINE-VFS] read path=ntdll.so bytes={}", bytes.len());
+        }
         if !crate::linux_vfs::install_root_android_file(path, bytes) {
+            log_root_android_file_skip(path);
             #[cfg(any(
                 feature = "android-apk-verify",
                 feature = "android-art-verify",
@@ -950,6 +1014,37 @@ fn install_root_android_files(
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "lifecycle-root-exec-verify")]
+fn log_root_android_file_skip(_path: &[u8]) {
+    #[cfg(feature = "compat-wine-d3d-verify")]
+    if _path.ends_with(b"d3d11.dll")
+        || _path.ends_with(b"dxgi.dll")
+        || _path.ends_with(b"d3d11-probe.exe")
+        || _path.ends_with(b"d3d12.dll")
+        || _path.ends_with(b"d3d12core.dll")
+        || _path.ends_with(b"d3d12-probe.exe")
+        || _path.ends_with(b"d3d11-wsi-probe.exe")
+    {
+        crate::kprintln!(
+            "[JSR-WINE-D3D-VFS] skip path={}",
+            core::str::from_utf8(_path).unwrap_or("<non-utf8>")
+        );
+    }
+    #[cfg(feature = "compat-wine-verify")]
+    if _path.ends_with(b"/wine/x86_64-unix/ntdll.so") {
+        crate::kprintln!("[JSR-WINE-VFS] skip path=ntdll.so");
+    }
+    #[cfg(any(
+        feature = "android-apk-verify",
+        feature = "android-art-verify",
+        feature = "vulkan-metal2vulkan-verify"
+    ))]
+    crate::kprintln!(
+        "[JSR-ANDROID-ART] file-skip path={}",
+        core::str::from_utf8(_path).unwrap_or("<non-utf8>")
+    );
 }
 
 #[cfg(any(
@@ -1020,6 +1115,259 @@ fn run_root_android_program(
     Ok(())
 }
 
+#[cfg(any(
+    feature = "compat-darling-verify",
+    feature = "compat-jvm-verify",
+    feature = "compat-dotnet-verify"
+))]
+fn install_root_runtime_cache(
+    root: &Ext4Reader,
+    manifest_path: &str,
+    vfs_root: &str,
+) -> Result<(), HealthError> {
+    let metadata = root
+        .metadata(manifest_path)
+        .map_err(|_| HealthError::RootExecute)?;
+    let max_bytes = usize::try_from(metadata.len).map_err(|_| HealthError::RootExecute)?;
+    crate::mm::heap::ensure_free(max_bytes).map_err(|_| HealthError::RootExecute)?;
+    let manifest = root
+        .read_file(manifest_path, max_bytes)
+        .map_err(|_| HealthError::RootExecute)?;
+    let text = core::str::from_utf8(&manifest).map_err(|_| HealthError::RootExecute)?;
+    for line in text.lines().skip(1) {
+        if line.is_empty() {
+            continue;
+        }
+        let mut fields = line.split('\t');
+        let relative = fields.next().ok_or(HealthError::RootExecute)?;
+        let declared = fields.next().ok_or(HealthError::RootExecute)?;
+        let digest = fields.next().ok_or(HealthError::RootExecute)?;
+        if fields.next().is_some() || digest.len() != 64 {
+            return Err(HealthError::RootExecute);
+        }
+        if relative.starts_with('/')
+            || relative
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
+        {
+            return Err(HealthError::RootExecute);
+        }
+        let declared = declared
+            .parse::<usize>()
+            .map_err(|_| HealthError::RootExecute)?;
+        let path = alloc::format!("{vfs_root}/{relative}");
+        let metadata = root.metadata(&path).map_err(|_| HealthError::RootExecute)?;
+        if usize::try_from(metadata.len).ok() != Some(declared) {
+            return Err(HealthError::RootExecute);
+        }
+        crate::mm::heap::ensure_free(declared).map_err(|_| HealthError::RootExecute)?;
+        let bytes = root
+            .read_file(&path, declared)
+            .map_err(|_| HealthError::RootExecute)?;
+        let expected = decode_sha256(digest).ok_or(HealthError::RootExecute)?;
+        let computed: [u8; 32] = Sha256::digest(&bytes).into();
+        if computed != expected {
+            return Err(HealthError::RootExecute);
+        }
+        if !crate::linux_abi::install_runtime_cache_file(path.as_bytes(), bytes) {
+            return Err(HealthError::RootExecute);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(
+    feature = "compat-darling-verify",
+    feature = "compat-jvm-verify",
+    feature = "compat-dotnet-verify"
+))]
+fn decode_sha256(text: &str) -> Option<[u8; 32]> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 64 {
+        return None;
+    }
+    let nibble = |value: u8| match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    };
+    let mut output = [0u8; 32];
+    for (byte, pair) in output.iter_mut().zip(bytes.chunks_exact(2)) {
+        *byte = (nibble(pair[0])? << 4) | nibble(pair[1])?;
+    }
+    Some(output)
+}
+
+#[cfg(feature = "compat-jvm-verify")]
+fn run_jvm_probe_with_steady_state(
+    executable: &[u8],
+    interpreter: &[u8],
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> bool {
+    if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+        "openjdk21-jvm",
+        "/data/runtimes/openjdk/bin/java",
+        executable,
+        interpreter,
+        "/lib64/ld-linux-x86-64.so.2",
+        argv,
+        envp,
+        crate::mm::frame::free_frames(),
+        false,
+        JVM_PROGRAM_DEADLINE_TICKS,
+    ) {
+        return false;
+    }
+    if crate::mm::heap::ensure_free(2 * 1024 * 1024).is_err() {
+        return false;
+    }
+    let frames_before = crate::mm::frame::free_frames();
+    crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+        "openjdk21-jvm",
+        "/data/runtimes/openjdk/bin/java",
+        executable,
+        interpreter,
+        "/lib64/ld-linux-x86-64.so.2",
+        argv,
+        envp,
+        frames_before,
+        true,
+        JVM_PROGRAM_DEADLINE_TICKS,
+    )
+}
+
+#[cfg(feature = "compat-dotnet-verify")]
+fn run_dotnet_probe_with_steady_state(
+    executable: &[u8],
+    interpreter: &[u8],
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> bool {
+    if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+        "dotnet10-coreclr",
+        "/data/runtimes/dotnet/DotnetProbe",
+        executable,
+        interpreter,
+        "/lib64/ld-linux-x86-64.so.2",
+        argv,
+        envp,
+        crate::mm::frame::free_frames(),
+        false,
+        DOTNET_PROGRAM_DEADLINE_TICKS,
+    ) {
+        return false;
+    }
+    if crate::mm::heap::ensure_free(2 * 1024 * 1024).is_err() {
+        return false;
+    }
+    let frames_before = crate::mm::frame::free_frames();
+    crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+        "dotnet10-coreclr",
+        "/data/runtimes/dotnet/DotnetProbe",
+        executable,
+        interpreter,
+        "/lib64/ld-linux-x86-64.so.2",
+        argv,
+        envp,
+        frames_before,
+        true,
+        DOTNET_PROGRAM_DEADLINE_TICKS,
+    )
+}
+
+#[cfg(feature = "compat-darling-verify")]
+fn run_darling_namespace_probe(
+    executable: &[u8],
+    interpreter: &[u8],
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) {
+    let _ = crate::compat_dynamic_demo::run_root_dynamic_program_until_root_exit(
+        "darling-launcher",
+        "/data/runtimes/darling/usr/bin/darling",
+        executable,
+        interpreter,
+        "/lib64/ld-linux-x86-64.so.2",
+        argv,
+        envp,
+        crate::mm::frame::free_frames(),
+        false,
+        DARLING_BOOTSTRAP_DEADLINE_TICKS,
+    );
+    if crate::mm::heap::ensure_free(2 * 1024 * 1024).is_err() {
+        return;
+    }
+    let probe_frames_before = crate::mm::frame::free_frames();
+    for attempt in 0..DARLING_LAUNCH_ATTEMPTS {
+        crate::linux_abi::reset_darling_syscall_trace_budget();
+        let frames_before = crate::mm::frame::free_frames();
+        let exited_zero = crate::compat_dynamic_demo::run_root_dynamic_program_until_root_exit(
+            "darling-launcher",
+            "/data/runtimes/darling/usr/bin/darling",
+            executable,
+            interpreter,
+            "/lib64/ld-linux-x86-64.so.2",
+            argv,
+            envp,
+            frames_before,
+            false,
+            DARLING_RETRY_DEADLINE_TICKS,
+        );
+        crate::kprintln!(
+            "[JSR-DARLING-START] attempt={} exited_zero={}",
+            attempt,
+            exited_zero
+        );
+        for id in crate::proc::linux_process_ids() {
+            crate::kprintln!(
+                "[JSR-DARLING-PROC] attempt={} id={:#x} pid={} name={} state={:?}",
+                attempt,
+                id.raw(),
+                crate::proc::linux_pid(id).unwrap_or(0),
+                crate::proc::name(id).unwrap_or("<unknown>"),
+                crate::proc::state(id)
+            );
+            for (tid, task) in crate::linux_abi::darling_thread_tasks(id) {
+                crate::kprintln!(
+                    "[JSR-DARLING-TASK] attempt={} process={:#x} tid={} task={} snapshot={:?}",
+                    attempt,
+                    id.raw(),
+                    tid,
+                    task.0,
+                    crate::sched::task_snapshot(task)
+                );
+            }
+        }
+        if exited_zero {
+            let remaining_processes = crate::compat_dynamic_demo::cleanup_compat_processes();
+            let settle = crate::sched::timer_ticks().saturating_add(100);
+            let _ = crate::sched::run_until(settle);
+            let frames_after = crate::mm::frame::free_frames();
+            crate::kprintln!(
+                "[JSR-DARLING-CLEANUP] frames_before={} frames_after={} retained={} processes={}",
+                probe_frames_before,
+                frames_after,
+                probe_frames_before.saturating_sub(frames_after),
+                remaining_processes
+            );
+            break;
+        }
+        crate::linux_abi::reset_darling_syscall_trace_budget();
+        let deadline = crate::sched::timer_ticks().saturating_add(DARLING_RETRY_DELAY_TICKS);
+        while crate::sched::timer_ticks() < deadline {
+            let step = crate::sched::timer_ticks()
+                .saturating_add(DARLING_PROGRESS_SLICE_TICKS)
+                .min(deadline);
+            let _ = crate::sched::run_until(step);
+            if crate::sched::timer_ticks() < step {
+                crate::sched::sleep_ticks(1);
+            }
+        }
+    }
+}
+
 #[cfg(feature = "lifecycle-root-exec-verify")]
 fn execute_root_dynamic_programs(
     root: &Ext4Reader,
@@ -1035,6 +1383,430 @@ fn execute_root_dynamic_programs(
         return Err(HealthError::RootExecute);
     }
     install_root_libraries(root)?;
+    #[cfg(feature = "compat-darling-verify")]
+    {
+        for path in [
+            b"/etc/passwd".as_slice(),
+            b"/etc/group".as_slice(),
+            b"/data/runtimes/darling/usr/libexec/darling/System/Library/LaunchDaemons/org.darlinghq.shellspawn.plist".as_slice(),
+        ] {
+            let text_path = core::str::from_utf8(path).map_err(|_| HealthError::RootExecute)?;
+            let bytes = root
+                .read_file(text_path, 16 * 1024)
+                .map_err(|_| HealthError::RootExecute)?;
+            if !crate::linux_vfs::install_root_android_file(path, bytes) {
+                return Err(HealthError::RootExecute);
+            }
+        }
+        install_root_runtime_cache(
+            root,
+            "/data/runtimes/darling/runtime.manifest.tsv",
+            "/data/runtimes/darling",
+        )?;
+        let executable = root
+            .read_file("/data/runtimes/darling/usr/bin/darling", 4 * 1024 * 1024)
+            .map_err(|_| HealthError::RootExecute)?;
+        let interpreter = root
+            .read_file("/lib64/ld-linux-x86-64.so.2", 4 * 1024 * 1024)
+            .map_err(|_| HealthError::RootExecute)?;
+        let server = root
+            .read_file("/usr/bin/darlingserver", 8 * 1024 * 1024)
+            .map_err(|_| HealthError::RootExecute)?;
+        if !crate::linux_vfs::install_root_program(
+            origin,
+            b"/usr/bin/darlingserver",
+            server.len(),
+            interpreter.len(),
+        ) {
+            return Err(HealthError::RootExecute);
+        }
+        let mldr = root
+            .read_file(
+                "/data/runtimes/darling/usr/libexec/darling/usr/libexec/darling/mldr",
+                4 * 1024 * 1024,
+            )
+            .map_err(|_| HealthError::RootExecute)?;
+        if !crate::linux_vfs::install_root_program(
+            origin,
+            b"/data/runtimes/darling/usr/libexec/darling/usr/libexec/darling/mldr",
+            mldr.len(),
+            interpreter.len(),
+        ) {
+            return Err(HealthError::RootExecute);
+        }
+        let darling_argv: [&[u8]; 4] = [
+            b"/data/runtimes/darling/usr/bin/darling",
+            b"exec",
+            b"/data/runtimes/darling/usr/libexec/darling/bin/echo",
+            b"DARLING_EXEC_OK",
+        ];
+        let darling_envp: [&[u8]; 7] = [
+            b"DPREFIX=/tmp/darlingprefix",
+            b"HOME=/data",
+            b"PATH=/usr/bin:/bin",
+            b"DSERVER_LOG_STDERR=1",
+            b"DSERVER_LOG_LEVEL=debug",
+            b"DARLING_NOOVERLAYFS=1",
+            b"DSERVER_INIT=/usr/libexec/shellspawn",
+        ];
+        run_darling_namespace_probe(&executable, &interpreter, &darling_argv, &darling_envp);
+        return Ok(());
+    }
+    #[cfg(feature = "compat-dotnet-verify")]
+    {
+        install_root_runtime_cache(
+            root,
+            "/data/runtimes/dotnet/runtime.manifest.tsv",
+            "/data/runtimes/dotnet",
+        )?;
+        let executable = root
+            .read_file("/data/runtimes/dotnet/DotnetProbe", 4 * 1024 * 1024)
+            .map_err(|_| HealthError::RootExecute)?;
+        let interpreter = root
+            .read_file("/lib64/ld-linux-x86-64.so.2", 4 * 1024 * 1024)
+            .map_err(|_| HealthError::RootExecute)?;
+        let subprocess = root
+            .read_file("/bin/true", 4 * 1024 * 1024)
+            .map_err(|_| HealthError::RootExecute)?;
+        if !crate::linux_vfs::install_root_program(
+            origin,
+            b"/bin/true",
+            subprocess.len(),
+            interpreter.len(),
+        ) {
+            return Err(HealthError::RootExecute);
+        }
+        let dotnet_argv: [&[u8]; 1] = [b"/data/runtimes/dotnet/DotnetProbe"];
+        let dotnet_envp: [&[u8]; 10] = [
+            b"HOME=/data",
+            b"PATH=/usr/bin:/bin",
+            b"TMPDIR=/tmp",
+            b"DOTNET_ROOT=/data/runtimes/dotnet",
+            b"DOTNET_BUNDLE_EXTRACT_BASE_DIR=/data/runtimes/dotnet/.bundle",
+            b"DOTNET_EnableDiagnostics=0",
+            b"DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1",
+            b"LD_LIBRARY_PATH=/data/runtimes/dotnet:/usr/lib/x86_64-linux-gnu",
+            b"LANG=C.UTF-8",
+            b"TZ=UTC",
+        ];
+        if !run_dotnet_probe_with_steady_state(
+            &executable,
+            &interpreter,
+            &dotnet_argv,
+            &dotnet_envp,
+        ) {
+            return Err(HealthError::RootExecute);
+        }
+        return Ok(());
+    }
+    #[cfg(feature = "compat-jvm-verify")]
+    {
+        install_root_runtime_cache(
+            root,
+            "/data/runtimes/openjdk/runtime.manifest.tsv",
+            "/data/runtimes/openjdk",
+        )?;
+        let java = root
+            .read_file("/data/runtimes/openjdk/bin/java", 4 * 1024 * 1024)
+            .map_err(|_| HealthError::RootExecute)?;
+        let interpreter = root
+            .read_file("/lib64/ld-linux-x86-64.so.2", 4 * 1024 * 1024)
+            .map_err(|_| HealthError::RootExecute)?;
+        let jvm_argv: [&[u8]; 8] = [
+            b"/data/runtimes/openjdk/bin/java",
+            b"-Xmx64m",
+            b"-XX:-UsePerfData",
+            b"-Djava.home=/data/runtimes/openjdk",
+            b"-cp",
+            b"/data/runtimes/openjdk/probe",
+            b"JvmProbe",
+            b"-probe",
+        ];
+        let jvm_envp: [&[u8]; 6] = [
+            b"HOME=/data",
+            b"JAVA_HOME=/data/runtimes/openjdk",
+            b"PATH=/data/runtimes/openjdk/bin:/usr/bin:/bin",
+            b"LD_LIBRARY_PATH=/data/runtimes/openjdk/lib:/data/runtimes/openjdk/lib/server",
+            b"LANG=C.UTF-8",
+            b"TZ=UTC",
+        ];
+        if !run_jvm_probe_with_steady_state(&java, &interpreter, &jvm_argv, &jvm_envp) {
+            return Err(HealthError::RootExecute);
+        }
+        return Ok(());
+    }
+    #[cfg(feature = "compat-wine-verify")]
+    {
+        install_root_android_files(root, origin)?;
+        #[cfg(not(feature = "compat-wine-d3d-verify"))]
+        {
+            let stdio_argv: [&[u8]; 1] = [b"/usr/bin/jasper-file-stdio"];
+            run_root_program(root, origin, "/usr/bin/jasper-file-stdio", &stdio_argv)?;
+        }
+        #[cfg(not(feature = "compat-wine-d3d-verify"))]
+        {
+            let wine_argv: [&[u8]; 5] = [
+                b"/usr/lib/x86_64-linux-gnu/wine/wine",
+                b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/cmd.exe",
+                b"/c",
+                b"echo",
+                b"WINE_CMD_OK",
+            ];
+            // Leave TMPDIR unset: Ubuntu Wine's server_tmpdir helper frees the
+            // secure_getenv() result when TMPDIR is present. Wine still defaults
+            // its temporary directory to /tmp.
+            let wine_envp: [&[u8]; 11] = [
+                b"HOME=/data",
+                b"PATH=/usr/lib/x86_64-linux-gnu/wine:/usr/bin:/bin",
+                b"WINEBOOTSTRAPMODE=1",
+                b"WINEPREFIX=/data/wineprefix",
+                b"WINEARCH=win64",
+                b"WINEDEBUG=+module",
+                b"WINEDLLPATH=/usr/lib/x86_64-linux-gnu/wine/x86_64-windows:/usr/lib/x86_64-linux-gnu/wine/x86_64-unix",
+                b"WINEDLLDIR0=/usr/lib/x86_64-linux-gnu/wine",
+                b"WINEDLLOVERRIDES=winemenubuilder.exe=d;mscoree=d;mshtml=d",
+                b"LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/wine/x86_64-unix",
+                b"LANG=C.UTF-8",
+            ];
+            let wine = root
+                .read_file("/usr/lib/x86_64-linux-gnu/wine/wine", 4 * 1024 * 1024)
+                .map_err(|_| HealthError::RootExecute)?;
+            let wineserver = root
+                .read_file("/usr/lib/x86_64-linux-gnu/wine/wineserver", 4 * 1024 * 1024)
+                .map_err(|_| HealthError::RootExecute)?;
+            let wine_preloader = root
+                .read_file(
+                    "/usr/lib/x86_64-linux-gnu/wine/wine-preloader.static",
+                    4 * 1024 * 1024,
+                )
+                .map_err(|_| HealthError::RootExecute)?;
+            let interpreter = root
+                .read_file("/lib64/ld-linux-x86-64.so.2", 4 * 1024 * 1024)
+                .map_err(|_| HealthError::RootExecute)?;
+            if !crate::linux_vfs::install_root_android_file(
+                b"/usr/lib/x86_64-linux-gnu/wine/wine-preloader",
+                wine_preloader.clone(),
+            ) || !crate::linux_vfs::install_root_program(
+                origin,
+                b"/usr/lib/x86_64-linux-gnu/wine/wine",
+                wine.len(),
+                interpreter.len(),
+            ) || !crate::linux_vfs::install_root_program(
+                origin,
+                b"/usr/lib/x86_64-linux-gnu/wine/wineserver",
+                wineserver.len(),
+                interpreter.len(),
+            ) || !crate::linux_vfs::install_root_program(
+                origin,
+                b"/usr/lib/x86_64-linux-gnu/wine/wine-preloader",
+                wine_preloader.len(),
+                interpreter.len(),
+            ) {
+                return Err(HealthError::RootExecute);
+            }
+            crate::linux_abi::reset_wine_syscall_trace_budget();
+            if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+                "compat-wine-cmd",
+                "/usr/lib/x86_64-linux-gnu/wine/wine",
+                &wine,
+                &interpreter,
+                "/lib64/ld-linux-x86-64.so.2",
+                &wine_argv,
+                &wine_envp,
+                crate::mm::frame::free_frames(),
+                false,
+                WINE_COLD_START_DEADLINE_TICKS,
+            ) {
+                return Err(HealthError::RootExecute);
+            }
+            // A cold prefix initializes Wine and compatibility-cache metadata once.
+            // Measure an immediately repeated command to prove steady-state release.
+            crate::mm::heap::ensure_free(2 * 1024 * 1024).map_err(|_| HealthError::RootExecute)?;
+            crate::linux_abi::reset_wine_syscall_trace_budget();
+            if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+                "compat-wine-cmd",
+                "/usr/lib/x86_64-linux-gnu/wine/wine",
+                &wine,
+                &interpreter,
+                "/lib64/ld-linux-x86-64.so.2",
+                &wine_argv,
+                &wine_envp,
+                crate::mm::frame::free_frames(),
+                true,
+                WINE_COLD_START_DEADLINE_TICKS,
+            ) {
+                return Err(HealthError::RootExecute);
+            }
+        }
+        #[cfg(feature = "compat-wine-d3d-verify")]
+        {
+            let wine = root
+                .read_file("/opt/wine-devel/lib/wine/x86_64-unix/wine", 4 * 1024 * 1024)
+                .map_err(|_| HealthError::RootExecute)?;
+            let wineserver = root
+                .read_file("/opt/wine-devel/bin/wineserver", 4 * 1024 * 1024)
+                .map_err(|_| HealthError::RootExecute)?;
+            let wine_loader = root
+                .read_file("/opt/wine-devel/lib/wine/x86_64-unix/wine", 4 * 1024 * 1024)
+                .map_err(|_| HealthError::RootExecute)?;
+            let wine_preloader = root
+                .read_file(
+                    "/opt/wine-devel/lib/wine/x86_64-unix/wine-preloader",
+                    4 * 1024 * 1024,
+                )
+                .map_err(|_| HealthError::RootExecute)?;
+            let interpreter = root
+                .read_file("/lib64/ld-linux-x86-64.so.2", 4 * 1024 * 1024)
+                .map_err(|_| HealthError::RootExecute)?;
+            if !crate::linux_vfs::install_root_program(
+                origin,
+                b"/opt/wine-devel/bin/wine",
+                wine.len(),
+                interpreter.len(),
+            ) || !crate::linux_vfs::install_root_program(
+                origin,
+                b"/opt/wine-devel/bin/wineserver",
+                wineserver.len(),
+                interpreter.len(),
+            ) || !crate::linux_vfs::install_root_program(
+                origin,
+                b"/opt/wine-devel/lib/wine/x86_64-unix/wine",
+                wine_loader.len(),
+                interpreter.len(),
+            ) || !crate::linux_vfs::install_root_program(
+                origin,
+                b"/opt/wine-devel/lib/wine/x86_64-unix/wine-preloader",
+                wine_preloader.len(),
+                interpreter.len(),
+            ) {
+                return Err(HealthError::RootExecute);
+            }
+            #[cfg(not(any(
+                feature = "compat-wine-d3d12-verify",
+                feature = "compat-wine-wsi-verify"
+            )))]
+            {
+                let d3d_argv: [&[u8]; 2] = [
+                    b"/opt/wine-devel/lib/wine/x86_64-unix/wine",
+                    b"/opt/wine-devel/lib/wine/x86_64-windows/d3d11-probe.exe",
+                ];
+                let d3d_envp: [&[u8]; 15] = [
+                    b"HOME=/data",
+                    b"PATH=/opt/wine-devel/bin:/usr/bin:/bin",
+                    b"WINEBOOTSTRAPMODE=1",
+                    b"WINEPREFIX=/data/wineprefix",
+                    b"WINEARCH=win64",
+                    b"WINEDEBUG=+module",
+                    b"WINEDLLPATH=/opt/wine-devel/lib/wine/x86_64-windows:/opt/wine-devel/lib/wine/x86_64-unix",
+                    b"WINEDLLDIR0=/opt/wine-devel/lib/wine",
+                    b"WINEDLLOVERRIDES=d3d11=n,b;dxgi=n,b;winemenubuilder.exe=d;mscoree=d;mshtml=d",
+                    b"LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/opt/wine-devel/lib/wine/x86_64-unix",
+                    b"LANG=C.UTF-8",
+                    b"VK_DRIVER_FILES=/usr/lib/x86_64-linux-gnu/lvp_icd.json",
+                    b"VK_ICD_FILENAMES=/usr/lib/x86_64-linux-gnu/lvp_icd.json",
+                    b"VK_LOADER_DEBUG=error,warn",
+                    b"DXVK_LOG_LEVEL=info",
+                ];
+                crate::linux_abi::reset_wine_syscall_trace_budget();
+                if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+                    "compat-wine-d3d11",
+                    "/opt/wine-devel/lib/wine/x86_64-unix/wine",
+                    &wine,
+                    &interpreter,
+                    "/lib64/ld-linux-x86-64.so.2",
+                    &d3d_argv,
+                    &d3d_envp,
+                    crate::mm::frame::free_frames(),
+                    false,
+                    WINE_COLD_START_DEADLINE_TICKS,
+                ) {
+                    return Err(HealthError::RootExecute);
+                }
+            }
+            #[cfg(feature = "compat-wine-d3d12-verify")]
+            {
+                let d3d12_argv: [&[u8]; 2] = [
+                    b"/opt/wine-devel/lib/wine/x86_64-unix/wine",
+                    b"/opt/wine-devel/lib/wine/x86_64-windows/d3d12-probe.exe",
+                ];
+                let d3d12_envp: [&[u8]; 16] = [
+                    b"HOME=/data",
+                    b"PATH=/opt/wine-devel/bin:/usr/bin:/bin",
+                    b"WINEBOOTSTRAPMODE=1",
+                    b"WINEPREFIX=/data/wineprefix",
+                    b"WINEARCH=win64",
+                    b"WINEDEBUG=+module",
+                    b"WINEDLLPATH=/opt/wine-devel/lib/wine/x86_64-windows:/opt/wine-devel/lib/wine/x86_64-unix",
+                    b"WINEDLLDIR0=/opt/wine-devel/lib/wine",
+                    b"WINEDLLOVERRIDES=d3d12=n,b;d3d12core=n,b;dxgi=n,b;explorer.exe=d;winemenubuilder.exe=d;mscoree=d;mshtml=d",
+                    b"LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/opt/wine-devel/lib/wine/x86_64-unix",
+                    b"LANG=C.UTF-8",
+                    b"VK_DRIVER_FILES=/usr/lib/x86_64-linux-gnu/lvp_icd.json",
+                    b"VK_ICD_FILENAMES=/usr/lib/x86_64-linux-gnu/lvp_icd.json",
+                    b"VK_LOADER_DEBUG=error,warn",
+                    b"DXVK_LOG_LEVEL=info",
+                    b"VKD3D_DEBUG=warn",
+                ];
+                crate::linux_abi::reset_wine_syscall_trace_budget();
+                if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+                    "compat-wine-d3d12",
+                    "/opt/wine-devel/lib/wine/x86_64-unix/wine",
+                    &wine,
+                    &interpreter,
+                    "/lib64/ld-linux-x86-64.so.2",
+                    &d3d12_argv,
+                    &d3d12_envp,
+                    crate::mm::frame::free_frames(),
+                    false,
+                    WINE_COLD_START_DEADLINE_TICKS,
+                ) {
+                    return Err(HealthError::RootExecute);
+                }
+            }
+            #[cfg(feature = "compat-wine-wsi-verify")]
+            {
+                let wsi_argv: [&[u8]; 2] = [
+                    b"/opt/wine-devel/lib/wine/x86_64-unix/wine",
+                    b"/opt/wine-devel/lib/wine/x86_64-windows/d3d11-wsi-probe.exe",
+                ];
+                let wsi_envp: [&[u8]; 15] = [
+                    b"HOME=/data",
+                    b"PATH=/opt/wine-devel/bin:/usr/bin:/bin",
+                    b"WINEBOOTSTRAPMODE=1",
+                    b"WINEPREFIX=/data/wineprefix",
+                    b"WINEARCH=win64",
+                    b"WINEDEBUG=+module",
+                    b"WINEDLLPATH=/opt/wine-devel/lib/wine/x86_64-windows:/opt/wine-devel/lib/wine/x86_64-unix",
+                    b"WINEDLLDIR0=/opt/wine-devel/lib/wine",
+                    b"WINEDLLOVERRIDES=d3d11=n,b;dxgi=n,b;explorer.exe=d;winemenubuilder.exe=d;mscoree=d;mshtml=d",
+                    b"LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/opt/wine-devel/lib/wine/x86_64-unix",
+                    b"LANG=C.UTF-8",
+                    b"VK_DRIVER_FILES=/usr/lib/x86_64-linux-gnu/lvp_icd.json",
+                    b"VK_ICD_FILENAMES=/usr/lib/x86_64-linux-gnu/lvp_icd.json",
+                    b"VK_LOADER_DEBUG=error,warn",
+                    b"DXVK_LOG_LEVEL=info",
+                ];
+                for run in 0..3 {
+                    crate::linux_abi::reset_wine_syscall_trace_budget();
+                    if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+                        "compat-wine-wsi",
+                        "/opt/wine-devel/lib/wine/x86_64-unix/wine",
+                        &wine,
+                        &interpreter,
+                        "/lib64/ld-linux-x86-64.so.2",
+                        &wsi_argv,
+                        &wsi_envp,
+                        crate::mm::frame::free_frames(),
+                        run == 2,
+                        WINE_COLD_START_DEADLINE_TICKS,
+                    ) {
+                        return Err(HealthError::RootExecute);
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
     #[cfg(feature = "android-apk-verify")]
     {
         install_root_android_files(root, origin)?;
@@ -1182,18 +1954,21 @@ fn execute_root_dynamic_programs(
             "android-toybox-uname",
             &toybox,
             &uname_argv,
+            &[],
             frames_before,
             false,
         ) || !crate::compat_dynamic_demo::run_root_static_program(
             "android-toybox-printf",
             &toybox,
             &printf_argv,
+            &[],
             frames_before,
             false,
         ) || !crate::compat_dynamic_demo::run_root_static_program(
             "android-toybox-sha256sum",
             &toybox,
             &sha_argv,
+            &[],
             frames_before,
             false,
         ) {
@@ -1207,6 +1982,7 @@ fn execute_root_dynamic_programs(
             "aosp-binder-driver-test",
             &binder_test,
             &binder_argv,
+            &[],
             crate::mm::frame::free_frames(),
             false,
         ) {
@@ -1256,55 +2032,57 @@ fn execute_root_dynamic_programs(
     }
     #[cfg(not(feature = "android-apk-verify"))]
     {
-    let true_argv: [&[u8]; 1] = [b"/bin/true"];
-    run_root_program(root, origin, "/bin/true", &true_argv)?;
-    let getconf_argv: [&[u8]; 2] = [b"/usr/bin/getconf", b"GNU_LIBC_VERSION"];
-    run_root_program(root, origin, "/usr/bin/getconf", &getconf_argv)?;
-    let uname_argv: [&[u8]; 2] = [b"/usr/bin/uname", b"-a"];
-    run_root_program(root, origin, "/usr/bin/uname", &uname_argv)?;
-    let hostname_argv: [&[u8]; 1] = [b"/usr/bin/hostname"];
-    run_root_program(root, origin, "/usr/bin/hostname", &hostname_argv)?;
-    let basename_argv: [&[u8]; 2] = [b"/usr/bin/basename", b"/usr/lib/x86_64-linux-gnu/libc.so.6"];
-    run_root_program(root, origin, "/usr/bin/basename", &basename_argv)?;
-    let dirname_argv: [&[u8]; 2] = [b"/usr/bin/dirname", b"/usr/lib/x86_64-linux-gnu/libc.so.6"];
-    run_root_program(root, origin, "/usr/bin/dirname", &dirname_argv)?;
-    let id_argv: [&[u8]; 2] = [b"/usr/bin/id", b"-u"];
-    run_root_program(root, origin, "/usr/bin/id", &id_argv)?;
-    let pwd_argv: [&[u8]; 1] = [b"/usr/bin/pwd"];
-    run_root_program(root, origin, "/usr/bin/pwd", &pwd_argv)?;
-    let nproc_argv: [&[u8]; 1] = [b"/usr/bin/nproc"];
-    run_root_program(root, origin, "/usr/bin/nproc", &nproc_argv)?;
-    let sleep_argv: [&[u8]; 2] = [b"/usr/bin/sleep", b"0.05"];
-    run_root_program(root, origin, "/usr/bin/sleep", &sleep_argv)?;
-    let find_argv: [&[u8]; 6] = [
-        b"/usr/bin/find",
-        b"/",
-        b"-maxdepth",
-        b"1",
-        b"-mindepth",
-        b"1",
-    ];
-    run_root_program(root, origin, "/usr/bin/find", &find_argv)?;
-    let ls_argv: [&[u8]; 3] = [b"/usr/bin/ls", b"-1", b"/usr/bin"];
-    run_root_program(root, origin, "/usr/bin/ls", &ls_argv)?;
-    let wc_argv: [&[u8]; 3] = [
-        b"/usr/bin/wc",
-        b"-c",
-        b"/usr/lib/x86_64-linux-gnu/libc.so.6",
-    ];
-    run_root_program(root, origin, "/usr/bin/wc", &wc_argv)?;
-    let printf_argv: [&[u8]; 3] = [b"/usr/bin/printf", b"jasper-%s\n", b"dynamic"];
-    run_root_program(root, origin, "/usr/bin/printf", &printf_argv)?;
-    let ppid_argv: [&[u8]; 1] = [b"/usr/bin/jasper-getppid"];
-    run_root_program(root, origin, "/usr/bin/jasper-getppid", &ppid_argv)?;
-    let dash_argv: [&[u8]; 3] = [
-        b"/bin/dash",
-        b"-c",
-        b"echo jasper-shell-ok\ncd /usr\npwd\n/usr/bin/printf 'external-%s\\n' ok\n",
-    ];
-    run_root_program(root, origin, "/bin/dash", &dash_argv)?;
-    let signal_argv: [&[u8]; 1] = [b"/usr/bin/jasper-signal-basic"];
-    run_root_program(root, origin, "/usr/bin/jasper-signal-basic", &signal_argv)
+        let true_argv: [&[u8]; 1] = [b"/bin/true"];
+        run_root_program(root, origin, "/bin/true", &true_argv)?;
+        let getconf_argv: [&[u8]; 2] = [b"/usr/bin/getconf", b"GNU_LIBC_VERSION"];
+        run_root_program(root, origin, "/usr/bin/getconf", &getconf_argv)?;
+        let uname_argv: [&[u8]; 2] = [b"/usr/bin/uname", b"-a"];
+        run_root_program(root, origin, "/usr/bin/uname", &uname_argv)?;
+        let hostname_argv: [&[u8]; 1] = [b"/usr/bin/hostname"];
+        run_root_program(root, origin, "/usr/bin/hostname", &hostname_argv)?;
+        let basename_argv: [&[u8]; 2] =
+            [b"/usr/bin/basename", b"/usr/lib/x86_64-linux-gnu/libc.so.6"];
+        run_root_program(root, origin, "/usr/bin/basename", &basename_argv)?;
+        let dirname_argv: [&[u8]; 2] =
+            [b"/usr/bin/dirname", b"/usr/lib/x86_64-linux-gnu/libc.so.6"];
+        run_root_program(root, origin, "/usr/bin/dirname", &dirname_argv)?;
+        let id_argv: [&[u8]; 2] = [b"/usr/bin/id", b"-u"];
+        run_root_program(root, origin, "/usr/bin/id", &id_argv)?;
+        let pwd_argv: [&[u8]; 1] = [b"/usr/bin/pwd"];
+        run_root_program(root, origin, "/usr/bin/pwd", &pwd_argv)?;
+        let nproc_argv: [&[u8]; 1] = [b"/usr/bin/nproc"];
+        run_root_program(root, origin, "/usr/bin/nproc", &nproc_argv)?;
+        let sleep_argv: [&[u8]; 2] = [b"/usr/bin/sleep", b"0.05"];
+        run_root_program(root, origin, "/usr/bin/sleep", &sleep_argv)?;
+        let find_argv: [&[u8]; 6] = [
+            b"/usr/bin/find",
+            b"/",
+            b"-maxdepth",
+            b"1",
+            b"-mindepth",
+            b"1",
+        ];
+        run_root_program(root, origin, "/usr/bin/find", &find_argv)?;
+        let ls_argv: [&[u8]; 3] = [b"/usr/bin/ls", b"-1", b"/usr/bin"];
+        run_root_program(root, origin, "/usr/bin/ls", &ls_argv)?;
+        let wc_argv: [&[u8]; 3] = [
+            b"/usr/bin/wc",
+            b"-c",
+            b"/usr/lib/x86_64-linux-gnu/libc.so.6",
+        ];
+        run_root_program(root, origin, "/usr/bin/wc", &wc_argv)?;
+        let printf_argv: [&[u8]; 3] = [b"/usr/bin/printf", b"jasper-%s\n", b"dynamic"];
+        run_root_program(root, origin, "/usr/bin/printf", &printf_argv)?;
+        let ppid_argv: [&[u8]; 1] = [b"/usr/bin/jasper-getppid"];
+        run_root_program(root, origin, "/usr/bin/jasper-getppid", &ppid_argv)?;
+        let dash_argv: [&[u8]; 3] = [
+            b"/bin/dash",
+            b"-c",
+            b"echo jasper-shell-ok\ncd /usr\npwd\n/usr/bin/printf 'external-%s\\n' ok\n",
+        ];
+        run_root_program(root, origin, "/bin/dash", &dash_argv)?;
+        let signal_argv: [&[u8]; 1] = [b"/usr/bin/jasper-signal-basic"];
+        run_root_program(root, origin, "/usr/bin/jasper-signal-basic", &signal_argv)
     }
 }
 

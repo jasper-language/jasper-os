@@ -1,10 +1,11 @@
 # Issue #42 原生用户态 Pager 状态机
 
-更新时间：2026-11-20。
+更新时间：2026-11-21。
 
-状态：**native state-machine slice passed**。新增 `kernel-core::fault_pager`，
-用于收口 M-04 的授权、请求、递归缺页、处理者死亡、超时、撤销和两阶段页表裁决
-语义。本切片不是新用户 ABI，也不表示页表接线或 Android userfaultfd 已完成。
+状态：**M08 compat-retained；proof-only state machine passed**。新增
+`kernel-core::fault_pager`，用于审计授权、请求、递归缺页、处理者死亡、超时、
+撤销和两阶段页表裁决语义。它不是新用户 ABI，也没有被批准为生产原生机制；
+Linux userfaultfd 与 Mach pager 协议永久由兼容层承担。
 
 ## 边界
 
@@ -42,12 +43,13 @@ cargo test --locked -p kernel-core fault_pager --lib
 7 passed; 0 failed
 ```
 
-## 尚未关闭
+## 最终裁决边界
 
 - 尚未接入真实 Process/MemoryObject 临界区、页表安装、TLB shootdown 和调度停车；
 - 尚无 compat 关闭后的原生 CPL3 多处理器缺页压力、重映射、对象撤销、任务退出和
   公平性证据；
-- userfaultfd 只可作为后续兼容适配；本状态机不会把其协议写入内核 ABI；
+- 因为没有独立于兼容层的原生消费者，不批准新的 Pager ABI；userfaultfd 继续是
+  兼容协议，本状态机只保留 proof-only 证据；
 - MemoryWorkloadRecovery、可丢弃页、回写和内存压力策略未在本切片中定义；
-- Issue #42 的 FS/NET/device/graphics 后端静止、完整 syscall disposition 和原生
-  Profile 全链路仍未完成。
+- FS/NET/device/graphics 后端静止由 M09 关闭；物理 DMA/IOMMU 由 #43 验收，
+  syscall disposition 只证明分发表完整性，不改变本裁决。

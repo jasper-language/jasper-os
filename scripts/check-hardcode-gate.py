@@ -37,6 +37,7 @@ SCOPE = (
     "modules",
     "netd",
     "tools",
+    "trust-service",
     "user",
     "xtask",
 )

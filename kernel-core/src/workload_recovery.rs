@@ -861,4 +861,81 @@ mod tests {
             RecoveryError::InvalidCandidate
         );
     }
+
+    #[test]
+    fn sixty_four_workload_orphans_restart_with_generation_isolation() {
+        let mut table = WorkloadTable::new();
+        let mut members = WorkloadMembers::new();
+        let usage = ResourceUsage {
+            memory_bytes: 256,
+            threads: 0,
+            ring_entries: 0,
+        };
+
+        for index in 0..64u64 {
+            let old = running(&mut table, DOMAIN);
+            let member = 10_000 + index;
+            members.attach(&table, old, member).unwrap();
+            table.charge(old, usage).unwrap();
+            table.transition(old, WorkloadState::Failed).unwrap();
+            let replacement = running(&mut table, DOMAIN);
+
+            let blocked = recovery_snapshot(&table, &members, old, Some(replacement)).unwrap();
+            assert!(!blocked.publishable);
+            assert_eq!(blocked.remaining_members, 1);
+
+            let progress = note_member_exit(&table, &mut members, old, member).unwrap();
+            assert_eq!(progress.remaining_members, 0);
+            assert!(!progress.resources_drained);
+            table.release(old, usage).unwrap();
+            let recovered = recovery_snapshot(&table, &members, old, Some(replacement)).unwrap();
+            assert!(recovered.publishable);
+            assert!(recovered.resources_drained);
+            assert!(recovered.children_drained);
+            assert!(recovered.replacement_running);
+            assert_ne!(old, replacement);
+        }
+
+        assert_eq!(members.count_for(running(&mut table, DOMAIN)), 0);
+        assert_eq!(table.len(), 129);
+    }
+
+    #[test]
+    fn sixty_four_member_crash_is_ordered_and_failure_atomic() {
+        let mut table = WorkloadTable::new();
+        let root = running(&mut table, DOMAIN);
+        let mut members = WorkloadMembers::new();
+        let child_limits = ResourceLimits {
+            cpu_permille: 10,
+            memory_bytes: 128,
+            threads: 1,
+            ring_entries: 1,
+            io_bytes: 256,
+            io_ops: 1,
+        };
+        let mut children = std::vec::Vec::new();
+        for index in 0..64u64 {
+            let child = table.create_child(root, child_limits).unwrap();
+            table.transition(child, WorkloadState::Ready).unwrap();
+            table.transition(child, WorkloadState::Running).unwrap();
+            members.attach(&table, child, 20_000 + index).unwrap();
+            children.push(child);
+        }
+
+        let plan = plan_root_crash::<65>(&table, &members, root, &children).unwrap();
+        assert_eq!(plan.len(), 65);
+        assert_eq!(plan.target(64).unwrap().workload, root);
+        for index in 0..64 {
+            assert_eq!(plan.target(index).unwrap().member_count, 1);
+        }
+        apply_root_crash(&mut table, &plan).unwrap();
+        assert_eq!(table.snapshot(root).unwrap().state, WorkloadState::Failed);
+        for child in children {
+            let snapshot = table.snapshot(child).unwrap();
+            assert_eq!(snapshot.state, WorkloadState::Failed);
+            assert_eq!(snapshot.usage, ResourceUsage::default());
+            assert_eq!(members.count_for(child), 1);
+        }
+        assert_eq!(members.count_for(root), 0);
+    }
 }

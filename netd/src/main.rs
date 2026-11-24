@@ -37,6 +37,9 @@ fn run() -> Result<(), String> {
     let (options, check_only) = parse_args(&args)?;
     options.validate().map_err(str::to_owned)?;
     if check_only {
+        options
+            .validate_credentials(QuicProfile::default())
+            .map_err(|error| format!("{} failed", error.name()))?;
         println!(
             "jasper-netd state=configuration-valid bind={} max_connections={} max_stream_bytes={} max_datagram_bytes={}",
             options.bind,
@@ -52,6 +55,13 @@ fn run() -> Result<(), String> {
         .build()
         .map_err(|_| "failed to create async runtime".to_owned())?;
     runtime.block_on(async {
+        let service = daemon::start(options, QuicProfile::default())
+            .map_err(|error| format!("{} failed", error.name()))?;
+        println!(
+            "jasper-netd state={:?} bind={}",
+            service.state(),
+            service.local_addr()
+        );
         let shutdown = async {
             #[cfg(unix)]
             {
@@ -76,7 +86,9 @@ fn run() -> Result<(), String> {
                 let _ = tokio::signal::ctrl_c().await;
             }
         };
-        let stats = daemon::run_until(options, QuicProfile::default(), shutdown)
+        shutdown.await;
+        let stats = service
+            .shutdown()
             .await
             .map_err(|error| format!("{} failed", error.name()))?;
         println!(

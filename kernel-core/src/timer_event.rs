@@ -717,6 +717,58 @@ mod tests {
         assert!(t.armed_request(id).is_some());
     }
 
+    #[test]
+    fn clock_jump_and_cross_owner_close_recover_independently() {
+        let mut table = TimerTable::<4>::new();
+        let mut first = OwnerBudget::new(2);
+        let mut second = OwnerBudget::new(1);
+        let periodic = table.create(1, &mut first).unwrap();
+        let one_shot = table.create(2, &mut second).unwrap();
+        let periodic_request = Request {
+            at: 10,
+            urgency: Urgency::Precise,
+            period_ns: 4,
+        };
+        let one_shot_request = Request {
+            at: 20,
+            urgency: Urgency::Precise,
+            period_ns: 0,
+        };
+        table.arm(periodic, 1, periodic_request).unwrap();
+        table.arm(one_shot, 2, one_shot_request).unwrap();
+
+        // A non-monotonic observation never fires future timers or mutates them.
+        assert_eq!(table.expire(periodic, 8), Ok(None));
+        assert_eq!(table.expire(periodic, 5), Ok(None));
+        assert_eq!(table.expire(one_shot, 19), Ok(None));
+        assert_eq!(table.expire(periodic, 21), Ok(Some(Fired {
+            owner: 1,
+            at: 10,
+            next: Some(22),
+        })));
+        // A large forward jump skips missed periods and preserves phase.
+        assert_eq!(table.expire(periodic, 29), Ok(Some(Fired {
+            owner: 1,
+            at: 22,
+            next: Some(30),
+        })));
+        assert_eq!(table.armed_request(periodic).map(|request| request.at), Some(30));
+
+        // Closing one owner's domain cannot disarm or corrupt the other owner.
+        assert_eq!(
+            table.close(one_shot, 2, &mut second),
+            Ok(Some(one_shot_request))
+        );
+        assert_eq!(second.used(), 0);
+        assert_eq!(table.armed_request(periodic).map(|request| request.at), Some(30));
+        assert_eq!(table.cancel(periodic, 1), Ok(Cancelled::Disarmed(Request {
+            at: 30,
+            ..periodic_request
+        })));
+        assert_eq!(table.close(periodic, 1, &mut first), Ok(None));
+        assert_eq!((table.live(), table.armed(), first.used(), second.used()), (0, 0, 0, 0));
+    }
+
     #[cfg(feature = "runtime-registries")]
     #[test]
     fn runtime_timer_inventory_grows_past_previous_ring_envelope() {

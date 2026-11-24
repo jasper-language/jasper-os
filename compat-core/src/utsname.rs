@@ -14,7 +14,10 @@ pub const LINUX_UTSNAME_BYTES: usize = LINUX_UTSNAME_FIELD_BYTES * 6;
 const UTSNAME_FIELDS: [&[u8]; 6] = [
     b"Linux",
     b"jasper",
-    b"0.0.1",
+    // Minimum Linux ABI release advertised by the bounded compatibility
+    // profile. Features gated on this release still fail closed when their
+    // Jasper implementation is absent.
+    b"4.17.0-jasper",
     b"Jasper-OS Linux ABI 3.1.0",
     b"x86_64",
     b"localdomain",
@@ -53,7 +56,7 @@ mod tests {
         let expected: [&[u8]; 6] = [
             b"Linux",
             b"jasper",
-            b"0.0.1",
+            b"4.17.0-jasper",
             b"Jasper-OS Linux ABI 3.1.0",
             b"x86_64",
             b"localdomain",

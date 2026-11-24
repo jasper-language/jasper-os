@@ -16,6 +16,7 @@ MATRIX = ROOT / "verification/native-ecosystem.toml"
 PROFILE = ROOT / "release/native-profile.toml"
 KERNEL_MANIFEST = ROOT / "kernel/Cargo.toml"
 DAG = ROOT / "milestones/unified-dag.toml"
+SYSTEM_IDS = ROOT / "abi/system-ids.txt"
 
 REQUIRED_ACCEPTANCE = {
     "optional-compat-dependencies",
@@ -25,6 +26,27 @@ REQUIRED_ACCEPTANCE = {
     "runtime-install-stop-uninstall",
     "default-distribution-exclusion",
 }
+
+REQUIRED_EXTERNAL_FRAMEWORKS = {
+    "jvm": "linux-compat",
+    "dotnet": "linux-compat",
+    "android-framework": "android-userland-over-linux-compat",
+    "win32": "wine-over-linux-compat",
+}
+
+FORBIDDEN_NATIVE_ABI_MARKERS = (
+    "coreclr",
+    "csharp",
+    "dotnet",
+    "jvm",
+    "jni",
+    "java",
+    "openjdk",
+    "android.framework",
+    "activitymanager",
+    "win32",
+    "direct3d",
+)
 
 
 def fail(message: str) -> None:
@@ -108,6 +130,53 @@ def check_dependency_trees() -> int:
     return 6
 
 
+def check_runtime_framework_policy(matrix: dict) -> None:
+    policy = matrix.get("runtime_framework_policy")
+    if not isinstance(policy, dict):
+        fail("runtime framework policy is missing")
+    if policy.get("version") != 1:
+        fail("unsupported runtime framework policy version")
+    if policy.get("policy") != "compatibility-only":
+        fail("external frameworks must remain compatibility-only")
+    if policy.get("native_frameworks") != []:
+        fail("Jasper-OS must not claim an external framework as native")
+    if policy.get("kernel_abi_expansion") != "forbidden":
+        fail("external frameworks must not expand the Jasper native ABI")
+    if policy.get("required_claim") != (
+        "running under compatibility is not native framework support"
+    ):
+        fail("compatibility versus native-framework claim is not explicit")
+
+    frameworks = policy.get("framework")
+    if not isinstance(frameworks, list):
+        fail("runtime framework list is missing")
+    execution_paths = {
+        item.get("id"): item.get("execution_path")
+        for item in frameworks
+        if isinstance(item, dict)
+    }
+    if execution_paths != REQUIRED_EXTERNAL_FRAMEWORKS:
+        fail(
+            "runtime framework execution paths differ: "
+            f"{sorted(set(execution_paths.items()) ^ set(REQUIRED_EXTERNAL_FRAMEWORKS.items()))}"
+        )
+
+    registered = {
+        fields[2].lower()
+        for line in SYSTEM_IDS.read_text(encoding="utf-8").splitlines()
+        if not line.startswith("#")
+        and len(fields := line.split("\t")) >= 3
+        and fields[1] == "op"
+    }
+    leaked = sorted(
+        name
+        for name in registered
+        if any(marker in name for marker in FORBIDDEN_NATIVE_ABI_MARKERS)
+    )
+    if leaked:
+        fail(f"external framework leaked into the native ABI registry: {leaked}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -124,6 +193,7 @@ def main() -> int:
         matrix = read_toml(MATRIX)
         if matrix.get("schema") != 1 or matrix.get("stage") != "NATIVE-ECOSYSTEM-1":
             fail("bad matrix schema or stage")
+        check_runtime_framework_policy(matrix)
         acceptance = {
             item.get("id"): item
             for item in matrix.get("acceptance", [])
@@ -241,7 +311,15 @@ def main() -> int:
         )
         require_anchors(
             "docs/native-ecosystem-independence.md",
-            ("默认 Jasper Profile", "发行组件卸载", "默认发行退出"),
+            (
+                "默认 Jasper Profile",
+                "发行组件卸载",
+                "默认发行退出",
+                "不会提供 JVM/Java",
+                "不会提供 .NET/CoreCLR/C#",
+                "只能作为外部用户态组件",
+                "不是 Jasper 原生框架",
+            ),
         )
         require_anchors(
             "docs/issue-23-28-constraints.md",

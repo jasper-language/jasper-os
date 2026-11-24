@@ -5,10 +5,11 @@
 //! Responsibility: expose the exact unmodified upstream `libc.so.6` bytes and stable virtual
 //! identities needed by the real loader. This is not the production VFS.
 
+use alloc::vec::Vec;
 #[cfg(feature = "lifecycle-root-exec-verify")]
 use alloc::sync::Arc;
 #[cfg(feature = "lifecycle-root-exec-verify")]
-use alloc::vec::Vec;
+use alloc::string::ToString;
 #[cfg(feature = "lifecycle-root-exec-verify")]
 use spin::{Mutex, Once};
 #[cfg(feature = "lifecycle-root-exec-verify")]
@@ -18,7 +19,7 @@ use jasper_lifecycle_boot::P0_SYSTEM_BYTES;
 #[cfg(feature = "lifecycle-root-exec-verify")]
 use kernel_core::block::{self, Request, Terminal};
 #[cfg(feature = "lifecycle-root-exec-verify")]
-use kernel_core::ext4_view::{Ext4ByteSource, Ext4Reader, Ext4SourceError};
+use kernel_core::ext4_view::{Ext4ByteSource, Ext4FsError, Ext4Reader, Ext4SourceError};
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
 use crate::blk::BlockDevice;
@@ -143,14 +144,145 @@ pub(crate) const ANDROID_FILE_PATHS: &[&[u8]] = &[
     b"/usr/lib/x86_64-linux-gnu/libpthread.so.0",
     b"/usr/lib/x86_64-linux-gnu/runtime_examples.air",
     b"/usr/bin/llvm-as",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-unix/ntdll.so",
+    b"/usr/lib/x86_64-linux-gnu/wine/wine",
+    b"/usr/lib/x86_64-linux-gnu/wine/wineserver",
+    b"/lib64/ld-linux-x86-64.so.2",
+    b"/usr/lib/x86_64-linux-gnu/libunwind.so.8",
+    b"/usr/lib/x86_64-linux-gnu/liblzma.so.5",
     b"/sys/devices/system/cpu/online",
     b"/proc/stat",
     b"/SwiftShader.ini",
+    b"/usr/lib/x86_64-linux-gnu/wine/wine-preloader",
+    b"/usr/share/wine/nls/c_20127.nls",
+    b"/usr/share/wine/nls/locale.nls",
+    b"/usr/share/wine/nls/l_intl.nls",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/advapi32.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/cmd.exe",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/gdi32.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/kernel32.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/kernelbase.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/msvcrt.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/ntdll.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/sechost.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/shcore.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/shell32.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/shlwapi.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/start.exe",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/ucrtbase.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/user32.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/win32u.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/zlib1.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/apisetschema.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/wineboot.exe",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/ws2_32.dll",
+    b"/usr/share/wine/wine.inf",
+    b"/usr/share/wine/nls/sortdefault.nls",
+    b"/usr/share/wine/nls/normnfc.nls",
+    b"/usr/share/wine/nls/c_1252.nls",
+    b"/usr/share/wine/nls/c_437.nls",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-unix/win32u.so",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/imm32.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/d3d11.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/dxgi.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/d3d11-probe.exe",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/version.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/setupapi.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/rpcrt4.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/winevulkan.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/vulkan-1.dll",
+    b"/usr/lib/x86_64-linux-gnu/wine/x86_64-unix/winevulkan.so",
+    b"/usr/lib/x86_64-linux-gnu/libxcb.so.1",
+    b"/usr/lib/x86_64-linux-gnu/libxcb-shm.so.0",
+    b"/usr/lib/x86_64-linux-gnu/libwayland-client.so.0",
+    b"/usr/lib/x86_64-linux-gnu/libXau.so.6",
+    b"/usr/lib/x86_64-linux-gnu/libXdmcp.so.6",
+    b"/usr/lib/x86_64-linux-gnu/libffi.so.8",
+    b"/usr/lib/x86_64-linux-gnu/libX11.so.6",
+    b"/usr/lib/x86_64-linux-gnu/libXext.so.6",
+    b"/opt/wine-devel/bin/wine",
+    b"/opt/wine-devel/bin/wineserver",
+    b"/opt/wine-devel/lib/wine/x86_64-unix/ntdll.so",
+    b"/opt/wine-devel/lib/wine/x86_64-unix/win32u.so",
+    b"/opt/wine-devel/lib/wine/x86_64-unix/wine",
+    b"/opt/wine-devel/lib/wine/x86_64-unix/wine-preloader",
+    b"/opt/wine-devel/lib/wine/x86_64-unix/winevulkan.so",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/advapi32.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/apisetschema.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/cmd.exe",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/d3d11.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/dxgi.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/d3d11-probe.exe",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/gdi32.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/imm32.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/kernel32.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/kernelbase.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/msvcrt.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/ntdll.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/rpcrt4.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/sechost.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/setupapi.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/shcore.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/shell32.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/shlwapi.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/ucrtbase.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/user32.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/uxtheme.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/version.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/vulkan-1.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/win32u.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/wineboot.exe",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/winevulkan.dll",
+    b"/opt/wine-devel/share/wine/wine.inf",
+    b"/opt/wine-devel/share/wine/nls/c_20127.nls",
+    b"/opt/wine-devel/share/wine/nls/locale.nls",
+    b"/opt/wine-devel/share/wine/nls/l_intl.nls",
+    b"/opt/wine-devel/share/wine/nls/sortdefault.nls",
+    b"/opt/wine-devel/share/wine/nls/normnfc.nls",
+    b"/opt/wine-devel/share/wine/nls/c_1252.nls",
+    b"/opt/wine-devel/share/wine/nls/c_437.nls",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/ws2_32.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/start.exe",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/cfgmgr32.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/cryptbase.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/explorer.exe",
+    b"/opt/wine-devel/lib/wine/x86_64-unix/ws2_32.so",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/dnsapi.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/winedbg.exe",
+    b"/opt/wine-devel/lib/wine/x86_64-unix/dnsapi.so",
+    b"/usr/lib/x86_64-linux-gnu/libvulkan_lvp.so",
+    b"/usr/lib/x86_64-linux-gnu/lvp_icd.json",
+    b"/usr/lib/x86_64-linux-gnu/libLLVM.so.21.1",
+    b"/usr/lib/x86_64-linux-gnu/libdrm.so.2",
+    b"/usr/lib/x86_64-linux-gnu/libexpat.so.1",
+    b"/usr/lib/x86_64-linux-gnu/libdisplay-info.so.3",
+    b"/usr/lib/x86_64-linux-gnu/libxml2.so.16",
+    b"/usr/lib/x86_64-linux-gnu/libedit.so.2",
+    b"/usr/lib/x86_64-linux-gnu/libtinfo.so.6",
+    b"/usr/lib/x86_64-linux-gnu/libbsd.so.0",
+    b"/usr/lib/x86_64-linux-gnu/libmd.so.0",
+    b"/usr/lib/x86_64-linux-gnu/libzstd.so.1",
+    b"/usr/lib/x86_64-linux-gnu/libz.so.1",
+    b"/usr/lib/x86_64-linux-gnu/libstdc++.so.6",
+    b"/usr/lib/x86_64-linux-gnu/libX11-xcb.so.1",
+    b"/usr/lib/x86_64-linux-gnu/libxcb-dri3.so.0",
+    b"/usr/lib/x86_64-linux-gnu/libxcb-present.so.0",
+    b"/usr/lib/x86_64-linux-gnu/libxcb-randr.so.0",
+    b"/usr/lib/x86_64-linux-gnu/libxcb-render.so.0",
+    b"/usr/lib/x86_64-linux-gnu/libxcb-sync.so.1",
+    b"/usr/lib/x86_64-linux-gnu/libxcb-xfixes.so.0",
+    b"/usr/lib/x86_64-linux-gnu/libxshmfence.so.1",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/d3d12.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/d3d12core.dll",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/d3d12-probe.exe",
+    b"/opt/wine-devel/lib/wine/x86_64-windows/d3d11-wsi-probe.exe",
+    b"/etc/passwd",
+    b"/etc/group",
 ];
 
 #[cfg(feature = "lifecycle-root-exec-verify")]
-static ROOT_LIBRARIES: [Once<Vec<u8>>; ANDROID_FILE_PATHS.len()] =
-    [const { Once::new() }; ANDROID_FILE_PATHS.len()];
+static ROOT_LIBRARIES: [Once<Vec<u8>>; ANDROID_FILE_PATHS.len() + 6] =
+    [const { Once::new() }; ANDROID_FILE_PATHS.len() + 6];
 #[cfg(feature = "lifecycle-root-exec-verify")]
 const _: () = assert!(ANDROID_FILE_PATHS.len() <= (u8::MAX as usize) + 1);
 
@@ -378,6 +510,25 @@ pub enum DirectoryId {
     DataLocalTmp,
     DataCache,
     DataCacheMetal,
+    Lib64,
+    UsrLibX86Wine,
+    UsrLibX86WineUnix,
+    DataWineprefix,
+    UsrShare,
+    UsrShareWine,
+    UsrShareWineNls,
+    UsrLibX86WineWindows,
+    Opt,
+    OptWineDevel,
+    OptWineDevelBin,
+    OptWineDevelLib,
+    OptWineDevelLibWine,
+    OptWineDevelLibWineUnix,
+    OptWineDevelLibWineWindows,
+    OptWineDevelShare,
+    OptWineDevelShareWine,
+    OptWineDevelShareWineNls,
+    Etc,
 }
 
 impl DirectoryId {
@@ -413,6 +564,25 @@ impl DirectoryId {
             Self::DataLocalTmp => 23,
             Self::DataCache => 24,
             Self::DataCacheMetal => 25,
+                Self::Lib64 => 26,
+                Self::UsrLibX86Wine => 27,
+                Self::UsrLibX86WineUnix => 28,
+                Self::DataWineprefix => 29,
+                Self::UsrShare => 30,
+                Self::UsrShareWine => 31,
+                Self::UsrShareWineNls => 32,
+                Self::UsrLibX86WineWindows => 33,
+                Self::Opt => 34,
+                Self::OptWineDevel => 35,
+                Self::OptWineDevelBin => 36,
+                Self::OptWineDevelLib => 37,
+                Self::OptWineDevelLibWine => 38,
+                Self::OptWineDevelLibWineUnix => 39,
+                Self::OptWineDevelLibWineWindows => 40,
+                Self::OptWineDevelShare => 41,
+                Self::OptWineDevelShareWine => 42,
+                Self::OptWineDevelShareWineNls => 43,
+                Self::Etc => 44,
             }
     }
 
@@ -448,6 +618,25 @@ impl DirectoryId {
             Self::DataLocalTmp => 24,
             Self::DataCache => 25,
             Self::DataCacheMetal => 26,
+            Self::Lib64 => 27,
+            Self::UsrLibX86Wine => 28,
+            Self::UsrLibX86WineUnix => 29,
+                Self::DataWineprefix => 30,
+                Self::UsrShare => 31,
+                Self::UsrShareWine => 32,
+                Self::UsrShareWineNls => 33,
+                Self::UsrLibX86WineWindows => 34,
+                Self::Opt => 35,
+                Self::OptWineDevel => 36,
+                Self::OptWineDevelBin => 37,
+                Self::OptWineDevelLib => 38,
+                Self::OptWineDevelLibWine => 39,
+                Self::OptWineDevelLibWineUnix => 40,
+                Self::OptWineDevelLibWineWindows => 41,
+                Self::OptWineDevelShare => 42,
+                Self::OptWineDevelShareWine => 43,
+                Self::OptWineDevelShareWineNls => 44,
+                Self::Etc => 45,
             }
     }
 
@@ -482,6 +671,35 @@ impl DirectoryId {
             value if value == (DIRECTORY_HANDLE_BASE | 24) => Some(Self::DataLocalTmp),
             value if value == (DIRECTORY_HANDLE_BASE | 25) => Some(Self::DataCache),
             value if value == (DIRECTORY_HANDLE_BASE | 26) => Some(Self::DataCacheMetal),
+            value if value == (DIRECTORY_HANDLE_BASE | 27) => Some(Self::Lib64),
+            value if value == (DIRECTORY_HANDLE_BASE | 28) => Some(Self::UsrLibX86Wine),
+            value if value == (DIRECTORY_HANDLE_BASE | 29) => Some(Self::UsrLibX86WineUnix),
+            value if value == (DIRECTORY_HANDLE_BASE | 30) => Some(Self::DataWineprefix),
+            value if value == (DIRECTORY_HANDLE_BASE | 31) => Some(Self::UsrShare),
+            value if value == (DIRECTORY_HANDLE_BASE | 32) => Some(Self::UsrShareWine),
+            value if value == (DIRECTORY_HANDLE_BASE | 33) => Some(Self::UsrShareWineNls),
+            value if value == (DIRECTORY_HANDLE_BASE | 34) => {
+                Some(Self::UsrLibX86WineWindows)
+            }
+            value if value == (DIRECTORY_HANDLE_BASE | 35) => Some(Self::Opt),
+            value if value == (DIRECTORY_HANDLE_BASE | 36) => Some(Self::OptWineDevel),
+            value if value == (DIRECTORY_HANDLE_BASE | 37) => Some(Self::OptWineDevelBin),
+            value if value == (DIRECTORY_HANDLE_BASE | 38) => Some(Self::OptWineDevelLib),
+            value if value == (DIRECTORY_HANDLE_BASE | 39) => {
+                Some(Self::OptWineDevelLibWine)
+            }
+            value if value == (DIRECTORY_HANDLE_BASE | 40) => {
+                Some(Self::OptWineDevelLibWineUnix)
+            }
+            value if value == (DIRECTORY_HANDLE_BASE | 41) => {
+                Some(Self::OptWineDevelLibWineWindows)
+            }
+            value if value == (DIRECTORY_HANDLE_BASE | 42) => Some(Self::OptWineDevelShare),
+            value if value == (DIRECTORY_HANDLE_BASE | 43) => Some(Self::OptWineDevelShareWine),
+            value if value == (DIRECTORY_HANDLE_BASE | 44) => {
+                Some(Self::OptWineDevelShareWineNls)
+            }
+            value if value == (DIRECTORY_HANDLE_BASE | 45) => Some(Self::Etc),
             _ => None,
         }
     }
@@ -517,6 +735,29 @@ impl DirectoryId {
             Self::DataLocalTmp => b"/data/local/tmp",
             Self::DataCache => b"/data/.cache",
             Self::DataCacheMetal => b"/data/.cache/metal2vulkan",
+            Self::Lib64 => b"/lib64",
+            Self::UsrLibX86Wine => b"/usr/lib/x86_64-linux-gnu/wine",
+            Self::UsrLibX86WineUnix => {
+                b"/usr/lib/x86_64-linux-gnu/wine/x86_64-unix"
+            }
+            Self::DataWineprefix => b"/data/wineprefix",
+            Self::UsrShare => b"/usr/share",
+            Self::UsrShareWine => b"/usr/share/wine",
+            Self::UsrShareWineNls => b"/usr/share/wine/nls",
+            Self::UsrLibX86WineWindows => {
+                b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows"
+            }
+            Self::Opt => b"/opt",
+            Self::OptWineDevel => b"/opt/wine-devel",
+            Self::OptWineDevelBin => b"/opt/wine-devel/bin",
+            Self::OptWineDevelLib => b"/opt/wine-devel/lib",
+            Self::OptWineDevelLibWine => b"/opt/wine-devel/lib/wine",
+            Self::OptWineDevelLibWineUnix => b"/opt/wine-devel/lib/wine/x86_64-unix",
+            Self::OptWineDevelLibWineWindows => b"/opt/wine-devel/lib/wine/x86_64-windows",
+            Self::OptWineDevelShare => b"/opt/wine-devel/share",
+            Self::OptWineDevelShareWine => b"/opt/wine-devel/share/wine",
+            Self::OptWineDevelShareWineNls => b"/opt/wine-devel/share/wine/nls",
+            Self::Etc => b"/etc",
         }
     }
 }
@@ -574,6 +815,39 @@ pub struct DirEntry {
     pub node: Node,
 }
 
+/// Canonicalizes an absolute pathname without consulting the namespace.
+///
+/// Linux resolves `.` and `..` lexically for this bounded read-only view.
+/// Parent components clamp at `/`, so a pathname can never escape the
+/// compatibility root. Repeated separators are removed.
+pub(crate) fn normalize_absolute_path(path: &[u8]) -> Option<Vec<u8>> {
+    if !path.starts_with(b"/") {
+        return None;
+    }
+    let mut normalized = Vec::new();
+    normalized.try_reserve(path.len() + 1).ok()?;
+    normalized.push(b'/');
+    for component in path.split(|byte| *byte == b'/') {
+        match component {
+            b"" | b"." => {}
+            b".." => {
+                if normalized.len() > 1 {
+                    if let Some(separator) = normalized.iter().rposition(|byte| *byte == b'/') {
+                        normalized.truncate(separator.max(1));
+                    }
+                }
+            }
+            _ => {
+                if normalized.len() > 1 {
+                    normalized.push(b'/');
+                }
+                normalized.extend_from_slice(component);
+            }
+        }
+    }
+    Some(normalized)
+}
+
 /// Resolves one Linux-compatible absolute path to a verification file.
 ///
 /// 解析已知绝对路径；其他路径（包括 `/etc/ld.so.cache`）返回 `None`，由调用者产生
@@ -585,6 +859,8 @@ pub fn lookup(path: &[u8]) -> Option<FileId> {
     {
         return None;
     }
+    let normalized = normalize_absolute_path(path)?;
+    let path = normalized.as_slice();
     if let Some(index) = ANDROID_FILE_PATHS
         .iter()
         .position(|candidate| *candidate == path)
@@ -629,14 +905,28 @@ pub fn lookup(path: &[u8]) -> Option<FileId> {
 ///
 /// 将绝对路径解析为有界命名空间中的文件或目录；未知路径返回 `None`。
 pub fn lookup_node(path: &[u8]) -> Option<Node> {
+    let normalized = normalize_absolute_path(path)?;
+    let path = normalized.as_slice();
     let directory = match path {
         b"/" => Some(DirectoryId::Root),
         b"/lib" => Some(DirectoryId::Lib),
         b"/lib/x86_64-linux-gnu" => Some(DirectoryId::LibX86_64),
+        b"/lib64" => Some(DirectoryId::Lib64),
+        b"/bin" => Some(DirectoryId::UsrBin),
         b"/usr" => Some(DirectoryId::Usr),
         b"/usr/bin" => Some(DirectoryId::UsrBin),
         b"/usr/lib" => Some(DirectoryId::UsrLib),
         b"/usr/lib/x86_64-linux-gnu" => Some(DirectoryId::UsrLibX86_64),
+        b"/usr/lib/x86_64-linux-gnu/wine" => Some(DirectoryId::UsrLibX86Wine),
+        b"/usr/lib/x86_64-linux-gnu/wine/x86_64-unix" => {
+            Some(DirectoryId::UsrLibX86WineUnix)
+        }
+        b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows" => {
+            Some(DirectoryId::UsrLibX86WineWindows)
+        }
+        b"/usr/share" => Some(DirectoryId::UsrShare),
+        b"/usr/share/wine" => Some(DirectoryId::UsrShareWine),
+        b"/usr/share/wine/nls" => Some(DirectoryId::UsrShareWineNls),
         b"/system" => Some(DirectoryId::System),
         b"/system/bin" => Some(DirectoryId::SystemBin),
         b"/system/lib64" => Some(DirectoryId::SystemLib64),
@@ -651,11 +941,27 @@ pub fn lookup_node(path: &[u8]) -> Option<Node> {
         b"/apex/com.android.i18n/etc/icu" => Some(DirectoryId::ApexI18nEtcIcu),
         b"/apex/com.android.i18n/lib64" => Some(DirectoryId::ApexI18nLib64),
         b"/linkerconfig" => Some(DirectoryId::LinkerConfig),
+        b"/etc" => Some(DirectoryId::Etc),
         b"/data" => Some(DirectoryId::Data),
         b"/data/local" => Some(DirectoryId::DataLocal),
         b"/data/local/tmp" => Some(DirectoryId::DataLocalTmp),
+        b"/data/wineprefix" => Some(DirectoryId::DataWineprefix),
         b"/data/.cache" => Some(DirectoryId::DataCache),
         b"/data/.cache/metal2vulkan" => Some(DirectoryId::DataCacheMetal),
+        b"/opt" => Some(DirectoryId::Opt),
+        b"/opt/wine-devel" => Some(DirectoryId::OptWineDevel),
+        b"/opt/wine-devel/bin" => Some(DirectoryId::OptWineDevelBin),
+        b"/opt/wine-devel/lib" => Some(DirectoryId::OptWineDevelLib),
+        b"/opt/wine-devel/lib/wine" => Some(DirectoryId::OptWineDevelLibWine),
+        b"/opt/wine-devel/lib/wine/x86_64-unix" => {
+            Some(DirectoryId::OptWineDevelLibWineUnix)
+        }
+        b"/opt/wine-devel/lib/wine/x86_64-windows" => {
+            Some(DirectoryId::OptWineDevelLibWineWindows)
+        }
+        b"/opt/wine-devel/share" => Some(DirectoryId::OptWineDevelShare),
+        b"/opt/wine-devel/share/wine" => Some(DirectoryId::OptWineDevelShareWine),
+        b"/opt/wine-devel/share/wine/nls" => Some(DirectoryId::OptWineDevelShareWineNls),
         _ => None,
     };
     let exact = directory
@@ -675,10 +981,22 @@ pub fn lookup_node(path: &[u8]) -> Option<Node> {
         b"/" => Some(DirectoryId::Root),
         b"/lib" => Some(DirectoryId::Lib),
         b"/lib/x86_64-linux-gnu" => Some(DirectoryId::LibX86_64),
+        b"/lib64" => Some(DirectoryId::Lib64),
+        b"/bin" => Some(DirectoryId::UsrBin),
         b"/usr" => Some(DirectoryId::Usr),
         b"/usr/bin" => Some(DirectoryId::UsrBin),
         b"/usr/lib" => Some(DirectoryId::UsrLib),
         b"/usr/lib/x86_64-linux-gnu" => Some(DirectoryId::UsrLibX86_64),
+        b"/usr/lib/x86_64-linux-gnu/wine" => Some(DirectoryId::UsrLibX86Wine),
+        b"/usr/lib/x86_64-linux-gnu/wine/x86_64-unix" => {
+            Some(DirectoryId::UsrLibX86WineUnix)
+        }
+        b"/usr/lib/x86_64-linux-gnu/wine/x86_64-windows" => {
+            Some(DirectoryId::UsrLibX86WineWindows)
+        }
+        b"/usr/share" => Some(DirectoryId::UsrShare),
+        b"/usr/share/wine" => Some(DirectoryId::UsrShareWine),
+        b"/usr/share/wine/nls" => Some(DirectoryId::UsrShareWineNls),
         b"/system" => Some(DirectoryId::System),
         b"/system/bin" => Some(DirectoryId::SystemBin),
         b"/system/lib64" => Some(DirectoryId::SystemLib64),
@@ -693,11 +1011,27 @@ pub fn lookup_node(path: &[u8]) -> Option<Node> {
         b"/apex/com.android.i18n/etc/icu" => Some(DirectoryId::ApexI18nEtcIcu),
         b"/apex/com.android.i18n/lib64" => Some(DirectoryId::ApexI18nLib64),
         b"/linkerconfig" => Some(DirectoryId::LinkerConfig),
+        b"/etc" => Some(DirectoryId::Etc),
         b"/data" => Some(DirectoryId::Data),
         b"/data/local" => Some(DirectoryId::DataLocal),
         b"/data/local/tmp" => Some(DirectoryId::DataLocalTmp),
+        b"/data/wineprefix" => Some(DirectoryId::DataWineprefix),
         b"/data/.cache" => Some(DirectoryId::DataCache),
         b"/data/.cache/metal2vulkan" => Some(DirectoryId::DataCacheMetal),
+        b"/opt" => Some(DirectoryId::Opt),
+        b"/opt/wine-devel" => Some(DirectoryId::OptWineDevel),
+        b"/opt/wine-devel/bin" => Some(DirectoryId::OptWineDevelBin),
+        b"/opt/wine-devel/lib" => Some(DirectoryId::OptWineDevelLib),
+        b"/opt/wine-devel/lib/wine" => Some(DirectoryId::OptWineDevelLibWine),
+        b"/opt/wine-devel/lib/wine/x86_64-unix" => {
+            Some(DirectoryId::OptWineDevelLibWineUnix)
+        }
+        b"/opt/wine-devel/lib/wine/x86_64-windows" => {
+            Some(DirectoryId::OptWineDevelLibWineWindows)
+        }
+        b"/opt/wine-devel/share" => Some(DirectoryId::OptWineDevelShare),
+        b"/opt/wine-devel/share/wine" => Some(DirectoryId::OptWineDevelShareWine),
+        b"/opt/wine-devel/share/wine/nls" => Some(DirectoryId::OptWineDevelShareWineNls),
         _ => None,
     }?;
     directory_entries(directory)
@@ -712,8 +1046,16 @@ pub fn lookup_node(path: &[u8]) -> Option<Node> {
 pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
     const ROOT: &[DirEntry] = &[
         DirEntry {
+            name: b"bin",
+            node: Node::Directory(DirectoryId::UsrBin),
+        },
+        DirEntry {
             name: b"lib",
             node: Node::Directory(DirectoryId::Lib),
+        },
+        DirEntry {
+            name: b"lib64",
+            node: Node::Directory(DirectoryId::Lib64),
         },
         DirEntry {
             name: b"usr",
@@ -734,6 +1076,14 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         DirEntry {
             name: b"data",
             node: Node::Directory(DirectoryId::Data),
+        },
+        DirEntry {
+            name: b"opt",
+            node: Node::Directory(DirectoryId::Opt),
+        },
+        DirEntry {
+            name: b"etc",
+            node: Node::Directory(DirectoryId::Etc),
         },
     ];
     const LIB: &[DirEntry] = &[DirEntry {
@@ -789,6 +1139,292 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
             name: b"runtime_examples.air",
             node: Node::File(FileId::AndroidFile(81)),
         },
+        DirEntry {
+            name: b"libunwind.so.8",
+            node: Node::File(FileId::AndroidFile(87)),
+        },
+        DirEntry {
+            name: b"liblzma.so.5",
+            node: Node::File(FileId::AndroidFile(88)),
+        },
+        DirEntry {
+            name: b"wine",
+            node: Node::Directory(DirectoryId::UsrLibX86Wine),
+        },
+        DirEntry {
+            name: b"libxcb.so.1",
+            node: Node::File(FileId::AndroidFile(131)),
+        },
+        DirEntry {
+            name: b"libxcb-shm.so.0",
+            node: Node::File(FileId::AndroidFile(132)),
+        },
+        DirEntry {
+            name: b"libwayland-client.so.0",
+            node: Node::File(FileId::AndroidFile(133)),
+        },
+        DirEntry {
+            name: b"libXau.so.6",
+            node: Node::File(FileId::AndroidFile(134)),
+        },
+        DirEntry {
+            name: b"libXdmcp.so.6",
+            node: Node::File(FileId::AndroidFile(135)),
+        },
+        DirEntry {
+            name: b"libffi.so.8",
+            node: Node::File(FileId::AndroidFile(136)),
+        },
+        DirEntry {
+            name: b"libX11.so.6",
+            node: Node::File(FileId::AndroidFile(137)),
+        },
+        DirEntry {
+            name: b"libXext.so.6",
+            node: Node::File(FileId::AndroidFile(138)),
+        },
+        DirEntry {
+            name: b"libvulkan_lvp.so",
+            node: Node::File(FileId::AndroidFile(188)),
+        },
+        DirEntry {
+            name: b"lvp_icd.json",
+            node: Node::File(FileId::AndroidFile(189)),
+        },
+        DirEntry {
+            name: b"libLLVM.so.21.1",
+            node: Node::File(FileId::AndroidFile(190)),
+        },
+        DirEntry {
+            name: b"libdrm.so.2",
+            node: Node::File(FileId::AndroidFile(191)),
+        },
+        DirEntry {
+            name: b"libexpat.so.1",
+            node: Node::File(FileId::AndroidFile(192)),
+        },
+        DirEntry {
+            name: b"libdisplay-info.so.3",
+            node: Node::File(FileId::AndroidFile(193)),
+        },
+        DirEntry {
+            name: b"libxml2.so.16",
+            node: Node::File(FileId::AndroidFile(194)),
+        },
+        DirEntry {
+            name: b"libedit.so.2",
+            node: Node::File(FileId::AndroidFile(195)),
+        },
+        DirEntry {
+            name: b"libtinfo.so.6",
+            node: Node::File(FileId::AndroidFile(196)),
+        },
+        DirEntry {
+            name: b"libbsd.so.0",
+            node: Node::File(FileId::AndroidFile(197)),
+        },
+        DirEntry {
+            name: b"libmd.so.0",
+            node: Node::File(FileId::AndroidFile(198)),
+        },
+        DirEntry {
+            name: b"libzstd.so.1",
+            node: Node::File(FileId::AndroidFile(199)),
+        },
+        DirEntry {
+            name: b"libz.so.1",
+            node: Node::File(FileId::AndroidFile(200)),
+        },
+        DirEntry {
+            name: b"libstdc++.so.6",
+            node: Node::File(FileId::AndroidFile(201)),
+        },
+        DirEntry {
+            name: b"libX11-xcb.so.1",
+            node: Node::File(FileId::AndroidFile(202)),
+        },
+        DirEntry {
+            name: b"libxcb-dri3.so.0",
+            node: Node::File(FileId::AndroidFile(203)),
+        },
+        DirEntry {
+            name: b"libxcb-present.so.0",
+            node: Node::File(FileId::AndroidFile(204)),
+        },
+        DirEntry {
+            name: b"libxcb-randr.so.0",
+            node: Node::File(FileId::AndroidFile(205)),
+        },
+        DirEntry {
+            name: b"libxcb-render.so.0",
+            node: Node::File(FileId::AndroidFile(206)),
+        },
+        DirEntry {
+            name: b"libxcb-sync.so.1",
+            node: Node::File(FileId::AndroidFile(207)),
+        },
+        DirEntry {
+            name: b"libxcb-xfixes.so.0",
+            node: Node::File(FileId::AndroidFile(208)),
+        },
+        DirEntry {
+            name: b"libxshmfence.so.1",
+            node: Node::File(FileId::AndroidFile(209)),
+        },
+    ];
+    const LIB64: &[DirEntry] = &[DirEntry {
+        name: b"ld-linux-x86-64.so.2",
+        node: Node::File(FileId::AndroidFile(86)),
+    }];
+    const WINE: &[DirEntry] = &[
+        DirEntry {
+            name: b"x86_64-unix",
+            node: Node::Directory(DirectoryId::UsrLibX86WineUnix),
+        },
+        DirEntry {
+            name: b"x86_64-windows",
+            node: Node::Directory(DirectoryId::UsrLibX86WineWindows),
+        },
+        DirEntry {
+            name: b"wine-preloader",
+            node: Node::File(FileId::AndroidFile(92)),
+        },
+        DirEntry {
+            name: b"wine",
+            node: Node::File(FileId::AndroidFile(84)),
+        },
+        DirEntry {
+            name: b"wineserver",
+            node: Node::File(FileId::AndroidFile(85)),
+        },
+    ];
+    const WINE_UNIX: &[DirEntry] = &[
+        DirEntry {
+            name: b"ntdll.so",
+            node: Node::File(FileId::AndroidFile(83)),
+        },
+        DirEntry {
+            name: b"win32u.so",
+            node: Node::File(FileId::AndroidFile(120)),
+        },
+        DirEntry {
+            name: b"winevulkan.so",
+            node: Node::File(FileId::AndroidFile(130)),
+        },
+    ];
+    const WINE_WINDOWS: &[DirEntry] = &[
+        DirEntry {
+            name: b"advapi32.dll",
+            node: Node::File(FileId::AndroidFile(96)),
+        },
+        DirEntry {
+            name: b"cmd.exe",
+            node: Node::File(FileId::AndroidFile(97)),
+        },
+        DirEntry {
+            name: b"gdi32.dll",
+            node: Node::File(FileId::AndroidFile(98)),
+        },
+        DirEntry {
+            name: b"kernel32.dll",
+            node: Node::File(FileId::AndroidFile(99)),
+        },
+        DirEntry {
+            name: b"kernelbase.dll",
+            node: Node::File(FileId::AndroidFile(100)),
+        },
+        DirEntry {
+            name: b"msvcrt.dll",
+            node: Node::File(FileId::AndroidFile(101)),
+        },
+        DirEntry {
+            name: b"ntdll.dll",
+            node: Node::File(FileId::AndroidFile(102)),
+        },
+        DirEntry {
+            name: b"sechost.dll",
+            node: Node::File(FileId::AndroidFile(103)),
+        },
+        DirEntry {
+            name: b"shcore.dll",
+            node: Node::File(FileId::AndroidFile(104)),
+        },
+        DirEntry {
+            name: b"shell32.dll",
+            node: Node::File(FileId::AndroidFile(105)),
+        },
+        DirEntry {
+            name: b"shlwapi.dll",
+            node: Node::File(FileId::AndroidFile(106)),
+        },
+        DirEntry {
+            name: b"start.exe",
+            node: Node::File(FileId::AndroidFile(107)),
+        },
+        DirEntry {
+            name: b"ucrtbase.dll",
+            node: Node::File(FileId::AndroidFile(108)),
+        },
+        DirEntry {
+            name: b"user32.dll",
+            node: Node::File(FileId::AndroidFile(109)),
+        },
+        DirEntry {
+            name: b"win32u.dll",
+            node: Node::File(FileId::AndroidFile(110)),
+        },
+        DirEntry {
+            name: b"zlib1.dll",
+            node: Node::File(FileId::AndroidFile(111)),
+        },
+        DirEntry {
+            name: b"apisetschema.dll",
+            node: Node::File(FileId::AndroidFile(112)),
+        },
+        DirEntry {
+            name: b"wineboot.exe",
+            node: Node::File(FileId::AndroidFile(113)),
+        },
+        DirEntry {
+            name: b"ws2_32.dll",
+            node: Node::File(FileId::AndroidFile(114)),
+        },
+        DirEntry {
+            name: b"imm32.dll",
+            node: Node::File(FileId::AndroidFile(121)),
+        },
+        DirEntry {
+            name: b"d3d11.dll",
+            node: Node::File(FileId::AndroidFile(122)),
+        },
+        DirEntry {
+            name: b"dxgi.dll",
+            node: Node::File(FileId::AndroidFile(123)),
+        },
+        DirEntry {
+            name: b"d3d11-probe.exe",
+            node: Node::File(FileId::AndroidFile(124)),
+        },
+        DirEntry {
+            name: b"version.dll",
+            node: Node::File(FileId::AndroidFile(125)),
+        },
+        DirEntry {
+            name: b"setupapi.dll",
+            node: Node::File(FileId::AndroidFile(126)),
+        },
+        DirEntry {
+            name: b"rpcrt4.dll",
+            node: Node::File(FileId::AndroidFile(127)),
+        },
+        DirEntry {
+            name: b"winevulkan.dll",
+            node: Node::File(FileId::AndroidFile(128)),
+        },
+        DirEntry {
+            name: b"vulkan-1.dll",
+            node: Node::File(FileId::AndroidFile(129)),
+        },
     ];
     const USR: &[DirEntry] = &[
         DirEntry {
@@ -798,6 +1434,10 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         DirEntry {
             name: b"lib",
             node: Node::Directory(DirectoryId::UsrLib),
+        },
+        DirEntry {
+            name: b"share",
+            node: Node::Directory(DirectoryId::UsrShare),
         },
     ];
     const USR_BIN: &[DirEntry] = &[
@@ -876,6 +1516,10 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         DirEntry {
             name: b"true",
             node: Node::Executable(0x300e),
+        },
+        DirEntry {
+            name: b"darlingserver",
+            node: Node::Executable(0x3014),
         },
         DirEntry {
             name: b"uname",
@@ -1042,6 +1686,10 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
             node: Node::Directory(DirectoryId::DataLocal),
         },
         DirEntry {
+            name: b"wineprefix",
+            node: Node::Directory(DirectoryId::DataWineprefix),
+        },
+        DirEntry {
             name: b".cache",
             node: Node::Directory(DirectoryId::DataCache),
         },
@@ -1061,13 +1709,336 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         name: b"metal2vulkan",
         node: Node::Directory(DirectoryId::DataCacheMetal),
     }];
+    const USR_SHARE: &[DirEntry] = &[DirEntry {
+        name: b"wine",
+        node: Node::Directory(DirectoryId::UsrShareWine),
+    }];
+    const USR_SHARE_WINE: &[DirEntry] = &[
+        DirEntry {
+            name: b"nls",
+            node: Node::Directory(DirectoryId::UsrShareWineNls),
+        },
+        DirEntry {
+            name: b"wine.inf",
+            node: Node::File(FileId::AndroidFile(115)),
+        },
+    ];
+    const USR_SHARE_WINE_NLS: &[DirEntry] = &[
+        DirEntry {
+            name: b"c_20127.nls",
+            node: Node::File(FileId::AndroidFile(93)),
+        },
+        DirEntry {
+            name: b"locale.nls",
+            node: Node::File(FileId::AndroidFile(94)),
+        },
+        DirEntry {
+            name: b"l_intl.nls",
+            node: Node::File(FileId::AndroidFile(95)),
+        },
+        DirEntry {
+            name: b"sortdefault.nls",
+            node: Node::File(FileId::AndroidFile(116)),
+        },
+        DirEntry {
+            name: b"normnfc.nls",
+            node: Node::File(FileId::AndroidFile(117)),
+        },
+        DirEntry {
+            name: b"c_1252.nls",
+            node: Node::File(FileId::AndroidFile(118)),
+        },
+        DirEntry {
+            name: b"c_437.nls",
+            node: Node::File(FileId::AndroidFile(119)),
+        },
+    ];
+    const OPT: &[DirEntry] = &[DirEntry {
+        name: b"wine-devel",
+        node: Node::Directory(DirectoryId::OptWineDevel),
+    }];
+    const OPT_WINE_DEVEL: &[DirEntry] = &[
+        DirEntry {
+            name: b"bin",
+            node: Node::Directory(DirectoryId::OptWineDevelBin),
+        },
+        DirEntry {
+            name: b"lib",
+            node: Node::Directory(DirectoryId::OptWineDevelLib),
+        },
+        DirEntry {
+            name: b"share",
+            node: Node::Directory(DirectoryId::OptWineDevelShare),
+        },
+    ];
+    const OPT_WINE_DEVEL_BIN: &[DirEntry] = &[
+        DirEntry {
+            name: b"wine",
+            node: Node::File(FileId::AndroidFile(139)),
+        },
+        DirEntry {
+            name: b"wineserver",
+            node: Node::File(FileId::AndroidFile(140)),
+        },
+    ];
+    const OPT_WINE_DEVEL_LIB: &[DirEntry] = &[DirEntry {
+        name: b"wine",
+        node: Node::Directory(DirectoryId::OptWineDevelLibWine),
+    }];
+    const OPT_WINE_DEVEL_LIB_WINE: &[DirEntry] = &[
+        DirEntry {
+            name: b"x86_64-unix",
+            node: Node::Directory(DirectoryId::OptWineDevelLibWineUnix),
+        },
+        DirEntry {
+            name: b"x86_64-windows",
+            node: Node::Directory(DirectoryId::OptWineDevelLibWineWindows),
+        },
+    ];
+    const OPT_WINE_DEVEL_LIB_WINE_UNIX: &[DirEntry] = &[
+        DirEntry {
+            name: b"ntdll.so",
+            node: Node::File(FileId::AndroidFile(141)),
+        },
+        DirEntry {
+            name: b"win32u.so",
+            node: Node::File(FileId::AndroidFile(142)),
+        },
+        DirEntry {
+            name: b"wine",
+            node: Node::File(FileId::AndroidFile(143)),
+        },
+        DirEntry {
+            name: b"wine-preloader",
+            node: Node::File(FileId::AndroidFile(144)),
+        },
+        DirEntry {
+            name: b"winevulkan.so",
+            node: Node::File(FileId::AndroidFile(145)),
+        },
+        DirEntry {
+            name: b"ws2_32.so",
+            node: Node::File(FileId::AndroidFile(184)),
+        },
+        DirEntry {
+            name: b"dnsapi.so",
+            node: Node::File(FileId::AndroidFile(187)),
+        },
+    ];
+    const OPT_WINE_DEVEL_LIB_WINE_WINDOWS: &[DirEntry] = &[
+        DirEntry {
+            name: b"advapi32.dll",
+            node: Node::File(FileId::AndroidFile(146)),
+        },
+        DirEntry {
+            name: b"apisetschema.dll",
+            node: Node::File(FileId::AndroidFile(147)),
+        },
+        DirEntry {
+            name: b"cmd.exe",
+            node: Node::File(FileId::AndroidFile(148)),
+        },
+        DirEntry {
+            name: b"d3d11.dll",
+            node: Node::File(FileId::AndroidFile(149)),
+        },
+        DirEntry {
+            name: b"dxgi.dll",
+            node: Node::File(FileId::AndroidFile(150)),
+        },
+        DirEntry {
+            name: b"d3d11-probe.exe",
+            node: Node::File(FileId::AndroidFile(151)),
+        },
+        DirEntry {
+            name: b"gdi32.dll",
+            node: Node::File(FileId::AndroidFile(152)),
+        },
+        DirEntry {
+            name: b"imm32.dll",
+            node: Node::File(FileId::AndroidFile(153)),
+        },
+        DirEntry {
+            name: b"kernel32.dll",
+            node: Node::File(FileId::AndroidFile(154)),
+        },
+        DirEntry {
+            name: b"kernelbase.dll",
+            node: Node::File(FileId::AndroidFile(155)),
+        },
+        DirEntry {
+            name: b"msvcrt.dll",
+            node: Node::File(FileId::AndroidFile(156)),
+        },
+        DirEntry {
+            name: b"ntdll.dll",
+            node: Node::File(FileId::AndroidFile(157)),
+        },
+        DirEntry {
+            name: b"rpcrt4.dll",
+            node: Node::File(FileId::AndroidFile(158)),
+        },
+        DirEntry {
+            name: b"sechost.dll",
+            node: Node::File(FileId::AndroidFile(159)),
+        },
+        DirEntry {
+            name: b"setupapi.dll",
+            node: Node::File(FileId::AndroidFile(160)),
+        },
+        DirEntry {
+            name: b"shcore.dll",
+            node: Node::File(FileId::AndroidFile(161)),
+        },
+        DirEntry {
+            name: b"shell32.dll",
+            node: Node::File(FileId::AndroidFile(162)),
+        },
+        DirEntry {
+            name: b"shlwapi.dll",
+            node: Node::File(FileId::AndroidFile(163)),
+        },
+        DirEntry {
+            name: b"ucrtbase.dll",
+            node: Node::File(FileId::AndroidFile(164)),
+        },
+        DirEntry {
+            name: b"user32.dll",
+            node: Node::File(FileId::AndroidFile(165)),
+        },
+        DirEntry {
+            name: b"uxtheme.dll",
+            node: Node::File(FileId::AndroidFile(214)),
+        },
+        DirEntry {
+            name: b"version.dll",
+            node: Node::File(FileId::AndroidFile(166)),
+        },
+        DirEntry {
+            name: b"vulkan-1.dll",
+            node: Node::File(FileId::AndroidFile(167)),
+        },
+        DirEntry {
+            name: b"win32u.dll",
+            node: Node::File(FileId::AndroidFile(168)),
+        },
+        DirEntry {
+            name: b"wineboot.exe",
+            node: Node::File(FileId::AndroidFile(169)),
+        },
+        DirEntry {
+            name: b"winevulkan.dll",
+            node: Node::File(FileId::AndroidFile(170)),
+        },
+        DirEntry {
+            name: b"ws2_32.dll",
+            node: Node::File(FileId::AndroidFile(179)),
+        },
+        DirEntry {
+            name: b"start.exe",
+            node: Node::File(FileId::AndroidFile(180)),
+        },
+        DirEntry {
+            name: b"cfgmgr32.dll",
+            node: Node::File(FileId::AndroidFile(181)),
+        },
+        DirEntry {
+            name: b"cryptbase.dll",
+            node: Node::File(FileId::AndroidFile(182)),
+        },
+        DirEntry {
+            name: b"explorer.exe",
+            node: Node::File(FileId::AndroidFile(183)),
+        },
+        DirEntry {
+            name: b"dnsapi.dll",
+            node: Node::File(FileId::AndroidFile(185)),
+        },
+        DirEntry {
+            name: b"winedbg.exe",
+            node: Node::File(FileId::AndroidFile(186)),
+        },
+        DirEntry {
+            name: b"d3d12.dll",
+            node: Node::File(FileId::AndroidFile(210)),
+        },
+        DirEntry {
+            name: b"d3d12core.dll",
+            node: Node::File(FileId::AndroidFile(211)),
+        },
+        DirEntry {
+            name: b"d3d12-probe.exe",
+            node: Node::File(FileId::AndroidFile(212)),
+        },
+        DirEntry {
+            name: b"d3d11-wsi-probe.exe",
+            node: Node::File(FileId::AndroidFile(213)),
+        },
+    ];
+    const OPT_WINE_DEVEL_SHARE: &[DirEntry] = &[DirEntry {
+        name: b"wine",
+        node: Node::Directory(DirectoryId::OptWineDevelShareWine),
+    }];
+    const OPT_WINE_DEVEL_SHARE_WINE: &[DirEntry] = &[
+        DirEntry {
+            name: b"wine.inf",
+            node: Node::File(FileId::AndroidFile(171)),
+        },
+        DirEntry {
+            name: b"nls",
+            node: Node::Directory(DirectoryId::OptWineDevelShareWineNls),
+        },
+    ];
+    const OPT_WINE_DEVEL_SHARE_WINE_NLS: &[DirEntry] = &[
+        DirEntry {
+            name: b"c_20127.nls",
+            node: Node::File(FileId::AndroidFile(172)),
+        },
+        DirEntry {
+            name: b"locale.nls",
+            node: Node::File(FileId::AndroidFile(173)),
+        },
+        DirEntry {
+            name: b"l_intl.nls",
+            node: Node::File(FileId::AndroidFile(174)),
+        },
+        DirEntry {
+            name: b"sortdefault.nls",
+            node: Node::File(FileId::AndroidFile(175)),
+        },
+        DirEntry {
+            name: b"normnfc.nls",
+            node: Node::File(FileId::AndroidFile(176)),
+        },
+        DirEntry {
+            name: b"c_1252.nls",
+            node: Node::File(FileId::AndroidFile(177)),
+        },
+        DirEntry {
+            name: b"c_437.nls",
+            node: Node::File(FileId::AndroidFile(178)),
+        },
+    ];
+    const ETC: &[DirEntry] = &[
+        DirEntry {
+            name: b"passwd",
+            node: Node::File(FileId::AndroidFile(214)),
+        },
+        DirEntry {
+            name: b"group",
+            node: Node::File(FileId::AndroidFile(215)),
+        },
+    ];
     match directory {
         DirectoryId::Root => ROOT,
         DirectoryId::Lib => LIB,
         DirectoryId::LibX86_64 | DirectoryId::UsrLibX86_64 => LIB_X86_64,
+        DirectoryId::Lib64 => LIB64,
         DirectoryId::Usr => USR,
         DirectoryId::UsrBin => USR_BIN,
         DirectoryId::UsrLib => USR_LIB,
+        DirectoryId::UsrLibX86Wine => WINE,
+        DirectoryId::UsrLibX86WineUnix => WINE_UNIX,
         DirectoryId::System => SYSTEM,
         DirectoryId::SystemBin => SYSTEM_BIN,
         DirectoryId::SystemLib64 => SYSTEM_LIB64,
@@ -1085,8 +2056,24 @@ pub fn directory_entries(directory: DirectoryId) -> &'static [DirEntry] {
         DirectoryId::Data => DATA,
         DirectoryId::DataLocal => DATA_LOCAL,
         DirectoryId::DataLocalTmp => DATA_LOCAL_TMP,
+        DirectoryId::DataWineprefix => &[],
         DirectoryId::DataCache => DATA_CACHE,
         DirectoryId::DataCacheMetal => &[],
+        DirectoryId::UsrShare => USR_SHARE,
+        DirectoryId::UsrShareWine => USR_SHARE_WINE,
+        DirectoryId::UsrShareWineNls => USR_SHARE_WINE_NLS,
+        DirectoryId::UsrLibX86WineWindows => WINE_WINDOWS,
+        DirectoryId::Opt => OPT,
+        DirectoryId::OptWineDevel => OPT_WINE_DEVEL,
+        DirectoryId::OptWineDevelBin => OPT_WINE_DEVEL_BIN,
+        DirectoryId::OptWineDevelLib => OPT_WINE_DEVEL_LIB,
+        DirectoryId::OptWineDevelLibWine => OPT_WINE_DEVEL_LIB_WINE,
+        DirectoryId::OptWineDevelLibWineUnix => OPT_WINE_DEVEL_LIB_WINE_UNIX,
+        DirectoryId::OptWineDevelLibWineWindows => OPT_WINE_DEVEL_LIB_WINE_WINDOWS,
+        DirectoryId::OptWineDevelShare => OPT_WINE_DEVEL_SHARE,
+        DirectoryId::OptWineDevelShareWine => OPT_WINE_DEVEL_SHARE_WINE,
+        DirectoryId::OptWineDevelShareWineNls => OPT_WINE_DEVEL_SHARE_WINE_NLS,
+        DirectoryId::Etc => ETC,
     }
 }
 
@@ -1123,6 +2110,39 @@ pub fn node_from_inode(inode: u64) -> Option<Node> {
     } else {
         search(root, inode)
     }
+}
+
+/// Resolve a bounded sequence of symlinks and read the final regular file.
+#[cfg(feature = "lifecycle-root-exec-verify")]
+fn read_root_file(
+    root: &Ext4Reader,
+    path: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, Ext4FsError> {
+    let mut current = path.to_string();
+    for _ in 0..8 {
+        if !root.metadata(&current)?.is_symlink {
+            return root.read_file(&current, max_bytes);
+        }
+        let target = root.read_symlink(&current, 4096)?;
+        let target = core::str::from_utf8(&target).map_err(|_| Ext4FsError::InvalidPath)?;
+        if target.is_empty()
+            || target.starts_with('/')
+            || target.split('/').any(|part| part == "..")
+        {
+            return Err(Ext4FsError::InvalidPath);
+        }
+        let parent = current
+            .rsplit_once('/')
+            .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
+            .ok_or(Ext4FsError::InvalidPath)?;
+        current = if parent == "/" {
+            alloc::format!("/{target}")
+        } else {
+            alloc::format!("{parent}/{target}")
+        };
+    }
+    Err(Ext4FsError::TooLarge)
 }
 
 /// Installs the libc bytes read from the selected System A/B root.
@@ -1264,17 +2284,40 @@ pub fn root_executable(
     let root = Ext4Reader::open(source).map_err(|_| RootExecutableError::Io)?;
     let logical_path =
         core::str::from_utf8(logical_path.as_bytes()).map_err(|_| RootExecutableError::Io)?;
-    let executable = root
-        .read_file(logical_path, executable_len)
-        .map_err(|_| RootExecutableError::Io)?;
-    let interpreter = root
-        .read_file(ROOT_INTERPRETER_PATH, interpreter_len)
+    let executable =
+        read_root_file(&root, logical_path, executable_len).map_err(|_| RootExecutableError::Io)?;
+    let interpreter = read_root_file(&root, ROOT_INTERPRETER_PATH, interpreter_len)
         .map_err(|_| RootExecutableError::Io)?;
     if executable.len() != executable_len || interpreter.len() != interpreter_len {
         return Err(RootExecutableError::Io);
     }
     io.commit();
     Ok((executable, interpreter))
+}
+
+#[cfg(feature = "lifecycle-root-exec-verify")]
+pub fn root_interpreter(pid: kernel_core::objtable::ObjId) -> Result<Vec<u8>, RootExecutableError> {
+    let source = ROOT_SOURCE
+        .lock()
+        .as_ref()
+        .cloned()
+        .ok_or(RootExecutableError::NotFound)?;
+    let root = Ext4Reader::open(source).map_err(|_| RootExecutableError::Io)?;
+    let metadata = root
+        .metadata(ROOT_INTERPRETER_PATH)
+        .map_err(|_| RootExecutableError::Io)?;
+    let bytes = usize::try_from(metadata.len).map_err(|_| RootExecutableError::Io)?;
+    let io =
+        crate::workload::begin_process_io(pid, metadata.len, 1).map_err(|error| match error {
+            kernel_core::workload::WorkloadError::Quota
+            | kernel_core::workload::WorkloadError::InvalidState => RootExecutableError::Quota,
+            _ => RootExecutableError::Io,
+        })?;
+    crate::mm::heap::ensure_free(bytes).map_err(|_| RootExecutableError::Quota)?;
+    let interpreter =
+        read_root_file(&root, ROOT_INTERPRETER_PATH, bytes).map_err(|_| RootExecutableError::Io)?;
+    io.commit();
+    Ok(interpreter)
 }
 
 /// Returns whether the verification slice contains any bytes.

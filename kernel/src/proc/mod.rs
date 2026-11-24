@@ -85,6 +85,8 @@ static LINUX_PID_NEXT: AtomicU32 = AtomicU32::new(1);
 static NEXT_LINUX_AIO_CONTEXT: AtomicU64 = AtomicU64::new(0x9000_0000_0000_0001);
 #[cfg(feature = "linux-abi")]
 static NEXT_LINUX_SYSV_SHMEM_ID: AtomicU64 = AtomicU64::new(0x0000_8d00_0000_0001);
+#[cfg(feature = "linux-abi")]
+static NEXT_LINUX_NAMESPACE_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_WORKLOAD_DOMAIN: AtomicU32 = AtomicU32::new(1);
 /// Opaque sentinel used only by the Linux standard-stream compatibility table.
 ///
@@ -123,6 +125,8 @@ const LINUX_MQ_HANDLE_BASE: u64 = 0x0000_8c00_0000_0000;
 const LINUX_MOUNT_TREE_HANDLE_BASE: u64 = 0x0000_8e00_0000_0000;
 #[cfg(feature = "linux-abi")]
 const LINUX_FS_CONTEXT_HANDLE_BASE: u64 = 0x0000_8f00_0000_0000;
+#[cfg(feature = "linux-abi")]
+const LINUX_NAMESPACE_HANDLE_BASE: u64 = 0x0000_8d80_0000_0000;
 const LINUX_LANDLOCK_HANDLE_BASE: u64 = 0x0000_9000_0000_0000;
 
 /// Compatibility-only process state installed by the optional Linux service.
@@ -150,6 +154,8 @@ struct LinuxProcessState {
     exited_cpu_ticks: u64,
     /// Authorized directory view used for relative AT_FDCWD resolution.
     cwd: crate::linux_vfs::DirectoryId,
+    /// Optional writable cache directory selected as the current directory.
+    cwd_cache: Option<u32>,
     brk: u64,
     mmap_next: u64,
     mmap32_next: u64,
@@ -162,6 +168,12 @@ struct LinuxProcessState {
     cap_effective: u64,
     cap_permitted: u64,
     cap_inheritable: u64,
+    namespace_generation: u64,
+    namespace_flags: u64,
+    mount_namespace_id: u64,
+    uts_namespace_id: u64,
+    ipc_namespace_id: u64,
+    pid_namespace_id: u64,
     uid: u32,
     euid: u32,
     suid: u32,
@@ -188,6 +200,7 @@ struct LinuxProcessState {
     mappings: Vec<LinuxMapping>,
     reservations: Vec<LinuxReservation>,
     sealed_ranges: Vec<(u64, u64)>,
+    truncated_shared: Vec<(u64, u64)>,
     pipes: Vec<LinuxPipeHandle>,
     next_pipe_handle: u64,
     sockets: Vec<LinuxSocketHandle>,
@@ -305,6 +318,7 @@ struct LinuxSocketHandle {
     endpoint: Arc<compat_core::UnixSocketEndpoint>,
     listener: Option<Arc<UnixListener>>,
     controls: Arc<LinuxSocketControls>,
+    packet_mode: bool,
 }
 
 #[cfg(feature = "linux-abi")]
@@ -685,6 +699,7 @@ enum LinuxFdResource {
         endpoint: Arc<compat_core::UnixSocketEndpoint>,
         listener: Option<Arc<UnixListener>>,
         controls: Arc<LinuxSocketControls>,
+        packet_mode: bool,
     },
 }
 
@@ -746,6 +761,38 @@ impl LinuxSocketControls {
         (first, second)
     }
 
+    fn connect_pair(first: &Arc<Self>, second: &Arc<Self>) -> bool {
+        if Arc::ptr_eq(first, second) {
+            return false;
+        }
+        let first_to_second = Arc::new(LinuxSocketControlQueue {
+            messages: SpinLock::new(VecDeque::new()),
+            written: AtomicUsize::new(0),
+            read: AtomicUsize::new(0),
+        });
+        let second_to_first = Arc::new(LinuxSocketControlQueue {
+            messages: SpinLock::new(VecDeque::new()),
+            written: AtomicUsize::new(0),
+            read: AtomicUsize::new(0),
+        });
+        let mut first_tx = first.tx.lock();
+        let mut first_rx = first.rx.lock();
+        let mut second_tx = second.tx.lock();
+        let mut second_rx = second.rx.lock();
+        if first_tx.is_some()
+            || first_rx.is_some()
+            || second_tx.is_some()
+            || second_rx.is_some()
+        {
+            return false;
+        }
+        *first_tx = Some(Arc::clone(&first_to_second));
+        *second_rx = Some(first_to_second);
+        *second_tx = Some(Arc::clone(&second_to_first));
+        *first_rx = Some(second_to_first);
+        true
+    }
+
     fn attach_peer(&self) -> Option<Arc<Self>> {
         let mut tx = self.tx.lock();
         let mut rx = self.rx.lock();
@@ -781,6 +828,9 @@ struct PendingSocketConnection {
 struct UnixListener {
     name: compat_core::UnixSocketName,
     owner: compat_core::UnixCredentials,
+    packet_mode: bool,
+    datagram_endpoint: Option<Arc<compat_core::UnixSocketEndpoint>>,
+    datagram_controls: Option<Arc<LinuxSocketControls>>,
     listening: AtomicU32,
     backlog: AtomicU32,
     pending: SpinLock<VecDeque<PendingSocketConnection>>,
@@ -796,6 +846,7 @@ pub(crate) enum LinuxSocketError {
     Invalid,
     IsConnected,
     AddressInUse,
+    NoEntry,
     NotBound,
     NotConnected,
     ConnectionRefused,
@@ -936,6 +987,7 @@ struct SharedMapping {
     va: u64,
     page: Arc<crate::mm::memory_object::Page>,
     source: BackingIdentity,
+    file_offset: u64,
     flags: MapFlags,
 }
 
@@ -1208,6 +1260,17 @@ pub(crate) fn linux_cwd(pid: ObjId) -> Option<crate::linux_vfs::DirectoryId> {
     })
 }
 
+/// Returns the writable cache directory selected as this process's cwd.
+///
+/// 返回进程当前选中的可写缓存目录；静态兼容目录返回 `None`。
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_cwd_cache(pid: ObjId) -> Option<u32> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p.linux.as_ref()?.cwd_cache,
+        _ => None,
+    })
+}
+
 /// Commits a validated Linux current directory.
 ///
 /// 仅提交已解析到兼容 namespace 的目录身份；进程退出后不存在可更新状态。
@@ -1216,6 +1279,18 @@ pub(crate) fn set_linux_cwd(pid: ObjId, cwd: crate::linux_vfs::DirectoryId) -> b
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
         linux.cwd = cwd;
+        linux.cwd_cache = None;
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Commits one validated writable cache directory as the current directory.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_cwd_cache(pid: ObjId, cwd_cache: u32) -> bool {
+    with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
+        linux.cwd_cache = Some(cwd_cache);
         Ok(())
     })
     .is_ok()
@@ -1335,6 +1410,7 @@ pub(crate) fn linux_socketpair(
     pid: ObjId,
     close_on_exec: bool,
     nonblocking: bool,
+    packet_mode: bool,
 ) -> Option<(u32, u32)> {
     let byte_budget = usize::try_from(crate::mm::heap::limit()).ok()?;
     with_proc(pid, |p| {
@@ -1392,12 +1468,14 @@ pub(crate) fn linux_socketpair(
             endpoint: Arc::new(first),
             listener: None,
             controls: first_controls,
+            packet_mode,
         });
         linux.sockets.push(LinuxSocketHandle {
             handle: second_handle,
             endpoint: Arc::new(second),
             listener: None,
             controls: second_controls,
+            packet_mode,
         });
         Ok((first_fd.fd(), second_fd.fd()))
     })
@@ -1410,6 +1488,7 @@ pub(crate) fn linux_socket_create(
     pid: ObjId,
     close_on_exec: bool,
     nonblocking: bool,
+    packet_mode: bool,
 ) -> Result<u32, LinuxSocketError> {
     let byte_budget =
         usize::try_from(crate::mm::heap::limit()).map_err(|_| LinuxSocketError::NoSpace)?;
@@ -1450,6 +1529,7 @@ pub(crate) fn linux_socket_create(
             endpoint,
             listener: None,
             controls: LinuxSocketControls::empty(),
+            packet_mode,
         });
         Ok(fd.fd())
     })
@@ -1497,6 +1577,13 @@ pub(crate) fn linux_socket_bind(
                     uid: compat_core::syscall::LINUX_COMPAT_UID as u32,
                     gid: compat_core::syscall::LINUX_COMPAT_GID as u32,
                 },
+                packet_mode: socket.packet_mode,
+                datagram_endpoint: socket
+                    .packet_mode
+                    .then(|| Arc::clone(&socket.endpoint)),
+                datagram_controls: socket
+                    .packet_mode
+                    .then(|| Arc::clone(&socket.controls)),
                 listening: AtomicU32::new(0),
                 backlog: AtomicU32::new(1),
                 pending: SpinLock::new(VecDeque::new()),
@@ -1507,6 +1594,37 @@ pub(crate) fn linux_socket_bind(
         }
         _ => Err(LinuxSocketError::Invalid),
     })
+}
+
+/// Reports whether one pathname or abstract Unix socket name is currently
+/// published by a live listening endpoint.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_name_bound(name: &compat_core::UnixSocketName) -> bool {
+    let mut listeners = UNIX_LISTENERS.lock();
+    listeners.retain(|listener| listener.strong_count() != 0);
+    listeners
+        .iter()
+        .filter_map(Weak::upgrade)
+        .any(|listener| listener.name == *name)
+}
+
+/// Removes one published pathname socket name. Existing listener objects stay
+/// alive for accepted connections, while new connects can no longer resolve it.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_name_unlink(name: &compat_core::UnixSocketName) -> bool {
+    let mut removed = false;
+    UNIX_LISTENERS.lock().retain(|listener| {
+        let Some(listener) = listener.upgrade() else {
+            return false;
+        };
+        if listener.name == *name {
+            removed = true;
+            false
+        } else {
+            true
+        }
+    });
+    removed
 }
 
 /// Enables accept processing for one bound AF_UNIX endpoint.
@@ -1583,7 +1701,36 @@ pub(crate) fn linux_socket_connect(
                     .filter_map(Weak::upgrade)
                     .find(|listener| listener.name == name)
             }
-            .ok_or(LinuxSocketError::ConnectionRefused)?;
+            .ok_or(LinuxSocketError::NoEntry)?;
+            if let (Some(server), Some(server_controls)) = (
+                listener.datagram_endpoint.as_ref(),
+                listener.datagram_controls.as_ref(),
+            ) {
+                if !compat_core::UnixSocketEndpoint::connect_pair(&socket.endpoint, server) {
+                    return Err(LinuxSocketError::Invalid);
+                }
+                if !LinuxSocketControls::connect_pair(&socket.controls, server_controls) {
+                    return Err(LinuxSocketError::Invalid);
+                }
+                if !socket.endpoint.set_names(local_name, name)
+                    || !server.set_names(name, local_name)
+                {
+                    return Err(LinuxSocketError::Invalid);
+                }
+                let client_credentials = compat_core::UnixCredentials {
+                    pid: linux.pid,
+                    uid: compat_core::syscall::LINUX_COMPAT_UID as u32,
+                    gid: compat_core::syscall::LINUX_COMPAT_GID as u32,
+                };
+                if !socket
+                    .endpoint
+                    .set_credentials(client_credentials, listener.owner)
+                    || !server.set_credentials(listener.owner, client_credentials)
+                {
+                    return Err(LinuxSocketError::Invalid);
+                }
+                return Ok(());
+            }
             if listener.listening.load(Ordering::Acquire) == 0 {
                 return Err(LinuxSocketError::ConnectionRefused);
             }
@@ -1696,6 +1843,7 @@ pub(crate) fn linux_socket_accept(
                 endpoint: accepted,
                 listener: None,
                 controls: accepted_controls,
+                packet_mode: listener.packet_mode,
             });
             Ok(fd.fd())
         }
@@ -1735,6 +1883,44 @@ pub(crate) fn linux_socket_endpoint(
             .iter()
             .find(|socket| socket.handle == handle)
             .map(|socket| Arc::clone(&socket.endpoint)),
+        _ => None,
+    })
+}
+
+/// Reports whether one listening socket has a queued client connection.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_listener_ready(pid: ObjId, handle: u64) -> Option<bool> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => {
+            let socket = p
+                .linux
+                .as_ref()?
+                .sockets
+                .iter()
+                .find(|socket| socket.handle == handle)?;
+            Some(socket.listener.as_ref().is_some_and(|listener| {
+                listener.listening.load(Ordering::Acquire) != 0
+                    && !listener.pending.lock().is_empty()
+            }))
+        }
+        _ => None,
+    })
+}
+
+/// Reports whether one socket owns a bound listener object.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_is_listener(pid: ObjId, handle: u64) -> Option<bool> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => Some(
+            p.linux
+                .as_ref()?
+                .sockets
+                .iter()
+                .find(|socket| socket.handle == handle)?
+                .listener
+                .as_ref()
+                .is_some_and(|listener| listener.listening.load(Ordering::Acquire) != 0),
+        ),
         _ => None,
     })
 }
@@ -1833,6 +2019,7 @@ pub(crate) fn linux_capture_fd_transfer(
                         endpoint: Arc::clone(&socket.endpoint),
                         listener: socket.listener.as_ref().map(Arc::clone),
                         controls: Arc::clone(&socket.controls),
+                        packet_mode: socket.packet_mode,
                     }
                 }
                 compat_core::fd::CompatKind::Event => {
@@ -2133,6 +2320,7 @@ pub(crate) fn linux_install_fd_transfer(
                     endpoint,
                     listener,
                     controls,
+                    packet_mode,
                 } => {
                     linux
                         .sockets
@@ -2147,7 +2335,7 @@ pub(crate) fn linux_install_fd_transfer(
                         None,
                         None,
                         None,
-                        Some((endpoint, listener, controls)),
+                        Some((endpoint, listener, controls, packet_mode)),
                     )
                 }
             };
@@ -2227,7 +2415,7 @@ pub(crate) fn linux_install_fd_transfer(
                 linux.next_mq_handle = next;
                 linux.message_queues.push(LinuxMqHandle { handle, queue });
             }
-            if let Some((endpoint, listener, controls)) = pending_socket {
+            if let Some((endpoint, listener, controls, packet_mode)) = pending_socket {
                 let next = handle
                     .checked_add(1)
                     .ok_or(LinuxFdTransferError::NoSpace)?;
@@ -2237,6 +2425,7 @@ pub(crate) fn linux_install_fd_transfer(
                     endpoint,
                     listener,
                     controls,
+                    packet_mode,
                 });
             }
             Ok(fd.fd())
@@ -2294,22 +2483,82 @@ pub(crate) fn linux_socket_record_data(pid: ObjId, handle: u64, bytes: usize) {
     if bytes == 0 {
         return;
     }
-    let Some(controls) = crate::kobj::with(|t| match t.get(pid) {
+    let Some((controls, packet_mode)) = crate::kobj::with(|t| match t.get(pid) {
         Ok(KObject::Process(p)) => p
             .linux
             .as_ref()?
             .sockets
             .iter()
             .find(|socket| socket.handle == handle)
-            .map(|socket| Arc::clone(&socket.controls)),
+            .map(|socket| (Arc::clone(&socket.controls), socket.packet_mode)),
         _ => None,
     }) else {
         return;
     };
     let queue = controls.tx.lock().as_ref().map(Arc::clone);
     if let Some(queue) = queue {
-        queue.written.fetch_add(bytes, Ordering::AcqRel);
+        let start = queue.written.fetch_add(bytes, Ordering::AcqRel);
+        if packet_mode {
+            let mut messages = queue.messages.lock();
+            if messages.try_reserve(1).is_ok() {
+                messages.push_back(LinuxControlMessage {
+                    start,
+                    fds: Vec::new(),
+                    credentials: true,
+                });
+            }
+        }
     }
+}
+
+/// Returns the remaining bytes in the oldest packet on one packet socket.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_packet_remaining(pid: ObjId, handle: u64) -> Option<usize> {
+    let (controls, packet_mode) = crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .sockets
+            .iter()
+            .find(|socket| socket.handle == handle)
+            .map(|socket| (Arc::clone(&socket.controls), socket.packet_mode)),
+        _ => None,
+    })?;
+    if !packet_mode {
+        return None;
+    }
+    let queue = controls.rx.lock().as_ref().map(Arc::clone)?;
+    let read = queue.read.load(Ordering::Acquire);
+    let written = queue.written.load(Ordering::Acquire);
+    let messages = queue.messages.lock();
+    let packet_start = messages
+        .iter()
+        .map(|message| message.start)
+        .filter(|start| *start <= read)
+        .max()?;
+    let end = messages
+        .iter()
+        .map(|message| message.start)
+        .filter(|start| *start > packet_start)
+        .min()
+        .unwrap_or(written);
+    (end > read).then_some(end - read)
+}
+
+/// Reports whether one socket preserves datagram or seqpacket boundaries.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_is_packet(pid: ObjId, handle: u64) -> Option<bool> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => Some(
+            p.linux
+                .as_ref()?
+                .sockets
+                .iter()
+                .find(|socket| socket.handle == handle)?
+                .packet_mode,
+        ),
+        _ => None,
+    })
 }
 
 /// Consumes ancillary records crossed by a socket read. A non-capturing read
@@ -2547,6 +2796,228 @@ pub(crate) fn linux_create_shared_memory(
         })
     })
     .ok()
+}
+
+/// Resizes one file-backed shared object while retaining its page identity.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_shared_memory_resize(
+    pid: ObjId,
+    object: &LinuxSharedMemoryObject,
+    size: u64,
+) -> Result<(), LinuxAshmemError> {
+    let pages = usize::try_from(size.div_ceil(FRAME_SIZE))
+        .map_err(|_| LinuxAshmemError::NoMemory)?;
+    let current = object.buffer.pages.lock().len();
+    if pages > current {
+        let additional = pages - current;
+        let mut fresh = with_proc(pid, |p| {
+            let mut charge = p
+                .memory_account
+                .reserve(
+                    additional as u64,
+                    0,
+                    p.memory_owned_limit,
+                    p.memory_pin_limit,
+                )
+                .ok_or(ProcError::MemoryQuota)?;
+            let mut pages = Vec::new();
+            pages
+                .try_reserve_exact(additional)
+                .map_err(|_| ProcError::OutOfFrames)?;
+            for _ in 0..additional {
+                let charge = charge.take_page().ok_or(ProcError::OutOfFrames)?;
+                pages.push(
+                    crate::mm::memory_object::Page::zeroed(charge)
+                        .ok_or(ProcError::OutOfFrames)?,
+                );
+            }
+            Ok(pages)
+        })
+        .map_err(|_| LinuxAshmemError::NoMemory)?;
+        object.buffer.pages.lock().append(&mut fresh);
+    } else if pages < current {
+        let removed = {
+            let mut current_pages = object.buffer.pages.lock();
+            current_pages.split_off(pages)
+        };
+        object.buffer.size.store(size, Ordering::Release);
+        drop(removed);
+        return Ok(());
+    }
+    object.buffer.size.store(size, Ordering::Release);
+    Ok(())
+}
+
+/// Applies file truncation to every mapping of one file-backed shared object.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_shared_memory_truncate(
+    pid: ObjId,
+    object: &LinuxSharedMemoryObject,
+    size: u64,
+) -> Result<(), LinuxAshmemError> {
+    linux_shared_memory_resize(pid, object, size)?;
+    let backing = kernel_core::memory_capability::BackingIdentity::new(object.buffer.id, 1)
+        .ok_or(LinuxAshmemError::Invalid)?;
+    let processes = kobj::with(|table| {
+        let mut processes = Vec::new();
+        table.for_each_live(|id, object| {
+            if matches!(object, KObject::Process(process) if process.linux.is_some()) {
+                let _ = processes.try_reserve(1);
+                processes.push(id);
+            }
+            true
+        });
+        processes
+    });
+    for process in processes {
+        let expired = with_proc(process, |p| {
+            let mut addresses = Vec::new();
+            for mapping in &p.shared_maps {
+                if mapping.source == backing && mapping.file_offset >= size {
+                    addresses
+                        .try_reserve(1)
+                        .map_err(|_| ProcError::OutOfFrames)?;
+                    addresses.push(mapping.va);
+                }
+            }
+            Ok(addresses)
+        })
+        .unwrap_or_default();
+        for address in expired {
+            if unmap_shared_page(process, address).unwrap_or(false) {
+                let _ = with_proc(process, |p| {
+                    let Some(linux) = p.linux.as_mut() else {
+                        return Err(ProcError::NoSuchProcess);
+                    };
+                    linux
+                        .truncated_shared
+                        .try_reserve(1)
+                        .map_err(|_| ProcError::OutOfFrames)?;
+                    linux
+                        .truncated_shared
+                        .push((address, address.saturating_add(FRAME_SIZE)));
+                    Ok(())
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reports whether a fault targets a shared page invalidated by file truncation.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_truncated_shared_fault(pid: ObjId, address: u64) -> bool {
+    with_proc(pid, |p| {
+        Ok(p.linux.as_ref().is_some_and(|linux| {
+            linux
+                .truncated_shared
+                .iter()
+                .any(|(start, end)| address >= *start && address < *end)
+        }))
+    })
+    .unwrap_or(false)
+}
+
+/// Clears truncate tombstones when their address range is unmapped or replaced.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn clear_linux_truncated_range(pid: ObjId, start: u64, end: u64) {
+    let _ = with_proc(pid, |p| {
+        if let Some(linux) = p.linux.as_mut() {
+            linux
+                .truncated_shared
+                .retain(|(range_start, range_end)| *range_end <= start || *range_start >= end);
+        }
+        Ok(())
+    });
+}
+
+/// Copies one byte range into a shared-memory object without changing its
+/// declared size. The object is page backed and may be mapped by several
+/// compatibility processes at once.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_shared_memory_write_from(
+    object: &LinuxSharedMemoryObject,
+    offset: u64,
+    input: &[u8],
+) -> Result<usize, LinuxAshmemError> {
+    if input.is_empty() {
+        return Ok(0);
+    }
+    let size = object.buffer.size.load(Ordering::Acquire);
+    let end = offset
+        .checked_add(input.len() as u64)
+        .ok_or(LinuxAshmemError::Invalid)?;
+    if end > size {
+        return Err(LinuxAshmemError::Invalid);
+    }
+    let page_bytes = FRAME_SIZE as usize;
+    let pages = object.buffer.pages.lock();
+    let mut copied = 0usize;
+    while copied < input.len() {
+        let absolute = offset
+            .checked_add(copied as u64)
+            .ok_or(LinuxAshmemError::Invalid)?;
+        let index = usize::try_from(absolute / page_bytes as u64)
+            .map_err(|_| LinuxAshmemError::Invalid)?;
+        let inner = (absolute % page_bytes as u64) as usize;
+        let take = (input.len() - copied).min(page_bytes - inner);
+        let page = pages.get(index).ok_or(LinuxAshmemError::Invalid)?;
+        let pointer = crate::mm::phys_to_virt(page.frame().start() + inner as u64)
+            .ok_or(LinuxAshmemError::NoMemory)?;
+        // SAFETY: the retained Page owns this live frame and the copied range
+        // is bounded to one page.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                input[copied..].as_ptr(),
+                pointer,
+                take,
+            )
+        };
+        copied += take;
+    }
+    Ok(input.len())
+}
+
+/// Copies bytes from a shared-memory object without changing its size.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_shared_memory_read_into(
+    object: &LinuxSharedMemoryObject,
+    offset: u64,
+    output: &mut [u8],
+) -> Result<usize, LinuxAshmemError> {
+    let size = object.buffer.size.load(Ordering::Acquire);
+    if offset >= size || output.is_empty() {
+        return Ok(0);
+    }
+    let available = usize::try_from(size - offset)
+        .map_err(|_| LinuxAshmemError::Invalid)?
+        .min(output.len());
+    let page_bytes = FRAME_SIZE as usize;
+    let pages = object.buffer.pages.lock();
+    let mut copied = 0usize;
+    while copied < available {
+        let absolute = offset
+            .checked_add(copied as u64)
+            .ok_or(LinuxAshmemError::Invalid)?;
+        let index = usize::try_from(absolute / page_bytes as u64)
+            .map_err(|_| LinuxAshmemError::Invalid)?;
+        let inner = (absolute % page_bytes as u64) as usize;
+        let take = (available - copied).min(page_bytes - inner);
+        let page = pages.get(index).ok_or(LinuxAshmemError::Invalid)?;
+        let pointer = crate::mm::phys_to_virt(page.frame().start() + inner as u64)
+            .ok_or(LinuxAshmemError::NoMemory)?;
+        // SAFETY: the retained Page owns this live frame and the range is
+        // bounded to one page.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                pointer as *const u8,
+                output[copied..].as_mut_ptr(),
+                take,
+            )
+        };
+        copied += take;
+    }
+    Ok(available)
 }
 
 #[cfg(feature = "linux-abi")]
@@ -4865,6 +5336,7 @@ pub(crate) fn linux_ashmem_map(
                 va: address + index as u64 * PAGE,
                 page: Arc::clone(page),
                 source: backing,
+                file_offset: offset + index as u64 * PAGE,
                 flags,
             });
         }
@@ -4883,24 +5355,38 @@ pub(crate) fn linux_shared_memory_map(
     pid: ObjId,
     object: &LinuxSharedMemoryObject,
     address: u64,
+    backing_offset: u64,
     length: u64,
     writable: bool,
 ) -> Result<(), LinuxAshmemError> {
     const PAGE: u64 = kernel_core::frame::FRAME_SIZE;
-    if address % PAGE != 0 || length == 0 || length % PAGE != 0 {
+    if address % PAGE != 0
+        || backing_offset % PAGE != 0
+        || length == 0
+        || length % PAGE != 0
+    {
         return Err(LinuxAshmemError::Invalid);
     }
     let pages_count = length / PAGE;
     let retained = {
         let guard = object.buffer.pages.lock();
         let count = usize::try_from(pages_count).map_err(|_| LinuxAshmemError::Invalid)?;
+        let start =
+            usize::try_from(backing_offset / PAGE).map_err(|_| LinuxAshmemError::Invalid)?;
+        let size = object.buffer.size.load(Ordering::Acquire);
+        if backing_offset
+            .checked_add(length)
+            .is_none_or(|end| end > size.div_ceil(PAGE) * PAGE)
+        {
+            return Err(LinuxAshmemError::Invalid);
+        }
         let mut retained = Vec::new();
         retained
             .try_reserve_exact(count)
             .map_err(|_| LinuxAshmemError::NoMemory)?;
         retained.extend(
             guard
-                .get(..count)
+                .get(start..start.checked_add(count).ok_or(LinuxAshmemError::Invalid)?)
                 .ok_or(LinuxAshmemError::Invalid)?
                 .iter()
                 .cloned(),
@@ -4986,6 +5472,7 @@ pub(crate) fn linux_shared_memory_map(
                 va: address + index as u64 * PAGE,
                 page: Arc::clone(page),
                 source: backing,
+                file_offset: backing_offset + index as u64 * PAGE,
                 flags,
             });
         }
@@ -5055,6 +5542,14 @@ pub(crate) fn linux_install_rw_file(
                 close_on_exec,
             )
             .map_err(|_| ProcError::NoTaskSlot)?;
+        let access_mode = match (readable, writable) {
+            (true, true) => 2,
+            (false, true) => 1,
+            _ => 0,
+        };
+        if !linux.fds.set_fd_status_flags(fd.fd(), access_mode) {
+            return Err(ProcError::NoTaskSlot);
+        }
         Ok(fd.fd())
     })
     .ok()
@@ -5196,6 +5691,51 @@ pub(crate) fn linux_handle_fd_count(pid: ObjId, handle: u64) -> usize {
             .map(|linux| linux.fds.handle_fd_count(handle))
             .unwrap_or(0),
         _ => 0,
+    })
+}
+
+/// Reports whether any live Linux process still references a compatibility handle.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_handle_in_use_globally(handle: u64) -> bool {
+    crate::kobj::with(|table| {
+        let mut in_use = false;
+        table.for_each_live(|_, object| {
+            let KObject::Process(process) = object else {
+                return true;
+            };
+            let Some(linux) = process.linux.as_ref() else {
+                return true;
+            };
+            in_use = linux_handle_in_use(linux, handle);
+            !in_use
+        });
+        in_use
+    })
+}
+
+/// Returns live Linux compatibility process identities for verification quiescence.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_process_ids() -> Vec<ObjId> {
+    crate::kobj::with(|table| {
+        let mut processes = Vec::new();
+        table.for_each_live(|id, object| {
+            if matches!(
+                object,
+                KObject::Process(process)
+                    if process.linux.is_some()
+                        && matches!(
+                            process.state,
+                            ProcState::Running
+                                | ProcState::Exiting { .. }
+                                | ProcState::Exited { .. }
+                        )
+            ) {
+                let _ = processes.try_reserve(1);
+                processes.push(id);
+            }
+            true
+        });
+        processes
     })
 }
 
@@ -5477,6 +6017,189 @@ pub(crate) fn set_linux_capabilities(pid: ObjId, capabilities: LinuxCapabilities
         Ok(())
     })
     .is_ok()
+}
+
+/// Records supported per-process namespace flags after a successful unshare.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_add_namespace_flags(pid: ObjId, flags: u64) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        let next = linux
+            .namespace_generation
+            .checked_add(1)
+            .ok_or(ProcError::NoTaskSlot)?;
+        linux.namespace_generation = next;
+        linux.namespace_flags |= flags;
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// One Linux namespace class exposed through `/proc/<pid>/ns`.
+#[cfg(feature = "linux-abi")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxNamespaceType {
+    Mount,
+    Uts,
+    Ipc,
+    Pid,
+}
+
+#[cfg(feature = "linux-abi")]
+impl LinuxNamespaceType {
+    pub(crate) const fn flag(self) -> u64 {
+        match self {
+            Self::Mount => 0x0002_0000,
+            Self::Uts => 0x0400_0000,
+            Self::Ipc => 0x0800_0000,
+            Self::Pid => 0x2000_0000,
+        }
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Mount => "mnt",
+            Self::Uts => "uts",
+            Self::Ipc => "ipc",
+            Self::Pid => "pid",
+        }
+    }
+
+    pub(crate) const fn from_name(name: &[u8]) -> Option<Self> {
+        match name {
+            b"mnt" => Some(Self::Mount),
+            b"uts" => Some(Self::Uts),
+            b"ipc" => Some(Self::Ipc),
+            b"pid" => Some(Self::Pid),
+            _ => None,
+        }
+    }
+}
+
+/// Creates new compatibility namespace identities for the requested classes.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_unshare_namespaces(pid: ObjId, flags: u64) -> bool {
+    let next = NEXT_LINUX_NAMESPACE_ID.fetch_add(1, Ordering::Relaxed);
+    if next == 0 {
+        return false;
+    }
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        if flags & LinuxNamespaceType::Mount.flag() != 0 {
+            linux.mount_namespace_id = next;
+        }
+        if flags & LinuxNamespaceType::Uts.flag() != 0 {
+            linux.uts_namespace_id = next;
+        }
+        if flags & LinuxNamespaceType::Ipc.flag() != 0 {
+            linux.ipc_namespace_id = next;
+        }
+        if flags & LinuxNamespaceType::Pid.flag() != 0 {
+            linux.pid_namespace_id = next;
+        }
+        let generation = linux
+            .namespace_generation
+            .checked_add(1)
+            .ok_or(ProcError::NoTaskSlot)?;
+        linux.namespace_generation = generation;
+        linux.namespace_flags |= flags;
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Returns the identity of one namespace class for a compatibility process.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_namespace_id(pid: ObjId, kind: LinuxNamespaceType) -> Option<u64> {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_ref().ok_or(ProcError::Exited)?;
+        Ok(match kind {
+            LinuxNamespaceType::Mount => linux.mount_namespace_id,
+            LinuxNamespaceType::Uts => linux.uts_namespace_id,
+            LinuxNamespaceType::Ipc => linux.ipc_namespace_id,
+            LinuxNamespaceType::Pid => linux.pid_namespace_id,
+        })
+    })
+    .ok()
+}
+
+/// Joins one already-created compatibility namespace identity.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_set_namespace_id(
+    pid: ObjId,
+    kind: LinuxNamespaceType,
+    namespace: u64,
+) -> bool {
+    if namespace == 0 || namespace >= (1u64 << 32) {
+        return false;
+    }
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        match kind {
+            LinuxNamespaceType::Mount => linux.mount_namespace_id = namespace,
+            LinuxNamespaceType::Uts => linux.uts_namespace_id = namespace,
+            LinuxNamespaceType::Ipc => linux.ipc_namespace_id = namespace,
+            LinuxNamespaceType::Pid => linux.pid_namespace_id = namespace,
+        }
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Installs one read-only namespace descriptor retaining its typed identity.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_install_namespace_fd(
+    pid: ObjId,
+    kind: LinuxNamespaceType,
+    namespace: u64,
+    close_on_exec: bool,
+) -> Option<u32> {
+    if namespace == 0 || namespace >= (1u64 << 32) {
+        return None;
+    }
+    let type_bits = match kind {
+        LinuxNamespaceType::Mount => 1,
+        LinuxNamespaceType::Uts => 2,
+        LinuxNamespaceType::Ipc => 3,
+        LinuxNamespaceType::Pid => 4,
+    };
+    let handle = LINUX_NAMESPACE_HANDLE_BASE | (type_bits << 32) | namespace;
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        let fd = linux
+            .fds
+            .install(
+                handle,
+                Rights::READ,
+                compat_core::fd::CompatKind::Namespace,
+                close_on_exec,
+            )
+            .map_err(|_| ProcError::NoTaskSlot)?;
+        Ok(fd.fd())
+    })
+    .ok()
+}
+
+/// Resolves one namespace descriptor to its class and identity.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_namespace_fd(
+    pid: ObjId,
+    fd: u32,
+) -> Option<(LinuxNamespaceType, u64)> {
+    let entry = linux_fd(pid, fd)?;
+    if entry.kind != compat_core::fd::CompatKind::Namespace {
+        return None;
+    }
+    let encoded = entry.handle.checked_sub(LINUX_NAMESPACE_HANDLE_BASE)?;
+    let namespace = encoded & 0xffff_ffff;
+    let kind = match encoded >> 32 {
+        1 => LinuxNamespaceType::Mount,
+        2 => LinuxNamespaceType::Uts,
+        3 => LinuxNamespaceType::Ipc,
+        4 => LinuxNamespaceType::Pid,
+        _ => return None,
+    };
+    (namespace != 0).then_some((kind, namespace))
 }
 
 /// Returns the Linux ABI credential state for one compatibility process.
@@ -6222,10 +6945,7 @@ pub(crate) fn set_linux_stack_range(pid: ObjId, start: u64, end: u64) -> bool {
 pub(crate) fn linux_reserve_range(pid: ObjId, start: u64, end: u64) -> Result<(), MemError> {
     if start % FRAME_SIZE != 0
         || end <= start
-        || !((start >= arch::USER_WINDOW.0 && end <= arch::USER_WINDOW.1)
-            || (arch::LOW_USER_WINDOW.1 > arch::LOW_USER_WINDOW.0
-                && start >= arch::LOW_USER_WINDOW.0
-                && end <= arch::LOW_USER_WINDOW.1))
+        || !arch::is_private_range(start, end)
     {
         return Err(MemError::InvalidRange);
     }
@@ -6315,6 +7035,54 @@ pub(crate) fn linux_next_free_start(pid: ObjId, start: u64, size: u64) -> Option
                 return Some(candidate);
             };
             candidate = next.checked_add(alignment - 1)? & !(alignment - 1);
+        }
+        None
+    })
+}
+
+/// Finds a page-aligned range by searching downward from `upper`.
+///
+/// Linux normally chooses ordinary `mmap(NULL)` candidates top-down. The
+/// forward cursor remains useful for stable low-address placement, but a
+/// compatibility workload can exhaust that cursor while large gaps remain
+/// below the upper window boundary.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_prev_free_start(
+    pid: ObjId,
+    lower: u64,
+    upper: u64,
+    size: u64,
+) -> Option<u64> {
+    crate::kobj::with(|t| {
+        let p = match t.get(pid) {
+            Ok(KObject::Process(p)) => p,
+            _ => return None,
+        };
+        let linux = p.linux.as_ref()?;
+        let alignment = kernel_core::frame::FRAME_SIZE;
+        let mut candidate = upper.checked_sub(size)? & !(alignment - 1);
+        for _ in 0..linux.reservations.len().saturating_add(linux.mappings.len()).saturating_add(1) {
+            if candidate < lower {
+                return None;
+            }
+            let end = candidate.checked_add(size)?;
+            let reservation_start = linux
+                .reservations
+                .iter()
+                .filter(|reservation| reservation.start < end && reservation.end > candidate)
+                .map(|reservation| reservation.start)
+                .min();
+            let mapping_start = linux
+                .mappings
+                .iter()
+                .filter(|mapping| mapping.va < end && mapping.va + alignment > candidate)
+                .map(|mapping| mapping.va)
+                .min();
+            let Some(conflict_start) = reservation_start.into_iter().chain(mapping_start).min()
+            else {
+                return Some(candidate);
+            };
+            candidate = conflict_start.checked_sub(size)? & !(alignment - 1);
         }
         None
     })
@@ -6699,9 +7467,48 @@ pub(crate) fn linux_materialize_reserved(
         let _ = linux_reserve_range(pid, start, end);
         return Err(MemError::Quota);
     }
+    if with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::NoSuchProcess)?;
+        linux
+            .mappings
+            .try_reserve(pages as usize)
+            .map_err(|_| ProcError::OutOfFrames)?;
+        Ok(())
+    })
+    .is_err()
+    {
+        let _ = linux_reserve_range(pid, start, end);
+        return Err(MemError::OutOfMemory);
+    }
     if let Err(error) = map_anon(pid, start, pages, writable) {
         let _ = linux_reserve_range(pid, start, end);
         return Err(error);
+    }
+    let flags = if writable {
+        MapFlags::USER.union(MapFlags::WRITE)
+    } else {
+        MapFlags::USER
+    };
+    if with_proc(pid, |p| {
+        let linux = p.linux.as_mut().ok_or(ProcError::NoSuchProcess)?;
+        for index in 0..pages {
+            linux.mappings.push(LinuxMapping {
+                va: start + index * FRAME_SIZE,
+                flags,
+                file: None,
+                file_offset: 0,
+                shared_file: false,
+            });
+        }
+        Ok(())
+    })
+    .is_err()
+    {
+        for index in 0..pages {
+            let _ = unmap_page(pid, start + index * FRAME_SIZE);
+        }
+        let _ = linux_reserve_range(pid, start, end);
+        return Err(MemError::NoSuchProcess);
     }
     Ok(true)
 }
@@ -6769,7 +7576,9 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
     let pid = allocate_linux_pid().ok_or(ProcError::NoTaskSlot)?;
     let fd_budget = FdTable::capacity_for_bytes(
         (MAX_PROCESS_FRAMES as u64).saturating_mul(FRAME_SIZE as u64),
-    );
+    )
+    .min(linux_global_metadata_capacity() as u64)
+    .max(3);
     let mut fds = FdTable::with_limits(fd_budget as usize, fd_budget as usize);
     for (fd, rights) in [(0, Rights::READ), (1, Rights::WRITE), (2, Rights::WRITE)] {
         fds.install_at(
@@ -6795,6 +7604,7 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         child_cpu_ticks: 0,
         exited_cpu_ticks: 0,
         cwd: crate::linux_vfs::DirectoryId::Root,
+        cwd_cache: None,
         brk: crate::arch::USER_WINDOW.0 + 0x1000_0000,
         mmap_next: crate::arch::USER_WINDOW.0 + 0x4000_0000,
         mmap32_next: crate::arch::LOW_USER_WINDOW.0 + 0x1000_0000,
@@ -6805,6 +7615,12 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         cap_effective: (1u64 << 41) - 1,
         cap_permitted: (1u64 << 41) - 1,
         cap_inheritable: 0,
+        namespace_generation: 0,
+        namespace_flags: 0,
+        mount_namespace_id: 1,
+        uts_namespace_id: 1,
+        ipc_namespace_id: 1,
+        pid_namespace_id: 1,
         uid: 0,
         euid: 0,
         suid: 0,
@@ -6836,6 +7652,7 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         mappings: Vec::new(),
         reservations: Vec::new(),
         sealed_ranges: Vec::new(),
+        truncated_shared: Vec::new(),
         pipes: Vec::new(),
         next_pipe_handle: LINUX_PIPE_HANDLE_BASE,
         sockets: Vec::new(),
@@ -7354,7 +8171,7 @@ fn checked_range(va: u64, pages: u64) -> Result<(), MemError> {
         .checked_mul(FRAME_SIZE)
         .and_then(|len| va.checked_add(len))
         .ok_or(MemError::InvalidRange)?;
-    if !in_private_window(va) || end > arch::USER_WINDOW.1 {
+    if !in_private_window(va) || !arch::is_private_range(va, end) {
         return Err(MemError::InvalidRange);
     }
     Ok(())
@@ -7742,6 +8559,7 @@ pub fn map_memory(
                 va: va + i as u64 * FRAME_SIZE,
                 page: Arc::clone(page),
                 source: memory_backing_identity(id),
+                file_offset: (offset as u64 + i as u64) * FRAME_SIZE,
                 flags,
             });
         }
@@ -7884,7 +8702,7 @@ pub fn map_device_bar(
         .checked_mul(FRAME_SIZE)
         .and_then(|len| va.checked_add(len))
         .ok_or(MemError::InvalidRange)?;
-    if !in_private_window(va) || end > arch::USER_WINDOW.1 {
+    if !in_private_window(va) || !arch::is_private_range(va, end) {
         return Err(MemError::InvalidRange);
     }
     let flags = MapFlags::USER
@@ -9005,6 +9823,7 @@ pub fn fork_linux_process(
                         mapping.va,
                         Arc::clone(&mapping.page),
                         mapping.source,
+                        mapping.file_offset,
                         mapping.flags,
                     )
                 })
@@ -9065,8 +9884,10 @@ pub fn fork_linux_process(
             return Err(error);
         }
     }
-    for (va, page, source, flags) in shared_mappings {
-        if let Err(error) = copy_linux_shared_mapping(child, va, page, source, flags) {
+    for (va, page, source, file_offset, flags) in shared_mappings {
+        if let Err(error) =
+            copy_linux_shared_mapping(child, va, page, source, file_offset, flags)
+        {
             rollback(child, false);
             return Err(error);
         }
@@ -9142,6 +9963,7 @@ pub fn vfork_linux_process(
                             mapping.va,
                             Arc::clone(&mapping.page),
                             mapping.source,
+                            mapping.file_offset,
                             mapping.flags,
                         )
                     })
@@ -9210,11 +10032,12 @@ pub fn vfork_linux_process(
         p.shared_maps
             .try_reserve(shared_mappings.len())
             .map_err(|_| ProcError::OutOfFrames)?;
-        for (va, page, source, flags) in shared_mappings {
+        for (va, page, source, file_offset, flags) in shared_mappings {
             p.shared_maps.push(SharedMapping {
                 va,
                 page,
                 source,
+                file_offset,
                 flags,
             });
         }
@@ -9304,6 +10127,7 @@ fn copy_linux_shared_mapping(
     va: u64,
     page: Arc<crate::mm::memory_object::Page>,
     source: BackingIdentity,
+    file_offset: u64,
     flags: MapFlags,
 ) -> Result<(), ProcError> {
     with_proc(child, |process| {
@@ -9359,6 +10183,7 @@ fn copy_linux_shared_mapping(
             va,
             page,
             source,
+            file_offset,
             flags,
         });
         process.space.end_shootdown();
@@ -11175,6 +12000,8 @@ pub(crate) fn destroy_task_object(object: KObject) {
 /// 正常路径上句柄表在 exited 时已被关闭；这里**不依赖该假设**：仍有残余句柄则逐个释放其外部所有权，
 /// 并输出诊断标记（出现即说明某条路径漏了检查）。
 fn destroy_process(p: Box<Process>) {
+    #[cfg(feature = "linux-abi")]
+    let linux_pid = p.linux.as_ref().map(|linux| linux.pid);
     let Process {
         space,
         frames,
@@ -11239,6 +12066,12 @@ fn destroy_process(p: Box<Process>) {
         let _ = kobj::release_internal(c); // 防御：子进程表正常应已在退出时释放
     }
     let _ = kobj::release_internal(exit_state); // 进程 → 退出状态（在飞 wait 仍可持有它）
+    #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+    crate::linux_abi::reclaim_unlinked_cache_files();
+    #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
+    if let Some(linux_pid) = linux_pid {
+        crate::linux_abi::reclaim_proc_cache_nodes(linux_pid);
+    }
 }
 
 /// Dedicated subscription-count/queue-slot admission. Does not share memory quota.

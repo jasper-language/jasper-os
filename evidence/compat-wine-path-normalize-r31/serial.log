@@ -1,0 +1,478 @@
+[2J[001;001H[=3h[2J[001;001H[2J[001;001H[8;042;160t[2J[001;001H[2J[001;001H[8;056;240t[2J[001;001HBdsDxe: loading Boot0002 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x4,0x0)
+BdsDxe: starting Boot0002 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x4,0x0)
+Jasper-OS boot manager starting
+selecting slot=A reason=ConfirmedRelease attempt=1 release=1 kernel_bytes=4069624
+INFO : Framebuffer info: FrameBufferInfo { byte_len: 4096000, width: 1280, height: 800, pixel_format: Bgr, bytes_per_pixel: 4, stride: 1280 }
+INFO : Jasper-OS mature bootloader common starting
+TRACE: exiting boot services
+INFO : Elf file loaded at Pointer {
+    addr: 0x000000001d814000,
+    metadata: 4069624,
+}
+INFO : virtual_address_offset: 0x10000000000
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(4), offset: 0, virtual_addr: 0, physical_addr: 0, file_size: 43ddc, mem_size: 43ddc, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(5), offset: 43de0, virtual_addr: 44de0, physical_addr: 44de0, file_size: 1e2def, mem_size: 1e2def, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 226bd0, virtual_addr: 228bd0, physical_addr: 228bd0, file_size: 15938, mem_size: 16430, align: 1000 })
+INFO : Mapping bss section
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 23c540, virtual_addr: 23f540, physical_addr: 23f540, file_size: 106cf0, mem_size: 2208a8, align: 1000 })
+INFO : Mapping bss section
+INFO : Entry point at: 0x10000045060
+INFO : Creating GDT at PhysAddr(0x274000)
+INFO : Map framebuffer
+INFO : Map physical memory
+INFO : Allocate bootinfo
+INFO : Create Memory Map
+INFO : Create bootinfo
+INFO : Jumping to kernel entry point at VirtAddr(0x10000045060)
+[JSR-BOOT] jasper-os rust kernel 0.0.1 x86_64
+[JSR-CONFIG] profile=standard valid=ok params=29
+[JSR-CONFIG] timer_hz=100
+[JSR-CONFIG] boot_ticks=25
+[JSR-CONFIG] quantum.0=2
+[JSR-CONFIG] quantum.1=2
+[JSR-CONFIG] quantum.2=4
+[JSR-CONFIG] quantum.3=4
+[JSR-CONFIG] decay_period=8
+[JSR-CONFIG] max_tasks=64
+[JSR-CONFIG] max_rt=8
+[JSR-CONFIG] kernel_stack_bytes=131072
+[JSR-CONFIG] watchdog_ticks=50
+[JSR-CONFIG] watchdog_log=16
+[JSR-CONFIG] cpu_burst_ticks=4
+[JSR-CONFIG] heap_grow_step=65536
+[JSR-CONFIG] heap_budget_permille=250
+[JSR-CONFIG] pressure_low_permille=125
+[JSR-CONFIG] pressure_critical_permille=50
+[JSR-CONFIG] pressure_reserve_frames=256
+[JSR-CONFIG] max_process_frames=0
+[JSR-CONFIG] max_vm_guest_frames=32768
+[JSR-CONFIG] max_map_pages=1024
+[JSR-CONFIG] max_objects=1024
+[JSR-CONFIG] handles_per_process=64
+[JSR-CONFIG] max_endpoints_per_process=64
+[JSR-CONFIG] ipc_max_queue_bytes=1048576
+[JSR-CONFIG] ipc_max_process_bytes=4194304
+[JSR-CONFIG] ipc_max_total_bytes=16777216
+[JSR-CONFIG] trace_capacity=32
+[JSR-CONFIG] irq_queue_len=64
+[JSR-CAP] cpu_bootstrap_slots=128 tasks=64 objects=1024 handles=64 frames=0 rings=0 endpoints=64
+[JSR-BOOT-STAGE] done stage=console done_mask=0x1
+[JSR-GDT] ok
+[JSR-XSAVE] enabled=true avx=true avx_size=256 capacity=832
+[JSR-IDT] ok
+[JSR-EXC] breakpoint handler verified
+[JSR-BOOT-STAGE] done stage=platform done_mask=0x3
+[JSR-TICK] n=1
+[JSR-TICK] n=2
+[JSR-TICK] n=3
+[JSR-TICK] n=4
+[JSR-TICK] n=5
+[JSR-TICK] n=6
+[JSR-TICK] n=7
+[JSR-TICK] n=8
+[JSR-TICK] n=9
+[JSR-TICK] n=10
+[JSR-TICK] n=11
+[JSR-TICK] n=12
+[JSR-TICK] n=13
+[JSR-TICK] n=14
+[JSR-TICK] n=15
+[JSR-TICK] n=16
+[JSR-TICK] n=17
+[JSR-TICK] n=18
+[JSR-TICK] n=19
+[JSR-TICK] n=20
+[JSR-TICK] n=21
+[JSR-TICK] n=22
+[JSR-TICK] n=23
+[JSR-TICK] n=24
+[JSR-TICK] n=25
+[JSR-BOOT-STAGE] done stage=timer done_mask=0x7
+[JSR-BOOT-STAGE] done stage=frames done_mask=0xf
+[JSR-BOOT-STAGE] done stage=kernel_map done_mask=0x1f
+[JSR-TERM] capacity input=32768 output=32768 uart_pump=512 available=130113536
+[JSR-DISPLAY-COMPOSITOR] layers=2 visible=2 primary=terminal overlays=bounded alpha=true full_frame=false damage=true overlay_damage=true text_full=true input_capacity=1000
+[JSR-BOOT-STAGE] done stage=heap done_mask=0x3f
+[JSR-SPAWN] child_limit=8 tasks=64 source=boot_capacity
+[JSR-WORKLOAD] capacity workloads=64 members=256 tasks=64 budget=130113536 dynamic=true
+[JSR-SCHED] qos quantum=[1, 1, 1, 1] decay=8 owed_cap=2000 timer_hz=100 tasks=64 dynamic=true
+[JSR-RING] capacity rings=64 in_flight=1024 tasks=64 objects=1024 dynamic=true
+[JSR-IPC] capacity endpoints=8 queue_bytes=127064 process_bytes=508256 total_bytes=8132096 tasks=64 objects=1024 budget=130113536 dynamic=true
+[JSR-SANDBOX] capacity sandboxes=64 workloads=64 budget=130113536 dynamic=true
+[JSR-SANDBOX-STORAGE] capacity images=128 layers=1588 volumes=496 sandboxes=64 budget=130113536 dynamic=true
+[JSR-BOOT-STAGE] done stage=capacity done_mask=0x7f
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=1 keys=0 input_capacity=1000 dropped=0 compositor_layers=2 pressed=0 released=0
+[JSR-BOOT-STAGE] done stage=devices done_mask=0xff
+[JSR-PROFILE] table idx=0 name=headless valid=true modules=9 services=25 capabilities=10 min_tasks=32 min_objects=256 hot_load=0
+[JSR-PROFILE] table idx=1 name=headless-min valid=true modules=5 services=20 capabilities=5 min_tasks=32 min_objects=128 hot_load=0
+[JSR-PROFILE] active name=headless valid=true params=standard modules=9 services=25 capabilities=10 guarantees=2 dynamic=true
+[JSR-BOOT-STAGE] done stage=profile done_mask=0x1ff
+[JSR-ASSEMBLY] capacity modules=9 capabilities=10 services=25 metadata=1870 budget=127064 dynamic=true
+[JSR-LIFE] release_dispatch closing_locks=true outside_lock=5 none=11 none_empty=true destroyed_when_none=0 hooks_match_registry=true
+[JSR-ASSEMBLY] activate module=core objects=1024
+[JSR-ASSEMBLY] activate module=sched tasks=64 stacks=64
+[JSR-ASSEMBLY] activate module=realtime rt=8
+[JSR-ASSEMBLY] activate module=job queue=empty
+[JSR-PCI] dev bdf=00:00.0 vendor=0x8086 device=0x29c0 class=0x060000 bars=0 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:01.0 vendor=0x1234 device=0x1111 class=0x030000 bars=2 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:02.0 vendor=0x8086 device=0x10d3 class=0x020000 bars=4 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:03.0 vendor=0x1af4 device=0x1005 class=0x00ff00 bars=3 caps_discovered=5 caps_admitted=5 caps_truncated=0
+[JSR-PCI] dev bdf=00:04.0 vendor=0x1af4 device=0x1001 class=0x010000 bars=3 caps_discovered=5 caps_admitted=5 caps_truncated=0
+[JSR-PCI] dev bdf=00:1f.0 vendor=0x8086 device=0x2918 class=0x060100 bars=0 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:1f.2 vendor=0x8086 device=0x2922 class=0x010601 bars=2 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:1f.3 vendor=0x8086 device=0x2930 class=0x0c0500 bars=1 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-ASSEMBLY] activate module=devices pci=ecam functions=8
+[JSR-ASSEMBLY] module=core order=0 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=memory order=1 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=time order=2 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=sched order=3 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=channel order=4 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=realtime order=5 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=job order=6 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=async order=7 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=devices order=8 state=ready reason= version=1.0.0
+[JSR-CAP] boot source=derived objects=1024 tasks=64 rt=8 task_stacks=64 mem_limit=97585152
+[JSR-K06] profile=headless ops=109 kernel_base=72 module_service=37 active_unavailable=0 unclaimed=0 gate_mismatch=0 ring=available time=available sync=available
+[JSR-ASSEMBLY] summary profile=headless modules=9 ready=9 failed=0 blocked=0 declared=10 published=10 pre_publish=0 audit=ok restart=system.module.error.already_started stop_core=system.module.error.in_use stop_devices=system.module.error.permanent generation=0 readers=0
+[JSR-BOOT-STAGE] done stage=assembly done_mask=0x3ff
+[JSR-SCHED] mode=multi
+[JSR-CAPABILITY] domain=system.memory.boot-map state=verified inventory=complete discovered=140 supported=140 admitted=140 rejected=0 unsupported=0 enabled=140 exposed=140 verified=140 fault=none
+[JSR-CAPABILITY] domain=system.cpu.xstate state=exposed inventory=complete discovered=6 supported=6 admitted=3 rejected=0 unsupported=3 enabled=3 exposed=3 verified=0 fault=none
+[JSR-CAPABILITY] domain=system.device.pci-capabilities state=exposed inventory=complete discovered=10 supported=10 admitted=10 rejected=0 unsupported=0 enabled=10 exposed=10 verified=0 fault=none
+[JSR-CAPABILITY] domain=system.network state=discovered inventory=complete discovered=1 supported=0 admitted=0 rejected=0 unsupported=1 enabled=0 exposed=0 verified=0 fault=none
+[JSR-CAPABILITY] domain=system.device.gpu state=discovered inventory=complete discovered=1 supported=0 admitted=0 rejected=0 unsupported=1 enabled=0 exposed=0 verified=0 fault=none
+[JSR-BOOT-STAGE] done stage=sched_mode done_mask=0x7ff
+[JSR-BOOT-STAGE] done stage=space done_mask=0xfff
+[JSR-IOAPIC] controllers=1 pins=24 exposed=2 unsupported=22 invalid=0 dropped=0
+[JSR-IOAPIC] line=0 name=serial vector=80 gsi_pin=4 controlled=true
+[JSR-IOAPIC] line=1 name=rtc vector=81 gsi_pin=8 controlled=true
+[JSR-SMP] admit present=2 enabled=2 disabled=0 per_cpu_bytes=16384 required_bytes=32768 available_bytes=508497920 source=resource-budget
+[JSR-XSAVE] enabled=true avx=true avx_size=256 capacity=832
+[JSR-SMP] start present=2 online=2 failed=0 source=acpi.madt dropped=0 disabled=0
+[JSR-IRQ] topology source=smp_ready discovered=2 admitted=2 rejected=0 capacity=2 budget=127064 dynamic=true complete=true
+[JSR-BOOT-STAGE] done stage=smp done_mask=0x1fff
+[JSR-RT2] high_resolution=true legacy_tick_abi=true
+[JSR-BOOT-STAGE] done stage=highres done_mask=0x3fff
+[JSR-NOHZ] configured power=tickless divisor=4 cpus=2
+[JSR-BOOT-STAGE] done stage=idle_tick done_mask=0x7fff
+[JSR-STAGE] user_runtime embedded_programs=true
+[JSR-BOOT-STAGE] done stage=user_runtime done_mask=0xffff
+[JSR-PLAN] finish plan=lifecycle-health-fail stages=0xffff cases=0
+[JSR-SEC3] policy=installed epoch=2 audit_capacity=256
+[JSR-PROC] event=system.process.created id=0x2 name=first-program memory_cap_capacity=1134 memory_cap_metadata_budget=4066048 memory_budget=130113536 process_slots=64 dynamic=true
+[JSR-PROC] event=system.task.spawned process=0x2 task=1001 task_obj=0x4 name=first-program
+[JSR-SYSCALL] enter name=system.console.write id=4 task=first-program effects=write
+[JSR-USERTEXT] task=first-program bytes=57 text=你好，来自 ELF 装载的用户程序（user-hello）
+[JSR-SYSCALL] exit name=system.console.write id=4 ret=57 status=OK
+[JSR-SYSCALL] enter name=system.console.write id=4 task=first-program effects=write
+[JSR-USERTEXT] task=first-program bytes=13 text=bss_zero=true
+[JSR-SYSCALL] exit name=system.console.write id=4 ret=13 status=OK
+[JSR-SYSCALL] enter name=system.abi.get id=56 task=first-program effects=read
+[JSR-SYSCALL] exit name=system.abi.get id=56 ret=12886343680 status=OK
+[JSR-SYSCALL] enter name=system.console.write id=4 task=first-program effects=write
+[JSR-USERTEXT] task=first-program bytes=10 text=abi=3.22.0
+[JSR-SYSCALL] exit name=system.console.write id=4 ret=10 status=OK
+[JSR-SYSCALL] enter name=system.console.write id=4 task=first-program effects=write
+[JSR-USERTEXT] task=first-program bytes=14 text=abi_query=true
+[JSR-SYSCALL] exit name=system.console.write id=4 ret=14 status=OK
+[JSR-SYSCALL] enter name=system.task.exit id=1 task=first-program effects=irreversible
+[JSR-SYSCALL] exit name=system.task.exit id=1 code=0 action=task_exited
+[JSR-PROC] event=system.process.exited id=0x2 name=first-program code=0 threads=1 handles_closed=0
+[JSR-PROC] event=system.task.exit_switch task=1001 cause=exit
+[JSR-PROC] event=system.process.reaped id=0x2 frames=6 quarantined=0 threads=1 code=0
+[JSR-LIFE] cleanup destroy type=Task id=0x4
+[JSR-LIFE] cleanup destroy type=Process id=0x2
+[JSR-LIFE] cleanup destroy type=ExitState id=0x3
+[JSR-LIFE] cleanup destroy type=ExitState id=0x1
+[JSR-PROD] first_program state=Some(Exited { code: 0 }) reclaimed=true
+[JSR-PROC] event=system.process.created id=0x100000002 name=blk1 memory_cap_capacity=1134 memory_cap_metadata_budget=4066048 memory_budget=130113536 process_slots=64 dynamic=true
+[JSR-PROC] event=system.process.created id=0x7 name=root-linux-probe memory_cap_capacity=1134 memory_cap_metadata_budget=4066048 memory_budget=130113536 process_slots=64 dynamic=true
+[JSR-PROC] event=system.task.spawned process=0x7 task=1002 task_obj=0x9 name=root-linux-probe
+linux-abi: fd1 raw x86_64 ET_EXEC entered
+linux-abi: fd2 raw bytes accepted
+[JSR-WINE-FCNTL] fd=4 cmd=1031 arg=131072
+[JSR-WINE-FCNTL] fd=3 cmd=1032 arg=0
+[JSR-PROC] event=system.process.created id=0xb name=linux-fork memory_cap_capacity=1134 memory_cap_metadata_budget=4066048 memory_budget=130113536 process_slots=64 dynamic=true
+[JSR-PROC] event=system.task.spawned process=0xb task=1003 task_obj=0xd name=linux-fork
+[JSR-PROC] event=system.process.exiting id=0xb code=0 handles_closed=0
+[JSR-PROC] event=system.process.exited id=0xb name=linux-fork code=0 threads=1 handles_closed=0
+[JSR-PROC] event=system.task.exit_switch task=1003 cause=linux process exit
+[JSR-PROC] event=system.process.reaped id=0xb frames=6 quarantined=0 threads=1 code=0
+[JSR-LIFE] cleanup destroy type=Task id=0xd
+[JSR-LIFE] cleanup destroy type=Process id=0xb
+[JSR-LIFE] cleanup destroy type=ExitState id=0xc
+[JSR-LIFE] cleanup destroy type=ExitState id=0xa
+linux-native: epoll=true many_epolls=true many_eventfds=true many_timerfds=true many_signalfds=true many_pipes=true futex=true mmap=true io_uring=true
+[JSR-PROC] event=system.process.exiting id=0x7 code=0 handles_closed=0
+[JSR-PROC] event=system.process.exited id=0x7 name=root-linux-probe code=0 threads=1 handles_closed=0
+[JSR-PROC] event=system.task.exit_switch task=1002 cause=linux process exit
+[JSR-PROC] event=system.process.reaped id=0x7 frames=6 quarantined=0 threads=1 code=0
+[JSR-LIFE] cleanup destroy type=Task id=0x9
+[JSR-LIFE] cleanup destroy type=Process id=0x7
+[JSR-LIFE] cleanup destroy type=ExitState id=0x8
+[JSR-LIFE] cleanup destroy type=ExitState id=0x6
+[JSR-LIFE-ROOT-EXEC] path=/usr/libexec/jasper/health-probe bytes=22344 mapped=true cpl3=true exited=true syscalls=519 frames_before=123983 frames_after=123967 resources=false
+[JSR-PROC] event=system.process.created id=0x100000007 name=root-linux-probe memory_cap_capacity=1134 memory_cap_metadata_budget=4066048 memory_budget=130113536 process_slots=64 dynamic=true
+[JSR-PROC] event=system.task.spawned process=0x100000007 task=1004 task_obj=0x100000009 name=root-linux-probe
+linux-abi: fd1 raw x86_64 ET_EXEC entered
+linux-abi: fd2 raw bytes accepted
+[JSR-WINE-FCNTL] fd=4 cmd=1031 arg=131072
+[JSR-WINE-FCNTL] fd=3 cmd=1032 arg=0
+[JSR-PROC] event=system.process.created id=0x10000000b name=linux-fork memory_cap_capacity=1134 memory_cap_metadata_budget=4066048 memory_budget=130113536 process_slots=64 dynamic=true
+[JSR-PROC] event=system.task.spawned process=0x10000000b task=1005 task_obj=0x10000000d name=linux-fork
+[JSR-PROC] event=system.process.exiting id=0x10000000b code=0 handles_closed=0
+[JSR-PROC] event=system.process.exited id=0x10000000b name=linux-fork code=0 threads=1 handles_closed=0
+[JSR-PROC] event=system.task.exit_switch task=1005 cause=linux process exit
+[JSR-PROC] event=system.process.reaped id=0x10000000b frames=6 quarantined=0 threads=1 code=0
+[JSR-LIFE] cleanup destroy type=Task id=0x10000000d
+[JSR-LIFE] cleanup destroy type=Process id=0x10000000b
+[JSR-LIFE] cleanup destroy type=ExitState id=0x10000000c
+[JSR-LIFE] cleanup destroy type=ExitState id=0x10000000a
+linux-native: epoll=true many_epolls=true many_eventfds=true many_timerfds=true many_signalfds=true many_pipes=true futex=true mmap=true io_uring=true
+[JSR-PROC] event=system.process.exiting id=0x100000007 code=0 handles_closed=0
+[JSR-PROC] event=system.process.exited id=0x100000007 name=root-linux-probe code=0 threads=1 handles_closed=0
+[JSR-PROC] event=system.task.exit_switch task=1004 cause=linux process exit
+[JSR-PROC] event=system.process.reaped id=0x100000007 frames=6 quarantined=0 threads=1 code=0
+[JSR-LIFE] cleanup destroy type=Task id=0x100000009
+[JSR-LIFE] cleanup destroy type=Process id=0x100000007
+[JSR-LIFE] cleanup destroy type=ExitState id=0x100000008
+[JSR-LIFE] cleanup destroy type=ExitState id=0x100000006
+[JSR-LIFE-ROOT-EXEC] path=/usr/libexec/jasper/health-probe bytes=22344 mapped=true cpl3=true exited=true syscalls=520 frames_before=123967 frames_after=123967 resources=true
+[JSR-LIFE-ROOT-LIBS] count=6 bytes=5602240 source=system-ab
+[JSR-WINE-VFS] load path=/usr/lib/x86_64-linux-gnu/wine/x86_64-unix/ntdll.so
+[JSR-WINE-VFS] read path=ntdll.so bytes=589512
+[JSR-PROC] event=system.process.created id=0x200000007 name=usr/bin/jasper-file-stdio memory_cap_capacity=1134 memory_cap_metadata_budget=4066048 memory_budget=130113536 process_slots=64 dynamic=true
+[JSR-PROC] event=system.task.spawned process=0x200000007 task=1006 task_obj=0x200000009 name=usr/bin/jasper-file-stdio
+[JSR-LINUX-PATH] kind=openat path=/etc/ld.so.cache
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-LINUX-PATH] kind=openat path=/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v3/libc.so.6
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-LINUX-PATH] kind=openat path=/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v2/libc.so.6
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-LINUX-PATH] kind=openat path=/lib/x86_64-linux-gnu/libc.so.6
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-WINE-FSTAT] fd=3 kind=File handle=0xffff000000000001
+[JSR-WINE-MMAP-FIXED] addr=0x100040028000 bytes=0x198000 concrete_pages=408 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x1000401c0000 bytes=0x4e000 concrete_pages=78 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x10004020e000 bytes=0x6000 concrete_pages=6 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x100040214000 bytes=0xd000 concrete_pages=13 reserved=false
+[JSR-LINUX-PATH] kind=creat path=/tmp/jasper-file-stdio
+[JSR-WINE-CREAT] result=Ok(3)
+[JSR-WINE-FCNTL] fd=3 cmd=3 arg=10
+[JSR-WINE-FSTAT] fd=3 kind=File handle=0x4a53434600000002
+[JSR-WINE-FSTAT] cache-file=true size=0
+[JSR-WINE-FSTAT] fd=1 kind=Other handle=0xffffffffffffffff
+FILE_STDIO_OK
+[JSR-PROC] event=system.process.exiting id=0x200000007 code=0 handles_closed=0
+[JSR-LINUX-ROBUST] handled=0 tid=5
+[JSR-PROC] event=system.process.exited id=0x200000007 name=usr/bin/jasper-file-stdio code=0 threads=1 handles_closed=0
+[JSR-PROC] event=system.task.exit_switch task=1006 cause=linux process exit
+[JSR-COMPAT-DYNAMIC-REFS] program=usr/bin/jasper-file-stdio pages=2696 references=2696 max=1
+[JSR-PROC] event=system.process.reaped id=0x200000007 frames=2696 quarantined=0 threads=1 code=0
+[JSR-LIFE] cleanup destroy type=Task id=0x200000009
+[JSR-LIFE] cleanup destroy type=Process id=0x200000007
+[JSR-LIFE] cleanup destroy type=ExitState id=0x200000008
+[JSR-LIFE] cleanup destroy type=ExitState id=0x200000006
+[JSR-COMPAT-DYNAMIC-RESOURCE] program=usr/bin/jasper-file-stdio frames_before=121919 frames_after=121846 retained=73 heap_used_before=19224336 heap_used_after=19224752 heap_mapped_delta=299008 pins=0 orphaned=0 failed_frees=0 released=3241
+[JSR-LIFE-ROOT-DYNAMIC] program=usr/bin/jasper-file-stdio path=/usr/bin/jasper-file-stdio interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=38 exit_zero=true frames_before=121919 resources=false failed=0
+[JSR-PROC] event=system.process.created id=0x300000007 name=usr/bin/jasper-file-stdio memory_cap_capacity=1134 memory_cap_metadata_budget=4066048 memory_budget=130113536 process_slots=64 dynamic=true
+[JSR-PROC] event=system.task.spawned process=0x300000007 task=1007 task_obj=0x300000009 name=usr/bin/jasper-file-stdio
+[JSR-LINUX-PATH] kind=openat path=/etc/ld.so.cache
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-LINUX-PATH] kind=openat path=/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v3/libc.so.6
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-LINUX-PATH] kind=openat path=/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v2/libc.so.6
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-LINUX-PATH] kind=openat path=/lib/x86_64-linux-gnu/libc.so.6
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-WINE-FSTAT] fd=3 kind=File handle=0xffff000000000001
+[JSR-WINE-MMAP-FIXED] addr=0x100040028000 bytes=0x198000 concrete_pages=408 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x1000401c0000 bytes=0x4e000 concrete_pages=78 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x10004020e000 bytes=0x6000 concrete_pages=6 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x100040214000 bytes=0xd000 concrete_pages=13 reserved=false
+[JSR-LINUX-PATH] kind=creat path=/tmp/jasper-file-stdio
+[JSR-WINE-CREAT] result=Ok(3)
+[JSR-WINE-FCNTL] fd=3 cmd=3 arg=10
+[JSR-WINE-FSTAT] fd=3 kind=File handle=0x4a53434600000002
+[JSR-WINE-FSTAT] cache-file=true size=0
+[JSR-WINE-FSTAT] fd=1 kind=Other handle=0xffffffffffffffff
+FILE_STDIO_OK
+[JSR-PROC] event=system.process.exiting id=0x300000007 code=0 handles_closed=0
+[JSR-LINUX-ROBUST] handled=0 tid=6
+[JSR-PROC] event=system.process.exited id=0x300000007 name=usr/bin/jasper-file-stdio code=0 threads=1 handles_closed=0
+[JSR-PROC] event=system.task.exit_switch task=1007 cause=linux process exit
+[JSR-COMPAT-DYNAMIC-REFS] program=usr/bin/jasper-file-stdio pages=2696 references=2696 max=1
+[JSR-PROC] event=system.process.reaped id=0x300000007 frames=2696 quarantined=0 threads=1 code=0
+[JSR-LIFE] cleanup destroy type=Task id=0x300000009
+[JSR-LIFE] cleanup destroy type=Process id=0x300000007
+[JSR-LIFE] cleanup destroy type=ExitState id=0x300000008
+[JSR-LIFE] cleanup destroy type=ExitState id=0x300000006
+[JSR-LIFE-ROOT-DYNAMIC] program=usr/bin/jasper-file-stdio path=/usr/bin/jasper-file-stdio interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=38 exit_zero=true frames_before=121846 resources=true failed=0
+[JSR-PROC] event=system.process.created id=0x400000007 name=compat-wine-cmd memory_cap_capacity=1134 memory_cap_metadata_budget=4066048 memory_budget=130113536 process_slots=64 dynamic=true
+[JSR-PROC] event=system.task.spawned process=0x400000007 task=1008 task_obj=0x400000009 name=compat-wine-cmd
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v3/libc.so.6
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v2/libc.so.6
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/x86_64-linux-gnu/libc.so.6
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-WINE-FSTAT] fd=3 kind=File handle=0xffff000000000001
+[JSR-WINE-MMAP-FIXED] addr=0x10004002a000 bytes=0x198000 concrete_pages=408 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x1000401c2000 bytes=0x4e000 concrete_pages=78 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x100040210000 bytes=0x6000 concrete_pages=6 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x100040216000 bytes=0xd000 concrete_pages=13 reserved=false
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/x86_64-linux-gnu/wine/x86_64-unix/x86_64-unix/ntdll.so
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/x86_64-linux-gnu/wine/x86_64-unix/ntdll.so
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-WINE-FSTAT] fd=3 kind=File handle=0xffff000000008053
+[JSR-WINE-MMAP-FIXED] addr=0x100040230000 bytes=0x67000 concrete_pages=103 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x100040297000 bytes=0x1c000 concrete_pages=28 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x1000402b3000 bytes=0x3000 concrete_pages=3 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x1000402b6000 bytes=0x35000 concrete_pages=53 reserved=false
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/x86_64-linux-gnu/libunwind.so.8
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-WINE-FSTAT] fd=3 kind=File handle=0xffff000000008057
+[JSR-WINE-MMAP-FIXED] addr=0x1000402ee000 bytes=0xb000 concrete_pages=11 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x1000402f9000 bytes=0x2000 concrete_pages=2 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x1000402fb000 bytes=0x2000 concrete_pages=2 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x1000402fd000 bytes=0xa000 concrete_pages=10 reserved=false
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/x86_64-linux-gnu/liblzma.so.5
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-WINE-FSTAT] fd=3 kind=File handle=0xffff000000008058
+[JSR-WINE-MMAP-FIXED] addr=0x10004030b000 bytes=0x24000 concrete_pages=36 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x10004032f000 bytes=0xb000 concrete_pages=11 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x10004033a000 bytes=0x2000 concrete_pages=2 reserved=false
+[JSR-LINUX-PATH] kind=openat path=/etc/nsswitch.conf
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-LINUX-PATH] kind=openat path=/etc/passwd
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-WINE-EXEC] path=/usr/lib/x86_64-linux-gnu/wine/wine-preloader
+preloader: Warning: failed to reserve range 0000000000010000-0000000000110000
+preloader: Warning: failed to reserve range 0000000000110000-0000000068000000
+preloader: Warning: failed to reserve range 00007ffffe000000-00007fffffff0000
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/x86_64-linux-gnu/wine/wine
+[JSR-WINE-OPEN] flags=0x0
+[JSR-WINE-MMAP-FIXED] addr=0x100040001000 bytes=0x1000 concrete_pages=1 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x100040002000 bytes=0x1000 concrete_pages=1 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x100040003000 bytes=0x2000 concrete_pages=2 reserved=false
+[JSR-LINUX-PATH] kind=openat path=/lib64/ld-linux-x86-64.so.2
+[JSR-WINE-OPEN] flags=0x0
+[JSR-WINE-MMAP-FIXED] addr=0x100040006000 bytes=0x2f000 concrete_pages=47 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x100040035000 bytes=0xb000 concrete_pages=11 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x100040040000 bytes=0x3000 concrete_pages=3 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x100040043000 bytes=0x1000 concrete_pages=1 reserved=false
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v3/libc.so.6
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v2/libc.so.6
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/x86_64-linux-gnu/libc.so.6
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-WINE-FSTAT] fd=3 kind=File handle=0xffff000000000001
+[JSR-WINE-MMAP-FIXED] addr=0x10004006e000 bytes=0x198000 concrete_pages=408 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x100040206000 bytes=0x4e000 concrete_pages=78 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x100040254000 bytes=0x6000 concrete_pages=6 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x10004025a000 bytes=0xd000 concrete_pages=13 reserved=false
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/x86_64-linux-gnu/wine/x86_64-unix/x86_64-unix/ntdll.so
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/x86_64-linux-gnu/wine/x86_64-unix/ntdll.so
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-WINE-FSTAT] fd=3 kind=File handle=0xffff000000008053
+[JSR-WINE-MMAP-FIXED] addr=0x100040271000 bytes=0x67000 concrete_pages=103 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x1000402d8000 bytes=0x1c000 concrete_pages=28 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x1000402f4000 bytes=0x3000 concrete_pages=3 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x1000402f7000 bytes=0x35000 concrete_pages=53 reserved=false
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/x86_64-linux-gnu/libunwind.so.8
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-WINE-FSTAT] fd=3 kind=File handle=0xffff000000008057
+[JSR-WINE-MMAP-FIXED] addr=0x10004032f000 bytes=0xb000 concrete_pages=11 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x10004033a000 bytes=0x2000 concrete_pages=2 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x10004033c000 bytes=0x2000 concrete_pages=2 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x10004033e000 bytes=0xa000 concrete_pages=10 reserved=false
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/x86_64-linux-gnu/liblzma.so.5
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-WINE-FSTAT] fd=3 kind=File handle=0xffff000000008058
+[JSR-WINE-MMAP-FIXED] addr=0x10004034c000 bytes=0x24000 concrete_pages=36 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x100040370000 bytes=0xb000 concrete_pages=11 reserved=false
+[JSR-WINE-MMAP-FIXED] addr=0x10004037b000 bytes=0x2000 concrete_pages=2 reserved=false
+[JSR-LINUX-PATH] kind=openat path=/etc/nsswitch.conf
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-LINUX-PATH] kind=openat path=/etc/passwd
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-WINE-MMAP] addr=0x8000000000000000 bytes=0x1000 prot=0x0 flags=0x100022
+[JSR-WINE-MMAP] addr=0x4000000000000000 bytes=0x1000 prot=0x0 flags=0x100022
+[JSR-WINE-MMAP] addr=0x2000000000000000 bytes=0x1000 prot=0x0 flags=0x100022
+[JSR-WINE-MMAP] addr=0x1000000000000000 bytes=0x1000 prot=0x0 flags=0x100022
+[JSR-WINE-MMAP] addr=0x800000000000000 bytes=0x1000 prot=0x0 flags=0x100022
+[JSR-WINE-MMAP] addr=0x400000000000000 bytes=0x1000 prot=0x0 flags=0x100022
+[JSR-WINE-MMAP] addr=0x200000000000000 bytes=0x1000 prot=0x0 flags=0x100022
+[JSR-WINE-MMAP] addr=0x100000000000000 bytes=0x1000 prot=0x0 flags=0x100022
+[JSR-WINE-MMAP] addr=0x80000000000000 bytes=0x1000 prot=0x0 flags=0x100022
+[JSR-WINE-MMAP] addr=0x40000000000000 bytes=0x1000 prot=0x0 flags=0x100022
+[JSR-WINE-MMAP] addr=0x20000000000000 bytes=0x1000 prot=0x0 flags=0x100022
+[JSR-WINE-MMAP] addr=0x10000000000000 bytes=0x1000 prot=0x0 flags=0x100022
+[JSR-WINE-MMAP] addr=0x8000000000000 bytes=0x1000 prot=0x0 flags=0x100022
+[JSR-WINE-MMAP] addr=0x4000000000000 bytes=0x1000 prot=0x0 flags=0x100022
+[JSR-WINE-MMAP] addr=0x2000000000000 bytes=0x1000 prot=0x0 flags=0x100022
+[JSR-WINE-MMAP] addr=0x1000000000000 bytes=0x1000 prot=0x0 flags=0x100022
+[JSR-WINE-MMAP] addr=0x800000000000 bytes=0x1000 prot=0x0 flags=0x100022
+[JSR-WINE-MMAP] addr=0x400000000000 bytes=0x1000 prot=0x0 flags=0x100022
+[JSR-WINE-MMAP] addr=0x200000000000 bytes=0x1000 prot=0x0 flags=0x100022
+[JSR-WINE-MMAP] addr=0x100000000000 bytes=0x1000 prot=0x0 flags=0x100022
+[JSR-WINE-FSTAT] fd=2 kind=Other handle=0xffffffffffffffff
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/locale/locale-archive
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-LINUX-PATH] kind=openat path=/usr/share/locale/locale.alias
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/locale/C.UTF-8/LC_CTYPE
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/locale/C.utf8/LC_CTYPE
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/locale/C/LC_CTYPE
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/x86_64-linux-gnu/wine/../../../share/wine/nls/c_20127.nls
+[JSR-WINE-OPEN] flags=0x0
+[JSR-WINE-FSTAT] fd=3 kind=File handle=0xffff00000000805d
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/locale/C.UTF-8/LC_IDENTIFICATION
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/locale/C.utf8/LC_IDENTIFICATION
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/locale/C/LC_IDENTIFICATION
+[JSR-WINE-OPEN] flags=0x80000
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/x86_64-linux-gnu/wine/../../../share/wine/nls/locale.nls
+[JSR-WINE-OPEN] flags=0x0
+[JSR-WINE-FSTAT] fd=3 kind=File handle=0xffff00000000805e
+[JSR-LINUX-PATH] kind=openat path=/usr/lib/x86_64-linux-gnu/wine/../../../share/wine/nls/l_intl.nls
+[JSR-WINE-OPEN] flags=0x0
+[JSR-WINE-FSTAT] fd=3 kind=File handle=0xffff00000000805f
+[JSR-WINE-MMAP-FIXED] addr=0x7ffe0000 bytes=0x1000 concrete_pages=0 reserved=true
+[JSR-LINUX-PATH] kind=openat path=.
+[JSR-WINE-OPEN] flags=0x0
+[JSR-LINUX-PATH] kind=openat path=/run/user/0
+[JSR-WINE-OPEN] flags=0x90800
+[JSR-LINUX-PATH] kind=openat path=/data/wineprefix/wineserver
+[JSR-WINE-OPEN] flags=0x0
+[JSR-LINUX-PATH] kind=mkdirat path=/tmp/wine-JEVKzO
+[JSR-LINUX-PATH] kind=creat path=/data/wineprefix/wineserver
+[JSR-WINE-CREAT] result=Ok(4)
+[JSR-WINE-FCNTL] fd=4 cmd=3 arg=4
+[JSR-WINE-FSTAT] fd=4 kind=File handle=0x4a53434600000005
+[JSR-WINE-FSTAT] cache-file=true size=0
+free(): invalid pointer
+[JSR-LINUX-SIGNAL] queued target_tid=7 signal=6 mask=0x0 pending=0x20
+[JSR-PROC] event=system.process.exiting id=0x400000007 code=134 handles_closed=0
+[JSR-LINUX-SIGNAL] complete=false signal=6 error=4
+[JSR-LINUX-ROBUST] handled=0 tid=7
+[JSR-PROC] event=system.process.exited id=0x400000007 name=compat-wine-cmd code=134 threads=1 handles_closed=0
+[JSR-PROC] event=system.task.exit_switch task=1008 cause=linux signal default action
+[JSR-COMPAT-DYNAMIC-FAIL] stage=exit_zero
+[JSR-COMPAT-DYNAMIC-REFS] program=compat-wine-cmd pages=3798 references=3798 max=1
+[JSR-PROC] event=system.process.reaped id=0x400000007 frames=3798 quarantined=0 threads=1 code=134
+[JSR-LIFE] cleanup destroy type=Task id=0x400000009
+[JSR-LIFE] cleanup destroy type=Process id=0x400000007
+[JSR-LIFE] cleanup destroy type=ExitState id=0x400000008
+[JSR-LIFE] cleanup destroy type=ExitState id=0x400000006
+[JSR-COMPAT-DYNAMIC-RESOURCE] program=compat-wine-cmd frames_before=121673 frames_after=121529 retained=144 heap_used_before=19948208 heap_used_after=19951024 heap_mapped_delta=585728 pins=0 orphaned=0 failed_frees=0 released=14993
+[JSR-COMPAT-DYNAMIC-FAIL] stage=resources
+[JSR-LIFE-ROOT-DYNAMIC] program=compat-wine-cmd path=/usr/lib/x86_64-linux-gnu/wine/wine interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=262 exit_zero=false frames_before=121673 resources=false failed=2
+[JSR-LIFE-HEALTH] result=failed reason=root_execute

@@ -109,11 +109,26 @@ pub type Mapper = <Current as Platform>::Mapper;
 pub type SpaceRoot = <Current as Platform>::SpaceRoot;
 /// 每个地址空间私有的虚拟窗口，见 [`Platform::USER_WINDOW`]。
 pub const USER_WINDOW: (u64, u64) = <Current as Platform>::USER_WINDOW;
+#[cfg(target_arch = "x86_64")]
+pub const COMPAT_FIXED_WINDOW: (u64, u64) = self::x86_64::space::COMPAT_FIXED_WINDOW;
+#[cfg(not(target_arch = "x86_64"))]
+pub const COMPAT_FIXED_WINDOW: (u64, u64) = (0, 0);
 /// Optional low private window used by 32-bit address constrained Linux mappings.
 #[cfg(target_arch = "x86_64")]
 pub const LOW_USER_WINDOW: (u64, u64) = self::x86_64::space::LOW_USER_WINDOW;
 #[cfg(not(target_arch = "x86_64"))]
 pub const LOW_USER_WINDOW: (u64, u64) = (0, 0);
+
+/// Returns whether a range belongs to any address-space-private compatibility window.
+pub fn is_private_range(start: u64, end: u64) -> bool {
+    (start >= USER_WINDOW.0 && end <= USER_WINDOW.1)
+        || (COMPAT_FIXED_WINDOW.1 > COMPAT_FIXED_WINDOW.0
+            && start >= COMPAT_FIXED_WINDOW.0
+            && end <= COMPAT_FIXED_WINDOW.1)
+        || (LOW_USER_WINDOW.1 > LOW_USER_WINDOW.0
+            && start >= LOW_USER_WINDOW.0
+            && end <= LOW_USER_WINDOW.1)
+}
 /// 内核共享部分的顶级表项数，见 [`Platform::KERNEL_PART_ENTRIES`]。
 pub const KERNEL_PART_ENTRIES: usize = <Current as Platform>::KERNEL_PART_ENTRIES;
 /// 内核堆虚拟区起点，见 [`Platform::KERNEL_HEAP_BASE`]。

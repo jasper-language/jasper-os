@@ -240,6 +240,7 @@ pub mod pi_work;
 pub mod percpu_migration;
 pub mod sync_origin;
 pub mod event_wait;
+pub mod file_event;
 
 pub mod extension_abi;
 

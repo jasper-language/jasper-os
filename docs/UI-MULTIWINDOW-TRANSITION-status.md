@@ -1,10 +1,11 @@
 # UI Multi-window Transition Status
 
-Updated: 2026-11-21
+Updated: 2026-11-22
 
-Status: **core-passed: layout, CPL3 migration, dual-Surface framebuffer output
-and capability/budget rollback are verified; an emitted hardware/QEMU hotplug
-event source remains open.**
+Status: **done for the declared DAG gate: layout, CPL3 migration, dual-Surface
+framebuffer output, capability/budget rollback and a platform capability event
+producer are verified. Physical Pixel 6a display/input qualification remains a
+separate `UI-PHYSICAL-MATRIX-1` node.**
 
 `kernel-core::ui_workspace` provides a bounded, allocation-fallible contract for
 the same application/Scene model under Single, Split and MultiWindow layouts:
@@ -23,12 +24,15 @@ the same application/Scene model under Single, Split and MultiWindow layouts:
 - each Scene has one prepared-frame ticket; migration atomically clears all
   pending tickets, stale tickets cannot commit, and duplicate tickets fail;
 - frames and input using pre-migration Surface/input generations are rejected.
+- `UiCapabilityProducer` converts observed surface, DPI, keyboard and policy
+  facts into one monotonically versioned capability event; unchanged polling
+  does not rotate generations or cancel pending frames.
 
 ## Verification
 
 ```text
 cargo test -p kernel-core ui_workspace --lib
-4 passed; 0 failed
+6 passed; 0 failed
 ```
 
 Tests cover single/split geometry, independent generation rotation, stale frame
@@ -63,10 +67,29 @@ independent left/right viewports. QEMU validates both pixels directly:
 
 Both rounds restore all process, Channel, Surface and frame resources.
 
-## Remaining gates
+## Platform capability event producer
 
-- Add a production/QEMU display-size/DPI/keyboard hotplug event producer and
-  route its events through the existing capability transaction.
-- Exercise that producer and the physical display matrix on Pixel 6a.
+`kernel/src/display.rs` records display/input observations from the platform
+event source without migrating a workspace or granting authority. The QEMU UI
+process drill injects F12 through the real PS/2 path; the bounded producer
+converts the changed platform facts into capability epoch 3, recomputes the
+workspace, performs the unified `ServiceUiFramePresent` authorization and
+budget preflight, then commits the new Surface/DPI/keyboard state atomically.
+Two rounds report:
 
-`UI-MULTIWINDOW-TRANSITION-1` therefore remains in progress.
+```text
+[JSR-UI-HOTPLUG] observed=true source=platform key=0x012e event_epoch=3 \
+surface=1216x720 dpi=128 keyboard=false committed=true \
+old_frame_rejected=true failed=0
+```
+
+The QEMU run exits 33 and restores all process, Channel, Surface and frame
+resources. The producer is part of the production display integration; the
+verification feature provides the externally injected platform event used by
+the deterministic QEMU matrix.
+
+## Physical gate boundary
+
+Pixel 6a physical display geometry/DPI/keyboard changes, degraded display
+recovery and direct on-screen verification belong to `UI-PHYSICAL-MATRIX-1`.
+They do not reopen the transport-independent multi-window transaction gate.

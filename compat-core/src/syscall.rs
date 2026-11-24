@@ -674,12 +674,17 @@ pub enum CompatErrno {
     ReadOnly = linux_raw_sys::errno::EROFS,
     /// Path resolution would cross a requested confinement boundary.
     CrossDevice = linux_raw_sys::errno::EXDEV,
+    /// Too many symbolic links were encountered during pathname resolution.
+    SymlinkLoop = linux_raw_sys::errno::ELOOP,
     /// Resource is already owned or waited on.
     /// 资源已被占用或已有等待者。
     Busy = linux_raw_sys::errno::EBUSY,
     /// Bounded compatibility capacity is exhausted.
     /// 有界兼容容量耗尽。
     NoSpace = linux_raw_sys::errno::ENOSPC,
+    /// Per-process file descriptor capacity is exhausted.
+    /// 每进程文件描述符容量耗尽。
+    TooManyFiles = linux_raw_sys::errno::EMFILE,
     /// Absolute deadline elapsed.
     /// 绝对截止期已到。
     TimedOut = linux_raw_sys::errno::ETIMEDOUT,

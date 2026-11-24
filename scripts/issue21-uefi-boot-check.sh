@@ -57,17 +57,25 @@ case "$CARGO_TARGET" in
 esac
 LIMIT="${ISSUE21_UEFI_TIMEOUT:-45}"
 MODE="${ISSUE21_UEFI_MODE:-normal}"
+REUSE_ROOT="${ISSUE21_REUSE_ROOT:-0}"
 if [ -z "${ISSUE21_UEFI_TIMEOUT:-}" ] &&
-  { [ "$MODE" = android-art ] || [ "$MODE" = android-apk ]; }; then
+  { [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] ||
+    [ "$MODE" = compat-wine-d3d ] || [ "$MODE" = compat-wine-d3d12 ] ||
+    [ "$MODE" = compat-wine-wsi ] || [ "$MODE" = compat-jvm ] ||
+    [ "$MODE" = compat-dotnet ] || [ "$MODE" = compat-darling ]; }; then
   LIMIT=900
 fi
 PREBUILT="${ISSUE21_UEFI_PREBUILT:-0}"
 QEMU_LOCK="${ISSUE21_QEMU_LOCK:-/tmp/jasper-os-qemu.lock}"
 QEMU_CPUS="${ISSUE21_QEMU_CPUS:-$($ROOT/scripts/qemu-cpu-set.sh)}"
+QEMU_ACCEL="${ISSUE21_QEMU_ACCEL:-tcg}"
 QEMU_SMP="${ISSUE21_QEMU_SMP:-1}"
 QEMU_MEMORY="${ISSUE21_QEMU_MEMORY:-}"
 if [ -z "$QEMU_MEMORY" ]; then
-  if [ "$MODE" = android-art ] || [ "$MODE" = android-apk ]; then
+  if [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] ||
+    [ "$MODE" = compat-wine-d3d ] || [ "$MODE" = compat-wine-d3d12 ] ||
+    [ "$MODE" = compat-wine-wsi ] || [ "$MODE" = compat-jvm ] ||
+    [ "$MODE" = compat-dotnet ] || [ "$MODE" = compat-darling ]; then
     QEMU_MEMORY=2G
   else
     QEMU_MEMORY=512M
@@ -144,7 +152,7 @@ fi
 
 # 仅清理本脚本固定命名的派生产物；证据目录必须独占，防止陈旧日志混入。
 # Remove only this script's fixed derived files; evidence output must be fresh.
-if [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
+if [ "$REUSE_ROOT" != 1 ] && [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
   rm -f -- "$IMAGE" "$ESP_IMAGE" "$UEFI_ESP" "$OVMF_VARS"
 fi
 
@@ -161,6 +169,13 @@ case "$MODE" in
   android-ecosystem) KERNEL_FEATURES=lifecycle-root-exec-verify,android-ecosystem-verify ;;
   android-art) KERNEL_FEATURES=lifecycle-root-exec-verify,android-art-verify ;;
   android-apk) KERNEL_FEATURES=lifecycle-root-exec-verify,android-apk-verify ;;
+  compat-wine) KERNEL_FEATURES=lifecycle-root-exec-verify,compat-wine-verify ;;
+  compat-wine-d3d) KERNEL_FEATURES=lifecycle-root-exec-verify,compat-wine-verify,compat-wine-d3d-verify ;;
+  compat-wine-d3d12) KERNEL_FEATURES=lifecycle-root-exec-verify,compat-wine-verify,compat-wine-d3d-verify,compat-wine-d3d12-verify ;;
+  compat-wine-wsi) KERNEL_FEATURES=lifecycle-root-exec-verify,compat-wine-verify,compat-wine-d3d-verify,compat-wine-wsi-verify ;;
+  compat-jvm) KERNEL_FEATURES=lifecycle-root-exec-verify,compat-jvm-verify ;;
+  compat-dotnet) KERNEL_FEATURES=lifecycle-root-exec-verify,compat-dotnet-verify ;;
+  compat-darling) KERNEL_FEATURES=lifecycle-root-exec-verify,compat-darling-verify ;;
   vulkan-metal2vulkan) KERNEL_FEATURES=lifecycle-root-exec-verify,vulkan-metal2vulkan-verify ;;
   vulkan-swiftshader) KERNEL_FEATURES=lifecycle-root-exec-verify,vulkan-metal2vulkan-verify,vulkan-compute-only ;;
   block-timeout) KERNEL_FEATURES=lifecycle-block-timeout-verify ;;
@@ -207,17 +222,36 @@ run_lifecycle() {
   fi
 }
 
-if [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
+if [ "$REUSE_ROOT" != 1 ] && [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
   run_lifecycle jasper-gpt-image \
     "$IMAGE" 38654705664 >"$OUT/gpt.log" 2>&1
   run_lifecycle jasper-esp-format \
     "$IMAGE" 38654705664 >"$OUT/esp-format.log" 2>&1
+fi
+if [ "$REUSE_ROOT" = 1 ] || [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
+  if [ "$REUSE_ROOT" = 1 ]; then
+    run_lifecycle jasper-esp-format \
+      "$IMAGE" 38654705664 >"$OUT/esp-format.log" 2>&1
+  fi
+  rm -f -- "$UEFI_ESP"
   "$CARGO_TARGET/release/xtask" uefi-managed-esp \
     "$KERNEL" "$KERNEL" \
     "$BOOT_MANAGER" \
     "$UEFI_ESP" >"$OUT/uefi-esp.log" 2>&1
   run_lifecycle jasper-esp-install \
     "$IMAGE" 38654705664 "$UEFI_ESP" >"$OUT/esp-install.log" 2>&1
+  if [ "$REUSE_ROOT" = 1 ]; then
+    dd if=/dev/zero of="$IMAGE" bs=512 seek=34605056 count=131072 \
+      conv=notrunc status=none
+    dd if=/dev/zero of="$IMAGE" bs=512 seek=34736128 count=131072 \
+      conv=notrunc status=none
+    run_lifecycle jasper-control-init \
+      "$IMAGE" 38654705664 "$KERNEL" 1 1 1 1 1 >"$OUT/control-init.log" 2>&1
+    run_lifecycle jasper-control-inspect \
+      "$IMAGE" 38654705664 >"$OUT/control-inspect.log" 2>&1
+  fi
+fi
+if [ "$REUSE_ROOT" != 1 ] && [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
   run_lifecycle jasper-ext4-provision \
     "$IMAGE" 38654705664 >"$OUT/ext4-provision.log" 2>&1
 fi
@@ -225,11 +259,12 @@ ROOT_EXEC_PROBE=""
 ROOT_FULL_USERLAND=0
 ROOT_SIGNAL_FIXTURE=""
 ROOT_PPID_FIXTURE=""
+ROOT_STDIO_FIXTURE=""
 ROOT_ANDROID_TOYBOX="${JASPER_TOYBOX_BIN:-}"
 ROOT_AOSP_BINDER_TEST="${JASPER_AOSP_BINDER_TEST:-}"
 ROOT_ANDROID_TREE="${JASPER_ANDROID_TREE:-}"
 ROOT_ANDROID_LINKER_CONFIG=""
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = compat-wine ] || [ "$MODE" = compat-wine-d3d ] || [ "$MODE" = compat-wine-d3d12 ] || [ "$MODE" = compat-wine-wsi ] || [ "$MODE" = compat-jvm ] || [ "$MODE" = compat-dotnet ] || [ "$MODE" = compat-darling ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
   ROOT_EXEC_PROBE=$(find "$BUILD_TARGET/x86_64-unknown-none/release/build" \
     -path '*/out/user-target/x86_64-unknown-none/release/user-linuxprobe' \
     -type f -print | sort | tail -n 1)
@@ -247,6 +282,11 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native
   gcc -O2 -pthread verification/fixtures/linux/getppid.c \
     "${ANDROID_FIXTURE_FLAGS[@]}" \
     -o "$ROOT_PPID_FIXTURE" >"$OUT/root-ppid-build.log" 2>&1
+  if [ "$MODE" = compat-wine ]; then
+    ROOT_STDIO_FIXTURE="$TARGET/root-file-stdio"
+    gcc -O2 -fno-stack-protector verification/fixtures/linux/file_stdio.c \
+      -o "$ROOT_STDIO_FIXTURE" >"$OUT/root-file-stdio-build.log" 2>&1
+  fi
   if [ "$MODE" = android-ecosystem ] && [ -z "$ROOT_ANDROID_TOYBOX" ]; then
     echo "issue21-uefi-boot: JASPER_TOYBOX_BIN is required for android-ecosystem mode" >&2
     exit 64
@@ -259,7 +299,7 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native
     echo "issue21-uefi-boot: JASPER_ANDROID_TREE is required for $MODE mode" >&2
     exit 64
   fi
-  if { [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; } && [ -z "$ROOT_ANDROID_TREE" ]; then
+  if { [ "$MODE" = compat-wine ] || [ "$MODE" = compat-wine-d3d ] || [ "$MODE" = compat-wine-d3d12 ] || [ "$MODE" = compat-wine-wsi ] || [ "$MODE" = compat-jvm ] || [ "$MODE" = compat-dotnet ] || [ "$MODE" = compat-darling ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; } && [ -z "$ROOT_ANDROID_TREE" ]; then
     echo "issue21-uefi-boot: JASPER_ANDROID_TREE is required for $MODE mode" >&2
     exit 64
   fi
@@ -286,11 +326,11 @@ if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native
       | tee "$OUT/apk-preflight.log"
   fi
 fi
-if [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
+if [ "$REUSE_ROOT" != 1 ] && [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
   bash scripts/issue21-system-root-fixture.sh \
-    "$IMAGE" "$TARGET" 1050624 A 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" "$ROOT_PPID_FIXTURE" "$ROOT_ANDROID_TOYBOX" "$ROOT_AOSP_BINDER_TEST" "$ROOT_ANDROID_TREE" "$ROOT_ANDROID_LINKER_CONFIG" >"$OUT/system-root-a.log" 2>&1
+    "$IMAGE" "$TARGET" 1050624 A 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" "$ROOT_PPID_FIXTURE" "$ROOT_ANDROID_TOYBOX" "$ROOT_AOSP_BINDER_TEST" "$ROOT_ANDROID_TREE" "$ROOT_ANDROID_LINKER_CONFIG" "$ROOT_STDIO_FIXTURE" >"$OUT/system-root-a.log" 2>&1
   bash scripts/issue21-system-root-fixture.sh \
-    "$IMAGE" "$TARGET" 17827840 B 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" "$ROOT_PPID_FIXTURE" "$ROOT_ANDROID_TOYBOX" "$ROOT_AOSP_BINDER_TEST" "$ROOT_ANDROID_TREE" "$ROOT_ANDROID_LINKER_CONFIG" >"$OUT/system-root-b.log" 2>&1
+    "$IMAGE" "$TARGET" 17827840 B 1 "$ROOT_EXEC_PROBE" "$ROOT_FULL_USERLAND" "$ROOT_SIGNAL_FIXTURE" "$ROOT_PPID_FIXTURE" "$ROOT_ANDROID_TOYBOX" "$ROOT_AOSP_BINDER_TEST" "$ROOT_ANDROID_TREE" "$ROOT_ANDROID_LINKER_CONFIG" "$ROOT_STDIO_FIXTURE" >"$OUT/system-root-b.log" 2>&1
   run_lifecycle jasper-control-init \
     "$IMAGE" 38654705664 "$KERNEL" 1 1 1 1 1 >"$OUT/control-init.log" 2>&1
   run_lifecycle jasper-control-inspect \
@@ -313,17 +353,21 @@ fsck.fat -n -v -l "$ESP_IMAGE" >"$OUT/fsck-fat.log" 2>&1
 sgdisk -v "$IMAGE" >"$OUT/sgdisk.log" 2>&1
 grep -q 'No problems found' "$OUT/sgdisk.log"
 
-if [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
+if [ "$REUSE_ROOT" != 1 ] && [ "${ISSUE21_REUSE_P0:-0}" != 1 ]; then
   cp /usr/share/OVMF/OVMF_VARS_4M.fd "$OVMF_VARS"
 fi
 QEMU_EXTRA=(-monitor none)
 if [ -n "${ISSUE21_MONITOR_SOCKET:-}" ]; then
   QEMU_EXTRA=(-monitor "unix:$ISSUE21_MONITOR_SOCKET,server=on,wait=off")
 fi
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
-  CPU="${ISSUE21_QEMU_CPU:-max}"
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = compat-wine ] || [ "$MODE" = compat-jvm ] || [ "$MODE" = compat-dotnet ] || [ "$MODE" = compat-darling ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
+  if [ "$MODE" = compat-jvm ] || [ "$MODE" = compat-dotnet ]; then
+    CPU="${ISSUE21_QEMU_CPU:-max,-avx,-avx2}"
+  else
+    CPU="${ISSUE21_QEMU_CPU:-max}"
+  fi
   if [ "${ISSUE21_DISABLE_RDRAND:-0}" = 1 ]; then
-    CPU=max,-rdrand,-rdseed
+    CPU="$CPU,-rdrand,-rdseed"
   fi
   QEMU_EXTRA+=(-cpu "$CPU")
   if [ "$MODE" = iommu-dma ]; then
@@ -404,7 +448,7 @@ if [ "${ISSUE21_QEMU_GDB:-0}" = 1 ]; then
 fi
 set +e
 nice -n 15 taskset -c "$QEMU_CPUS" timeout "$LIMIT" qemu-system-x86_64 \
-  -accel tcg \
+  -accel "$QEMU_ACCEL" \
   -machine q35 \
   -m "$QEMU_MEMORY" \
   -smp "$QEMU_SMP" \
@@ -417,7 +461,7 @@ rc=$?
 set -e
 exec 9>&-
 printf '%s\n' "$rc" >"$OUT/qemu.rc"
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = compat-wine ] || [ "$MODE" = compat-jvm ] || [ "$MODE" = compat-dotnet ] || [ "$MODE" = compat-darling ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
   [ "$rc" -eq 33 ]
 else
   [ "$rc" -eq 124 ]
@@ -610,6 +654,83 @@ if [ "$MODE" = android-apk ]; then
   grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"
   ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
   echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
+  exit 0
+fi
+if [ "$MODE" = compat-wine ]; then
+  grep -aq '^FILE_STDIO_OK stdio_stat=true pipe_stat=true socket_stat=true file_status=true positioned_io=true vectored_fd=true cwd_status=true record_lock=true monotonic_time=true unix_socket=true socket_message=true epoll_status=true vfs_path=true unlink_lifetime=true shared_mmap=true materialized_fork_inherit=true fixed_prot_none_replace=true low_window=true' "$OUT/serial.log"
+  grep -aq '^WINE_CMD_OK' "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=compat-wine-cmd path=/usr/lib/x86_64-linux-gnu/wine/wine interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true failed=0' \
+    "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"
+  ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' \
+    "$OUT/serial.log"
+  echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
+  exit 0
+fi
+if [ "$MODE" = compat-wine-d3d ]; then
+  grep -aq '^D3D11_PROBE_OK feature=0x[0-9a-f]* pixel=32,64,128,255' "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=compat-wine-d3d11 path=/opt/wine-devel/lib/wine/x86_64-unix/wine interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true failed=0' \
+    "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"
+  ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' \
+    "$OUT/serial.log"
+  echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
+  exit 0
+fi
+if [ "$MODE" = compat-wine-d3d12 ]; then
+  grep -aq '^D3D12_PROBE_OK pixel=32,64,128,255 observed=' "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=compat-wine-d3d12 path=/opt/wine-devel/lib/wine/x86_64-unix/wine interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true failed=0' \
+    "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"
+  ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' \
+    "$OUT/serial.log"
+  echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
+  exit 0
+fi
+if [ "$MODE" = compat-wine-wsi ]; then
+  grep -aq '^D3D11_WSI_PROBE_OK .*present=1' "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=compat-wine-wsi path=/opt/wine-devel/lib/wine/x86_64-unix/wine interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true failed=0' \
+    "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"
+  ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' \
+    "$OUT/serial.log"
+  echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
+  exit 0
+fi
+if [ "$MODE" = compat-jvm ]; then
+  grep -aq '^JVM_PROBE_OK value=499500 thread=true gc=true file=true java=' "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=openjdk21-jvm path=/data/runtimes/openjdk/bin/java interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true failed=0' \
+    "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"
+  ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' \
+    "$OUT/serial.log"
+  echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
+  exit 0
+fi
+if [ "$MODE" = compat-dotnet ]; then
+  grep -aq '^DOTNET_PROBE_OK runtime=10\.0\.15 checksum=150015000 thread=true task=true gc=true exception=true file=true socket=true' \
+    "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-ROOT-DYNAMIC\] program=dotnet10-coreclr path=/data/runtimes/dotnet/DotnetProbe interpreter=/lib64/ld-linux-x86-64.so.2 mapped=true interpreter_syscalls=true syscalls=[1-9][0-9]* exit_zero=true frames_before=[0-9]* resources=true failed=0' \
+    "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"
+  ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' \
+    "$OUT/serial.log"
+  echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
+  exit 0
+fi
+if [ "$MODE" = compat-darling ]; then
+  grep -aq 'Received call #1 (dserver_callnum_checkin)' "$OUT/serial.log"
+  grep -aq 'dserver_callnum_vchroot_path' "$OUT/serial.log"
+  grep -aq '^\[JSR-DARLING-MMAP\] addr=0x100000000 ' "$OUT/serial.log"
+  grep -aq '^DARLING_EXEC_OK' "$OUT/serial.log"
+  grep -aq '^\[JSR-DARLING-START\] attempt=[0-9][0-9]* exited_zero=true' \
+    "$OUT/serial.log"
+  grep -aq '^\[JSR-DARLING-CLEANUP\] .* retained=0 processes=0$' \
+    "$OUT/serial.log"
+  grep -aq '^\[JSR-LIFE-HEALTH\] result=root_execution_complete' "$OUT/serial.log"
+  ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' \
+    "$OUT/serial.log"
+  echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc cli=true retained=0 processes=0 evidence=$OUT"
   exit 0
 fi
 if [ "$MODE" = android-art ]; then

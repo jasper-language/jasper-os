@@ -47,7 +47,8 @@ state = "passed"
 [[acceptance]]
 id = "software-evidence-vertical"
 statement = "A real measured application, collector, broker, verifier and policy result are implemented with replay, crash and resource tests."
-state = "pending"
+state = "passed"
+evidence = "docs/ISSUE-46-SOFTWARE-EVIDENCE-status.md; trust-service/src/lib.rs; trust-service/src/tests.rs; cargo test -p jasper-trust-service"
 
 [[acceptance]]
 id = "hardware-attestation"

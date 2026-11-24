@@ -4,9 +4,10 @@
 
 ## 状态
 
-`partial`。已为 Driver Host、FS、NET 和 Graphics 四类 backend 补齐 AsyncRing
-的 submitted → cancel → backend terminal → quiesce → completion 路径；真实硬件
-DMA/IRQ 故障注入、hot-unplug 与物理 IOMMU 仍未完成，不能关闭 M09。
+`implemented-tested`（M09 native mechanism）。已为 Driver Host、FS、NET 和
+Graphics 四类 backend 补齐 AsyncRing 的 submitted → cancel → backend terminal
+→ quiesce → completion 路径。真实硬件 DMA/IRQ 故障注入、hot-unplug 与物理
+IOMMU 不在本状态机的完成口径内，继续由 #43 持有独立硬件门。
 
 ## 已闭合的设备矩阵
 
@@ -64,9 +65,11 @@ cargo test -p kernel-core --features runtime-registries,network-dynamic \
 submit→start→finish/cancel→quiesce→consume 序列；最终所有请求只有一个终态，
 credit、reserved、context 和完成队列均回到基线。
 
-## 尚未关闭
+## 最终裁决边界
 
-- 真实设备 DMA 仍访问、IRQ 迟到、FLR/物理 reset 失败、hot-unplug 和物理 IOMMU；
-- 真实多 CPU 内核调用方共享同一对象表锁下的取消/完成竞争与更高负载 reclaim；
-
-本切片不新增用户 ABI，不把 Driver Host 测试提升为物理设备资格。
+- 真实设备 DMA 仍访问、IRQ 迟到、FLR/物理 reset 失败、hot-unplug 和物理 IOMMU
+  属于 #43 硬件验收；
+- 真实多 CPU 内核调用方共享同一对象表锁下已有并发压力，后续更高负载 reclaim
+  属于性能/验证专项；
+- 本切片不新增用户 ABI，不把 Driver Host 软件状态机或 QEMU 证据提升为物理设备
+  资格。

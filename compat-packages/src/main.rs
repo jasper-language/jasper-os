@@ -10,7 +10,7 @@ use jasper_compat_packages::ComponentInstaller;
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  jasper-compat-pkg install <root> <manifest> <archive>\n  jasper-compat-pkg current <root> <name>\n  jasper-compat-pkg rollback <root> <name>\n  jasper-compat-pkg uninstall <root> <name>"
+        "usage:\n  jasper-compat-pkg install <root> <manifest> <archive>\n  jasper-compat-pkg current <root> <name>\n  jasper-compat-pkg stop <root> <name>\n  jasper-compat-pkg start <root> <name>\n  jasper-compat-pkg rollback <root> <name>\n  jasper-compat-pkg uninstall <root> <name>"
     );
     std::process::exit(2);
 }
@@ -28,7 +28,33 @@ fn main() {
             .map(|item| format!("{} {} {}", item.name, item.version, item.path.display())),
         "current" => installer
             .current(&args[3])
-            .map(|item| format!("{} {} {}", item.name, item.version, item.path.display())),
+            .map(|item| {
+                format!(
+                    "{} {} {} enabled={}",
+                    item.name,
+                    item.version,
+                    item.path.display(),
+                    item.enabled
+                )
+            }),
+        "stop" => installer.stop(&args[3]).map(|item| {
+            format!(
+                "{} {} {} enabled={}",
+                item.name,
+                item.version,
+                item.path.display(),
+                item.enabled
+            )
+        }),
+        "start" => installer.start(&args[3]).map(|item| {
+            format!(
+                "{} {} {} enabled={}",
+                item.name,
+                item.version,
+                item.path.display(),
+                item.enabled
+            )
+        }),
         "rollback" => installer
             .rollback(&args[3])
             .map(|item| format!("{} {} {}", item.name, item.version, item.path.display())),

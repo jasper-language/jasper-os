@@ -22,6 +22,8 @@ use crate::mm::frame::free_frames;
 use crate::proc::{self, ProcState};
 use crate::{arch, kobj, kprintln, sched};
 
+const ROOT_EXIT_SCHEDULE_SLICE_TICKS: u64 = 100;
+
 static TRUE: &[u8] = include_bytes!(env!("JSR_UBUNTU_TRUE"));
 static GETCONF: &[u8] = include_bytes!(env!("JSR_UBUNTU_GETCONF"));
 static PRINTF: &[u8] = include_bytes!(env!("JSR_UBUNTU_PRINTF"));
@@ -80,7 +82,87 @@ fn check(ok: bool, stage: &'static str) {
 
 fn cleanup(pid: ObjId) {
     let _ = proc::reap(pid);
-    kobj::run_cleanup(usize::MAX);
+    for _ in 0..1000 {
+        while kobj::run_cleanup(usize::MAX) != 0 {}
+        let processes = proc::linux_process_ids();
+        if processes.is_empty() {
+            break;
+        }
+        for id in processes {
+            let _ = proc::reap(id);
+        }
+        crate::sched::pause();
+    }
+    while kobj::run_cleanup(usize::MAX) != 0 {}
+    #[cfg(feature = "compat-wine-verify")]
+    {
+        let usage = crate::linux_abi::compat_cache_usage();
+        kprintln!(
+            "[JSR-COMPAT-CACHE] files={}/{} path_cap={} bytes_len={} bytes_cap={} shared={} dirs={}/{} dir_path_cap={} symlinks={}/{} symlink_cap={} threads={}/{} next={}",
+            usage[0],
+            usage[1],
+            usage[2],
+            usage[3],
+            usage[4],
+            usage[5],
+            usage[6],
+            usage[7],
+            usage[8],
+            usage[9],
+            usage[10],
+            usage[11],
+            usage[12],
+            usage[13],
+            usage[14],
+        );
+        crate::linux_abi::trace_compat_cache_files();
+        let global = crate::linux_abi::compat_global_usage();
+        kprintln!(
+            "[JSR-COMPAT-GLOBAL] len={} cap={} landlock_inner={} objects={} pending={}",
+            global[0],
+            global[1],
+            global[2],
+            global[3],
+            global[4],
+        );
+        let counts = crate::linux_abi::compat_global_counts();
+        kprintln!(
+            "[JSR-COMPAT-GLOBAL-COUNTS] thread={} landlock={} futex={} psig={} flock={}/{} plock={}/{} ptimer={} itimer={} mq_name={} qsig={} sysv_msg={} sem={}/{} undo={} shm={} keys={}/{}",
+            counts[0],
+            counts[1],
+            counts[2],
+            counts[3],
+            counts[4],
+            counts[5],
+            counts[6],
+            counts[7],
+            counts[8],
+            counts[9],
+            counts[10],
+            counts[11],
+            counts[12],
+            counts[13],
+            counts[14],
+            counts[15],
+            counts[16],
+            counts[17],
+            counts[18],
+        );
+    }
+}
+
+/// Reaps all remaining compatibility processes after a persistent runtime has
+/// completed its root-level acceptance command.
+#[cfg(feature = "compat-darling-verify")]
+pub(crate) fn cleanup_compat_processes() -> usize {
+    let processes = proc::linux_process_ids();
+    for pid in &processes {
+        let _ = proc::begin_exit(*pid, 137);
+    }
+    if let Some(pid) = processes.first().copied() {
+        cleanup(pid);
+    }
+    proc::linux_process_ids().len()
 }
 
 fn application_identity(name: &str, executable: &[u8]) -> ApplicationIdentity {
@@ -822,7 +904,9 @@ fn run_program(
         &[],
         frames_before,
         enforce_resources,
+        PROGRAM_DEADLINE_TICKS,
         None,
+        false,
     )
 }
 
@@ -844,7 +928,9 @@ fn run_program_on(
         &[],
         frames_before,
         enforce_resources,
+        PROGRAM_DEADLINE_TICKS,
         Some(affinity),
+        false,
     )
 }
 
@@ -857,7 +943,9 @@ fn run_program_with_interpreter(
     envp: &[&[u8]],
     frames_before: usize,
     enforce_resources: bool,
+    deadline_ticks: u64,
     affinity: Option<kernel_core::smp::CpuSet>,
+    return_on_root_exit: bool,
 ) -> ProgramResult {
     let calls_before = crate::syscall::call_count();
     let heap_before = crate::mm::heap::stats();
@@ -894,7 +982,10 @@ fn run_program_with_interpreter(
             return ProgramResult::FAILED;
         }
     };
-    check(executable_plan.interpreter.as_deref() == Some(interpreter_path), "pt_interp");
+    check(
+        executable_plan.interpreter.as_deref() == Some(interpreter_path),
+        "pt_interp",
+    );
     let dynamic = match plan_dynamic_program(
         &executable_plan,
         &interpreter_plan,
@@ -959,8 +1050,24 @@ fn run_program_with_interpreter(
         check(entered, "transfer_interpreter");
         thread = backend.task().is_some();
         check(thread, "thread");
-        let deadline = sched::timer_ticks().saturating_add(PROGRAM_DEADLINE_TICKS);
-        completed = sched::run_until(deadline);
+        let deadline = sched::timer_ticks().saturating_add(deadline_ticks);
+        if return_on_root_exit {
+            while sched::timer_ticks() < deadline {
+                let step = sched::timer_ticks()
+                    .saturating_add(ROOT_EXIT_SCHEDULE_SLICE_TICKS)
+                    .min(deadline);
+                let _ = sched::run_until(step);
+                if matches!(proc::state(pid), Some(ProcState::Exited { .. })) {
+                    completed = true;
+                    break;
+                }
+                if sched::timer_ticks() < step {
+                    sched::sleep_ticks(1);
+                }
+            }
+        } else {
+            completed = sched::run_until(deadline);
+        }
         if !completed {
             kprintln!(
                 "[JSR-COMPAT-DYNAMIC-FAIL] program={} stage=deadline_exceeded deadline={}",
@@ -996,7 +1103,9 @@ fn run_program_with_interpreter(
             max
         );
     }
-    cleanup(pid);
+    if !return_on_root_exit {
+        cleanup(pid);
+    }
     let frames_after = free_frames();
     let heap_after = crate::mm::heap::stats();
     let heap_used_before = heap_before.0.saturating_sub(heap_before.1);
@@ -1049,6 +1158,7 @@ pub(crate) fn run_root_static_program(
     name: &'static str,
     executable: &[u8],
     argv: &[&[u8]],
+    envp: &[&[u8]],
     frames_before: usize,
     enforce_resources: bool,
 ) -> bool {
@@ -1062,7 +1172,9 @@ pub(crate) fn run_root_static_program(
         false
     };
     if proc::set_application(pid, application_identity(name, executable)).is_err()
-        || argv.first().is_none_or(|path| !proc::linux_set_exec_path(pid, path))
+        || argv
+            .first()
+            .is_none_or(|path| !proc::linux_set_exec_path(pid, path))
     {
         return failed();
     }
@@ -1090,7 +1202,7 @@ pub(crate) fn run_root_static_program(
         interpreter_base: 0,
         stack_top: STACK_TOP,
         argv,
-        envp: &[],
+        envp,
         auxv: &[],
         random: Some(&[0x5au8; 16]),
     })
@@ -1440,6 +1552,104 @@ pub(crate) fn run_root_dynamic_program(
     frames_before: usize,
     enforce_resources: bool,
 ) -> bool {
+    run_root_dynamic_program_with_deadline(
+        name,
+        path,
+        executable,
+        interpreter,
+        interpreter_path,
+        argv,
+        envp,
+        frames_before,
+        enforce_resources,
+        PROGRAM_DEADLINE_TICKS,
+    )
+}
+
+/// Executes one bounded root-backed dynamic program with an explicit tick
+/// deadline. Cold Wine prefix and wineserver initialization needs a larger
+/// profile-specific budget than the small conformance fixtures.
+#[cfg(feature = "lifecycle-root-exec-verify")]
+pub(crate) fn run_root_dynamic_program_with_deadline(
+    name: &'static str,
+    path: &'static str,
+    executable: &[u8],
+    interpreter: &[u8],
+    interpreter_path: &'static str,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    frames_before: usize,
+    enforce_resources: bool,
+    deadline_ticks: u64,
+) -> bool {
+    run_root_dynamic_program_with_policy(
+        name,
+        path,
+        executable,
+        interpreter,
+        interpreter_path,
+        argv,
+        envp,
+        frames_before,
+        enforce_resources,
+        deadline_ticks,
+        false,
+    )
+}
+
+/// Executes a root-backed launcher and returns as soon as that root process
+/// exits. A darlingserver started by the launcher is intentionally persistent,
+/// so waiting for every worker to settle would turn a successful launcher into
+/// a deadline failure.
+#[cfg(feature = "lifecycle-root-exec-verify")]
+pub(crate) fn run_root_dynamic_program_until_root_exit(
+    name: &'static str,
+    path: &'static str,
+    executable: &[u8],
+    interpreter: &[u8],
+    interpreter_path: &'static str,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    frames_before: usize,
+    enforce_resources: bool,
+    deadline_ticks: u64,
+) -> bool {
+    run_root_dynamic_program_with_policy(
+        name,
+        path,
+        executable,
+        interpreter,
+        interpreter_path,
+        argv,
+        envp,
+        frames_before,
+        enforce_resources,
+        deadline_ticks,
+        true,
+    )
+}
+
+#[cfg(feature = "lifecycle-root-exec-verify")]
+fn run_root_dynamic_program_with_policy(
+    name: &'static str,
+    path: &'static str,
+    executable: &[u8],
+    interpreter: &[u8],
+    interpreter_path: &'static str,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    frames_before: usize,
+    enforce_resources: bool,
+    deadline_ticks: u64,
+    return_on_root_exit: bool,
+) -> bool {
+    let affinity = if return_on_root_exit {
+        let mut workers = crate::smp::online_set();
+        workers.remove(0);
+        (!workers.is_empty()).then_some(workers)
+    } else {
+        None
+    };
     let result = run_program_with_interpreter(
         name,
         executable,
@@ -1449,7 +1659,9 @@ pub(crate) fn run_root_dynamic_program(
         envp,
         frames_before,
         enforce_resources,
-        None,
+        deadline_ticks,
+        affinity,
+        return_on_root_exit,
     );
     let verified = result.mapped
         && result.interpreter_entered

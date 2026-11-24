@@ -1,4 +1,5 @@
 # source	issue	kind	reference
+display-firmware-dpi	35	runtime	UEFI-GOP-framebuffer-does-not-report-physical-DPI
 AOSP-ART-RegionSpace	32	spec	AOSP-ART-3c05e56adf5b268ec5b20bf8aec460815e45161c-region-space
 avb-vbmeta-descriptor-bound	21	policy	Issue-21-bounded-AVB-descriptor-decoder
 aarch64-el2-retain-probe	22	build	EL2-vector-residency-verification-feature
@@ -132,3 +133,5 @@ linux-keyring-uapi-v1	35	spec	Linux-key-payload-field-bound
 linux-directory-batch-policy	35	policy	bounded-directory-record-batch
 profile-render-layout-v1	35	spec	profile-query-rendered-record-layout
 jasper-channel-byte-v1	35	spec	Jasper-Channel-v1-message-byte-envelope
+trust-v1-wire-envelope	46	spec	Jasper-Trust-v1-bounded-CBOR-and-collection-envelope
+trust-v1-freshness	46	policy	Jasper-Trust-v1-maximum-challenge-lifetime
