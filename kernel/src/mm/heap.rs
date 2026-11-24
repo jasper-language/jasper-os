@@ -257,6 +257,12 @@ unsafe impl GlobalAlloc for KernelHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         #[cfg(feature = "fault-inject")]
         if crate::fault_inject::HEAP.hit() { return core::ptr::null_mut(); }
+        if HEAP_LIMIT
+            .get()
+            .is_some_and(|limit| layout.size() as u64 > *limit)
+        {
+            return core::ptr::null_mut();
+        }
         let mut s = HEAP.lock();
         let p = s.heap.allocate(layout.size(), layout.align());
         if !p.is_null() {

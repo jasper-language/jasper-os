@@ -356,7 +356,10 @@ impl KernelConfig {
         },
         memory: MemoryParams {
             heap_grow_step: 64 * 1024,
-            heap_budget_permille: 250,
+            // The heap has no default fraction-of-RAM capacity cap. It grows
+            // only on demand and competes through the real frame allocator;
+            // the virtual heap window remains the final overflow boundary.
+            heap_budget_permille: 1000,
             pressure: PressureParams::DEFAULT,
             max_process_frames: 0,
             max_vm_guest_frames: 32 * 1024, // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-policy-v1 reason=validated-standard-profile-policy
@@ -406,7 +409,7 @@ impl KernelConfig {
         },
         memory: MemoryParams {
             heap_grow_step: 16 * 1024,
-            heap_budget_permille: 250,
+            heap_budget_permille: 1000,
             pressure: PressureParams {
                 low_permille: 100,
                 critical_permille: 40,
@@ -510,7 +513,7 @@ impl KernelConfig {
             "heap_grow_step"
         );
         require!(
-            m.heap_budget_permille > 0 && m.heap_budget_permille <= 800,
+            m.heap_budget_permille > 0 && m.heap_budget_permille <= 1000,
             "heap_budget_permille"
         );
         require!(
@@ -757,7 +760,7 @@ mod tests {
             c.memory.heap_budget_permille = 0
         });
         rejects("heap_budget_permille", |c| {
-            c.memory.heap_budget_permille = 801
+            c.memory.heap_budget_permille = 1001
         });
         rejects("pressure", |c| c.memory.pressure.critical_permille = 200);
         rejects("pressure", |c| c.memory.pressure.critical_permille = 0);

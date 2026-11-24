@@ -1,0 +1,207 @@
+//! Parallel execution matrix over the CPUs that firmware enabled and the
+//! scheduler admitted.
+
+use alloc::vec::Vec;
+use core::hint::black_box;
+
+use crate::{arch, early, hardware, kprintln, mm, smp};
+
+/// Each worker performs this many individually executed, compiler-visible
+/// workload operations.
+const OPERATIONS_PER_WORKER: u64 = 1_000_000;
+
+fn scalar_work(seed: u64) -> u64 {
+    let start = arch::measure_cycles();
+    let mut value = seed | 1;
+    for index in 0..OPERATIONS_PER_WORKER {
+        value = value
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(index ^ 0x9e37_79b9_7f4a_7c15);
+        // SAFETY: the pointer names a live local for the complete iteration.
+        unsafe {
+            core::ptr::write_volatile(&mut value, value);
+        }
+    }
+    black_box(value);
+    arch::measure_cycles().wrapping_sub(start)
+}
+
+fn cycles_to_ns(cycles: u64) -> u64 {
+    early::tsc_frequency_hz()
+        .map(|hz| {
+            (u128::from(cycles) * 1_000_000_000u128 / u128::from(hz.max(1)))
+                .min(u128::from(u64::MAX)) as u64
+        })
+        .unwrap_or(0)
+}
+
+fn physical_cpus() -> Vec<usize> {
+    let topology = hardware::online_cpu_topology();
+    let mut out = Vec::new();
+    for cpu in topology {
+        if !out
+            .iter()
+            .any(|existing: &hardware::ApCpuTopology| existing.core_key == cpu.core_key)
+        {
+            let _ = out.try_reserve(1);
+            out.push(cpu);
+        }
+    }
+    out.into_iter().map(|cpu| cpu.logical).collect()
+}
+
+fn logical_cpus() -> Vec<usize> {
+    hardware::online_cpu_topology()
+        .into_iter()
+        .map(|cpu| cpu.logical)
+        .collect()
+}
+
+fn run_mode(
+    mode: &'static str,
+    cpus: &[usize],
+    single_throughput: Option<u64>,
+) -> Option<u64> {
+    if cpus.is_empty() || cpus[0] != 0 {
+        kprintln!("[JSR-PERF-SMP] mode={} status=invalid reason=bsp_missing", mode);
+        return None;
+    }
+    let mut posted = Vec::new();
+    if posted.try_reserve_exact(cpus.len().saturating_sub(1)).is_err() {
+        kprintln!("[JSR-SMP] mode={} status=invalid reason=call_slot_allocation", mode);
+        return None;
+    }
+    let mut worker_ns = Vec::new();
+    if worker_ns.try_reserve_exact(cpus.len()).is_err() {
+        kprintln!("[JSR-SMP] mode={} status=invalid reason=result_allocation", mode);
+        return None;
+    }
+    let (usable, free, heap_total, heap_free, _, heap_mapped) = memory();
+    let start = arch::measure_cycles();
+    for &cpu in cpus.iter().filter(|&&cpu| cpu != 0) {
+        if smp::post_call(cpu, scalar_work, cpu as u64).is_ok() {
+            posted.push(cpu);
+        }
+    }
+    let bsp_cycles = scalar_work(0);
+    worker_ns.push(cycles_to_ns(bsp_cycles));
+    let mut completed = 1usize;
+    let mut failed = 0usize;
+    for cpu in posted {
+        match smp::collect_call(cpu) {
+            Ok(cycles) if cycles != 0 => {
+                worker_ns.push(cycles_to_ns(cycles));
+                completed += 1;
+            }
+            _ => failed += 1,
+        }
+    }
+    let elapsed_ns = cycles_to_ns(arch::measure_cycles().wrapping_sub(start));
+    let total_operations = OPERATIONS_PER_WORKER.saturating_mul(completed as u64);
+    let throughput = total_operations
+        .saturating_mul(1_000_000_000)
+        .checked_div(elapsed_ns.max(1))
+        .unwrap_or(0);
+    let min_ns = worker_ns.iter().copied().min().unwrap_or(0);
+    let max_ns = worker_ns.iter().copied().max().unwrap_or(0);
+    let mean_ns = worker_ns
+        .iter()
+        .copied()
+        .fold(0u64, u64::saturating_add)
+        .checked_div(completed.max(1) as u64)
+        .unwrap_or(0);
+    let scaling = single_throughput
+        .filter(|base| *base != 0)
+        .map(|base| throughput.saturating_mul(1000) / base)
+        .unwrap_or(1000);
+    let (usable_after, free_after, heap_total_after, heap_free_after, _, mapped_after) = memory();
+    let reclaimed = usable == usable_after
+        && free == free_after
+        && heap_total == heap_total_after
+        && heap_free == heap_free_after
+        && heap_mapped == mapped_after;
+    let expected = cpus.len();
+    let line = alloc::format!(
+        "SMP MATRIX mode={} workers={}/{} operations_per_worker={} total_operations={} elapsed_ns={} throughput_ops_s={} scaling_permille={} worker_mean_ns={} worker_min_ns={} worker_max_ns={} failed={} reclaimed={}\n",
+        mode,
+        completed,
+        expected,
+        OPERATIONS_PER_WORKER,
+        total_operations,
+        elapsed_ns,
+        throughput,
+        scaling,
+        mean_ns,
+        min_ns,
+        max_ns,
+        failed,
+        reclaimed
+    );
+    early::append_line(line.trim_end());
+    kprintln!("{}", line.trim_end());
+    kprintln!(
+        "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"parallel-mode\",\"mode\":\"{}\",\"workers_expected\":{},\"workers_completed\":{},\"operations_per_worker\":{},\"total_operations\":{},\"elapsed_ns\":{},\"throughput_ops_s\":{},\"scaling_permille\":{},\"worker_mean_ns\":{},\"worker_min_ns\":{},\"worker_max_ns\":{},\"failed_workers\":{},\"resources_reclaimed\":{},\"usable_kib_before\":{},\"free_kib_before\":{},\"heap_used_kib_before\":{},\"heap_mapped_kib_before\":{}}}",
+        mode,
+        expected,
+        completed,
+        OPERATIONS_PER_WORKER,
+        total_operations,
+        elapsed_ns,
+        throughput,
+        scaling,
+        mean_ns,
+        min_ns,
+        max_ns,
+        failed,
+        reclaimed,
+        usable.saturating_mul(4),
+        free.saturating_mul(4),
+        heap_total.saturating_sub(heap_free) / 1024,
+        heap_mapped / 1024
+    );
+    Some(throughput)
+}
+
+fn memory() -> (usize, usize, usize, usize, usize, u64) {
+    let (heap_total, heap_free, blocks, heap_mapped) = mm::heap::stats();
+    (
+        mm::frame::usable_frames(),
+        mm::frame::free_frames(),
+        heap_total,
+        heap_free,
+        blocks,
+        heap_mapped,
+    )
+}
+
+/// Run single-core, one-thread-per-physical-core, and all-logical-CPU modes.
+pub fn run() {
+    let physical = physical_cpus();
+    let logical = logical_cpus();
+    let online = smp::online_set().len();
+    if logical.len() != online {
+        kprintln!(
+            "[JSR-PERF-SMP] reject=topology_probe_complete online={} probed={}",
+            online,
+            logical.len()
+        );
+    }
+    kprintln!(
+        "[JSR-PERF-SMP] discovery online={} probed={} physical={} logical={}",
+        online,
+        logical.len(),
+        physical.len(),
+        logical.len()
+    );
+    let single = run_mode("single", &[0], None).unwrap_or(0);
+    if physical.len() > 1 {
+        run_mode("all_physical_cores", &physical, Some(single));
+    } else {
+        kprintln!("[JSR-PERF-SMP] mode=all_physical_cores status=unavailable physical={}", physical.len());
+    }
+    if logical.len() > 1 {
+        run_mode("all_logical_threads", &logical, Some(single));
+    } else {
+        kprintln!("[JSR-PERF-SMP] mode=all_logical_threads status=unavailable logical={}", logical.len());
+    }
+}
