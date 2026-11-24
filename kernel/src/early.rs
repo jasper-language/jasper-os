@@ -142,14 +142,23 @@ pub fn install(framebuffer: &mut FrameBuffer) -> bool {
 /// Publish a bounded boot-stage marker to serial and, when available, directly
 /// to the framebuffer.
 pub fn mark(stage: &str) {
+    mark_serial(stage);
+
+    #[cfg(target_arch = "x86_64")]
+    paint_stage(stage);
+}
+
+/// Publish a diagnostic stage to the independent serial/log path without
+/// advancing the visible Normal-profile boot screen.
+///
+/// 仅写入独立串口/日志路径，不推进本地 Normal 启动屏。用于逐 AP、逐设备
+/// 等 Verbose/Debug 级细节；完整诊断仍保留，但不能淹没用户可见阶段。
+pub fn mark_serial(stage: &str) {
     serial_init();
     serial_bytes(b"[JSR-EARLY] stage=");
     serial_bytes(stage.as_bytes());
     arch::console_write_byte(b'\r');
     arch::console_write_byte(b'\n');
-
-    #[cfg(target_arch = "x86_64")]
-    paint_stage(stage);
 }
 
 /// Report successful completion of a boot component.

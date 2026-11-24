@@ -439,6 +439,10 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
         _ => !identity,
     };
     let space = arch::current_space();
+    crate::early::append_progress(&alloc::format!(
+        "SMP starting processors present={}",
+        topo.count().saturating_sub(1)
+    ));
     for cpu in 1..topo.count() {
         let Some(pc) = percpu::get(cpu) else {
             crate::kprintln!("[JSR-SMP] reject=percpu_missing cpu={}", cpu);
@@ -464,11 +468,11 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
             timer_hz,
         };
         let marker = alloc::format!("SMP START {cpu}");
-        crate::early::mark(&marker);
+        crate::early::mark_serial(&marker);
         // SAFETY：栈专属于该处理器；启动帧满足平台要求并已映射；处理器依次启动。
         let started = unsafe { arch::cpu_start(&req, frame) };
         let marker = alloc::format!("SMP WAIT {cpu}");
-        crate::early::mark(&marker);
+        crate::early::mark_serial(&marker);
         let online = started.is_ok() && wait_until(|| pc.state.get() != CpuState::Starting);
         if !online || pc.state.get() != CpuState::Online {
             // 超时：判失败。迟到的报到会被状态机拒绝，该处理器随即停机。
@@ -476,6 +480,12 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
             failed += 1;
         }
     }
+    crate::early::append_progress(&alloc::format!(
+        "SMP online {}/{} failed={}",
+        online_set().len(),
+        topo.count(),
+        failed
+    ));
     // 全部报到后撤掉恒等映射；有失败者时保留（迟到的处理器可能仍在执行启动代码）。
     if let (Some(f), true, 0) = (frame, identity && mapped, failed) {
         if let Some(p) = VirtPage::from_start(f.start()) {

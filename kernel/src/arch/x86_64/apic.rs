@@ -268,13 +268,13 @@ pub fn send_init_startup(dest: u32, start_page: u8) -> bool {
     {
         // Clear stale delivery errors before the INIT sequence in xAPIC mode.
         let _ = clear_and_read_esr();
-        crate::early::mark("AP INIT ASSERT");
+        crate::early::mark_serial("AP INIT ASSERT");
         // INIT uses level-triggered delivery: assert INIT with both
         // LEVEL_TRIGGER and LEVEL_ASSERT, then deassert with LEVEL_TRIGGER alone.
         if !send(dest, ICR_INIT | ICR_LEVEL_TRIGGER | ICR_LEVEL_ASSERT) {
             return false;
         }
-        crate::early::mark("AP INIT ASSERT OK");
+        crate::early::mark_serial("AP INIT ASSERT OK");
         let esr = clear_and_read_esr();
         if esr != 0 {
             let marker = alloc::format!("AP INIT ASSERT ESR={esr:#x}");
@@ -285,26 +285,26 @@ pub fn send_init_startup(dest: u32, start_page: u8) -> bool {
         // (x86 family >= 0xF). Holding INIT here resets this Ryzen 7 5700X.
         #[cfg(not(feature = "smp-skip-init-deassert"))]
         {
-            crate::early::mark("AP INIT DEASSERT");
+            crate::early::mark_serial("AP INIT DEASSERT");
             if !send(dest, ICR_INIT | ICR_LEVEL_TRIGGER) {
                 return false;
             }
-            crate::early::mark("AP INIT DEASSERT WRITE DONE");
-            crate::early::mark("AP INIT DEASSERT OK");
+            crate::early::mark_serial("AP INIT DEASSERT WRITE DONE");
+            crate::early::mark_serial("AP INIT DEASSERT OK");
         }
         #[cfg(feature = "smp-skip-init-deassert")]
-        crate::early::mark("AP INIT DEASSERT SKIP");
+        crate::early::mark_serial("AP INIT DEASSERT SKIP");
     }
     #[cfg(feature = "smp-skip-init")]
-    crate::early::mark("AP INIT SKIP");
+    crate::early::mark_serial("AP INIT SKIP");
     for sipi in 1..=2 {
         let marker = alloc::format!("AP SIPI {sipi}");
-        crate::early::mark(&marker);
+        crate::early::mark_serial(&marker);
         if !send(dest, ICR_STARTUP | ICR_LEVEL_ASSERT | start_page as u32) {
             return false;
         }
         let marker = alloc::format!("AP SIPI {sipi} OK");
-        crate::early::mark(&marker);
+        crate::early::mark_serial(&marker);
         pit::delay_us(300);
     }
     true

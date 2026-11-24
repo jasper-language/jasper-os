@@ -343,7 +343,7 @@ pub unsafe fn start(req: &CpuStart<space::SpaceRoot>, frame: Option<PhysFrame>) 
         req.hw_id,
         frame.start()
     );
-    crate::early::mark(&sending);
+    crate::early::mark_serial(&sending);
     if apic::send_init_startup(req.hw_id, (frame.start() >> 12) as u8) {
         Ok(())
     } else {
@@ -378,7 +378,7 @@ extern "C" fn ap_entry(index: u64) -> ! {
 
 fn ap_mark(index: usize, stage: &str) {
     let line = alloc::format!("AP {} {} apic={:#x}", index, stage, apic::id());
-    crate::early::mark(&line);
+    crate::early::mark_serial(&line);
 }
 
 /// 逻辑下标 `cpu` 的 APIC 标识（未登记时为 `None`）。
