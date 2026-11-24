@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use jasper_rt::channel::Channel;
 use jasper_rt::handle::Handle;
 use jasper_rt::{entry, ids, sys, time};
-use kernel_core::service_info::{self, Operation, Request, Response, Status};
+use kernel_core::service_info::{self, ListResponse, Operation, Request, Response, Status};
 use kernel_core::usi;
 
 entry!(main);
@@ -148,6 +148,75 @@ fn snapshot(request: Request, generation: u64) -> Response {
     }
 }
 
+fn list(request: Request, generation: u64) -> Vec<u8> {
+    let (id, service, record_bytes) = match request.operation {
+        Operation::ProcessList => (
+            ids::SYSTEM_PROCESS_LIST,
+            usi::Service::ProcessList,
+            usi::PROCESS_BYTES,
+        ),
+        Operation::ModuleList => (
+            ids::SYSTEM_MODULE_LIST,
+            usi::Service::ModuleList,
+            usi::MODULE_BYTES,
+        ),
+        _ => return Vec::new(),
+    };
+    if request.deadline_tick != 0 && time::now() > request.deadline_tick {
+        return list_error(request, Status::TimedOut, generation);
+    }
+    let payload = match query(id, service, request.request_id) {
+        Ok(payload) => payload,
+        Err(_) => return list_error(request, Status::Unauthorized, generation),
+    };
+    let Some(response) =
+        ListResponse::success(request, generation, record_bytes as u16, &payload)
+    else {
+        return Vec::new();
+    };
+    let mut wire = vec![0u8; service_info::LIST_HEADER_BYTES + response.payload.len()];
+    response
+        .encode_into(&mut wire)
+        .map_or_else(Vec::new, |len| {
+            wire.truncate(len);
+            wire
+        })
+}
+
+fn list_error(request: Request, status: Status, generation: u64) -> Vec<u8> {
+    let Some(response) = ListResponse::error(request, status, generation) else {
+        return Vec::new();
+    };
+    let mut wire = [0u8; service_info::LIST_HEADER_BYTES];
+    response
+        .encode_into(&mut wire)
+        .map_or_else(Vec::new, |len| wire[..len].to_vec())
+}
+
+fn list_protocol_error(bytes: &[u8], generation: u64) -> Option<Vec<u8>> {
+    let request_id = u64::from_le_bytes(bytes.get(16..24)?.try_into().ok()?);
+    if request_id == 0 {
+        return None;
+    }
+    let operation = match *bytes.get(8)? {
+        3 => Operation::ProcessList,
+        4 => Operation::ModuleList,
+        _ => return None,
+    };
+    let response = ListResponse::error(
+        Request {
+            request_id,
+            deadline_tick: 0,
+            operation,
+        },
+        Status::Protocol,
+        generation,
+    )?;
+    let mut wire = [0u8; service_info::LIST_HEADER_BYTES];
+    let len = response.encode_into(&mut wire)?;
+    Some(wire[..len].to_vec())
+}
+
 fn dispatch(request: Request, generation: u64) -> Response {
     if request.deadline_tick != 0 && time::now() > request.deadline_tick {
         return Response::error(request, Status::TimedOut, generation).unwrap();
@@ -157,6 +226,9 @@ fn dispatch(request: Request, generation: u64) -> Response {
             .map(|value| Response::describe(request, value, generation))
             .unwrap_or_else(|status| Response::error(request, status, generation).unwrap()),
         Operation::Snapshot => snapshot(request, generation),
+        Operation::ProcessList | Operation::ModuleList => {
+            Response::error(request, Status::Unsupported, generation).unwrap()
+        }
     }
 }
 
@@ -168,6 +240,8 @@ fn protocol_error(bytes: &[u8]) -> Option<Response> {
     let operation = match *bytes.get(8)? {
         1 => Operation::Describe,
         2 => Operation::Snapshot,
+        3 => Operation::ProcessList,
+        4 => Operation::ModuleList,
         _ => return None,
     };
     Response::error(
@@ -193,17 +267,28 @@ fn main(channel_raw: u64, generation: u64) -> i32 {
             Err(_) => return 0,
         };
         if !received.handles.is_empty() || received.sender_app == 0 || received.len != bytes.len() {
-            if let Some(response) = protocol_error(&bytes) {
+            if let Some(response) = list_protocol_error(&bytes, generation) {
+                let _ = channel.send(&response);
+            } else if let Some(response) = protocol_error(&bytes) {
                 let _ = channel.send(&response.encode());
             }
             continue;
         }
         let Some(request) = Request::decode(&bytes) else {
-            if let Some(response) = protocol_error(&bytes) {
+            if let Some(response) = list_protocol_error(&bytes, generation) {
+                let _ = channel.send(&response);
+            } else if let Some(response) = protocol_error(&bytes) {
                 let _ = channel.send(&response.encode());
             }
             continue;
         };
+        if matches!(request.operation, Operation::ProcessList | Operation::ModuleList) {
+            let response = list(request, generation);
+            if response.is_empty() || channel.send(&response).is_err() {
+                return 0;
+            }
+            continue;
+        }
         if let Some(cached) = cache.find(request) {
             let response = if cached.request.operation == request.operation {
                 cached.response

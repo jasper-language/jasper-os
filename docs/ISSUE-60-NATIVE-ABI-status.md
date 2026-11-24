@@ -131,6 +131,28 @@ time64_time128_coherent=true ok=true
 
 Evidence: `evidence/issue60-service-time-20261124-r2`.
 
+`service.info` now also carries the canonical USI process and module record
+streams over the same native Channel.
+
+- `ProcessList` and `ModuleList` call the existing kernel process/module read
+  boundaries and validate canonical record sizes;
+- list responses are bounded to one Channel payload and carry generation,
+  record width and record count;
+- the probe exercises both list operations, replay, restart and missing
+  capability denial.
+
+QEMU/OVMF evidence:
+
+```text
+[JSR-SERVICE-INFO] describe=true snapshot=true replay=true process_list=true
+module_list=true list_replay=true deadline=true protocol=true conflict=true
+conflict_status=1 restart=true denied_capability=true ok=true
+```
+
+Evidence: `evidence/issue60-service-info-20261124-r10`. This deploys the real
+service replacement for process/module list operations while retaining legacy
+syscalls until all old callers migrate.
+
 ## Framework updates incorporated
 
 The latest #24/#61/#77/#82/#84 constraints establish one shared Charset and

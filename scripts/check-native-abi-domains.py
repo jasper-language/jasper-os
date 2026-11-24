@@ -171,11 +171,15 @@ def operation_matrix(
             }
         )
         decision = str(classified["decision"])
-        if name == "system.info.get":
+        if name in {
+            "system.info.get",
+            "system.process.list",
+            "system.module.list",
+        }:
             migration_status = "service-runtime-deployed;legacy-retained"
             evidence = (
                 "kernel-core/src/service_info.rs;user/infod/src/main.rs;"
-                "user/infoprobe/src/main.rs;evidence/issue60-service-info-20261124-r8"
+                "user/infoprobe/src/main.rs;evidence/issue60-service-info-20261124-r10"
             )
         else:
             migration_status = "classification-only"

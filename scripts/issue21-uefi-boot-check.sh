@@ -496,7 +496,7 @@ if [ "$MODE" = update-agent ]; then
 fi
 if [ "$MODE" = service-info ]; then
   grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
-  grep -aq '\[JSR-SERVICE-INFO\] describe=true snapshot=true replay=true deadline=true protocol=true conflict=true conflict_status=1 restart=true denied_capability=true ok=true' "$OUT/serial.log"
+  grep -aq '\[JSR-SERVICE-INFO\] describe=true snapshot=true replay=true process_list=true module_list=true list_replay=true deadline=true protocol=true conflict=true conflict_status=1 restart=true denied_capability=true ok=true' "$OUT/serial.log"
   ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
   echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
   exit 0

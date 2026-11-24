@@ -13,12 +13,16 @@ pub const VERSION: u16 = 1;
 pub const SERVICE_ID: u32 = 0x494e_464f; // "OFNI" little-endian, stable protocol identity.
 pub const REQUEST_BYTES: usize = 32;
 pub const RESPONSE_BYTES: usize = 64;
+pub const LIST_HEADER_BYTES: usize = 40;
+pub const MAX_LIST_PAYLOAD: usize = 64 * 1024 - LIST_HEADER_BYTES;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Operation {
     Describe = 1,
     Snapshot = 2,
+    ProcessList = 3,
+    ModuleList = 4,
 }
 
 impl Operation {
@@ -26,6 +30,8 @@ impl Operation {
         match value {
             1 => Some(Self::Describe),
             2 => Some(Self::Snapshot),
+            3 => Some(Self::ProcessList),
+            4 => Some(Self::ModuleList),
             _ => None,
         }
     }
@@ -211,6 +217,162 @@ impl Response {
     }
 }
 
+/// Bounded list response carried through the same service Channel.
+///
+/// The payload remains the canonical USI process/module record stream supplied
+/// by the existing kernel boundaries; this is not a second registry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ListResponse<'a> {
+    pub request_id: u64,
+    pub operation: Operation,
+    pub status: Status,
+    pub service_generation: u64,
+    pub record_bytes: u16,
+    pub records: u32,
+    pub payload: &'a [u8],
+}
+
+impl<'a> ListResponse<'a> {
+    pub fn success(
+        request: Request,
+        service_generation: u64,
+        record_bytes: u16,
+        payload: &'a [u8],
+    ) -> Option<Self> {
+        let expected = match request.operation {
+            Operation::ProcessList => crate::usi::PROCESS_BYTES,
+            Operation::ModuleList => crate::usi::MODULE_BYTES,
+            _ => return None,
+        };
+        if record_bytes as usize != expected
+            || payload.len() > MAX_LIST_PAYLOAD
+            || payload.len() % expected != 0
+            || payload.len() / expected > u32::MAX as usize
+        {
+            return None;
+        }
+        Some(Self {
+            request_id: request.request_id,
+            operation: request.operation,
+            status: Status::Ok,
+            service_generation,
+            record_bytes,
+            records: (payload.len() / expected) as u32,
+            payload,
+        })
+    }
+
+    pub fn error(request: Request, status: Status, service_generation: u64) -> Option<Self> {
+        if status == Status::Ok
+            || !matches!(request.operation, Operation::ProcessList | Operation::ModuleList)
+        {
+            return None;
+        }
+        Some(Self {
+            request_id: request.request_id,
+            operation: request.operation,
+            status,
+            service_generation,
+            record_bytes: 0,
+            records: 0,
+            payload: &[],
+        })
+    }
+
+    pub fn encode_into(self, output: &mut [u8]) -> Option<usize> {
+        let total = LIST_HEADER_BYTES.checked_add(self.payload.len())?;
+        if total > u16::MAX as usize
+            || self.payload.len() > MAX_LIST_PAYLOAD
+            || self.request_id == 0
+            || (self.status == Status::Ok)
+                != (self.payload.len() % self.record_bytes.max(1) as usize == 0)
+        {
+            return None;
+        }
+        if self.status != Status::Ok && (self.record_bytes != 0 || !self.payload.is_empty()) {
+            return None;
+        }
+        let out = output.get_mut(..total)?;
+        out[..8].copy_from_slice(
+            &Header {
+                protocol: PROTOCOL,
+                version: VERSION,
+                bytes: total as u16,
+            }
+            .encode(),
+        );
+        out[8] = self.operation as u8;
+        out[9] = self.status as u8;
+        out[10..16].fill(0);
+        put_u64(out, 16, self.request_id);
+        put_u64(out, 24, self.service_generation);
+        put_u32(out, 32, self.payload.len() as u32);
+        put_u16(out, 36, self.record_bytes);
+        put_u16(out, 38, 0);
+        out[LIST_HEADER_BYTES..].copy_from_slice(self.payload);
+        Some(total)
+    }
+
+    pub fn decode(input: &'a [u8]) -> Option<Self> {
+        if input.len() < LIST_HEADER_BYTES
+            || Header::decode(input[..8].try_into().ok()?)
+                != Some(Header {
+                    protocol: PROTOCOL,
+                    version: VERSION,
+                    bytes: u16::try_from(input.len()).ok()?,
+                })
+            || input[10..16].iter().any(|byte| *byte != 0)
+            || get_u16(input, 38) != 0
+        {
+            return None;
+        }
+        let operation = Operation::from_raw(input[8])?;
+        if !matches!(operation, Operation::ProcessList | Operation::ModuleList) {
+            return None;
+        }
+        let status = match input[9] {
+            0 => Status::Ok,
+            1 => Status::Protocol,
+            2 => Status::Unauthorized,
+            3 => Status::TimedOut,
+            4 => Status::Unsupported,
+            _ => return None,
+        };
+        let payload_bytes = get_u32(input, 32) as usize;
+        let record_bytes = get_u16(input, 36);
+        if payload_bytes != input.len() - LIST_HEADER_BYTES
+            || payload_bytes > MAX_LIST_PAYLOAD
+        {
+            return None;
+        }
+        if status == Status::Ok {
+            let expected = match operation {
+                Operation::ProcessList => crate::usi::PROCESS_BYTES,
+                Operation::ModuleList => crate::usi::MODULE_BYTES,
+                _ => return None,
+            };
+            if record_bytes as usize != expected || payload_bytes % expected != 0 {
+                return None;
+            }
+        } else if record_bytes != 0 || payload_bytes != 0 {
+            return None;
+        }
+        Some(Self {
+            request_id: get_u64(input, 16),
+            operation,
+            status,
+            service_generation: get_u64(input, 24),
+            record_bytes,
+            records: if record_bytes == 0 {
+                0
+            } else {
+                (payload_bytes / record_bytes as usize) as u32
+            },
+            payload: &input[LIST_HEADER_BYTES..],
+        })
+    }
+}
+
 fn put_u16(out: &mut [u8], at: usize, value: u16) {
     out[at..at + 2].copy_from_slice(&value.to_le_bytes());
 }
@@ -279,5 +441,30 @@ mod tests {
         let mut response = Response::describe(request, 1, 1).encode();
         response[9] = Status::Unauthorized as u8;
         assert_eq!(Response::decode(&response), None);
+    }
+
+    #[test]
+    fn list_response_carries_canonical_usi_records() {
+        let process = crate::usi::Process {
+            pid: 7,
+            app: 9,
+            state: crate::usi::PROCESS_RUNNING,
+            flags: 0,
+            threads_live: 1,
+            threads_total: 1,
+            exit_code: 0,
+        }
+        .encode();
+        let request = Request {
+            request_id: 11,
+            deadline_tick: 12,
+            operation: Operation::ProcessList,
+        };
+        let response =
+            ListResponse::success(request, 3, crate::usi::PROCESS_BYTES as u16, &process).unwrap();
+        let mut wire = [0u8; LIST_HEADER_BYTES + crate::usi::PROCESS_BYTES];
+        let len = response.encode_into(&mut wire).unwrap();
+        assert_eq!(ListResponse::decode(&wire[..len]), Some(response));
+        assert_eq!(response.records, 1);
     }
 }
