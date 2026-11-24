@@ -1428,19 +1428,30 @@ fn run_general_switch_workload(
         }
     }
     let mut spawned = 0usize;
+    let mut group_affinity = kernel_core::smp::CpuSet::EMPTY;
     for &cpu in cpus {
-        let mut affinity = kernel_core::smp::CpuSet::EMPTY;
-        if !affinity.insert(cpu) {
+        if !group_affinity.insert(cpu) {
+            return false;
+        }
+    }
+    for &cpu in cpus {
+        let mut single_affinity = kernel_core::smp::CpuSet::EMPTY;
+        if !single_affinity.insert(cpu) {
             continue;
         }
         for worker in 0..SWITCH_WORKERS_PER_CPU {
             let id = TaskId(12_000 + (cpu as u64 * SWITCH_WORKERS_PER_CPU as u64) + worker as u64);
+            let affinity = if cfg!(feature = "bench-skip-single") {
+                group_affinity.clone()
+            } else {
+                single_affinity.clone()
+            };
             if sched::spawn_on(
                 id,
                 "smp-switch-workload",
                 general_switch_worker,
                 None,
-                affinity.clone(),
+                affinity,
             )
             .is_ok()
             {
