@@ -28,6 +28,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::fmt::{self, Write as _};
 use core::hint::black_box;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -51,6 +52,113 @@ static CHECKS: AtomicU32 = AtomicU32::new(0);
 static FAILED: AtomicU32 = AtomicU32::new(0);
 /// 计时类断言超界的次数：只记录，不计入功能失败（仿真器下计时不可信）。
 static TIMING_FAILED: AtomicU32 = AtomicU32::new(0);
+static LAST_RECLAIMED: AtomicBool = AtomicBool::new(false);
+
+/// Result-log slots are test-fixture metadata, not a hardware capacity.
+const REPORT_ROWS: usize = 32;
+/// One framebuffer result row, retaining slightly more text than the display width.
+const REPORT_ROW_BYTES: usize = 120;
+
+#[derive(Clone, Copy)]
+struct ReportRow {
+    bytes: [u8; REPORT_ROW_BYTES],
+    len: usize,
+}
+
+impl ReportRow {
+    const fn empty() -> Self {
+        Self {
+            bytes: [0; REPORT_ROW_BYTES],
+            len: 0,
+        }
+    }
+
+    fn text(&self) -> &str {
+        core::str::from_utf8(&self.bytes[..self.len]).unwrap_or("")
+    }
+}
+
+struct ReportLog {
+    rows: [ReportRow; REPORT_ROWS],
+    len: usize,
+}
+
+impl ReportLog {
+    const fn new() -> Self {
+        Self {
+            rows: [ReportRow::empty(); REPORT_ROWS],
+            len: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    fn push_format(&mut self, args: fmt::Arguments) {
+        if self.len == self.rows.len() {
+            return;
+        }
+        let row = &mut self.rows[self.len];
+        row.len = 0;
+        let mut writer = RowWriter {
+            bytes: &mut row.bytes,
+            len: &mut row.len,
+        };
+        let _ = writer.write_fmt(args);
+        self.len += 1;
+    }
+
+    fn push_text(&mut self, text: &str) {
+        self.push_format(format_args!(
+            "{}",
+            text.trim_end_matches(|ch| ch == '\r' || ch == '\n')
+        ));
+    }
+}
+
+struct RowWriter<'a> {
+    bytes: &'a mut [u8],
+    len: &'a mut usize,
+}
+
+impl fmt::Write for RowWriter<'_> {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        for ch in text.chars() {
+            let mut encoded = [0u8; 4];
+            let bytes = ch.encode_utf8(&mut encoded).as_bytes();
+            if *self.len + bytes.len() > self.bytes.len() {
+                break;
+            }
+            self.bytes[*self.len..*self.len + bytes.len()].copy_from_slice(bytes);
+            *self.len += bytes.len();
+        }
+        Ok(())
+    }
+}
+
+static REPORT: SpinLock<ReportLog> = SpinLock::new(ReportLog::new());
+
+fn reset_report() {
+    REPORT.lock().clear();
+    LAST_RECLAIMED.store(false, Ordering::Release);
+}
+
+fn record_result(args: fmt::Arguments) {
+    REPORT.lock().push_format(args);
+}
+
+/// Capture a final user-space benchmark result. Progress and diagnostic lines
+/// are intentionally excluded; the final panel only contains measurements.
+pub(crate) fn capture_console_line(text: &str) {
+    let line = text.trim_end_matches(|ch| ch == '\r' || ch == '\n');
+    if line.starts_with("bench: ")
+        && line.contains(" n=")
+        && !line.contains("progress")
+    {
+        REPORT.lock().push_text(line);
+    }
+}
 
 fn check(ok: bool, what: &str) {
     CHECKS.fetch_add(1, Ordering::Relaxed);
@@ -123,6 +231,7 @@ const TASK_ID_BASE: u64 = 9800;
 /// 运行全部基准。演练期间关闭时间片抢占；结束时恢复进入前的设置与中断状态。
 /// Run every benchmark; preemption is off during the drill and restored afterwards.
 pub fn run() {
+    reset_report();
     kprintln!(
         "[JSR-BENCH] stage=calibration_begin timer_hz={} target_ticks={}",
         config::ACTIVE.clock.timer_hz,
@@ -165,6 +274,7 @@ pub fn run() {
         end_heap_mapped,
     );
     check(reclaimed, "基准演练结束后资源未回到起点");
+    LAST_RECLAIMED.store(reclaimed, Ordering::Release);
     arch::irq_restore(was_enabled);
     sched::set_preemption(prev_preemption);
     kprintln!(
@@ -177,6 +287,46 @@ pub fn run() {
         CHECKS.load(Ordering::Relaxed),
         failed(),
         timing_failed()
+    );
+}
+
+/// Replace transient progress output with the complete result table after all
+/// million-sample batches have finished.
+pub fn publish_results(failed: u32, timing_failed: u32) {
+    let report = REPORT.lock();
+    #[cfg(feature = "bench-profile")]
+    {
+        early::results_begin();
+        early::append_line("FINAL RESULTS - ALL MILLION-SAMPLE BATCHES");
+        early::append_line("METRIC                         N       P50       P99      P999       MAX");
+        for row in &report.rows[..report.len] {
+            let text = row.text();
+            if !text.is_empty() {
+                early::append_line(text);
+            }
+        }
+        let mut status = ReportRow::empty();
+        let mut writer = RowWriter {
+            bytes: &mut status.bytes,
+            len: &mut status.len,
+        };
+        let _ = write!(
+            writer,
+            "STATUS FAILED={} TIMING_FAILED={} CHECKS={} RECLAIMED={}",
+            failed,
+            timing_failed,
+            CHECKS.load(Ordering::Acquire),
+            LAST_RECLAIMED.load(Ordering::Acquire)
+        );
+        early::append_line(status.text());
+    }
+    kprintln!(
+        "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"summary\",\"metrics\":{},\"failed\":{},\"timing_failed\":{},\"checks\":{},\"resources_reclaimed\":{}}}",
+        report.len,
+        failed,
+        timing_failed,
+        CHECKS.load(Ordering::Acquire),
+        LAST_RECLAIMED.load(Ordering::Acquire)
     );
 }
 
@@ -256,6 +406,15 @@ fn report_values(
             HumanDuration::new(m.max, cal)
         );
         screen_line(&line);
+        record_result(format_args!(
+            "{} N={} P50={} P99={} P999={} MAX={}",
+            name,
+            m.count,
+            HumanDuration::new(m.p50, cal),
+            HumanDuration::new(m.p99, cal),
+            HumanDuration::new(m.p999, cal),
+            HumanDuration::new(m.max, cal)
+        ));
     }
     sum
 }
@@ -611,6 +770,7 @@ fn context_switch(cal: &Calibration) -> Option<Summary> {
 
 fn frames(cal: &Calibration) {
     let before = baseline();
+    let before_heap_mapped = heap::stats().3;
     let mut alloc = Vec::with_capacity(TAIL_ITERS);
     let mut free = Vec::with_capacity(TAIL_ITERS);
     let mut ok = true;
@@ -651,8 +811,14 @@ fn frames(cal: &Calibration) {
     };
     check(refused, "重复释放页帧未被拒绝或改动了空闲帧数");
     let after = baseline();
-    check(after == before, "页帧基准后资源未回到基线");
-    kprintln!("[JSR-BENCH] case=frame_refusal double_free_refused={} free_unchanged={} reclaimed={}", refused, refused, after == before);
+    let reclaimed = resources_reclaimed(
+        before,
+        after,
+        before_heap_mapped,
+        heap::stats().3,
+    );
+    check(reclaimed, "页帧基准后资源未回到基线");
+    kprintln!("[JSR-BENCH] case=frame_refusal double_free_refused={} free_unchanged={} reclaimed={}", refused, refused, reclaimed);
 }
 
 // ---------------------------------------------------------------------------

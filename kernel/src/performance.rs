@@ -42,6 +42,7 @@ fn finish(ctx: &mut BootCtx) {
         timing_failed
     );
     emit(line.as_str());
+    bench_demo::publish_results(failed, timing_failed);
     arch::irq_enable();
     let mut ticks = 0u64;
     let mut pet_countdown = 0u32;
