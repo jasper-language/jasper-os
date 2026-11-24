@@ -75,6 +75,11 @@ streaming decoder and a dynamic `Vec<char>` grid:
 - Noto coverage is alpha-blended against the current destination pixel;
 - the text store no longer allocates while the DISPLAY lock is held.
 
+The streaming decoder is now a tested `kernel_core::utf8_stream` primitive.
+Unit tests cover a multibyte scalar split across calls, consecutive decoded
+characters across calls, invalid leading bytes, invalid continuation bytes and
+preservation of an ASCII byte that follows a partial sequence.
+
 Interactive QEMU evidence is retained at
 `evidence/issue93-utf8-terminal-qemu-20261124-r4`. Prompt/help/update/history/
 edit/Ctrl-C/EOF markers and first-program reclamation passed, but the harness

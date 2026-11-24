@@ -1094,6 +1094,13 @@ fn run_parallel_context_switch(mode: &str, cpus: &[usize], cal: &Calibration) ->
     CS_RELEASE.store(false, Ordering::Release);
     CS_RELEASE_CYCLES.store(0, Ordering::Release);
     CS_EXPECTED.store(cpus.len().saturating_mul(2) as u32, Ordering::Release);
+    // A single logical CPU has no cross-CPU start alignment to preserve. Let
+    // the first scheduled participant proceed and the scheduler alternate it
+    // with its partner; otherwise one participant can occupy forever while
+    // waiting for a peer that has not yet been scheduled.
+    if cpus.len() == 1 {
+        CS_RELEASE.store(true, Ordering::Release);
+    }
     for &cpu in cpus {
         let Some(done) = CS_DONE.get(cpu) else {
             return false;

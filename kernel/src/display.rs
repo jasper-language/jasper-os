@@ -79,8 +79,7 @@ struct Runtime {
     text_columns: usize,
     text_rows: usize,
     cursor: usize,
-    utf8_pending: [u8; 4],
-    utf8_len: usize,
+    utf8: kernel_core::utf8_stream::Utf8StreamDecoder,
     prompt_reported: bool,
     echo_reported: bool,
     ui_input_capture: bool,
@@ -246,8 +245,7 @@ pub fn start() -> Result<(), DisplayInputError> {
         text_columns,
         text_rows,
         cursor: 0,
-        utf8_pending: [0; 4],
-        utf8_len: 0,
+        utf8: kernel_core::utf8_stream::Utf8StreamDecoder::new(),
         prompt_reported: false,
         echo_reported: false,
         ui_input_capture: false,
@@ -918,17 +916,22 @@ impl Runtime {
 
     fn append_text(&mut self, bytes: &[u8]) {
         for byte in bytes.iter().copied() {
-            if byte < 0x80 {
-                self.flush_incomplete_utf8();
-                match byte {
-                    b'\r' => self.cursor -= self.cursor % self.text_columns,
-                    b'\n' => self.newline(),
-                    0x08 => self.backspace(),
-                    0x20..=0x7e => self.put_character(byte as char),
-                    _ => self.put_character('?'),
+            let mut retry = Some(byte);
+            while let Some(byte) = retry.take() {
+                match self.utf8.push(byte) {
+                    kernel_core::utf8_stream::Decode::Pending => {}
+                    kernel_core::utf8_stream::Decode::Character(character) => match character {
+                        '\r' => self.cursor -= self.cursor % self.text_columns,
+                        '\n' => self.newline(),
+                        '\u{0008}' => self.backspace(),
+                        character if character.is_control() => self.put_character('?'),
+                        character => self.put_character(character),
+                    },
+                    kernel_core::utf8_stream::Decode::Invalid(next) => {
+                        self.put_character('?');
+                        retry = next;
+                    }
                 }
-            } else {
-                self.push_utf8_byte(byte);
             }
         }
         if !self.prompt_reported && self.contains_text("JASPER> ") {
@@ -938,64 +941,6 @@ impl Runtime {
         if !self.echo_reported && self.contains_text("NATIVE-ECHO-OK") {
             self.echo_reported = true;
             kprintln!("[JSR-GTERM] output=echo-ok visible=true");
-        }
-    }
-
-    fn push_utf8_byte(&mut self, byte: u8) {
-        if self.utf8_len == 0 {
-            let expected = match byte {
-                0xc2..=0xdf => 2,
-                0xe0..=0xef => 3,
-                0xf0..=0xf4 => 4,
-                _ => {
-                    self.put_character('?');
-                    return;
-                }
-            };
-            self.utf8_pending[0] = byte;
-            self.utf8_len = 1;
-            if expected == 1 {
-                self.flush_incomplete_utf8();
-            }
-            return;
-        }
-        if byte & 0xc0 != 0x80 {
-            self.flush_incomplete_utf8();
-            self.push_utf8_byte(byte);
-            return;
-        }
-        let expected = match self.utf8_pending[0] {
-            0xc2..=0xdf => 2,
-            0xe0..=0xef => 3,
-            0xf0..=0xf4 => 4,
-            _ => {
-                self.utf8_len = 0;
-                self.put_character('?');
-                return;
-            }
-        };
-        if self.utf8_len >= self.utf8_pending.len() {
-            self.flush_incomplete_utf8();
-            return;
-        }
-        self.utf8_pending[self.utf8_len] = byte;
-        self.utf8_len += 1;
-        if self.utf8_len == expected {
-            match core::str::from_utf8(&self.utf8_pending[..expected])
-                .ok()
-                .and_then(|text| text.chars().next())
-            {
-                Some(character) => self.put_character(character),
-                None => self.put_character('?'),
-            }
-            self.utf8_len = 0;
-        }
-    }
-
-    fn flush_incomplete_utf8(&mut self) {
-        if self.utf8_len != 0 {
-            self.utf8_len = 0;
-            self.put_character('?');
         }
     }
 
