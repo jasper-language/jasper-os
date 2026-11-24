@@ -6,7 +6,7 @@ The PXE TFTP files serve the same source revision that passed QEMU control
 `evidence/issue95-general-switch-qemu-20261124-r5`, with forced x2APIC.
 
 ```text
-e60f77fe96d66898635820bc3a446be2598259ea254487db4cc58b9a266a22df  tftp/kernel-x86_64
+560be39b4b52e6d4f6fe09389c777bc4973a3a80fc66716992fe87793471658d  tftp/kernel-x86_64
 61e9aaad21bacb98abfcfe02306c6322559db3ab68303e3fae3e4cc191042782  tftp/bootloader.efi
 ```
 

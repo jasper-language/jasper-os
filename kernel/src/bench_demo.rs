@@ -1034,6 +1034,12 @@ static SWITCH_TARGETS: [AtomicU64; kernel_core::smp::MAX_CPUS] =
     [const { AtomicU64::new(0) }; kernel_core::smp::MAX_CPUS];
 static SWITCH_BASELINE_SET: [AtomicBool; kernel_core::smp::MAX_CPUS] =
     [const { AtomicBool::new(false) }; kernel_core::smp::MAX_CPUS];
+static SWITCH_CPU_READY: [AtomicU32; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicU32::new(0) }; kernel_core::smp::MAX_CPUS];
+static SWITCH_CPU_RELEASE: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; kernel_core::smp::MAX_CPUS];
+static SWITCH_WORKER_LOGGED: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; kernel_core::smp::MAX_CPUS];
 static SWITCH_WORKERS_DONE: AtomicU32 = AtomicU32::new(0);
 static SWITCH_LAST_REPORTED: [AtomicU64; kernel_core::smp::MAX_CPUS] =
     [const { AtomicU64::new(0) }; kernel_core::smp::MAX_CPUS];
@@ -1264,12 +1270,28 @@ fn parallel_switch_partner() {
 #[cfg(feature = "bench-profile")]
 fn general_switch_worker() {
     let cpu = arch::cpu_index();
-    let ready = CS_READY.fetch_add(1, Ordering::AcqRel) + 1;
-    if ready == CS_EXPECTED.load(Ordering::Acquire) {
+    let slot = crate::smp::percpu::this().current();
+    if SWITCH_WORKER_LOGGED
+        .get(slot)
+        .is_some_and(|logged| !logged.swap(true, Ordering::AcqRel))
+    {
+        kprintln!(
+            "[JSR-SMP-SW] stage=general_worker_start cpu={} slot={} cpu_ready={}",
+            cpu,
+            slot,
+            SWITCH_CPU_READY[cpu].load(Ordering::Acquire) + 1
+        );
+    }
+    let global_ready = CS_READY.fetch_add(1, Ordering::AcqRel) + 1;
+    let cpu_ready = SWITCH_CPU_READY[cpu].fetch_add(1, Ordering::AcqRel) + 1;
+    if cpu_ready == SWITCH_WORKERS_PER_CPU as u32 {
+        SWITCH_CPU_RELEASE[cpu].store(true, Ordering::Release);
+    }
+    if global_ready == CS_EXPECTED.load(Ordering::Acquire) {
         CS_RELEASE_CYCLES.store(arch::measure_cycles() as usize, Ordering::Release);
         CS_RELEASE.store(true, Ordering::Release);
     }
-    while !CS_RELEASE.load(Ordering::Acquire)
+    while !SWITCH_CPU_RELEASE[cpu].load(Ordering::Acquire)
         && !CS_ABORT.load(Ordering::Acquire)
         && !switch_deadline_reached()
     {
@@ -1360,6 +1382,9 @@ fn run_general_switch_workload(
     CS_RELEASE_CYCLES.store(0, Ordering::Release);
     CS_EXPECTED.store(expected_workers as u32, Ordering::Release);
     SWITCH_WORKERS_DONE.store(0, Ordering::Release);
+    for logged in &SWITCH_WORKER_LOGGED {
+        logged.store(false, Ordering::Release);
+    }
     let switch_seconds = if target_per_cpu <= 1_000 { 20 } else { 120 };
     CS_SWITCH_DEADLINE.store(
         arch::measure_cycles().saturating_add(
@@ -1374,6 +1399,8 @@ fn run_general_switch_workload(
         SWITCH_BASELINES[cpu].store(0, Ordering::Release);
         SWITCH_TARGETS[cpu].store(target_per_cpu as u64, Ordering::Release);
         SWITCH_BASELINE_SET[cpu].store(false, Ordering::Release);
+        SWITCH_CPU_READY[cpu].store(0, Ordering::Release);
+        SWITCH_CPU_RELEASE[cpu].store(false, Ordering::Release);
         let start = index.saturating_mul(per_cpu_capacity);
         let pointer = unsafe { records.as_mut_ptr().add(start) };
         if !sched::configure_switch_sample_sink(cpu, pointer, per_cpu_capacity) {
@@ -1387,7 +1414,6 @@ fn run_general_switch_workload(
             return false;
         }
     }
-
     let mut spawned = 0usize;
     for &cpu in cpus {
         let mut affinity = kernel_core::smp::CpuSet::EMPTY;
@@ -1987,12 +2013,21 @@ fn run_parallel_mode(mode: &str, cpus: &[usize], cal: &Calibration) -> bool {
             switch_planned_samples =
                 switch_planned_samples.saturating_add(iterations.saturating_mul(cpus.len()));
         }
-        early::append_progress(&alloc::format!(
-            "{} RUNNING CONTROLLED ROUND_TRIP",
+        #[cfg(not(feature = "bench-skip-single"))]
+        {
+            early::append_progress(&alloc::format!(
+                "{} RUNNING CONTROLLED ROUND_TRIP",
+                mode
+            ));
+            ok &= run_parallel_context_switch(mode, cpus, cal, 1_000);
+            switch_planned_samples =
+                switch_planned_samples.saturating_add(1_000 * cpus.len());
+        }
+        #[cfg(feature = "bench-skip-single")]
+        record_result(format_args!(
+            "{} CONTROLLED_ROUND_TRIP SKIPPED reason=physical_diagnostic",
             mode
         ));
-        ok &= run_parallel_context_switch(mode, cpus, cal, 1_000);
-        switch_planned_samples = switch_planned_samples.saturating_add(1_000 * cpus.len());
     }
     #[cfg(all(not(feature = "bench-switch-diagnostic"), feature = "bench-profile"))]
     {
