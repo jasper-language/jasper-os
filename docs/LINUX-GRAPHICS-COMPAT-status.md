@@ -1,11 +1,12 @@
 # Linux Vulkan 图形兼容状态
 
-更新日期：2026-11-17。
+更新日期：2026-11-24。
 
 状态：**core-passed**。Vulkan 能力、WSI 状态机、输入、设备内存导入、GPU
 提交/完成、fence/timeline 和 reset 已有可执行核心；真实 Linux Vulkan loader +
-SwiftShader ICD 的 compute 路径已在 Jasper root 中执行。物理 GPU、硬件 WSI、
-metal2vulkan render/present 和 DXVK/VKD3D 端到端仍未完成。
+SwiftShader ICD 的 compute 路径已在 Jasper root 中执行，Metal2Vulkan v0.2.0
+render-to-texture 也已在 Mesa lavapipe 上通过精确像素回读。物理 GPU、
+硬件 WSI、可见 present 和 DXVK/VKD3D 硬件路径仍未完成。
 
 ## 分层边界
 
@@ -41,9 +42,24 @@ metal2vulkan render/present 和 DXVK/VKD3D 端到端仍未完成。
 中的 compute 路径在 Jasper 中真实执行；SwiftShader 是 CPU 设备，不是物理 GPU
 验收。
 
-`metal2vulkan-render` 当前已进入 fragment pipeline，但在
-`ip=0x100086f1909d` 读取 `0x10006e4ba4f0` 时出现 page fault，退出码为 -1，
-资源也未完全回到基线。该结果明确保持失败，不用 compute 成功替代。
+2026-11-24 的 Metal2Vulkan v0.2.0 验收使用未修改的上游 examples、Linux
+Vulkan loader 和 Mesa lavapipe：
+
+```text
+device: llvmpipe (LLVM 21.1.8, 256 bits)
+output[0..4] = [0.0, 3.0, 6.0, 9.0], ..., output[999] = 2997: as expected
+every texel as expected: the top-left quarter drawn, the rest cleared
+program=metal2vulkan-render syscalls=3718 exit_zero=true
+frames_before=941344 resources=true failed=0
+```
+
+该 render 路径真实执行 render pipeline、private texture、clear、draw、
+texture-to-buffer copy、fence 和 mapped pixel readback。它不代表可见
+swapchain/present、物理 GPU 或硬件显示。证据见
+`evidence/compat-metal2vulkan-v020-r21-lavapipe/README.md`。
+
+SwiftShader render 仍有一条独立失败：其 JIT 代码读取已经 `munmap` 的匿名
+分配并 page fault。该失败没有被 lavapipe 成功掩盖；两种后端分别记录。
 
 ## 验证
 
@@ -66,11 +82,12 @@ compat-graphics-software: PASS loader=true icd=swiftshader compute=true render=f
 ## 未完成门
 
 - 物理 GPU 的厂商 ICD、真实 DRM/X11/XCB/Wayland surface 和硬件 presented pixels；
-- `metal2vulkan-render` page fault、render-to-texture 像素和 WSI/present 闭环；
+- `metal2vulkan-render` 可见 WSI/present 闭环；
 - 真实 GPU 页表、DMA-BUF/FD 导入、IOMMU 激活与 cache 一致性；
 - Vulkan command buffer 在物理 GPU 上执行 shader、拷贝和像素校验；
 - reset 前后的 FLR、IOMMU、SR-IOV/mdev、DMA/IRQ 静默；
-- DXVK/VKD3D-Proton 二进制执行真实 Direct3D 工作负载；
-- Wine + DXVK/VKD3D-Proton 端到端与真实性能。
+- DXVK/VKD3D-Proton 的物理 GPU、WSI 和 conformance；软件路径由
+  `verification/compat-d3d12.toml` 与 WSI 证据独立验收；
+- Wine + DXVK/VKD3D-Proton 的真实硬件性能。
 
 因此 `COMPAT-GRAPHICS-1` 保持 `core-passed`。

@@ -11,16 +11,28 @@
  *   x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror \
  *     -Wl,--disable-dynamicbase,--no-insert-timestamp \
  *     -o d3d12-probe.exe d3d12_probe.c \
- *     -ld3d12 -ldxguid -luuid
+ *     -ldxguid -luuid
  *
  * The fixed image base is required only by the current bounded Jasper user
  * window. It is not part of the eventual D3D12 acceptance profile.
  */
 
+static void write_line(const char *line)
+{
+    HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD written = 0;
+    if (output && output != INVALID_HANDLE_VALUE) {
+        WriteFile(output, line, (DWORD)strlen(line), &written, NULL);
+    }
+}
+
 static int fail(const char *stage, HRESULT result)
 {
-    printf("D3D12_PROBE_FAIL stage=%s hr=0x%08lx\n",
-           stage, (unsigned long)result);
+    char line[192];
+    snprintf(line, sizeof(line),
+             "D3D12_PROBE_FAIL stage=%s hr=0x%08lx\n",
+             stage, (unsigned long)result);
+    write_line(line);
     return 1;
 }
 
@@ -49,6 +61,11 @@ static void transition(
 
 static int run_probe(void)
 {
+    typedef HRESULT (WINAPI *CreateDeviceFn)(
+        IUnknown *,
+        D3D_FEATURE_LEVEL,
+        REFIID,
+        void **);
     D3D12_HEAP_PROPERTIES default_heap = {0};
     D3D12_HEAP_PROPERTIES readback_heap = {0};
     D3D12_RESOURCE_DESC texture_desc = {0};
@@ -72,13 +89,20 @@ static int run_probe(void)
     ID3D12Fence *fence = NULL;
     ID3D12Device *device = NULL;
     ID3D12CommandList *lists[1];
+    HMODULE d3d12_module = NULL;
+    CreateDeviceFn create_device = NULL;
     void *mapped = NULL;
     const unsigned char *pixel;
     HANDLE event = NULL;
     HRESULT result;
     DWORD wait_result;
 
-    result = D3D12CreateDevice(
+    d3d12_module = LoadLibraryW(L"d3d12.dll");
+    if (!d3d12_module) return fail("load-d3d12", HRESULT_FROM_WIN32(GetLastError()));
+    create_device = (CreateDeviceFn)(void *)GetProcAddress(
+        d3d12_module, "D3D12CreateDevice");
+    if (!create_device) return fail("resolve-d3d12", HRESULT_FROM_WIN32(GetLastError()));
+    result = create_device(
         NULL,
         D3D_FEATURE_LEVEL_11_0,
         &IID_ID3D12Device,
@@ -235,14 +259,23 @@ static int run_probe(void)
     pixel = (const unsigned char *)mapped;
     if (pixel[0] != 32 || pixel[1] != 64 ||
         pixel[2] != 128 || pixel[3] != 255) {
-        printf("D3D12_PROBE_FAIL stage=pixel pixel=%u,%u,%u,%u\n",
-               pixel[0], pixel[1], pixel[2], pixel[3]);
+        char line[160];
+        snprintf(line, sizeof(line),
+                 "D3D12_PROBE_FAIL stage=pixel pixel=%u,%u,%u,%u\n",
+                 pixel[0], pixel[1], pixel[2], pixel[3]);
+        write_line(line);
         ID3D12Resource_Unmap(staging, 0, NULL);
+        FreeLibrary(d3d12_module);
         return 1;
     }
-    printf(
-        "D3D12_PROBE_OK pixel=32,64,128,255 observed=%u,%u,%u,%u row_pitch=%u\n",
-        pixel[0], pixel[1], pixel[2], pixel[3], row_pitch);
+    {
+        char line[192];
+        snprintf(
+            line, sizeof(line),
+            "D3D12_PROBE_OK pixel=32,64,128,255 observed=%u,%u,%u,%u row_pitch=%u\n",
+            pixel[0], pixel[1], pixel[2], pixel[3], row_pitch);
+        write_line(line);
+    }
     ID3D12Resource_Unmap(staging, 0, NULL);
 
     if (event != NULL) CloseHandle(event);
@@ -254,71 +287,60 @@ static int run_probe(void)
     RELEASE(list);
     RELEASE(allocator);
     RELEASE(device);
+    FreeLibrary(d3d12_module);
     return 0;
 }
 
 /*
- * Run the offscreen probe on Wine's current desktop. The probe does not
- * require explorer.exe, X11 or Wayland; forcing the service desktop would
- * additionally exercise the first explorer launch and obscure device-only
- * failures.
+ * Bind the current process and thread to Wine's service desktop before any
+ * D3D12 module initialization can request a foreign desktop.
  */
 static int run_on_service_desktop(void)
 {
-    STARTUPINFOW startup = {0};
-    PROCESS_INFORMATION process = {0};
-    WCHAR module[MAX_PATH];
-    WCHAR command[MAX_PATH + 32];
-    HANDLE standard_handles[3];
-    DWORD exit_code = 1;
+    static const WCHAR station_name[] = L"__wineservice_winstation";
+    static const WCHAR desktop_name[] = L"Default";
+    HWINSTA station;
+    HDESK desktop;
+    DWORD error;
 
-    if (!GetModuleFileNameW(NULL, module, ARRAYSIZE(module))) {
-        return fail("locate-self", HRESULT_FROM_WIN32(GetLastError()));
+    station = CreateWindowStationW(station_name, 0, WINSTA_ALL_ACCESS, NULL);
+    if (!station && GetLastError() == ERROR_OBJECT_ALREADY_EXISTS) {
+        station = OpenWindowStationW(station_name, FALSE, WINSTA_ALL_ACCESS);
     }
-    if (swprintf(command, ARRAYSIZE(command), L"\"%ls\" --service-child", module) < 0) {
-        return fail("build-service-command", HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER));
+    if (!station) {
+        return fail("open-service-winstation",
+                    HRESULT_FROM_WIN32(GetLastError()));
     }
+    if (!SetProcessWindowStation(station)) {
+        error = GetLastError();
+        CloseHandle(station);
+        return fail("set-service-winstation", HRESULT_FROM_WIN32(error));
+    }
+    CloseHandle(station);
 
-    standard_handles[0] = GetStdHandle(STD_INPUT_HANDLE);
-    standard_handles[1] = GetStdHandle(STD_OUTPUT_HANDLE);
-    standard_handles[2] = GetStdHandle(STD_ERROR_HANDLE);
-    for (size_t index = 0; index < ARRAYSIZE(standard_handles); index++) {
-        if (standard_handles[index] && standard_handles[index] != INVALID_HANDLE_VALUE) {
-            SetHandleInformation(
-                standard_handles[index], HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
-        }
+    desktop = CreateDesktopW(desktop_name, NULL, NULL, 0, GENERIC_ALL, NULL);
+    if (!desktop && GetLastError() == ERROR_OBJECT_ALREADY_EXISTS) {
+        desktop = OpenDesktopW(desktop_name, 0, FALSE, GENERIC_ALL);
     }
-
-    startup.cb = sizeof(startup);
-    startup.dwFlags = STARTF_USESTDHANDLES;
-    startup.hStdInput = standard_handles[0];
-    startup.hStdOutput = standard_handles[1];
-    startup.hStdError = standard_handles[2];
-    startup.lpDesktop = NULL;
-
-    if (!CreateProcessW(
-            NULL,
-            command,
-            NULL,
-            NULL,
-            TRUE,
-            0,
-            NULL,
-            NULL,
-            &startup,
-            &process)) {
-        return fail("spawn-service-child", HRESULT_FROM_WIN32(GetLastError()));
+    if (!desktop) {
+        return fail("open-service-desktop",
+                    HRESULT_FROM_WIN32(GetLastError()));
     }
-    WaitForSingleObject(process.hProcess, INFINITE);
-    GetExitCodeProcess(process.hProcess, &exit_code);
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
-    return exit_code == 0 ? 0 : 1;
+    if (!SetThreadDesktop(desktop)) {
+        error = GetLastError();
+        CloseHandle(desktop);
+        return fail("set-service-desktop", HRESULT_FROM_WIN32(error));
+    }
+    CloseHandle(desktop);
+
+    write_line("D3D12_DESKTOP service=true\n");
+    return run_probe();
 }
 
 int main(int argc, char **argv)
 {
+    (void)argv;
+    setvbuf(stdout, NULL, _IONBF, 0);
     if (argc == 1) return run_on_service_desktop();
-    if (argc == 2 && strcmp(argv[1], "--service-child") == 0) return run_probe();
     return fail("arguments", E_INVALIDARG);
 }

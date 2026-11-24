@@ -18,8 +18,8 @@ command=bash scripts/build-d3d12-probe.sh
 
 ```text
 target/compat-d3d12/d3d12-probe.exe:
-  PE32+ executable (console) x86-64, for MS Windows, 19 sections
-sha256=c7afa08984ccf91e715df0210c747ca323226217a6a17a30ad6a1ae0ddbb8412
+  PE32+ executable (console) x86-64, for MS Windows, 18 sections
+sha256=486a6e45025d3c277125791f2e97a30e855e80cf5e7b5cedcbfda0472b5ca20e
 ```
 
 The build uses `--disable-dynamicbase` because Jasper's current bounded user

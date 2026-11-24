@@ -1,8 +1,8 @@
 schema = 1
 node = "COMPAT-D3D-1"
 status = "core-passed"
-updated = "2026-11-22"
-acceptance_claim = "bounded-fixture-not-runtime-pass"
+updated = "2026-11-24"
+acceptance_claim = "bounded-software-runtime-pass-not-physical"
 
 [baseline]
 name = "VKD3D-Proton"
@@ -45,9 +45,9 @@ hardware_gpu = false
 
 [[case]]
 id = "d3d12-offscreen-runtime"
-status = "not-run"
-environment = "jasper-qemu-software"
-evidence = ""
+status = "passed"
+environment = "jasper-qemu-lavapipe"
+evidence = "evidence/compat-wine-d3d12-r143-steady-state/README.md"
 marker = "D3D12_PROBE_OK pixel=32,64,128,255"
 hardware_gpu = false
 
@@ -68,10 +68,6 @@ marker = "D3D12_PHYSICAL_OK"
 hardware_gpu = true
 
 [[remaining_gate]]
-id = "d3d12-runtime-through-wine"
-reason = "fixture and pinned VKD3D assets exist, but no Jasper UEFI/QEMU runtime marker has been captured"
-
-[[remaining_gate]]
 id = "swapchain-wsi-present"
 reason = "offscreen clear/readback does not exercise DXGI swapchain, compositor surface or presented pixels"
 
@@ -81,7 +77,7 @@ reason = "the service desktop is headless and proves neither interactive input n
 
 [[remaining_gate]]
 id = "resource-reclamation"
-reason = "D3D11 currently reports resources=false; D3D12 worker, allocator, fence and mapping cleanup is not yet proven"
+reason = "the bounded D3D12 steady-state run is clean; compatibility-wide error, shutdown and interrupted-submit reclamation remains open"
 
 [[remaining_gate]]
 id = "physical-gpu-and-pixel6a"

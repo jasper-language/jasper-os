@@ -1,11 +1,13 @@
 # COMPAT-D3D-1 D3D12 状态
 
-更新日期：2026-11-23。
+更新日期：2026-11-24。
 
-状态：**core-passed；D3D12 fixture 已建立，Jasper 运行时尚未通过。**
+状态：**core-passed；Jasper/QEMU/lavapipe 的 D3D12 离屏运行时已通过。**
 
-本切片增加 VKD3D-Proton 3.1 的固定资产边界和 D3D12 离屏 probe，但不把
-fixture 可构建、D3D11 通过或 host baseline 当作 D3D12 done。
+本节点固定 VKD3D-Proton 3.1 资产边界，并已在真实 Jasper Linux ABI 和 Wine
+进程内完成 D3D12 离屏渲染、fence 等待、映射回读及稳态资源回收。该结果是
+软件 Vulkan（Mesa lavapipe）验收，不把 fixture、D3D11、宿主对照或 QEMU
+软件 ICD 当成物理 GPU、D3D12 WSI 或全面 conformance 完成。
 
 ## 固定基线
 
@@ -44,8 +46,8 @@ Jasper bounded user window 还不覆盖 Wine 随机化 PE 基址，因此该切�
 ISSUE21_UEFI_MODE=compat-wine-d3d12
 ```
 
-该模式要求字面量 `D3D12_PROBE_OK`、进程退出零和 `resources=true`。接线完成
-不改变下方“尚未运行”的结论。
+该模式要求字面量 `D3D12_PROBE_OK`、进程退出零和 `resources=true`。第一次
+执行建立 Wine prefix 和 compat cache，第二次执行作为稳态验收。
 
 2026-11-22 已在隔离 Debian bookworm 容器中使用 MinGW-w64 GCC 12.2 实际交叉
 编译，产物为 x86-64 PE32+ console executable。该结果仅证明 fixture 可构建。
@@ -68,6 +70,35 @@ D3D12_PROBE_OK pixel=32,64,128,255 observed=32,64,128,255 row_pitch=256
 ```
 
 该结果证明 fixture、Wine/DXVK/VKD3D 和 lavapipe 在宿主控制路径上可用。
+
+2026-11-24 的 r143 已完成 Jasper guest 运行时验收：
+
+```text
+D3D12_PROBE_OK pixel=32,64,128,255 observed=32,64,128,255 row_pitch=256
+```
+
+第二次稳态运行结果：
+
+```text
+program=compat-wine-d3d12 syscalls=32690 exit_zero=true
+frames_before=940409 resources=true failed=0
+[JSR-LIFE-HEALTH] result=root_execution_complete
+```
+
+此前的 `E_OUTOFMEMORY` 已定位到 Linux compat heap 固定 64 MiB 虚拟窗口。
+r143 的 VKD3D 分配越过原窗口后仍由动态 ceiling 接纳：
+
+```text
+requested=0x10001458e000 current=0x10001456b000 ceiling=0x100040000000
+```
+
+该 ceiling 来自当前进程的 live mapping/reservation，物理帧和进程配额仍由
+原有内核准入执行。修复不是 VKD3D 专用旁路。证据见
+`evidence/compat-wine-d3d12-r143-steady-state/README.md`。
+
+servicedesktop 启动期间仍有一个 Wine helper 在 PE 首选基址
+`0x7ff600003670` 页故障；主 D3D12 probe 随后继续并通过。因此该 helper
+问题保留为 Wine 桌面/loader 缺陷，不能用 D3D12 离屏通过来掩盖。
 
 offscreen probe 的启动桌面修正为 Wine 当前桌面，不再强制首次 explorer
 服务桌面。宿主仍通过；Jasper guest 在 2 GiB 和 4 GiB 下都越过 explorer
@@ -108,12 +139,15 @@ get_desktop_window failed to create desktop window
 D3D11_PROBE_OK feature=0xb000 pixel=32,64,128,255
 ```
 
-尚未运行或通过的是：
+已通过的是 VKD3D-Proton 3.1 D3D12 离屏运行时：
 
-- VKD3D-Proton D3D12 probe 在 Jasper UEFI/QEMU 中执行；
+- default texture、RTV、barrier、clear、copy、fence 和 mapped readback；
+- 第二次稳态运行的零物理帧保留和 `resources=true`。
+
+尚未通过的是：
+
 - DXGI swapchain、WSI、present 和 presented pixels；
 - 桌面窗口、焦点和真实输入；
-- D3D12 allocator、fence、worker 和 mapping 的资源回收；
 - 物理 GPU、Pixel 6a 和硬件显示验收。
 
 因此 `COMPAT-D3D-1` 继续保持 `core-passed`，`COMPAT-CONFORMANCE-1` 仍不得

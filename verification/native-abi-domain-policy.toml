@@ -1,0 +1,67 @@
+schema = 1
+updated = "2026-11-24"
+
+# This is an audit classifier, not permission to perform a mechanical rename.
+# Every entry still requires a real consumer and execution-boundary review.
+[target_namespaces]
+kernel = "kernel."
+service = "service."
+exokernel = "exokernel."
+
+[retired_new_protocol_namespaces]
+names = ["system.", "extension."]
+
+[kernel_prefixes]
+names = [
+  "system.abi",
+  "system.async",
+  "system.channel",
+  "system.console",
+  "system.event",
+  "system.handle",
+  "system.memory",
+  "system.process",
+  "system.sync",
+  "system.task",
+  "system.time",
+]
+
+[service_prefixes]
+names = [
+  "system.diagnostic",
+  "system.info",
+  "system.install",
+  "system.module",
+  "system.profile",
+  "system.terminal",
+  "system.update",
+]
+
+[service_exact]
+names = [
+  "system.process.list",
+  "system.sandbox.image.destroy",
+  "system.sandbox.image.layer.query",
+  "system.sandbox.image.load",
+  "system.sandbox.image.query",
+  "system.sandbox.launch.create",
+  "system.sandbox.launch.destroy",
+  "system.sandbox.launch.query",
+  "system.sandbox.launch.start",
+  "system.sandbox.volume.create",
+  "system.sandbox.volume.destroy",
+  "system.sandbox.volume.duplicate",
+  "system.sandbox.volume.query",
+  "system.sandbox.volume.release",
+  "system.sandbox.volume.write",
+]
+
+[split_review_prefixes]
+names = [
+  "system.device",
+  "system.sandbox",
+  "system.workload",
+]
+
+[reserved_review_ids]
+ids = [37, 38, 39, 40, 42]

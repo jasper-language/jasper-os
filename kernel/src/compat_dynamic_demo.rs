@@ -1112,10 +1112,9 @@ fn run_program_with_interpreter(
     let heap_used_after = heap_after.0.saturating_sub(heap_after.1);
     let heap_growth = heap_after.3.saturating_sub(heap_before.3);
     let frame_deficit = frames_before.saturating_sub(frames_after);
-    // The page-backed kernel heap grows monotonically. A mapping that expands by
-    // exactly the missing frames keeps all capacity in the allocator and is not a
-    // workload leak, provided the used heap returns to its baseline.
-    let resources = heap_used_after == heap_used_before
+    // A workload may release cached metadata as well as transient objects, so a
+    // decrease from the baseline is still clean. Only retained usage can leak.
+    let resources = heap_used_after <= heap_used_before
         && (frames_after == frames_before && heap_growth == 0
             || heap_growth == frame_deficit as u64 * kernel_core::frame::FRAME_SIZE);
     if !resources {

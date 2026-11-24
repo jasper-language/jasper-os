@@ -6832,18 +6832,15 @@ fn linux_mprotect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
         return Ok(0);
     }
     let pages = args[1] / PAGE;
-    let mut done = 0;
-    while done < pages {
-        let chunk = (pages - done).min(proc::MAX_MAP_PAGES); // JASPER-HARDCODE-REVIEW: issue=35 source=linux-mmap-batch-budget reason=batch-from-validated-KernelConfig-max-map-pages
-        proc::protect_linux_range_access(
-            pid,
-            args[0] + done * PAGE,
-            chunk,
-            args[2] != 0,
-            args[2] & PROT_WRITE != 0,
-            args[2] & PROT_EXEC != 0,
-        )
-        .map_err(|error| {
+    proc::protect_linux_range_access(
+        pid,
+        args[0],
+        pages,
+        args[2] != 0,
+        args[2] & PROT_WRITE != 0,
+        args[2] & PROT_EXEC != 0,
+    )
+    .map_err(|error| {
         #[cfg(any(
             feature = "android-ecosystem-verify",
             feature = "android-art-verify",
@@ -6861,9 +6858,7 @@ fn linux_mprotect(pid: ObjId, args: [u64; 6]) -> Result<u64, CompatErrno> {
             proc::linux_page_is_shared(pid, args[0])
         );
         CompatErrno::NoMemory
-        })?;
-        done += chunk;
-    }
+    })?;
     Ok(0)
 }
 
@@ -23272,18 +23267,32 @@ fn write_synthetic_statx(
 /// 只调整本进程兼容堆的匿名页；请求必须留在 Jasper 私有窗口和兼容堆上限内。
 /// 部分映射失败会撤销本次已建立的全部页，旧 `brk` 保持不变。
 fn linux_brk(pid: ObjId, requested: u64) -> Result<u64, CompatErrno> {
-    const BRK_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
     let current = proc::linux_brk_value(pid).ok_or(CompatErrno::NoSys)?;
     if requested == 0 {
         return Ok(current);
     }
     let floor = crate::arch::USER_WINDOW.0 + 0x1000_0000;
+    let ceiling = proc::linux_brk_ceiling(pid, current).ok_or(CompatErrno::NoMemory)?;
+    #[cfg(any(feature = "compat-wine-verify", feature = "compat-wine-d3d12-verify"))]
+    crate::kprintln!(
+        "[JSR-LINUX-BRK] requested={:#x} current={:#x} ceiling={:#x}",
+        requested,
+        current,
+        ceiling
+    );
     let page = kernel_core::frame::FRAME_SIZE;
     if requested < floor
         || requested.checked_add(page - 1).is_none()
-        || requested > floor + BRK_WINDOW_BYTES
+        || requested > ceiling
         || requested >= crate::arch::USER_WINDOW.1
     {
+        #[cfg(any(feature = "compat-wine-verify", feature = "compat-wine-d3d12-verify"))]
+        crate::kprintln!(
+            "[JSR-LINUX-BRK] reject=range requested={:#x} floor={:#x} ceiling={:#x}",
+            requested,
+            floor,
+            ceiling
+        );
         return Err(CompatErrno::NoMemory);
     }
     let old_end = align_up(current, page);

@@ -37,8 +37,9 @@ def validate(matrix: dict[str, Any]) -> tuple[int, int]:
     require(matrix.get("node") == "COMPAT-D3D-1", "wrong DAG node")
     require(matrix.get("status") == "core-passed", "fixture cannot promote D3D node")
     require(
-        matrix.get("acceptance_claim") == "bounded-fixture-not-runtime-pass",
-        "fixture must not claim a D3D12 runtime pass",
+        matrix.get("acceptance_claim")
+        == "bounded-software-runtime-pass-not-physical",
+        "software runtime evidence must not claim a physical D3D12 pass",
     )
 
     baseline = matrix.get("baseline", {})
@@ -100,7 +101,26 @@ def validate(matrix: dict[str, Any]) -> tuple[int, int]:
         in fixture_evidence.read_text(encoding="utf-8"),
         "fixture build evidence must not claim a Jasper runtime pass",
     )
-    for case_id in ("d3d12-offscreen-runtime", "wsi-present", "physical-gpu"):
+    runtime_evidence = ROOT / cases["d3d12-offscreen-runtime"].get("evidence", "")
+    require(
+        cases["d3d12-offscreen-runtime"].get("status") == "passed",
+        "D3D12 software runtime evidence missing",
+    )
+    require(
+        cases["d3d12-offscreen-runtime"].get("hardware_gpu") is False,
+        "lavapipe result cannot claim a hardware GPU",
+    )
+    require(runtime_evidence.is_file(), "D3D12 runtime evidence is missing")
+    runtime_text = runtime_evidence.read_text(encoding="utf-8")
+    require(
+        "D3D12_PROBE_OK pixel=32,64,128,255 observed=32,64,128,255" in runtime_text,
+        "D3D12 runtime evidence lacks the exact pixel marker",
+    )
+    require(
+        "resources=true" in runtime_text,
+        "D3D12 runtime evidence lacks the steady-state resource marker",
+    )
+    for case_id in ("wsi-present", "physical-gpu"):
         require(cases[case_id].get("status") == "not-run", f"{case_id} cannot be passed")
     require(cases["physical-gpu"].get("hardware_gpu") is True, "physical gate required")
 
@@ -108,7 +128,6 @@ def validate(matrix: dict[str, Any]) -> tuple[int, int]:
     require(
         gates
         == {
-            "d3d12-runtime-through-wine",
             "swapchain-wsi-present",
             "input-and-desktop",
             "resource-reclamation",
@@ -119,7 +138,8 @@ def validate(matrix: dict[str, Any]) -> tuple[int, int]:
 
     source = PROBE.read_text(encoding="utf-8")
     required_calls = (
-        "D3D12CreateDevice",
+        "LoadLibraryW(L\"d3d12.dll\")",
+        "GetProcAddress(",
         "CreateCommandQueue",
         "CreateCommandAllocator",
         "CreateCommandList",
@@ -143,7 +163,6 @@ def validate(matrix: dict[str, Any]) -> tuple[int, int]:
     require("x86_64-w64-mingw32-gcc" in build, "probe toolchain must be explicit")
     require(
         "-Werror" in build
-        and "-ld3d12" in build
         and "-ldxguid" in build
         and "-luuid" in build,
         "strict probe build flags missing",
@@ -176,8 +195,9 @@ def validate(matrix: dict[str, Any]) -> tuple[int, int]:
         "D3D12 Wine DLL overrides are missing",
     )
     require(
-        'run_root_dynamic_program_with_deadline(\n                    "compat-wine-d3d12"'
-        in lifecycle,
+        "run_root_dynamic_program_with_deadline(" in lifecycle
+        and '"compat-wine-d3d12",' in lifecycle
+        and "/opt/wine-devel/lib/wine/x86_64-windows/d3d12-probe.exe" in lifecycle,
         "D3D12 program identity is missing",
     )
     boot = BOOT.read_text(encoding="utf-8")
@@ -212,15 +232,24 @@ def self_test(matrix: dict[str, Any]) -> None:
         raise AssertionError("checker accepted a fabricated done status")
 
     broken = copy.deepcopy(matrix)
-    next(item for item in broken["case"] if item["id"] == "d3d12-offscreen-runtime")[
-        "status"
-    ] = "passed"
+    broken["acceptance_claim"] = "physical-pass"
     try:
         validate(broken)
     except ValidationError:
         pass
     else:
-        raise AssertionError("checker accepted an unexecuted D3D12 runtime pass")
+        raise AssertionError("checker accepted a physical D3D12 claim")
+
+    broken = copy.deepcopy(matrix)
+    next(item for item in broken["case"] if item["id"] == "d3d12-offscreen-runtime")[
+        "status"
+    ] = "not-run"
+    try:
+        validate(broken)
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("checker accepted a missing D3D12 runtime pass")
 
     broken = copy.deepcopy(matrix)
     broken["baseline"]["archive_sha256"] = "0" * 64
@@ -236,9 +265,14 @@ def main() -> int:
     matrix = tomllib.loads(MATRIX.read_text(encoding="utf-8"))
     self_test(matrix)
     cases, gates = validate(matrix)
+    runtime = next(
+        item["status"]
+        for item in matrix["case"]
+        if item["id"] == "d3d12-offscreen-runtime"
+    )
     print(
         "compat-d3d12: PASS "
-        f"status={matrix['status']} cases={cases} remaining={gates} runtime=false"
+        f"status={matrix['status']} cases={cases} remaining={gates} runtime={runtime}"
     )
     return 0
 

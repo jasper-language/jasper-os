@@ -140,6 +140,8 @@ struct LinuxProcessState {
     fds: FdTable,
     pid: u32,
     ppid: u32,
+    pid_view: u32,
+    ppid_view: u32,
     pgid: u32,
     sid: u32,
     nice: i32,
@@ -253,6 +255,7 @@ struct LinuxMapping {
     file: Option<crate::linux_vfs::FileId>,
     file_offset: u64,
     shared_file: bool,
+    cache_file_id: Option<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -286,6 +289,8 @@ pub(crate) struct LinuxCredentials {
 #[cfg(feature = "linux-abi")]
 #[derive(Clone, Copy)]
 pub(crate) struct LinuxRlimits {
+    pub(crate) core_current: u64,
+    pub(crate) core_maximum: u64,
     pub(crate) stack_current: u64,
     pub(crate) stack_maximum: u64,
     pub(crate) nofile_current: u64,
@@ -1030,6 +1035,7 @@ struct ThreadStart {
     arg1: u64,
     linux_clone: bool,
     fs_base: Option<u64>,
+    gs_base: Option<u64>,
     linux_fork_regs: Option<[u64; 6]>,
     linux_fork_args: Option<[u64; 6]>,
     clone_rdx: u64,
@@ -1903,6 +1909,58 @@ pub(crate) fn linux_socket_listener_ready(pid: ObjId, handle: u64) -> Option<boo
                     && !listener.pending.lock().is_empty()
             }))
         }
+        _ => None,
+    })
+}
+
+/// Reports whether a packet socket has a connected datagram peer.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_datagram_peer_count(pid: ObjId, handle: u64) -> Option<usize> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .sockets
+            .iter()
+            .find(|socket| socket.handle == handle)
+            .filter(|socket| socket.packet_mode && socket.endpoint.is_connected())
+            .map(|_| 1usize),
+        _ => None,
+    })
+}
+
+/// Checks that a packet send targets the socket's currently connected peer name.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_select_datagram_peer(
+    pid: ObjId,
+    handle: u64,
+    name: &compat_core::UnixSocketName,
+) -> Option<bool> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .sockets
+            .iter()
+            .find(|socket| socket.handle == handle)
+            .filter(|socket| socket.packet_mode)
+            .map(|socket| socket.endpoint.peer_name().is_some_and(|peer| peer == *name)),
+        _ => None,
+    })
+}
+
+/// Reports whether a packet socket has a readable datagram.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_socket_datagram_ready(pid: ObjId, handle: u64) -> Option<bool> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p
+            .linux
+            .as_ref()?
+            .sockets
+            .iter()
+            .find(|socket| socket.handle == handle)
+            .filter(|socket| socket.packet_mode)
+            .map(|socket| socket.endpoint.is_readable()),
         _ => None,
     })
 }
@@ -5945,6 +6003,15 @@ pub(crate) fn linux_pid(pid: ObjId) -> Option<u32> {
     })
 }
 
+/// Returns the PID visible inside the process's Linux PID namespace.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_pid_view(pid: ObjId) -> Option<u32> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p.linux.as_ref().map(|linux| linux.pid_view),
+        _ => None,
+    })
+}
+
 /// Returns the Linux process-group and session identities for one process.
 /// 返回一个进程的 Linux 进程组与会话身份。
 #[cfg(feature = "linux-abi")]
@@ -6798,6 +6865,15 @@ pub(crate) fn linux_ppid(pid: ObjId) -> Option<u32> {
     })
 }
 
+/// Returns the parent PID visible inside the process's Linux PID namespace.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_ppid_view(pid: ObjId) -> Option<u32> {
+    crate::kobj::with(|t| match t.get(pid) {
+        Ok(KObject::Process(p)) => p.linux.as_ref().map(|linux| linux.ppid_view),
+        _ => None,
+    })
+}
+
 /// Records the exact executable path used for Linux `/proc/self/exe`.
 ///
 /// 记录 Linux 程序的实际执行路径；超长、空或带 NUL 的路径失败关闭。
@@ -6847,6 +6923,43 @@ pub(crate) fn linux_brk_value(pid: ObjId) -> Option<u64> {
             .filter(|brk| *brk != 0),
         _ => None,
     })
+}
+
+/// Returns the first allocation boundary above the Linux heap base.
+///
+/// The compatibility heap may grow until it reaches another live mapping,
+/// reservation or the current mmap cursor. Physical-memory and process quotas
+/// remain enforced by `map_new`; this function only prevents virtual overlap.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn linux_brk_ceiling(pid: ObjId, lower_bound: u64) -> Option<u64> {
+    let page = kernel_core::frame::FRAME_SIZE;
+    if lower_bound >= crate::arch::USER_WINDOW.1 {
+        return None;
+    }
+    let mut ceiling = crate::arch::USER_WINDOW.1;
+    let mut observe = |start: u64| {
+        if start > lower_bound && start < ceiling {
+            ceiling = start;
+        }
+    };
+    with_proc(pid, |process| {
+        let linux = process.linux.as_ref().ok_or(ProcError::NoSuchProcess)?;
+        for mapping in &linux.mappings {
+            observe(mapping.va);
+        }
+        for reservation in &linux.reservations {
+            observe(reservation.start);
+        }
+        for mapping in &process.shared_maps {
+            observe(mapping.va);
+        }
+        for mapping in &process.device_maps {
+            observe(mapping.va);
+        }
+        Ok(())
+    })
+    .ok()?;
+    Some(ceiling & !(page as u64 - 1))
 }
 
 /// Commits a fully validated Linux `brk` value.
@@ -7463,11 +7576,8 @@ pub(crate) fn linux_materialize_reserved(
         return Ok(false);
     }
     let pages = (end - start) / FRAME_SIZE;
-    if pages > MAX_MAP_PAGES {
-        let _ = linux_reserve_range(pid, start, end);
-        return Err(MemError::Quota);
-    }
-    if with_proc(pid, |p| {
+    if pages == 0
+        || with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::NoSuchProcess)?;
         linux
             .mappings
@@ -7498,6 +7608,7 @@ pub(crate) fn linux_materialize_reserved(
                 file: None,
                 file_offset: 0,
                 shared_file: false,
+                cache_file_id: None,
             });
         }
         Ok(())
@@ -7595,6 +7706,8 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         fds,
         pid,
         ppid: compat_core::syscall::LINUX_COMPAT_ROOT_PPID as u32,
+        pid_view: pid,
+        ppid_view: compat_core::syscall::LINUX_COMPAT_ROOT_PPID as u32,
         pgid: pid,
         sid: pid,
         nice: 0,
@@ -7638,6 +7751,8 @@ pub fn create_linux(name: &'static str, calls: LinuxSyscallSet) -> Result<ObjId,
         subreaper: false,
         termination_signal: 0,
         rlimits: LinuxRlimits {
+            core_current: 0,
+            core_maximum: u64::MAX,
             stack_current: 8 * 1024 * 1024,
             stack_maximum: u64::MAX,
             nofile_current: fd_budget,
@@ -8021,6 +8136,7 @@ pub fn map_new(id: ObjId, va: u64, flags: MapFlags) -> Result<PhysFrame, ProcErr
                 file: None,
                 file_offset: 0,
                 shared_file: false,
+                cache_file_id: None,
             });
         }
         p.frames.push(Arc::clone(&page));
@@ -8135,7 +8251,7 @@ pub const MAX_PROCESS_FRAMES: usize = { // JASPER-HARDCODE-REVIEW: issue=35 sour
 };
 /// Per-process VM guest RAM limit, independent from the ordinary process account.
 pub const MAX_VM_GUEST_FRAMES: u64 = crate::config::ACTIVE.memory.max_vm_guest_frames as u64; // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-derived-process-limit reason=active-profile-vm-frame-policy
-/// 单次 `system.memory.map` / `unmap` 最多涉及的页数。
+/// Internal work-slice and native fixed-map capacity; never a Linux syscall range limit.
 pub const MAX_MAP_PAGES: u64 = crate::config::ACTIVE.memory.max_map_pages; // JASPER-HARDCODE-REVIEW: issue=35 source=kernel-config-derived-process-limit reason=active-profile-map-batch-policy
 /// 匿名映射 / 取消映射的失败原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8162,9 +8278,9 @@ pub enum MemError {
     NoSuchProcess,
 }
 
-/// 检查 `[va, va + pages × 页)` 是否是私有窗口内、按页对齐、页数在限额内的区间。
+/// Validates one page-aligned private range. Admission by process/global quota follows.
 fn checked_range(va: u64, pages: u64) -> Result<(), MemError> {
-    if va % FRAME_SIZE != 0 || pages == 0 || pages > MAX_MAP_PAGES {
+    if va % FRAME_SIZE != 0 || pages == 0 {
         return Err(MemError::InvalidRange);
     }
     let end = pages
@@ -9317,6 +9433,38 @@ pub(crate) fn set_linux_mapping_file(
     .is_ok()
 }
 
+/// Records bounded compatibility-cache backing for one Linux mapping page.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_mapping_cache_file(pid: ObjId, va: u64, cache_file_id: u32) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        let mapping = linux
+            .mappings
+            .iter_mut()
+            .find(|mapping| mapping.va == va)
+            .ok_or(ProcError::NoSuchProcess)?;
+        mapping.cache_file_id = Some(cache_file_id);
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Records the source offset for one cache-backed Linux mapping page.
+#[cfg(feature = "linux-abi")]
+pub(crate) fn set_linux_mapping_file_offset(pid: ObjId, va: u64, file_offset: u64) -> bool {
+    with_proc(pid, |process| {
+        let linux = process.linux.as_mut().ok_or(ProcError::Exited)?;
+        let mapping = linux
+            .mappings
+            .iter_mut()
+            .find(|mapping| mapping.va == va)
+            .ok_or(ProcError::NoSuchProcess)?;
+        mapping.file_offset = file_offset;
+        Ok(())
+    })
+    .is_ok()
+}
+
 /// Reports whether one Linux virtual page belongs to a shared memory mapping.
 #[cfg(feature = "linux-abi")]
 pub(crate) fn linux_page_is_shared(pid: ObjId, va: u64) -> bool {
@@ -9703,6 +9851,9 @@ fn thread_entry() {
     if let Some(base) = s.fs_base {
         let _ = arch::set_user_fs_base(base);
     }
+    if let Some(base) = s.gs_base {
+        let _ = arch::set_user_gs_base(base);
+    }
     #[cfg(all(feature = "linux-abi", target_arch = "x86_64"))]
     if s.linux_clone {
         // SAFETY：clone 的 RIP/RSP 已由 spawn_linux_clone 校验在用户私有窗口内。
@@ -9734,7 +9885,7 @@ pub fn spawn_thread(
     arg1: u64,
 ) -> Result<(TaskId, ObjId), ProcError> {
     spawn_thread_mode(
-        id, name, entry, stack, arg0, arg1, None, false, None, None, None, 0, 0, 0,
+        id, name, entry, stack, arg0, arg1, None, false, None, None, None, None, 0, 0, 0,
     )
 }
 
@@ -9750,7 +9901,21 @@ pub(crate) fn spawn_thread_affinity(
     affinity: Option<kernel_core::smp::CpuSet>,
 ) -> Result<(TaskId, ObjId), ProcError> {
     spawn_thread_mode(
-        id, name, entry, stack, arg0, arg1, affinity, false, None, None, None, 0, 0, 0,
+        id,
+        name,
+        entry,
+        stack,
+        arg0,
+        arg1,
+        affinity,
+        false,
+        None,
+        None,
+        None,
+        None,
+        0,
+        0,
+        0,
     )
 }
 
@@ -9764,6 +9929,7 @@ pub fn spawn_linux_clone(
     user_rip: u64,
     user_stack: u64,
     fs_base: Option<u64>,
+    gs_base: Option<u64>,
     preserved_regs: Option<[u64; 6]>,
     fork_args: Option<[u64; 6]>,
     clear_child_tid: u64,
@@ -9780,6 +9946,7 @@ pub fn spawn_linux_clone(
         None,
         true,
         fs_base,
+        gs_base,
         preserved_regs,
         fork_args,
         clear_child_tid,
@@ -9798,11 +9965,12 @@ pub fn fork_linux_process(
     user_rip: u64,
     user_stack: u64,
     fs_base: u64,
+    gs_base: u64,
     preserved_regs: [u64; 6],
     fork_args: [u64; 6],
     clear_child_tid: u64,
 ) -> Result<ObjId, ProcError> {
-    let (parent_linux_pid, calls, state, mappings, shared_mappings) =
+    let (parent_linux_pid, parent_pid_view, calls, state, mappings, shared_mappings) =
         kobj::with(|t| match t.get(parent) {
         Ok(KObject::Process(p)) if p.state == ProcState::Running => {
             let linux = p.linux.as_ref().ok_or(ProcError::NoSuchProcess)?;
@@ -9830,6 +9998,7 @@ pub fn fork_linux_process(
                 .collect::<Vec<_>>();
             Ok((
                 linux.pid,
+                linux.pid_view,
                 linux.calls,
                 linux.clone(),
                 mappings,
@@ -9859,6 +10028,8 @@ pub fn fork_linux_process(
         *linux = state;
         linux.pid = child_pid;
         linux.ppid = parent_linux_pid;
+        linux.pid_view = child_pid;
+        linux.ppid_view = parent_pid_view;
         linux.child_cpu_ticks = 0;
         linux.exited_cpu_ticks = 0;
         linux.pdeathsig = 0;
@@ -9906,6 +10077,7 @@ pub fn fork_linux_process(
         user_rip,
         user_stack,
         Some(fs_base),
+        Some(gs_base),
         Some(preserved_regs),
         Some(fork_args),
         clear_child_tid,
@@ -9930,6 +10102,7 @@ pub fn vfork_linux_process(
     user_rip: u64,
     user_stack: u64,
     fs_base: u64,
+    gs_base: u64,
     preserved_regs: [u64; 6],
     syscall_args: [u64; 6],
     parent_task: TaskId,
@@ -9937,6 +10110,7 @@ pub fn vfork_linux_process(
     let parent_stack_top = crate::arch::kernel_stack();
     let (
         parent_linux_pid,
+        parent_pid_view,
         calls,
         state,
         parent_root,
@@ -9970,6 +10144,7 @@ pub fn vfork_linux_process(
                     .collect::<Vec<_>>();
                 Ok((
                     linux.pid,
+                    linux.pid_view,
                     linux.calls,
                     linux.clone(),
                     p.space.root(),
@@ -10017,6 +10192,8 @@ pub fn vfork_linux_process(
         *linux = state;
         linux.pid = child_pid;
         linux.ppid = parent_linux_pid;
+        linux.pid_view = child_pid;
+        linux.ppid_view = parent_pid_view;
         linux.child_cpu_ticks = 0;
         linux.exited_cpu_ticks = 0;
         linux.pdeathsig = 0;
@@ -10064,6 +10241,7 @@ pub fn vfork_linux_process(
         user_rip,
         user_stack,
         Some(fs_base),
+        Some(gs_base),
         Some(preserved_regs),
         Some(syscall_args),
         0,
@@ -10277,6 +10455,7 @@ fn copy_linux_mapping(parent: ObjId, child: ObjId, mapping: LinuxMapping) -> Res
             file: mapping.file,
             file_offset: mapping.file_offset,
             shared_file: mapping.shared_file,
+            cache_file_id: mapping.cache_file_id,
         });
         p.frames.push(Arc::clone(&page));
         Ok(())
@@ -10409,6 +10588,7 @@ fn spawn_thread_mode(
     affinity: Option<kernel_core::smp::CpuSet>,
     linux_clone: bool,
     fs_base: Option<u64>,
+    gs_base: Option<u64>,
     linux_fork_regs: Option<[u64; 6]>,
     linux_fork_args: Option<[u64; 6]>,
     linux_clear_child_tid: u64,
@@ -10472,6 +10652,7 @@ fn spawn_thread_mode(
             arg1,
             linux_clone,
             fs_base,
+            gs_base,
             linux_fork_regs,
             linux_fork_args,
             clone_rdx,

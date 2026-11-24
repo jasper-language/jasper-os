@@ -1747,20 +1747,29 @@ fn execute_root_dynamic_programs(
                     b"DXVK_LOG_LEVEL=info",
                     b"VKD3D_DEBUG=warn",
                 ];
-                crate::linux_abi::reset_wine_syscall_trace_budget();
-                if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
-                    "compat-wine-d3d12",
-                    "/opt/wine-devel/lib/wine/x86_64-unix/wine",
-                    &wine,
-                    &interpreter,
-                    "/lib64/ld-linux-x86-64.so.2",
-                    &d3d12_argv,
-                    &d3d12_envp,
-                    crate::mm::frame::free_frames(),
-                    false,
-                    WINE_COLD_START_DEADLINE_TICKS,
-                ) {
-                    return Err(HealthError::RootExecute);
+                for run in 0..2 {
+                    if run == 1 {
+                        // The first invocation initializes the Wine prefix and
+                        // compatibility caches. Measure the immediately repeated
+                        // D3D12 workload against the resulting steady state.
+                        crate::mm::heap::ensure_free(2 * 1024 * 1024)
+                            .map_err(|_| HealthError::RootExecute)?;
+                    }
+                    crate::linux_abi::reset_wine_syscall_trace_budget();
+                    if !crate::compat_dynamic_demo::run_root_dynamic_program_with_deadline(
+                        "compat-wine-d3d12",
+                        "/opt/wine-devel/lib/wine/x86_64-unix/wine",
+                        &wine,
+                        &interpreter,
+                        "/lib64/ld-linux-x86-64.so.2",
+                        &d3d12_argv,
+                        &d3d12_envp,
+                        crate::mm::frame::free_frames(),
+                        run == 1,
+                        WINE_COLD_START_DEADLINE_TICKS,
+                    ) {
+                        return Err(HealthError::RootExecute);
+                    }
                 }
             }
             #[cfg(feature = "compat-wine-wsi-verify")]
@@ -1995,8 +2004,8 @@ fn execute_root_dynamic_programs(
         install_root_android_files(root, origin)?;
         let vulkan_envp: [&[u8]; 5] = [
             b"LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu",
-            b"VK_DRIVER_FILES=/usr/lib/x86_64-linux-gnu/vk_swiftshader_icd.json",
-            b"VK_ICD_FILENAMES=/usr/lib/x86_64-linux-gnu/vk_swiftshader_icd.json",
+            b"VK_DRIVER_FILES=/usr/lib/x86_64-linux-gnu/lvp_icd.json",
+            b"VK_ICD_FILENAMES=/usr/lib/x86_64-linux-gnu/lvp_icd.json",
             b"HOME=/data",
             b"XDG_CACHE_HOME=/data/.cache",
         ];

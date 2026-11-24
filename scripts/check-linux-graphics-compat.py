@@ -31,24 +31,47 @@ def main() -> int:
         "wsi-input-lifecycle",
         "gpu-import-submit-sync-reset",
         "vulkan-loader-swiftshader-compute",
+        "metal2vulkan-render-lavapipe",
     }
     if set(cases) != required:
         fail(f"case set mismatch: expected {sorted(required)}, got {sorted(cases)}")
     for case in cases.values():
         if not case.get("command") or not case.get("evidence"):
             fail(f"case {case['id']} lacks command or evidence")
-        if case["id"] != "vulkan-loader-swiftshader-compute":
+        if case["id"] not in {
+            "vulkan-loader-swiftshader-compute",
+            "metal2vulkan-render-lavapipe",
+        }:
             if case.get("hardware_gpu") is not False:
                 fail(f"case {case['id']} must not claim hardware GPU")
     software = cases["vulkan-loader-swiftshader-compute"]
     if software.get("kind") != "qemu-software" or software.get("hardware_gpu") is not False:
         fail("software loader/ICD case must remain qemu-software and hardware_gpu=false")
+    render = cases["metal2vulkan-render-lavapipe"]
+    if (
+        render.get("kind") != "qemu-software"
+        or render.get("hardware_gpu") is not False
+        or render.get("status") != "passed"
+    ):
+        fail("Metal2Vulkan render must remain bounded software evidence")
+    render_evidence = ROOT / render["evidence"]
+    if not render_evidence.is_file():
+        fail("Metal2Vulkan render evidence is missing")
+    render_text = render_evidence.read_text(encoding="utf-8")
+    for marker in (
+        "device: llvmpipe",
+        "every texel as expected",
+        "program=metal2vulkan-render",
+        "resources=true",
+        "qemu_rc=33",
+    ):
+        if marker not in render_text:
+            fail(f"Metal2Vulkan evidence lacks marker: {marker}")
 
     gates = {gate["id"] for gate in matrix.get("remaining_gate", [])}
     if gates != {
         "physical-gpu-vulkan-wsi",
-        "metal2vulkan-render-present",
-        "dxvk-vkd3d-execution",
+        "metal2vulkan-wsi-present",
     }:
         fail("hardware and D3D remaining gates must remain explicit")
 

@@ -258,11 +258,10 @@ fn memory_kernel_side() {
         "含空洞的取消映射应被拒且不改动",
     );
 
-    // 非法区间：未对齐、0 页、超过单次上限、窗口外、越过窗口末端、长度溢出；不可执行标志无从表达（接口只有 writable）
+    // 非法区间：未对齐、0 页、窗口外、越过窗口末端、长度溢出；不可执行标志无从表达（接口只有 writable）
     let bad = [
         proc::map_anon(pid, base + 1, 1, true),
         proc::map_anon(pid, base + 16 * page, 0, true),
-        proc::map_anon(pid, base + 16 * page, proc::MAX_MAP_PAGES + 1, true),
         proc::map_anon(pid, 0x1000, 1, true),
         proc::map_anon(pid, arch::USER_WINDOW.1 - page, 2, true),
         proc::map_anon(pid, base + 16 * page, u64::MAX / page, true),

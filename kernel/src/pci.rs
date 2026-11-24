@@ -200,6 +200,14 @@ pub fn activate() -> Result<(), &'static str> {
     if table.complete {
         Ok(())
     } else {
+        kprintln!(
+            "[JSR-PCI] incomplete functions={} dropped={} enumerate_error={} probe_failed={} restored={}",
+            table.functions(),
+            table.dropped,
+            table.enumerate_error,
+            table.probe_failed,
+            table.restored
+        );
         Err("PCI inventory incomplete")
     }
 }
@@ -271,7 +279,19 @@ fn build(
         complete: true,
         ..Table::empty()
     };
-    let mut budget = InventoryBudget::new(crate::mm::heap::stats().1 / 4);
+    let heap = crate::mm::heap::stats();
+    // The heap allocator can extend within its boot-derived limit. Charging the
+    // table against the current free-list remainder incorrectly fails when the
+    // free bytes are fragmented even though mapped heap capacity is available.
+    let inventory_bytes = heap.0 / 4;
+    let mut budget = InventoryBudget::new(inventory_bytes);
+    kprintln!(
+        "[JSR-PCI] inventory total={} free={} mapped={} budget={}",
+        heap.0,
+        heap.1,
+        heap.3,
+        inventory_bytes
+    );
 
     // Enumeration only reads headers; BAR probing needs exclusive access, so
     // collect the discovered functions into the admitted runtime inventory.
@@ -377,10 +397,19 @@ fn build(
         if !budget.charge::<Device>() || out.entries.try_reserve(1).is_err() {
             out.dropped += 1;
             out.complete = false;
+            kprintln!(
+                "[JSR-PCI] dropped device={} bdf={} reason=inventory_budget",
+                out.dropped,
+                format_bdf(device.bdf)
+            );
             break;
         }
         if device.caps_error {
             out.complete = false;
+            kprintln!(
+                "[JSR-PCI] error capabilities bdf={}",
+                format_bdf(device.bdf)
+            );
         }
         out.entries.push(device);
     }

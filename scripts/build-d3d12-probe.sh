@@ -14,6 +14,6 @@ fi
 mkdir -p "$(dirname "$OUT")"
 "$CC" -O2 -Wall -Wextra -Werror \
     -Wl,--disable-dynamicbase,--no-insert-timestamp \
-    -o "$OUT" "$SOURCE" -ld3d12 -ldxguid -luuid
+    -o "$OUT" "$SOURCE" -ldxguid -luuid
 file "$OUT"
 sha256sum "$OUT"

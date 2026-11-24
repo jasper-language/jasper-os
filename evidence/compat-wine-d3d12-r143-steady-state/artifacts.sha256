@@ -1,0 +1,5 @@
+c1ed0e484eb489cd791f7616e623f188d8f37100d6d9daa30ad52273e57d4034  target/issue21-wine-d3d12-r143/x86_64-unknown-none/release/jasper-kernel
+e2176eaf5fbc1a096b7df045bc335d34a77de730f7db84585f41732d0724957f  target/issue21-wine-d3d12-r143/x86_64-unknown-uefi/release/jasper-boot-manager.efi
+c602b9ab5387b2642b6315c26fb1f297a6fd7ff0aa0d6fae6cb1af9c5c08827b  evidence/compat-wine-d3d12-r143-steady-state/serial.log
+ca2ebdf97d7469496b1f4b78958f9dc8447efdcb623953fee7b6996b762f6fff  evidence/compat-wine-d3d12-r143-steady-state/qemu.rc
+b4c4861b322cffe8615fb68ded8fb02b9ecbc8896daa61cdfd6b1781dd49fa92  verification/wine-d3d-staging.json

@@ -1,6 +1,6 @@
 # COMPAT-WINE-1 Status
 
-Updated: 2026-11-22
+Updated: 2026-11-24
 
 Status: **in-progress / partial groundwork**.
 
@@ -132,6 +132,27 @@ ISSUE21_UEFI_MODE=compat-wine-wsi
 Each mode requires its own literal marker plus `resources=true`; no fallback
 from D3D11 offscreen to D3D12/WSI is accepted.
 
+On 2026-11-24 the D3D12 mode completed its bounded software acceptance. The
+second steady-state run of the unmodified Wine 11.22 loader with
+VKD3D-Proton 3.1 and DXVK 3.1.1 reported:
+
+```text
+D3D12_PROBE_OK pixel=32,64,128,255 observed=32,64,128,255 row_pitch=256
+program=compat-wine-d3d12 syscalls=32690 exit_zero=true
+frames_before=940409 resources=true failed=0
+```
+
+The earlier VKD3D `E_OUTOFMEMORY` was caused by a fixed 64 MiB Linux compat
+heap window. The generic Linux `brk` path now derives its ceiling from live
+mappings and reservations, while the existing physical-frame and process
+quotas remain authoritative. This does not grant or fake additional memory.
+
+The run still exposes a separate Wine helper fault at the PE preferred base
+`0x7ff600003670`; the main D3D12 probe continues, but that desktop/loader
+defect remains open. The result also remains software-lavapipe-only and does
+not satisfy physical GPU, visible desktop, D3D12 WSI or conformance gates.
+See `evidence/compat-wine-d3d12-r143-steady-state/README.md`.
+
 A generic unmodified C/POSIX fixture performs the same
 `creat -> fdopen -> fputs -> fclose` sequence twice through Jasper and exits
 zero with resources recovered. Disabling tcache did not change the earlier
@@ -139,8 +160,8 @@ failure, and removing the preload shim did not change it either.
 
 The remaining slices must:
 
-1. complete VKD3D-Proton D3D12 in the Jasper guest;
-2. add visible desktop input/focus and resize/revoke coverage;
+1. complete D3D12/DXGI WSI, visible desktop input/focus and resize/revoke;
+2. repair the remaining Wine helper preferred-base fault;
 3. continue through real GPU, display and Pixel 6a acceptance.
 
 Every ABI discovered by this work is recorded in

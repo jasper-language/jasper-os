@@ -2,7 +2,7 @@ schema = 1
 node = "COMPAT-GRAPHICS-1"
 title = "Linux Vulkan, WSI, input and GPU service compatibility"
 status = "core-passed"
-updated = "2026-11-17"
+updated = "2026-11-24"
 
 [[case]]
 id = "vulkan-capability-profiling"
@@ -32,17 +32,20 @@ command = "bash scripts/compat-graphics-software-check.sh"
 evidence = "unmodified Vulkan loader and SwiftShader ICD execute the upstream compute example in Jasper root userland"
 hardware_gpu = false
 
+[[case]]
+id = "metal2vulkan-render-lavapipe"
+kind = "qemu-software"
+status = "passed"
+command = "ISSUE21_UEFI_MODE=vulkan-metal2vulkan bash scripts/issue21-uefi-boot-check.sh"
+evidence = "evidence/compat-metal2vulkan-v020-r21-lavapipe/README.md"
+hardware_gpu = false
+
 [[remaining_gate]]
 id = "physical-gpu-vulkan-wsi"
 reason = "physical GPU/vendor ICD, DRM/X11/Wayland surface, hardware completion, reset, DMA/IOMMU silence and pixel output"
 status = "pending"
 
 [[remaining_gate]]
-id = "metal2vulkan-render-present"
-reason = "render-to-texture reaches fragment work but page-faults at ip=0x100086f1909d while reading 0x10006e4ba4f0; WSI/present remains pending"
-status = "pending"
-
-[[remaining_gate]]
-id = "dxvk-vkd3d-execution"
-reason = "DXVK/VKD3D-Proton binaries execute a real Windows Direct3D workload on the declared backend"
+id = "metal2vulkan-wsi-present"
+reason = "render-to-texture passes over lavapipe; visible swapchain/WSI, compositor presentation and hardware display remain pending"
 status = "pending"
