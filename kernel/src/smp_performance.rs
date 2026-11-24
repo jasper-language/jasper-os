@@ -1,14 +1,52 @@
 //! Parallel execution matrix over the CPUs that firmware enabled and the
 //! scheduler admitted.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::hint::black_box;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{arch, early, hardware, kprintln, mm, smp};
 
 /// Each worker performs this many individually executed, compiler-visible
 /// workload operations.
 const OPERATIONS_PER_WORKER: u64 = 1_000_000;
+
+static SHARED_ATOMIC: AtomicU64 = AtomicU64::new(0);
+static CONTENDED_LOCK: kernel_core::sync::SpinLock<u64> =
+    kernel_core::sync::SpinLock::new(0);
+
+#[derive(Clone, Copy)]
+enum ContentionKind {
+    Atomic = 1,
+    SpinLock = 2,
+    Frame = 3,
+    Heap = 4,
+    Tlb = 5,
+}
+
+impl ContentionKind {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Atomic => "atomic_rmw",
+            Self::SpinLock => "spin_lock",
+            Self::Frame => "frame_alloc_free",
+            Self::Heap => "heap_alloc_free_64",
+            Self::Tlb => "tlb_invalidate_local",
+        }
+    }
+
+    fn from_arg(value: u64) -> Option<Self> {
+        match value {
+            1 => Some(Self::Atomic),
+            2 => Some(Self::SpinLock),
+            3 => Some(Self::Frame),
+            4 => Some(Self::Heap),
+            5 => Some(Self::Tlb),
+            _ => None,
+        }
+    }
+}
 
 fn scalar_work(seed: u64) -> u64 {
     let start = arch::measure_cycles();
@@ -23,6 +61,36 @@ fn scalar_work(seed: u64) -> u64 {
         }
     }
     black_box(value);
+    arch::measure_cycles().wrapping_sub(start)
+}
+
+fn contention_work(arg: u64) -> u64 {
+    let Some(kind) = ContentionKind::from_arg(arg) else {
+        return 0;
+    };
+    let start = arch::measure_cycles();
+    for index in 0..OPERATIONS_PER_WORKER {
+        match kind {
+            ContentionKind::Atomic => {
+                black_box(SHARED_ATOMIC.fetch_add(1, Ordering::Relaxed));
+            }
+            ContentionKind::SpinLock => {
+                let mut value = CONTENDED_LOCK.lock();
+                *value = value.wrapping_add(1);
+            }
+            ContentionKind::Frame => {
+                if let Ok(frame) = mm::frame::allocate() {
+                    let _ = mm::frame::deallocate(frame);
+                }
+            }
+            ContentionKind::Heap => {
+                black_box(Box::new([index as u8; 64]));
+            }
+            ContentionKind::Tlb => {
+                arch::tlb_flush_local(arch::KERNEL_PROBE_VA + 0x60_0000, 1);
+            }
+        }
+    }
     arch::measure_cycles().wrapping_sub(start)
 }
 
@@ -187,6 +255,75 @@ fn run_mode(
     Some(throughput)
 }
 
+fn run_contention(kind: ContentionKind, cpus: &[usize]) -> Option<u64> {
+    if cpus.len() < 2 || cpus[0] != 0 {
+        kprintln!(
+            "[JSR-PERF-SMP] kind={} status=unavailable workers={}",
+            kind.name(),
+            cpus.len()
+        );
+        return None;
+    }
+    let start = arch::measure_cycles();
+    let mut posted = Vec::new();
+    if posted.try_reserve_exact(cpus.len().saturating_sub(1)).is_err() {
+        return None;
+    }
+    for &cpu in cpus.iter().filter(|&&cpu| cpu != 0) {
+        if smp::post_call(cpu, contention_work, kind as u64).is_ok() {
+            posted.push(cpu);
+        }
+    }
+    let bsp_cycles = contention_work(kind as u64);
+    let mut worker_cycles = Vec::new();
+    if worker_cycles.try_reserve_exact(cpus.len()).is_err() {
+        return None;
+    }
+    worker_cycles.push(bsp_cycles);
+    for cpu in posted {
+        if let Ok(cycles) = smp::collect_call(cpu) {
+            if cycles != 0 {
+                worker_cycles.push(cycles);
+            }
+        }
+    }
+    let elapsed_ns = cycles_to_ns(arch::measure_cycles().wrapping_sub(start))?;
+    let operations = OPERATIONS_PER_WORKER.saturating_mul(worker_cycles.len() as u64);
+    let throughput = operations
+        .saturating_mul(1_000_000_000)
+        .checked_div(elapsed_ns)
+        .filter(|value| *value != 0)?;
+    let min_ns = cycles_to_ns(*worker_cycles.iter().min()?)?;
+    let max_ns = cycles_to_ns(*worker_cycles.iter().max()?)?;
+    let line = alloc::format!(
+        "SMP KIND matrix kind={} workers={}/{} operations_per_worker={} total_operations={} elapsed_ns={} throughput_ops_s={} worker_min_ns={} worker_max_ns={}",
+        kind.name(),
+        worker_cycles.len(),
+        cpus.len(),
+        OPERATIONS_PER_WORKER,
+        operations,
+        elapsed_ns,
+        throughput,
+        min_ns,
+        max_ns
+    );
+    early::append_line(&line);
+    kprintln!("{}", line);
+    kprintln!(
+        "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"parallel-operation\",\"operation\":\"{}\",\"workers_expected\":{},\"workers_completed\":{},\"operations_per_worker\":{},\"total_operations\":{},\"elapsed_ns\":{},\"throughput_ops_s\":{},\"worker_min_ns\":{},\"worker_max_ns\":{}}}",
+        kind.name(),
+        cpus.len(),
+        worker_cycles.len(),
+        OPERATIONS_PER_WORKER,
+        operations,
+        elapsed_ns,
+        throughput,
+        min_ns,
+        max_ns
+    );
+    Some(throughput)
+}
+
 fn total_throughput(completed: usize, elapsed_ns: u64) -> Option<u64> {
     OPERATIONS_PER_WORKER
         .saturating_mul(completed as u64)
@@ -239,5 +376,16 @@ pub fn run() {
         run_mode("all_logical_threads", &logical, Some(single));
     } else {
         kprintln!("[JSR-PERF-SMP] mode=all_logical_threads status=unavailable logical={}", logical.len());
+    }
+    if logical.len() > 1 {
+        for kind in [
+            ContentionKind::Atomic,
+            ContentionKind::SpinLock,
+            ContentionKind::Frame,
+            ContentionKind::Heap,
+            ContentionKind::Tlb,
+        ] {
+            run_contention(kind, &logical);
+        }
     }
 }
