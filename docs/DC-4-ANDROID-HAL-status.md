@@ -29,6 +29,14 @@ Status: **software contract slice passed; DC-4 remains open.**
 Vendor Binder transactions, HIDL/AIDL payloads and vendor ioctl formats remain
 compatibility-layer data. They are not registered as Jasper native ABI.
 
+Guest authority projection is now explicit: Linux UID 0, Android UID 0,
+Android system and HAL identities are compatibility facts only. Projecting a
+guest claim requires a valid kernel-authenticated `SubjectIdentity` and returns
+that host subject unchanged. Guest fields cannot alter object ID, generation,
+application identity, policy epoch or handle rights. Unit coverage proves all
+four privileged guest classes are non-elevating and malformed host/guest
+identity facts fail closed.
+
 ## Verification
 
 ```text
@@ -44,6 +52,8 @@ PASS
 - A real AOSP/API-level HAL must complete Binder identity and permission
   mapping, device operations, death notification and restart on an ARM64
   device.
+- The host/guest identity projection must execute through the real Binder HAL
+  transport and SELinux policy enforcement, not only the contract tests.
 - The compatibility Binder/HAL host and native Device Service transport must
   use this contract without exposing vendor private protocols or a second
   permission/device root.

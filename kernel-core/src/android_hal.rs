@@ -16,6 +16,46 @@ use crate::task_index::Token;
 pub const ANDROID_HAL_CONTRACT_VERSION: u16 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompatGuestPrivilege {
+    LinuxUid(u32),
+    AndroidUid(u32),
+    AndroidSystem,
+    AndroidHal,
+}
+
+/// Guest identity facts are evidence from the compatibility domain. They may
+/// be projected into an existing host subject, but cannot create or elevate it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompatGuestIdentity {
+    pub privilege: CompatGuestPrivilege,
+    pub generation: u64,
+}
+
+impl CompatGuestIdentity {
+    pub const fn is_valid(self) -> bool {
+        self.generation != 0
+    }
+}
+
+/// Project guest identity facts onto the kernel-authenticated host subject.
+///
+/// Root, Android system and HAL privilege are diagnostic compatibility facts,
+/// never host authority. The returned subject is byte-for-byte the host
+/// subject supplied by the kernel.
+pub fn project_guest_subject(
+    host: SubjectIdentity,
+    guest: CompatGuestIdentity,
+) -> Result<SubjectIdentity, HalError> {
+    if !guest.is_valid()
+        || host.object.object_id == 0
+        || host.object.generation == 0
+    {
+        return Err(HalError::InvalidIdentity);
+    }
+    Ok(host)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AndroidApiLevel(pub u32);
 
 impl AndroidApiLevel {
@@ -507,6 +547,54 @@ mod tests {
             HalService::<1>::new(AndroidApiLevel(34), identity, pass, facts, wrong),
             Err(HalError::AuthorizationDenied)
         ));
+    }
+
+    #[test]
+    fn guest_root_and_android_privilege_cannot_change_host_identity() {
+        let host = subject();
+        for privilege in [
+            CompatGuestPrivilege::LinuxUid(0),
+            CompatGuestPrivilege::AndroidUid(0),
+            CompatGuestPrivilege::AndroidSystem,
+            CompatGuestPrivilege::AndroidHal,
+        ] {
+            let projected = project_guest_subject(
+                host,
+                CompatGuestIdentity {
+                    privilege,
+                    generation: 1,
+                },
+            )
+            .unwrap();
+            assert_eq!(projected, host);
+        }
+        let invalid = SubjectIdentity {
+            object: ObjectIdentity {
+                object_id: 0,
+                ..host.object
+            },
+            application: host.application,
+        };
+        assert_eq!(
+            project_guest_subject(
+                invalid,
+                CompatGuestIdentity {
+                    privilege: CompatGuestPrivilege::LinuxUid(0),
+                    generation: 1,
+                },
+            ),
+            Err(HalError::InvalidIdentity)
+        );
+        assert_eq!(
+            project_guest_subject(
+                host,
+                CompatGuestIdentity {
+                    privilege: CompatGuestPrivilege::AndroidSystem,
+                    generation: 0,
+                },
+            ),
+            Err(HalError::InvalidIdentity)
+        );
     }
 
     #[test]
