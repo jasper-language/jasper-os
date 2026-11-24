@@ -7,8 +7,8 @@
 
 use core::sync::atomic::Ordering;
 
-use crate::sync::IrqU64;
 use crate::console;
+use crate::sync::IrqU64;
 use crate::task::TaskId;
 use kernel_core::smp::CpuSet;
 
@@ -29,7 +29,10 @@ fn log_switch(e: &SwitchEvent) {
 fn demo_task() {
     for step in 1..=DEMO_STEPS {
         let (id, name) = super::current();
-        console::_print(format_args!("[JSR-TASK] name={} step={} task_id={}\n", name, step, id.0));
+        console::_print(format_args!(
+            "[JSR-TASK] name={} step={} task_id={}\n",
+            name, step, id.0
+        ));
         super::yield_now();
     }
 }
@@ -100,7 +103,10 @@ fn busy_task() {
             core::hint::spin_loop();
         }
         let (id, name) = super::current();
-        console::_print(format_args!("[JSR-TASK] name={} step={} task_id={}\n", name, step, id.0));
+        console::_print(format_args!(
+            "[JSR-TASK] name={} step={} task_id={}\n",
+            name, step, id.0
+        ));
     }
 }
 

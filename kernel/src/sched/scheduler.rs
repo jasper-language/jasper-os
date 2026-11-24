@@ -39,16 +39,16 @@
 //!   代价与可运行任务数成正比，与任务表容量无关；链表按槽位号有序，策略「同键取先者」的结果不变。
 //!   每 tick 的到期唤醒与实时预算补充只在最早到期时刻到达时才扫描（缓存最早时刻）。
 
-use alloc::boxed::Box;
-use alloc::vec::Vec;
 use crate::arch::TaskContext;
 use crate::task::{Task, TaskAffinity, TaskId, TaskState};
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use kernel_core::cpu_table::CpuTable;
 use kernel_core::deadline::{Deadline, ABSENT as NO_DEADLINE};
 use kernel_core::deadline_forest::DeadlineForest;
-use kernel_core::task_index::{TaskIndex, Node as IndexNode};
-use kernel_core::task_lifecycle::SlotLifecycle;
 use kernel_core::task_hot::Slot as HotSlot;
+use kernel_core::task_index::{Node as IndexNode, TaskIndex};
+use kernel_core::task_lifecycle::SlotLifecycle;
 use kernel_core::timer_event::{OwnerBudget, Request, TimerId, TimerTable, Urgency};
 
 use kernel_core::object::{advance_generation, GENERATION_RETIRED};
@@ -57,16 +57,17 @@ use kernel_core::smp::{CpuSet, MAX_CPUS};
 use kernel_core::tickless::{plan_with, StopBoard, TickPlan};
 
 use super::policy::{
-    inherit, new_entity, qos_change_allowed, BalanceParams, Balancer, Candidate, ClassMask, CoreLoad, CoreQueue, CpuLimit, CpuLimitStats,
-    Dequeue, Enqueue, LatencyHistogram, LimitError, Preempt, Qos, QueueError, Refusal, Requeue, SchedPolicy, Watchdog, WatchdogLog,
-    WatchdogReport, QOS_CLASSES,
+    inherit, new_entity, qos_change_allowed, BalanceParams, Balancer, Candidate, ClassMask,
+    CoreLoad, CoreQueue, CpuLimit, CpuLimitStats, Dequeue, Enqueue, LatencyHistogram, LimitError,
+    Preempt, Qos, QueueError, Refusal, Requeue, SchedPolicy, Watchdog, WatchdogLog, WatchdogReport,
+    QOS_CLASSES,
 };
-use super::KernelPolicy;
 use super::slots::{BootSlots, TrackedSlots};
+use super::stack::{ReserveError, StackPool, STATIC_STACKS};
+use super::KernelPolicy;
 use kernel_core::sched::{Link, RunLists};
 #[cfg(feature = "bench-profile")]
 use kernel_core::sync::Atomic64;
-use super::stack::{ReserveError, StackPool, STATIC_STACKS};
 use spin::Once;
 
 /// 堆就绪之前的内联槽位数（与静态内核栈数一致：那时只有这些槽位有栈）。
@@ -150,7 +151,10 @@ pub(super) struct LeafCompletion {
     pub(super) prev: usize,
     pub(super) token: Option<kernel_core::task_index::Token>,
     #[cfg(feature = "krn2-observe")]
-    pub(super) resume: Option<(kernel_core::task_index::Token, kernel_core::raw_timing::Endpoint)>,
+    pub(super) resume: Option<(
+        kernel_core::task_index::Token,
+        kernel_core::raw_timing::Endpoint,
+    )>,
 }
 
 #[derive(Clone, Copy)]
@@ -183,7 +187,11 @@ impl RunLeaf {
             runs: RunLists::new(),
             links: BootSlots::Inline([Link::EMPTY; INLINE_SLOTS]),
             hot: BootSlots::Inline(hot),
-            current: if cpu == 0 { 0 } else { crate::smp::percpu::IDLE_SLOT },
+            current: if cpu == 0 {
+                0
+            } else {
+                crate::smp::percpu::IDLE_SLOT
+            },
             slice_used: 0,
             slice_quantum: 1,
             switching_from: None,
@@ -197,18 +205,17 @@ macro_rules! run_leaves {
     ($($cpu:expr),+ $(,)?) => { [$(kernel_core::ticket::TicketLock::new(RunLeaf::new($cpu))),+] };
 }
 static BOOTSTRAP_RUN_LEAVES: [kernel_core::ticket::TicketLock<RunLeaf>; MAX_CPUS] = run_leaves![
-    0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
-    16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,
-    32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,
-    48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,
-    64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,
-    80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,
-    96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,
-    112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
+    50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73,
+    74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
+    98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116,
+    117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127,
 ];
 
-static EXTRA_RUN_LEAVES: Once<Result<Vec<kernel_core::ticket::TicketLock<RunLeaf>>, LeafReserveError>> =
-    Once::new();
+static EXTRA_RUN_LEAVES: Once<
+    Result<Vec<kernel_core::ticket::TicketLock<RunLeaf>>, LeafReserveError>,
+> = Once::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeafReserveError {
@@ -262,10 +269,19 @@ static LEAF_LOCAL_SWITCHES: core::sync::atomic::AtomicU32 = core::sync::atomic::
 #[cfg(feature = "bench-profile")]
 static COMPLETED_SWITCHES: [Atomic64; MAX_CPUS] = [const { Atomic64::new(0) }; MAX_CPUS];
 #[cfg(feature = "bench-profile")]
-static LAST_SWITCH_SLOT: [Atomic64; MAX_CPUS] =
-    [const { Atomic64::new(u64::MAX) }; MAX_CPUS];
+static LAST_SWITCH_SLOT: [Atomic64; MAX_CPUS] = [const { Atomic64::new(u64::MAX) }; MAX_CPUS];
 #[cfg(feature = "bench-profile")]
 static LAST_SWITCH_GENERATION: [Atomic64; MAX_CPUS] = [const { Atomic64::new(0) }; MAX_CPUS];
+#[cfg(feature = "bench-profile")]
+static RUNTIME_SWITCHES: [Atomic64; MAX_CPUS] = [const { Atomic64::new(0) }; MAX_CPUS];
+#[cfg(feature = "bench-profile")]
+static RUNTIME_LAST_FROM_SLOT: [Atomic64; MAX_CPUS] = [const { Atomic64::new(u64::MAX) }; MAX_CPUS];
+#[cfg(feature = "bench-profile")]
+static RUNTIME_LAST_FROM_GENERATION: [Atomic64; MAX_CPUS] = [const { Atomic64::new(0) }; MAX_CPUS];
+#[cfg(feature = "bench-profile")]
+static RUNTIME_LAST_TO_SLOT: [Atomic64; MAX_CPUS] = [const { Atomic64::new(u64::MAX) }; MAX_CPUS];
+#[cfg(feature = "bench-profile")]
+static RUNTIME_LAST_TO_GENERATION: [Atomic64; MAX_CPUS] = [const { Atomic64::new(0) }; MAX_CPUS];
 
 #[cfg(feature = "bench-profile")]
 fn record_completed_switch(
@@ -287,6 +303,37 @@ fn record_completed_switch(
     }
 }
 
+#[cfg(feature = "bench-profile")]
+fn record_runtime_switch(
+    cpu: usize,
+    from: usize,
+    from_token: Option<kernel_core::task_index::Token>,
+    to: usize,
+    to_token: Option<kernel_core::task_index::Token>,
+) {
+    if let Some(counter) = RUNTIME_SWITCHES.get(cpu) {
+        counter.fetch_add(1, core::sync::atomic::Ordering::Release);
+    }
+    if let Some(slot) = RUNTIME_LAST_FROM_SLOT.get(cpu) {
+        slot.store(from as u64, core::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(generation) = RUNTIME_LAST_FROM_GENERATION.get(cpu) {
+        generation.store(
+            from_token.map_or(0, |token| token.generation),
+            core::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    if let Some(slot) = RUNTIME_LAST_TO_SLOT.get(cpu) {
+        slot.store(to as u64, core::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(generation) = RUNTIME_LAST_TO_GENERATION.get(cpu) {
+        generation.store(
+            to_token.map_or(0, |token| token.generation),
+            core::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
 pub(super) fn completed_switch_count(cpu: usize) -> u64 {
     #[cfg(not(feature = "bench-profile"))]
     {
@@ -295,9 +342,9 @@ pub(super) fn completed_switch_count(cpu: usize) -> u64 {
     }
     #[cfg(feature = "bench-profile")]
     {
-    COMPLETED_SWITCHES
-        .get(cpu)
-        .map_or(0, |counter| counter.load(core::sync::atomic::Ordering::Relaxed))
+        COMPLETED_SWITCHES.get(cpu).map_or(0, |counter| {
+            counter.load(core::sync::atomic::Ordering::Relaxed)
+        })
     }
 }
 
@@ -309,19 +356,60 @@ pub(super) fn completed_switch_last(cpu: usize) -> Option<(usize, u64)> {
     }
     #[cfg(feature = "bench-profile")]
     {
-    let slot = LAST_SWITCH_SLOT
-        .get(cpu)?
-        .load(core::sync::atomic::Ordering::Relaxed);
-    (slot != u64::MAX).then(|| {
-        (
-            slot as usize,
-            LAST_SWITCH_GENERATION
-                .get(cpu)
-                .map_or(0, |generation| {
+        let slot = LAST_SWITCH_SLOT
+            .get(cpu)?
+            .load(core::sync::atomic::Ordering::Relaxed);
+        (slot != u64::MAX).then(|| {
+            (
+                slot as usize,
+                LAST_SWITCH_GENERATION.get(cpu).map_or(0, |generation| {
                     generation.load(core::sync::atomic::Ordering::Relaxed)
                 }),
-        )
-    })
+            )
+        })
+    }
+}
+
+pub(super) fn runtime_switch_count(cpu: usize) -> u64 {
+    #[cfg(not(feature = "bench-profile"))]
+    {
+        let _ = cpu;
+        0
+    }
+    #[cfg(feature = "bench-profile")]
+    {
+        RUNTIME_SWITCHES.get(cpu).map_or(0, |counter| {
+            counter.load(core::sync::atomic::Ordering::Acquire)
+        })
+    }
+}
+
+pub(super) fn runtime_switch_last(cpu: usize) -> Option<(usize, u64, usize, u64)> {
+    #[cfg(not(feature = "bench-profile"))]
+    {
+        let _ = cpu;
+        None
+    }
+    #[cfg(feature = "bench-profile")]
+    {
+        let from = RUNTIME_LAST_FROM_SLOT
+            .get(cpu)?
+            .load(core::sync::atomic::Ordering::Relaxed);
+        let to = RUNTIME_LAST_TO_SLOT
+            .get(cpu)?
+            .load(core::sync::atomic::Ordering::Relaxed);
+        (from != u64::MAX && to != u64::MAX).then(|| {
+            (
+                from as usize,
+                RUNTIME_LAST_FROM_GENERATION
+                    .get(cpu)
+                    .map_or(0, |value| value.load(core::sync::atomic::Ordering::Relaxed)),
+                to as usize,
+                RUNTIME_LAST_TO_GENERATION
+                    .get(cpu)
+                    .map_or(0, |value| value.load(core::sync::atomic::Ordering::Relaxed)),
+            )
+        })
     }
 }
 
@@ -334,15 +422,43 @@ pub(super) fn finish_leaf_switch(
     _resume: Option<kernel_core::raw_timing::Endpoint>,
 ) -> bool {
     with_leaf(cpu, |leaf| {
-        let Some(prev) = leaf.switching_from.take() else { return false; };
+        let Some(prev) = leaf.switching_from.take() else {
+            return false;
+        };
         let force_immediate = core::mem::replace(&mut leaf.switching_immediate, false);
-        assert!(leaf.completed.is_none(), "leaf switch completion was not drained");
-        let token = leaf.hot.get(prev).and_then(|slot| slot.generation())
-            .map(|generation| kernel_core::task_index::Token { slot: prev, generation });
+        assert!(
+            leaf.completed.is_none(),
+            "leaf switch completion was not drained"
+        );
+        let token = leaf
+            .hot
+            .get(prev)
+            .and_then(|slot| slot.generation())
+            .map(|generation| kernel_core::task_index::Token {
+                slot: prev,
+                generation,
+            });
+        #[cfg(feature = "bench-profile")]
+        let current = leaf.current;
+        #[cfg(feature = "bench-profile")]
+        let current_token = leaf
+            .hot
+            .get(current)
+            .and_then(|slot| slot.generation())
+            .map(|generation| kernel_core::task_index::Token {
+                slot: current,
+                generation,
+            });
         if let Some(token) = token {
-            let owner = leaf.hot[prev].get_mut(token).expect("finished switch exact hot owner");
-            if owner.on_cpu == Some(cpu) { owner.on_cpu = None; }
+            let owner = leaf.hot[prev]
+                .get_mut(token)
+                .expect("finished switch exact hot owner");
+            if owner.on_cpu == Some(cpu) {
+                owner.on_cpu = None;
+            }
         }
+        #[cfg(feature = "bench-profile")]
+        record_runtime_switch(cpu, prev, token, current, current_token);
         #[cfg(feature = "krn3-fast-tick-verify")]
         {
             LEAF_FINISHES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -353,7 +469,9 @@ pub(super) fn finish_leaf_switch(
         #[cfg(feature = "krn2-observe")]
         let resume = _resume.and_then(|end| {
             let slot = leaf.current;
-            leaf.hot.get(slot).and_then(|hot| hot.generation())
+            leaf.hot
+                .get(slot)
+                .and_then(|hot| hot.generation())
                 .map(|generation| (kernel_core::task_index::Token { slot, generation }, end))
         });
         leaf.completed = Some(LeafCompletion {
@@ -397,8 +515,10 @@ pub(super) fn fast_leaf_competing_tick(
     preemption: bool,
 ) -> FastLeafTick {
     with_leaf(cpu, |leaf| {
-        if leaf.current != token.slot || leaf.switching_from.is_some()
-            || leaf.local_transition.is_some() || leaf.completed.is_some()
+        if leaf.current != token.slot
+            || leaf.switching_from.is_some()
+            || leaf.local_transition.is_some()
+            || leaf.completed.is_some()
         {
             return FastLeafTick::Rejected;
         }
@@ -408,22 +528,40 @@ pub(super) fn fast_leaf_competing_tick(
         }
         let mut waiting = ClassMask::EMPTY;
         for slot in leaf.runs.iter(&leaf.links, LEAF_QUEUE) {
-            let Some(generation) = leaf.hot[slot].generation() else { return FastLeafTick::Rejected; };
+            let Some(generation) = leaf.hot[slot].generation() else {
+                return FastLeafTick::Rejected;
+            };
             let hot_token = kernel_core::task_index::Token { slot, generation };
-            let Ok(owner) = leaf.hot[slot].get(hot_token) else { return FastLeafTick::Rejected; };
-            if !owner.local_switchable { return FastLeafTick::Rejected; }
+            let Ok(owner) = leaf.hot[slot].get(hot_token) else {
+                return FastLeafTick::Rejected;
+            };
+            if !owner.local_switchable {
+                return FastLeafTick::Rejected;
+            }
             if slot != token.slot && owner.state == TaskState::Runnable && owner.on_cpu.is_none() {
                 waiting.insert(owner.sched.qos);
             }
         }
         {
-            let RunLeaf { queue, hot, slice_used, .. } = leaf;
-            let owner = hot[token.slot].get_mut(token).expect("fast competing tick exact owner");
-            queue.tick(Some(&mut owner.sched), waiting).expect("fast competing tick queue member");
+            let RunLeaf {
+                queue,
+                hot,
+                slice_used,
+                ..
+            } = leaf;
+            let owner = hot[token.slot]
+                .get_mut(token)
+                .expect("fast competing tick exact owner");
+            queue
+                .tick(Some(&mut owner.sched), waiting)
+                .expect("fast competing tick queue member");
             *slice_used = slice_used.saturating_add(1);
         }
         let preempt = leaf.queue.should_preempt(
-            leaf.hot[token.slot].get(token).ok().map(|owner| &owner.sched),
+            leaf.hot[token.slot]
+                .get(token)
+                .ok()
+                .map(|owner| &owner.sched),
             leaf.slice_used,
             leaf.slice_quantum,
             waiting,
@@ -434,50 +572,90 @@ pub(super) fn fast_leaf_competing_tick(
         let cause = Cause::of(preempt.expect("checked local preemption"));
         {
             let RunLeaf { queue, hot, .. } = leaf;
-            let prev = hot[token.slot].get_mut(token).expect("fast switch previous owner");
+            let prev = hot[token.slot]
+                .get_mut(token)
+                .expect("fast switch previous owner");
             prev.state = TaskState::Runnable;
-            queue.requeue(&mut prev.sched, Requeue::Preempted).expect("fast switch previous queue member");
+            queue
+                .requeue(&mut prev.sched, Requeue::Preempted)
+                .expect("fast switch previous queue member");
         }
         let choice = {
-            let RunLeaf { queue, runs, links, hot, .. } = leaf;
+            let RunLeaf {
+                queue,
+                runs,
+                links,
+                hot,
+                ..
+            } = leaf;
             let mut runnable = runs.iter(links, LEAF_QUEUE).filter_map(|slot| {
                 let generation = hot[slot].generation()?;
-                let owner = hot[slot].get(kernel_core::task_index::Token { slot, generation }).ok()?;
-                (owner.local_switchable && owner.state == TaskState::Runnable
-                    && (owner.on_cpu.is_none() || slot == token.slot)).then_some((slot, &owner.sched))
+                let owner = hot[slot]
+                    .get(kernel_core::task_index::Token { slot, generation })
+                    .ok()?;
+                (owner.local_switchable
+                    && owner.state == TaskState::Runnable
+                    && (owner.on_cpu.is_none() || slot == token.slot))
+                    .then_some((slot, &owner.sched))
             });
             queue.choose(&mut runnable)
         };
         let Some(choice) = choice else {
-            let prev = leaf.hot[token.slot].get_mut(token).expect("restore unselected previous owner");
+            let prev = leaf.hot[token.slot]
+                .get_mut(token)
+                .expect("restore unselected previous owner");
             prev.state = TaskState::Running;
-            leaf.queue.dispatched(&mut prev.sched).expect("restore previous dispatch");
+            leaf.queue
+                .dispatched(&mut prev.sched)
+                .expect("restore previous dispatch");
             return FastLeafTick::Continued;
         };
         leaf.slice_quantum = choice.quantum.max(1);
         leaf.slice_used = 0;
         let next = choice.slot;
-        let next_generation = leaf.hot[next].generation().expect("chosen task hot generation");
-        let next_token = kernel_core::task_index::Token { slot: next, generation: next_generation };
+        let next_generation = leaf.hot[next]
+            .generation()
+            .expect("chosen task hot generation");
+        let next_token = kernel_core::task_index::Token {
+            slot: next,
+            generation: next_generation,
+        };
         {
             let RunLeaf { queue, hot, .. } = leaf;
-            let owner = hot[next].get_mut(next_token).expect("chosen task hot owner");
+            let owner = hot[next]
+                .get_mut(next_token)
+                .expect("chosen task hot owner");
             owner.state = TaskState::Running;
             owner.on_cpu = Some(cpu);
-            queue.dispatched(&mut owner.sched).expect("chosen task queue member");
+            queue
+                .dispatched(&mut owner.sched)
+                .expect("chosen task queue member");
         }
         if next == token.slot {
             return FastLeafTick::Continued;
         }
         let prev = token.slot;
-        let old = leaf.hot[prev].get(token).expect("switch previous metadata").context as *mut TaskContext;
-        let next_hot = *leaf.hot[next].get(next_token).expect("switch next metadata");
+        let old = leaf.hot[prev]
+            .get(token)
+            .expect("switch previous metadata")
+            .context as *mut TaskContext;
+        let next_hot = *leaf.hot[next]
+            .get(next_token)
+            .expect("switch next metadata");
         let new = next_hot.context as *const TaskContext;
-        assert!(!old.is_null() && !new.is_null(), "worker switch metadata must have contexts");
+        assert!(
+            !old.is_null() && !new.is_null(),
+            "worker switch metadata must have contexts"
+        );
         leaf.current = next;
         leaf.switching_from = Some(prev);
         leaf.switching_immediate = false;
-        leaf.local_transition = Some(LeafTransition { cpu, prev, next, cause });
+        leaf.local_transition = Some(LeafTransition {
+            cpu,
+            prev,
+            next,
+            cause,
+        });
         LEAF_LOCAL_SWITCHES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         FastLeafTick::Switch(SwitchPlan {
             old,
@@ -520,7 +698,9 @@ fn with_leaf_hot<R>(
 ) -> (R, super::policy::SchedEntity) {
     with_leaf(cpu, |leaf| {
         let RunLeaf { queue, hot, .. } = leaf;
-        let owner = hot[token.slot].get_mut(token).expect("exact task hot owner");
+        let owner = hot[token.slot]
+            .get_mut(token)
+            .expect("exact task hot owner");
         let result = f(queue, &mut owner.sched);
         (result, owner.sched)
     })
@@ -532,11 +712,28 @@ fn with_leaf_hot<R>(
 pub(super) fn fast_leaf_tick(cpu: usize, token: kernel_core::task_index::Token) {
     with_leaf(cpu, |leaf| {
         assert_eq!(leaf.current, token.slot, "fast tick changed current owner");
-        let RunLeaf { queue, hot, slice_used, .. } = leaf;
-        let owner = hot[token.slot].get_mut(token).expect("fast tick exact hot owner");
-        assert_eq!(owner.state, TaskState::Running, "fast tick owner is not running");
-        assert_eq!(owner.sched.queue(), Some(cpu), "fast tick owner moved queues");
-        queue.tick(Some(&mut owner.sched), ClassMask::EMPTY).expect("authorized fast tick queue member");
+        let RunLeaf {
+            queue,
+            hot,
+            slice_used,
+            ..
+        } = leaf;
+        let owner = hot[token.slot]
+            .get_mut(token)
+            .expect("fast tick exact hot owner");
+        assert_eq!(
+            owner.state,
+            TaskState::Running,
+            "fast tick owner is not running"
+        );
+        assert_eq!(
+            owner.sched.queue(),
+            Some(cpu),
+            "fast tick owner moved queues"
+        );
+        queue
+            .tick(Some(&mut owner.sched), ClassMask::EMPTY)
+            .expect("authorized fast tick queue member");
         *slice_used = slice_used.saturating_add(1);
     });
 }
@@ -544,19 +741,39 @@ fn leaf_current(cpu: usize) -> usize {
     with_leaf(cpu, |leaf| leaf.current)
 }
 fn leaf_run_state(cpu: usize) -> (usize, u32, u32, Option<usize>) {
-    with_leaf(cpu, |leaf| (leaf.current, leaf.slice_used, leaf.slice_quantum, leaf.switching_from))
+    with_leaf(cpu, |leaf| {
+        (
+            leaf.current,
+            leaf.slice_used,
+            leaf.slice_quantum,
+            leaf.switching_from,
+        )
+    })
 }
 fn leaf_has_completion(cpu: usize) -> bool {
     with_leaf(cpu, |leaf| leaf.completed.is_some())
 }
 fn leaf_execution_settled(cpu: usize) -> bool {
     with_leaf(cpu, |leaf| {
-        if leaf.switching_from.is_some() || leaf.completed.is_some() { return false; }
+        if leaf.switching_from.is_some() || leaf.completed.is_some() {
+            return false;
+        }
         let current = leaf.current;
-        if !is_worker(current) { return true; }
-        leaf.hot.get(current).and_then(|slot| slot.generation()).and_then(|generation| {
-            leaf.hot[current].get(kernel_core::task_index::Token { slot: current, generation }).ok()
-        }).is_none_or(|owner| owner.on_cpu != Some(cpu))
+        if !is_worker(current) {
+            return true;
+        }
+        leaf.hot
+            .get(current)
+            .and_then(|slot| slot.generation())
+            .and_then(|generation| {
+                leaf.hot[current]
+                    .get(kernel_core::task_index::Token {
+                        slot: current,
+                        generation,
+                    })
+                    .ok()
+            })
+            .is_none_or(|owner| owner.on_cpu != Some(cpu))
     })
 }
 #[derive(Clone)]
@@ -578,14 +795,22 @@ impl Iterator for LeafSlots {
         Some(slot)
     }
 }
-fn with_leaf_pair<R>(source: usize, destination: usize, f: impl FnOnce(&mut RunLeaf, &mut RunLeaf) -> R) -> R {
+fn with_leaf_pair<R>(
+    source: usize,
+    destination: usize,
+    f: impl FnOnce(&mut RunLeaf, &mut RunLeaf) -> R,
+) -> R {
     let pair = kernel_core::percpu_migration::CpuPair::ordered(source, destination)
         .expect("run-leaf pair requires distinct CPUs");
     let first_lock = leaf(pair.first).expect("admitted source scheduler leaf");
     let second_lock = leaf(pair.second).expect("admitted destination scheduler leaf");
     let mut first = first_lock.lock();
     let mut second = second_lock.lock();
-    let result = if source == pair.first { f(&mut first, &mut second) } else { f(&mut second, &mut first) };
+    let result = if source == pair.first {
+        f(&mut first, &mut second)
+    } else {
+        f(&mut second, &mut first)
+    };
     drop(second);
     drop(first);
     result
@@ -605,9 +830,20 @@ pub struct DeadlineTrace {
 }
 #[cfg(feature = "fault-inject")]
 impl DeadlineTrace {
-    const EMPTY: Self = Self { token: kernel_core::task_index::Token { slot: usize::MAX, generation: 0 },
-        at: 0, requested_at: 0, stopped: false, ipis_before: 0, ipis_after: 0,
-        consumed_at: 0, consumer: usize::MAX, consumed: false };
+    const EMPTY: Self = Self {
+        token: kernel_core::task_index::Token {
+            slot: usize::MAX,
+            generation: 0,
+        },
+        at: 0,
+        requested_at: 0,
+        stopped: false,
+        ipis_before: 0,
+        ipis_after: 0,
+        consumed_at: 0,
+        consumer: usize::MAX,
+        consumed: false,
+    };
 }
 
 /// 高精度定时器事务携带的前两个时间点；后续点由真实发布路径补全。
@@ -619,7 +855,6 @@ pub(super) struct WakePhaseSource {
     pub lock_acquired: kernel_core::raw_timing::Endpoint,
 }
 
-
 /// 每个槽位在各张随容量增长的表里占用的字节数（任务表、组表、组世代、调度暂存、栈指针表；不含栈本身）。
 pub const BYTES_PER_SLOT: usize = core::mem::size_of::<Option<Task>>()
     + core::mem::size_of::<Option<CpuGroup>>()
@@ -629,7 +864,8 @@ pub const BYTES_PER_SLOT: usize = core::mem::size_of::<Option<Task>>()
     + core::mem::size_of::<bool>()
     + (MAX_CPUS + 1) * core::mem::size_of::<Link>()
     + core::mem::size_of::<*mut super::stack::Stack>()
-    + MAX_CPUS*core::mem::size_of::<Deadline>()+2*core::mem::size_of::<usize>();
+    + MAX_CPUS * core::mem::size_of::<Deadline>()
+    + 2 * core::mem::size_of::<usize>();
 
 /// 启动期扩容被拒绝的原因（被拒时调度器保持原样）。
 /// Why the boot-time grow was refused (the scheduler is left unchanged).
@@ -723,7 +959,10 @@ impl Cause {
 
     /// 该原因是否表示任务**主动**放弃处理器（看门狗据此清零连续占用）。
     pub fn voluntary(cause: &str) -> bool {
-        cause == Cause::YIELD || cause == Cause::SLEEP || cause == Cause::BLOCK || cause == Cause::EXIT
+        cause == Cause::YIELD
+            || cause == Cause::SLEEP
+            || cause == Cause::BLOCK
+            || cause == Cause::EXIT
     }
 
     /// 策略的抢占原因 → 切换原因名。
@@ -1151,7 +1390,11 @@ pub struct Scheduler {
     #[cfg(feature = "krn2-observe")]
     pub(super) raw_pending_at_reset: usize,
     /// 任务表：可变访问自动标脏，期限事件只同步脏槽位（issue #2）。
-    tasks: TrackedSlots<Option<Task>, INLINE_SLOTS, { kernel_core::dirty_slots::words_for(INLINE_SLOTS) }>,
+    tasks: TrackedSlots<
+        Option<Task>,
+        INLINE_SLOTS,
+        { kernel_core::dirty_slots::words_for(INLINE_SLOTS) },
+    >,
     // Author: chatgpt. One canonical generation state per slot; lock serialized.
     epochs: BootSlots<SlotLifecycle, INLINE_SLOTS>,
     id_index: Option<TaskIndex<BootSlots<IndexNode, { 2 * INLINE_SLOTS - 1 }>>>,
@@ -1164,31 +1407,31 @@ pub struct Scheduler {
     workers: usize,
     budget_tick_charges: [u32; 2],
     // Bounded diagnostic observer; never grants or changes CPU budget.
-    budget_window: Option<(CpuGroupId, u64, u64, (u64,u64), Option<(u64,(u64,u64))>)>,
+    budget_window: Option<(CpuGroupId, u64, u64, (u64, u64), Option<(u64, (u64, u64))>)>,
     /// 同步运行列表时被拒绝的次数（正常运行时恒为 0）。
     list_errors: u32,
     /// 睡眠任务中最早的定时唤醒时刻（`u64::MAX` = 没有；可能偏早，不会偏晚）。
     next_wake: CpuTable<u64, MAX_CPUS>,
     wake_heap: DeadlineForest<MAX_CPUS>,
-    wake_entries: BootSlots<Deadline, {INLINE_SLOTS * MAX_CPUS}>,
+    wake_entries: BootSlots<Deadline, { INLINE_SLOTS * MAX_CPUS }>,
     wake_positions: BootSlots<usize, INLINE_SLOTS>,
     wake_owners: BootSlots<usize, INLINE_SLOTS>,
     /// 实时任务中最早的预算补充时刻（`u64::MAX` = 没有；可能偏早，不会偏晚）。
     next_rt: CpuTable<u64, MAX_CPUS>,
     rt_heap: DeadlineForest<MAX_CPUS>,
-    rt_entries: BootSlots<Deadline, {INLINE_SLOTS * MAX_CPUS}>,
+    rt_entries: BootSlots<Deadline, { INLINE_SLOTS * MAX_CPUS }>,
     rt_positions: BootSlots<usize, INLINE_SLOTS>,
     rt_owners: BootSlots<usize, INLINE_SLOTS>,
     ns_heap: DeadlineForest<MAX_CPUS>,
-    ns_entries: BootSlots<Deadline,{INLINE_SLOTS*MAX_CPUS}>,
-    ns_positions: BootSlots<usize,INLINE_SLOTS>,
-    ns_owners: BootSlots<usize,INLINE_SLOTS>,
+    ns_entries: BootSlots<Deadline, { INLINE_SLOTS * MAX_CPUS }>,
+    ns_positions: BootSlots<usize, INLINE_SLOTS>,
+    ns_owners: BootSlots<usize, INLINE_SLOTS>,
     ns_roots: CpuTable<Option<u64>, MAX_CPUS>,
     ns_at: CpuTable<u64, MAX_CPUS>,
     ns_credit: CpuTable<Option<kernel_core::timer_units::CreditLedger>, MAX_CPUS>,
     ns_need_tick: CpuTable<bool, MAX_CPUS>,
-    ns_now:u64,
-    ns_active:bool,
+    ns_now: u64,
+    ns_active: bool,
     ns_programmed: CpuTable<Option<u64>, MAX_CPUS>,
     /// 任务纳秒唤醒、预算期限与 Ring 期限等待共用的身份来源。
     /// Shared identity source for task ns wakeups, budget deadlines and Ring waits.
@@ -1278,11 +1521,11 @@ pub struct Scheduler {
     nohz_divisor: u32,
     /// 计时处理器为停表处理器发出的重新调度请求次数（停表期间出现可接的工作）。
     nohz_kicks: u64,
-    #[cfg(feature="s3-nohz-verify")]
+    #[cfg(feature = "s3-nohz-verify")]
     nohz_diag_start: u64,
-    #[cfg(feature="s3-nohz-verify")]
+    #[cfg(feature = "s3-nohz-verify")]
     nohz_diag_local: [u64; MAX_CPUS],
-    #[cfg(feature="s3-nohz-verify")]
+    #[cfg(feature = "s3-nohz-verify")]
     nohz_diag_missed: [u64; MAX_CPUS],
 }
 
@@ -1324,7 +1567,10 @@ impl Scheduler {
         tasks[BOOT_SLOT] = Some(boot);
         let mut epochs = [const { SlotLifecycle::new(0) }; INLINE_SLOTS];
         let mut i = 0;
-        while i < INLINE_SLOTS { epochs[i] = SlotLifecycle::new(i); i += 1; }
+        while i < INLINE_SLOTS {
+            epochs[i] = SlotLifecycle::new(i);
+            i += 1;
+        }
         epochs[BOOT_SLOT] = SlotLifecycle::initial(BOOT_SLOT, 0);
         Scheduler {
             #[cfg(feature = "krn2-observe")]
@@ -1379,16 +1625,16 @@ impl Scheduler {
             rt_entries: BootSlots::Inline([Deadline::EMPTY; INLINE_SLOTS * MAX_CPUS]),
             rt_positions: BootSlots::Inline([NO_DEADLINE; INLINE_SLOTS]),
             rt_owners: BootSlots::Inline([NO_DEADLINE; INLINE_SLOTS]),
-            ns_heap:DeadlineForest::new(),
-            ns_entries:BootSlots::Inline([Deadline::EMPTY;INLINE_SLOTS*MAX_CPUS]),
-            ns_positions:BootSlots::Inline([NO_DEADLINE;INLINE_SLOTS]),
-            ns_owners:BootSlots::Inline([NO_DEADLINE;INLINE_SLOTS]),
+            ns_heap: DeadlineForest::new(),
+            ns_entries: BootSlots::Inline([Deadline::EMPTY; INLINE_SLOTS * MAX_CPUS]),
+            ns_positions: BootSlots::Inline([NO_DEADLINE; INLINE_SLOTS]),
+            ns_owners: BootSlots::Inline([NO_DEADLINE; INLINE_SLOTS]),
             ns_roots: CpuTable::new([None; MAX_CPUS]),
             ns_at: CpuTable::new([0; MAX_CPUS]),
             ns_credit: CpuTable::new([None; MAX_CPUS]),
             ns_need_tick: CpuTable::new([false; MAX_CPUS]),
-            ns_now:0,
-            ns_active:false,
+            ns_now: 0,
+            ns_active: false,
             ns_programmed: CpuTable::new([None; MAX_CPUS]),
             timer_table: TimerTable::new(),
             timer_budget: OwnerBudget::new(TIMER_SLOTS as u32),
@@ -1396,14 +1642,34 @@ impl Scheduler {
             ns_root_dirty: CpuSet::EMPTY,
             #[cfg(feature = "ns-dirty-audit")]
             ns_audits: 0,
-            ns_sync: kernel_core::deadline_forest::SyncStats { passes: 0, synced: 0, unchanged: 0, inserted: 0, rescheduled: 0, moved: 0, removed: 0 },
+            ns_sync: kernel_core::deadline_forest::SyncStats {
+                passes: 0,
+                synced: 0,
+                unchanged: 0,
+                inserted: 0,
+                rescheduled: 0,
+                moved: 0,
+                removed: 0,
+            },
             ns_budget: NsBudgetStats {
-                passes: 0, budget_cpu_checks: 0, due_cpu_checks: 0, due_cpus: 0,
-                table_slots: 0, due_events: 0, running_settlements: 0,
-                inactive_settlements: 0, max_settle_cycles: 0,
+                passes: 0,
+                budget_cpu_checks: 0,
+                due_cpu_checks: 0,
+                due_cpus: 0,
+                table_slots: 0,
+                due_events: 0,
+                running_settlements: 0,
+                inactive_settlements: 0,
+                max_settle_cycles: 0,
             },
             ns_budget_tasks: 0,
-            scan: ScanStats { picks: 0, visited: 0, max_visited: 0, wake_scans: 0, ticks: 0 },
+            scan: ScanStats {
+                picks: 0,
+                visited: 0,
+                max_visited: 0,
+                wake_scans: 0,
+                ticks: 0,
+            },
             hook_errors: 0,
             last_hook_error: None,
             idle_ctx: CpuTable::new([const { crate::arch::EMPTY_CONTEXT }; MAX_CPUS]),
@@ -1417,8 +1683,18 @@ impl Scheduler {
             delayed_deadline_timer: CpuSet::EMPTY,
             #[cfg(feature = "fault-inject")]
             deadline_trace: [DeadlineTrace::EMPTY; MAX_CPUS],
-            cpu_stats: CpuTable::new([CpuStats { busy_ticks: 0, idle_ticks: 0, idle_waiting: 0, max_idle_waiting: 0, steals: 0, pulls: 0, pull_hot: 0 }; MAX_CPUS]),
-            cpu_residency: CpuTable::new([kernel_core::cpu_time::Ledger::new(0,false); MAX_CPUS]),
+            cpu_stats: CpuTable::new(
+                [CpuStats {
+                    busy_ticks: 0,
+                    idle_ticks: 0,
+                    idle_waiting: 0,
+                    max_idle_waiting: 0,
+                    steals: 0,
+                    pulls: 0,
+                    pull_hot: 0,
+                }; MAX_CPUS],
+            ),
+            cpu_residency: CpuTable::new([kernel_core::cpu_time::Ledger::new(0, false); MAX_CPUS]),
             local_ticks: CpuTable::new([0; MAX_CPUS]),
             tick_publication: CpuTable::new([None; MAX_CPUS]),
             tick_touched: CpuTable::new([None; MAX_CPUS]),
@@ -1438,17 +1714,26 @@ impl Scheduler {
             scratch_wants: BootSlots::Inline([false; INLINE_SLOTS]),
             watchdog: Watchdog::new(super::policy::WATCHDOG_THRESHOLD),
             watchdog_log: WatchdogLog::new(),
-            arbiter: kernel_core::arbiter::Arbiter::new(kernel_core::arbiter::ArbiterParams::DEFAULT),
-            arb_windows: CpuTable::new([kernel_core::arbiter::Window { ticks: 0, realtime: 0, interactive: 0, batch: 0 }; MAX_CPUS]),
+            arbiter: kernel_core::arbiter::Arbiter::new(
+                kernel_core::arbiter::ArbiterParams::DEFAULT,
+            ),
+            arb_windows: CpuTable::new(
+                [kernel_core::arbiter::Window {
+                    ticks: 0,
+                    realtime: 0,
+                    interactive: 0,
+                    batch: 0,
+                }; MAX_CPUS],
+            ),
             nohz: StopBoard::new(0),
             nohz_wake_scratch: kernel_core::cpu_bitmap::CpuBitmap::empty(),
             nohz_divisor: 0,
             nohz_kicks: 0,
-            #[cfg(feature="s3-nohz-verify")]
+            #[cfg(feature = "s3-nohz-verify")]
             nohz_diag_start: 0,
-            #[cfg(feature="s3-nohz-verify")]
+            #[cfg(feature = "s3-nohz-verify")]
             nohz_diag_local: [0; MAX_CPUS],
-            #[cfg(feature="s3-nohz-verify")]
+            #[cfg(feature = "s3-nohz-verify")]
             nohz_diag_missed: [0; MAX_CPUS],
             arbiter_on: false,
         }
@@ -1465,8 +1750,12 @@ impl Scheduler {
     fn pick_arb_class(&mut self, c: usize, prev: usize) -> Option<kernel_core::arbiter::Class> {
         use kernel_core::arbiter::{Class, Demand};
         // An admitted eligible RT partition is active even for single-mode profiles.
-        if self.listed(c).any(|(i,t)|t.rt_period!=0 && t.state==TaskState::Runnable
-            && (t.on_cpu.is_none() || i==prev) && self.eligible(t)) {
+        if self.listed(c).any(|(i, t)| {
+            t.rt_period != 0
+                && t.state == TaskState::Runnable
+                && (t.on_cpu.is_none() || i == prev)
+                && self.eligible(t)
+        }) {
             return Some(Class::RealTime);
         }
         if !self.arbiter_on {
@@ -1489,7 +1778,12 @@ impl Scheduler {
         let chosen = self.arbiter.pick(demand, &self.arb_windows[c])?;
         // 只有该类确实有候选时才过滤，否则退回不按类别过滤（避免选出空集）。
         let has = self.listed(c).any(|(i, t)| {
-            i != prev && t.state == TaskState::Runnable && t.home == c && t.on_cpu.is_none() && self.eligible(t) && arb_class(t) == chosen
+            i != prev
+                && t.state == TaskState::Runnable
+                && t.home == c
+                && t.on_cpu.is_none()
+                && self.eligible(t)
+                && arb_class(t) == chosen
         });
         if !has {
             return None;
@@ -1523,7 +1817,11 @@ impl Scheduler {
     #[cfg(feature = "krn2-observe")]
     pub(super) fn raw_callback_identity(&self) -> (usize, u64) {
         let slot = self.cur();
-        let generation = self.epochs.get(slot).and_then(|e| e.history()).map_or(0, |r| r.token().generation);
+        let generation = self
+            .epochs
+            .get(slot)
+            .and_then(|e| e.history())
+            .map_or(0, |r| r.token().generation);
         (slot, generation)
     }
 
@@ -1569,42 +1867,50 @@ impl Scheduler {
             context: (&task.context as *const TaskContext) as usize,
             stack_top: is_worker(token.slot).then(|| self.stacks.top(token.slot)),
             space: task.space,
-            local_switchable: task.cpu_group.is_none() && task.rt_period == 0
-                && task.ns_budget.is_none() && task.sched.qos == task.base_qos,
+            local_switchable: task.cpu_group.is_none()
+                && task.rt_period == 0
+                && task.ns_budget.is_none()
+                && task.sched.qos == task.base_qos,
         };
         with_leaf(home, |leaf| {
-            leaf.hot[token.slot].publish(token, value).expect("publish empty task hot slot");
+            leaf.hot[token.slot]
+                .publish(token, value)
+                .expect("publish empty task hot slot");
         });
     }
 
     fn sync_hot(&self, slot: usize) {
         let task = self.task(slot).expect("sync live task hot state");
-        let token = self.epochs[slot].history().expect("sync task identity").token();
+        let token = self.epochs[slot]
+            .history()
+            .expect("sync task identity")
+            .token();
         let (state, on_cpu, space) = (task.state, task.on_cpu, task.space);
-        let local_switchable = task.cpu_group.is_none() && task.rt_period == 0
-            && task.ns_budget.is_none() && task.sched.qos == task.base_qos;
-        with_leaf(task.home, |leaf| {
-            match leaf.hot[slot].get_mut(token) {
-                Ok(hot) => {
-                    hot.state = state;
-                    hot.on_cpu = on_cpu;
-                    hot.space = space;
-                    hot.local_switchable = local_switchable;
-                }
-                Err(kernel_core::task_hot::Error::WrongSlot) => panic!("task hot wrong slot"),
-                Err(kernel_core::task_hot::Error::Stale) => panic!("task hot stale generation"),
-                Err(kernel_core::task_hot::Error::Empty) => panic!("task hot owner missing"),
-                Err(kernel_core::task_hot::Error::Occupied) => unreachable!(),
+        let local_switchable = task.cpu_group.is_none()
+            && task.rt_period == 0
+            && task.ns_budget.is_none()
+            && task.sched.qos == task.base_qos;
+        with_leaf(task.home, |leaf| match leaf.hot[slot].get_mut(token) {
+            Ok(hot) => {
+                hot.state = state;
+                hot.on_cpu = on_cpu;
+                hot.space = space;
+                hot.local_switchable = local_switchable;
             }
+            Err(kernel_core::task_hot::Error::WrongSlot) => panic!("task hot wrong slot"),
+            Err(kernel_core::task_hot::Error::Stale) => panic!("task hot stale generation"),
+            Err(kernel_core::task_hot::Error::Empty) => panic!("task hot owner missing"),
+            Err(kernel_core::task_hot::Error::Occupied) => unreachable!(),
         });
     }
 
     fn retire_hot(&self, home: usize, token: kernel_core::task_index::Token) {
         with_leaf(home, |leaf| {
-            leaf.hot[token.slot].retire(token).expect("retire matching task hot slot");
+            leaf.hot[token.slot]
+                .retire(token)
+                .expect("retire matching task hot slot");
         });
     }
-
 
     /// Mutate the canonical per-CPU scheduling entity and refresh the cold
     /// Task mirror after releasing the leaf lock.  All queue hooks use this
@@ -1617,9 +1923,15 @@ impl Scheduler {
     ) -> R {
         let task = self.tasks[slot].as_ref().expect("hot scheduling task");
         let home = task.home;
-        let token = self.epochs[slot].history().expect("hot scheduling identity").token();
+        let token = self.epochs[slot]
+            .history()
+            .expect("hot scheduling identity")
+            .token();
         let (result, sched) = with_leaf_hot(home, token, f);
-        self.tasks[slot].as_mut().expect("hot scheduling task mirror").sched = sched;
+        self.tasks[slot]
+            .as_mut()
+            .expect("hot scheduling task mirror")
+            .sched = sched;
         result
     }
 
@@ -1634,11 +1946,12 @@ impl Scheduler {
             && (0..cpus).all(|cpu| {
                 with_leaf(cpu, |leaf| {
                     leaf.queue.queued() == 0
-                        && leaf.current == if cpu == 0 {
-                            BOOT_SLOT
-                        } else {
-                            crate::smp::percpu::IDLE_SLOT
-                        }
+                        && leaf.current
+                            == if cpu == 0 {
+                                BOOT_SLOT
+                            } else {
+                                crate::smp::percpu::IDLE_SLOT
+                            }
                 })
             });
         if !quiescent {
@@ -1671,14 +1984,17 @@ impl Scheduler {
             && (0..cpus).all(|cpu| leaf_run_state(cpu).3.is_none())
             && (0..cpus).all(|cpu| !leaf_has_completion(cpu))
             && self.tasks.iter().enumerate().all(|(i, t)| {
-                i == BOOT_SLOT || t.as_ref().is_none_or(|t| t.state == TaskState::Exited && t.on_cpu.is_none())
+                i == BOOT_SLOT
+                    || t.as_ref()
+                        .is_none_or(|t| t.state == TaskState::Exited && t.on_cpu.is_none())
             });
         if !quiescent {
             return Err(GrowError::NotQuiescent);
         }
-        let oom = |s: &Self| GrowError::OutOfMemory { available: s.stacks.available() };
-        let mut affinities = CpuAffinityTable::new(slots, MAX_CPUS)
-            .map_err(|_| oom(self))?;
+        let oom = |s: &Self| GrowError::OutOfMemory {
+            available: s.stacks.available(),
+        };
+        let mut affinities = CpuAffinityTable::new(slots, MAX_CPUS).map_err(|_| oom(self))?;
         for slot in 0..slots {
             if let Some(task) = self.tasks.get(slot).and_then(|task| task.as_ref()) {
                 match task.affinity {
@@ -1688,7 +2004,8 @@ impl Scheduler {
                         }
                     }
                     TaskAffinity::Dynamic => {
-                        let source = self.dynamic_affinities
+                        let source = self
+                            .dynamic_affinities
                             .as_ref()
                             .and_then(|table| table.view(slot))
                             .ok_or_else(|| oom(self))?;
@@ -1715,82 +2032,165 @@ impl Scheduler {
                 .unwrap_or(CpuSet::EMPTY);
             ran_on.push(set);
         }
-        let tasks = self.tasks.prepare(slots, || None).ok_or_else(|| oom(self))?;
-        let groups = self.groups.prepare(slots, || None).ok_or_else(|| oom(self))?;
-        let group_links = self.group_links.prepare(slots, || Link::EMPTY).ok_or_else(|| oom(self))?;
-        let group_gen = self.group_gen.prepare(slots, || 0).ok_or_else(|| oom(self))?;
-        let base = self.scratch_base.prepare(slots, || None).ok_or_else(|| oom(self))?;
-        let eff = self.scratch_eff.prepare(slots, || None).ok_or_else(|| oom(self))?;
-        let waits = self.scratch_waits.prepare(slots, || None).ok_or_else(|| oom(self))?;
-        let wants = self.scratch_wants.prepare(slots, || false).ok_or_else(|| oom(self))?;
+        let tasks = self
+            .tasks
+            .prepare(slots, || None)
+            .ok_or_else(|| oom(self))?;
+        let groups = self
+            .groups
+            .prepare(slots, || None)
+            .ok_or_else(|| oom(self))?;
+        let group_links = self
+            .group_links
+            .prepare(slots, || Link::EMPTY)
+            .ok_or_else(|| oom(self))?;
+        let group_gen = self
+            .group_gen
+            .prepare(slots, || 0)
+            .ok_or_else(|| oom(self))?;
+        let base = self
+            .scratch_base
+            .prepare(slots, || None)
+            .ok_or_else(|| oom(self))?;
+        let eff = self
+            .scratch_eff
+            .prepare(slots, || None)
+            .ok_or_else(|| oom(self))?;
+        let waits = self
+            .scratch_waits
+            .prepare(slots, || None)
+            .ok_or_else(|| oom(self))?;
+        let wants = self
+            .scratch_wants
+            .prepare(slots, || false)
+            .ok_or_else(|| oom(self))?;
         let mut leaf_links = Vec::new();
-        leaf_links
-            .try_reserve_exact(cpus)
-            .map_err(|_| oom(self))?;
+        leaf_links.try_reserve_exact(cpus).map_err(|_| oom(self))?;
         leaf_links.resize_with(cpus, || None);
         let mut leaf_hot = Vec::new();
-        leaf_hot
-            .try_reserve_exact(cpus)
-            .map_err(|_| oom(self))?;
+        leaf_hot.try_reserve_exact(cpus).map_err(|_| oom(self))?;
         leaf_hot.resize_with(cpus, || None);
         for (cpu, prepared) in leaf_links.iter_mut().enumerate() {
-            *prepared = Some(with_leaf(cpu, |leaf| leaf.links.prepare(slots, || Link::EMPTY))
-                .ok_or_else(|| oom(self))?);
+            *prepared = Some(
+                with_leaf(cpu, |leaf| leaf.links.prepare(slots, || Link::EMPTY))
+                    .ok_or_else(|| oom(self))?,
+            );
             let mut slot = 0;
-            leaf_hot[cpu] = Some(with_leaf(cpu, |leaf| leaf.hot.prepare(slots, || {
-                let value = HotSlot::empty(slot);
-                slot += 1;
-                value
-            })).ok_or_else(|| oom(self))?);
+            leaf_hot[cpu] = Some(
+                with_leaf(cpu, |leaf| {
+                    leaf.hot.prepare(slots, || {
+                        let value = HotSlot::empty(slot);
+                        slot += 1;
+                        value
+                    })
+                })
+                .ok_or_else(|| oom(self))?,
+            );
         }
         let deadline_count = slots.checked_mul(cpus).ok_or_else(|| oom(self))?;
-        let mut wake_entries = self.wake_entries.prepare(deadline_count, || Deadline::EMPTY).ok_or_else(|| oom(self))?;
-        let mut wake_positions = self.wake_positions.prepare(slots, || NO_DEADLINE).ok_or_else(|| oom(self))?;
-        let mut rt_entries = self.rt_entries.prepare(deadline_count, || Deadline::EMPTY).ok_or_else(|| oom(self))?;
-        let mut rt_positions = self.rt_positions.prepare(slots, || NO_DEADLINE).ok_or_else(|| oom(self))?;
-        let mut wake_owners = self.wake_owners.prepare(slots, || NO_DEADLINE).ok_or_else(|| oom(self))?;
+        let mut wake_entries = self
+            .wake_entries
+            .prepare(deadline_count, || Deadline::EMPTY)
+            .ok_or_else(|| oom(self))?;
+        let mut wake_positions = self
+            .wake_positions
+            .prepare(slots, || NO_DEADLINE)
+            .ok_or_else(|| oom(self))?;
+        let mut rt_entries = self
+            .rt_entries
+            .prepare(deadline_count, || Deadline::EMPTY)
+            .ok_or_else(|| oom(self))?;
+        let mut rt_positions = self
+            .rt_positions
+            .prepare(slots, || NO_DEADLINE)
+            .ok_or_else(|| oom(self))?;
+        let mut wake_owners = self
+            .wake_owners
+            .prepare(slots, || NO_DEADLINE)
+            .ok_or_else(|| oom(self))?;
         let mut wake_heap = DeadlineForest::<MAX_CPUS>::new();
         // New CPU strides differ: rebuild all live nodes before any commit.
         for c in 0..cpus {
             for n in 0..self.wake_heap.len(c).unwrap() {
-                let event = self.wake_entries[c*self.tasks.len()+n];
-                wake_heap.set(&mut wake_entries, &mut wake_positions, &mut wake_owners, c, event)
+                let event = self.wake_entries[c * self.tasks.len() + n];
+                wake_heap
+                    .set(
+                        &mut wake_entries,
+                        &mut wake_positions,
+                        &mut wake_owners,
+                        c,
+                        event,
+                    )
                     .expect("preallocated deadline forest rebuild");
             }
         }
-        let mut rt_owners = self.rt_owners.prepare(slots, || NO_DEADLINE).ok_or_else(|| oom(self))?;
+        let mut rt_owners = self
+            .rt_owners
+            .prepare(slots, || NO_DEADLINE)
+            .ok_or_else(|| oom(self))?;
         let mut rt_heap = DeadlineForest::<MAX_CPUS>::new();
         // New CPU strides differ: rebuild all live nodes before any commit.
         for c in 0..cpus {
             for n in 0..self.rt_heap.len(c).unwrap() {
-                let event = self.rt_entries[c*self.tasks.len()+n];
-                rt_heap.set(&mut rt_entries, &mut rt_positions, &mut rt_owners, c, event)
+                let event = self.rt_entries[c * self.tasks.len() + n];
+                rt_heap
+                    .set(&mut rt_entries, &mut rt_positions, &mut rt_owners, c, event)
                     .expect("preallocated deadline forest rebuild");
             }
         }
         let mut pos = 0;
-        let epochs = self.epochs.prepare(slots, || { let e = SlotLifecycle::new(pos); pos += 1; e }).ok_or_else(|| oom(self))?;
-        let index_count = slots.checked_mul(2).and_then(|n| n.checked_sub(1)).ok_or_else(|| oom(self))?;
-        let storage = BootSlots::<IndexNode, {2 * INLINE_SLOTS - 1}>::Inline([IndexNode::Free(usize::MAX); 2 * INLINE_SLOTS - 1]);
-        let nodes = storage.prepare(index_count, || IndexNode::Free(usize::MAX)).ok_or_else(|| oom(self))?;
+        let epochs = self
+            .epochs
+            .prepare(slots, || {
+                let e = SlotLifecycle::new(pos);
+                pos += 1;
+                e
+            })
+            .ok_or_else(|| oom(self))?;
+        let index_count = slots
+            .checked_mul(2)
+            .and_then(|n| n.checked_sub(1))
+            .ok_or_else(|| oom(self))?;
+        let storage = BootSlots::<IndexNode, { 2 * INLINE_SLOTS - 1 }>::Inline(
+            [IndexNode::Free(usize::MAX); 2 * INLINE_SLOTS - 1],
+        );
+        let nodes = storage
+            .prepare(index_count, || IndexNode::Free(usize::MAX))
+            .ok_or_else(|| oom(self))?;
         let mut index = TaskIndex::new(BootSlots::Heap(nodes));
         for e in self.epochs.iter() {
-            if let Some(r) = e.history() { index.insert(r.label(), r.token()).expect("unique historical task labels"); }
+            if let Some(r) = e.history() {
+                index
+                    .insert(r.label(), r.token())
+                    .expect("unique historical task labels");
+            }
         }
-        let mut ns_entries=self.ns_entries.prepare(deadline_count,||Deadline::EMPTY).ok_or_else(||oom(self))?;
-        let mut ns_positions=self.ns_positions.prepare(slots,||NO_DEADLINE).ok_or_else(||oom(self))?;
-        let mut ns_owners=self.ns_owners.prepare(slots,||NO_DEADLINE).ok_or_else(||oom(self))?;
-        let mut ns_heap=DeadlineForest::<MAX_CPUS>::new();
+        let mut ns_entries = self
+            .ns_entries
+            .prepare(deadline_count, || Deadline::EMPTY)
+            .ok_or_else(|| oom(self))?;
+        let mut ns_positions = self
+            .ns_positions
+            .prepare(slots, || NO_DEADLINE)
+            .ok_or_else(|| oom(self))?;
+        let mut ns_owners = self
+            .ns_owners
+            .prepare(slots, || NO_DEADLINE)
+            .ok_or_else(|| oom(self))?;
+        let mut ns_heap = DeadlineForest::<MAX_CPUS>::new();
         // The forest stride follows the task-slot count. Rebuilding preserves
         // every live timer identity when startup capacity changes.
         for c in 0..cpus {
             for n in 0..self.ns_heap.len(c).unwrap() {
-                let event=self.ns_entries[c*self.tasks.len()+n];
-                ns_heap.set(&mut ns_entries,&mut ns_positions,&mut ns_owners,c,event)
+                let event = self.ns_entries[c * self.tasks.len() + n];
+                ns_heap
+                    .set(&mut ns_entries, &mut ns_positions, &mut ns_owners, c, event)
                     .expect("preallocated ns deadline forest rebuild");
             }
         }
-        self.ns_entries.commit(ns_entries);self.ns_positions.commit(ns_positions);self.ns_owners.commit(ns_owners);
+        self.ns_entries.commit(ns_entries);
+        self.ns_positions.commit(ns_positions);
+        self.ns_owners.commit(ns_owners);
         self.epochs.commit(epochs);
         self.id_index = Some(index);
         for slot in 0..self.tasks.len() {
@@ -1809,10 +2209,16 @@ impl Scheduler {
         self.scratch_waits.commit(waits);
         self.scratch_wants.commit(wants);
         for (cpu, prepared) in leaf_links.into_iter().enumerate() {
-            with_leaf(cpu, |leaf| leaf.links.commit(prepared.expect("all leaf link tables prepared")));
+            with_leaf(cpu, |leaf| {
+                leaf.links
+                    .commit(prepared.expect("all leaf link tables prepared"))
+            });
         }
         for (cpu, prepared) in leaf_hot.into_iter().enumerate() {
-            with_leaf(cpu, |leaf| leaf.hot.commit(prepared.expect("all leaf hot tables prepared")));
+            with_leaf(cpu, |leaf| {
+                leaf.hot
+                    .commit(prepared.expect("all leaf hot tables prepared"))
+            });
         }
         self.wake_entries = BootSlots::Heap(wake_entries);
         self.wake_positions = BootSlots::Heap(wake_positions);
@@ -1824,7 +2230,9 @@ impl Scheduler {
         self.rt_heap = rt_heap;
         self.ns_heap = ns_heap;
         self.ns_root_dirty = self.online.clone();
-        self.stacks.reserve(slots).map_err(|ReserveError { available }| GrowError::OutOfMemory { available })
+        self.stacks
+            .reserve(slots)
+            .map_err(|ReserveError { available }| GrowError::OutOfMemory { available })
     }
 
     /// 有栈可用的槽位总数（含引导线程槽位）。
@@ -1901,7 +2309,9 @@ impl Scheduler {
         let base = creator
             .map(|(base, _, _)| base)
             .unwrap_or(Qos::UserInitiated);
-        let home = self.balancer.place(placement, None, base, None, self.now, loads.as_slice());
+        let home = self
+            .balancer
+            .place(placement, None, base, None, self.now, loads.as_slice());
         let home_is_idle = home
             .as_ref()
             .ok()
@@ -1913,25 +2323,41 @@ impl Scheduler {
         // 已退出任务一旦被切走（`on_cpu` 清除），就再也不会在它的栈上执行，栈与 TCB 可以安全覆盖。
         self.ensure_id_index();
         let previous = self.historical_slot(id);
-        if previous.is_some_and(|i| self.tasks[i].as_ref().is_some_and(|t| t.state != TaskState::Exited || t.on_cpu.is_some()) || i == current) {
+        if previous.is_some_and(|i| {
+            self.tasks[i]
+                .as_ref()
+                .is_some_and(|t| t.state != TaskState::Exited || t.on_cpu.is_some())
+                || i == current
+        }) {
             return Err(SpawnError::DuplicateId);
         }
-        let mut candidates = previous.into_iter().chain((1..self.tasks.len()).filter(|i| Some(*i) != previous));
+        let mut candidates = previous
+            .into_iter()
+            .chain((1..self.tasks.len()).filter(|i| Some(*i) != previous));
         let slot = candidates
             .find_map(|i| {
-                let reusable = self.stacks.has_stack(i) && match self.tasks[i].as_ref() {
-                    None => true,
-                    Some(t) => t.state == TaskState::Exited && t.on_cpu.is_none() && i != current,
-                };
+                let reusable = self.stacks.has_stack(i)
+                    && match self.tasks[i].as_ref() {
+                        None => true,
+                        Some(t) => {
+                            t.state == TaskState::Exited && t.on_cpu.is_none() && i != current
+                        }
+                    };
                 // Same-label historical slots cannot be bypassed: leaving two
                 // historical entries for one label would make lookup ambiguous.
-                if previous.is_some() && previous != Some(i) { return None; }
-                if !reusable { return None; }
+                if previous.is_some() && previous != Some(i) {
+                    return None;
+                }
+                if !reusable {
+                    return None;
+                }
                 self.epochs[i].reserve(id.0).ok().map(|r| (i, r))
             })
             .ok_or(SpawnError::NoFreeSlot)?;
         let (slot, reservation) = slot;
-        let timer = self.timer_table.create(slot as u32, &mut self.timer_budget)
+        let timer = self
+            .timer_table
+            .create(slot as u32, &mut self.timer_budget)
             .map_err(|_| SpawnError::NoFreeSlot)?;
         // At most one label per slot, and 2*N-1 nodes. Preflight insertion
         // before changing task/group/stack state; failure aborts the reservation.
@@ -1940,23 +2366,36 @@ impl Scheduler {
             // Remove the old identity first to free two nodes at full capacity.
             // Restoring it cannot fail, since no intervening publication exists.
             let index = self.id_index.as_mut().unwrap();
-            if let Some(r) = old { assert_eq!(index.remove(r.label()), Some(r.token())); }
+            if let Some(r) = old {
+                assert_eq!(index.remove(r.label()), Some(r.token()));
+            }
             if index.insert(id.0, reservation.token()).is_err() {
-                if let Some(r) = old { index.insert(r.label(), r.token()).expect("restore historical label"); }
-                self.epochs[slot].abort(reservation).expect("abort current reservation");
-                self.timer_table.close(timer, slot as u32, &mut self.timer_budget)
+                if let Some(r) = old {
+                    index
+                        .insert(r.label(), r.token())
+                        .expect("restore historical label");
+                }
+                self.epochs[slot]
+                    .abort(reservation)
+                    .expect("abort current reservation");
+                self.timer_table
+                    .close(timer, slot as u32, &mut self.timer_budget)
                     .expect("rollback newly reserved timer identity");
                 return Err(SpawnError::NoFreeSlot);
             }
         } else {
             let index = self.id_index.as_mut().unwrap();
             assert_eq!(index.remove(id.0), old.map(|r| r.token()));
-            index.insert(id.0, reservation.token()).expect("same label replacement capacity");
+            index
+                .insert(id.0, reservation.token())
+                .expect("same label replacement capacity");
         }
         if let (Some(old), Some(task)) = (old, self.tasks[slot].as_ref()) {
             self.retire_hot(task.home, old.token());
         }
-        self.epochs[slot].publish(reservation).expect("publish current reservation");
+        self.epochs[slot]
+            .publish(reservation)
+            .expect("publish current reservation");
         let mut task = Task::new(id, name);
         task.entry = Some(entry);
         task.timer = Some(timer);
@@ -1968,11 +2407,20 @@ impl Scheduler {
         }
         task.affinity = if self.dynamic_affinities.is_some() {
             if let Some(set) = affinity {
-                assert!(self.copy_affinity_set(slot, set.clone()), "preallocated affinity set storage");
+                assert!(
+                    self.copy_affinity_set(slot, set.clone()),
+                    "preallocated affinity set storage"
+                );
             } else if let Some(source) = creator_slot {
-                assert!(self.inherit_affinity(slot, source), "preallocated inherited affinity storage");
+                assert!(
+                    self.inherit_affinity(slot, source),
+                    "preallocated inherited affinity storage"
+                );
             } else {
-                assert!(self.copy_affinity_set(slot, CpuSet::first(1)), "preallocated bootstrap affinity storage");
+                assert!(
+                    self.copy_affinity_set(slot, CpuSet::first(1)),
+                    "preallocated bootstrap affinity storage"
+                );
             }
             TaskAffinity::Dynamic
         } else {
@@ -1995,7 +2443,11 @@ impl Scheduler {
         // SAFETY：该槽位有栈且为空，没有任何任务在这块栈上运行。
         task.context = unsafe { self.stacks.prepare_initial_frame(slot, trampoline) };
         self.tasks[slot] = Some(task);
-        self.publish_hot(home, reservation.token(), self.tasks[slot].as_ref().unwrap());
+        self.publish_hot(
+            home,
+            reservation.token(),
+            self.tasks[slot].as_ref().unwrap(),
+        );
         self.workers += 1;
         let r = self.update_hot_sched(slot, |queue, sched| queue.enqueue(sched, Enqueue::Spawn));
         self.note(r);
@@ -2034,7 +2486,9 @@ impl Scheduler {
         if let Some(t) = self.task_mut(cur) {
             t.space = space;
         }
-        if self.task(cur).is_some() { self.sync_hot(cur); }
+        if self.task(cur).is_some() {
+            self.sync_hot(cur);
+        }
     }
 
     /// 设置当前任务可发起的系统调用集合。
@@ -2051,7 +2505,9 @@ impl Scheduler {
 
     /// 当前任务可发起的系统调用集合。
     pub fn current_syscalls(&self) -> crate::syscall::SyscallSet {
-        self.task(self.cur()).map(|t| t.syscalls).unwrap_or(crate::syscall::SyscallSet::EMPTY)
+        self.task(self.cur())
+            .map(|t| t.syscalls)
+            .unwrap_or(crate::syscall::SyscallSet::EMPTY)
     }
 
     /// 在同一个调度器事务内检查授权并替换目标任务的能力集合。
@@ -2065,15 +2521,30 @@ impl Scheduler {
         requested: crate::syscall::SyscallSet,
         registered: crate::syscall::SyscallSet,
     ) -> Result<(), SetCallsError> {
-        let caller_slot = self.live_slot(caller).filter(|&i| is_worker(i)).ok_or(SetCallsError::NoTask)?;
-        let target_slot = self.live_slot(target).filter(|&i| is_worker(i)).ok_or(SetCallsError::NoTask)?;
-        let caller_calls = self.task(caller_slot).ok_or(SetCallsError::NoTask)?.syscalls;
+        let caller_slot = self
+            .live_slot(caller)
+            .filter(|&i| is_worker(i))
+            .ok_or(SetCallsError::NoTask)?;
+        let target_slot = self
+            .live_slot(target)
+            .filter(|&i| is_worker(i))
+            .ok_or(SetCallsError::NoTask)?;
+        let caller_calls = self
+            .task(caller_slot)
+            .ok_or(SetCallsError::NoTask)?
+            .syscalls;
         match crate::syscall::SyscallSet::check_set(requested, caller_calls, registered) {
             Ok(()) => {}
-            Err(kernel_core::syscall_set::SetError::Unregistered) => return Err(SetCallsError::Unregistered),
-            Err(kernel_core::syscall_set::SetError::Escalation) => return Err(SetCallsError::Escalation),
+            Err(kernel_core::syscall_set::SetError::Unregistered) => {
+                return Err(SetCallsError::Unregistered)
+            }
+            Err(kernel_core::syscall_set::SetError::Escalation) => {
+                return Err(SetCallsError::Escalation)
+            }
         }
-        self.task_mut(target_slot).ok_or(SetCallsError::NoTask)?.syscalls = requested;
+        self.task_mut(target_slot)
+            .ok_or(SetCallsError::NoTask)?
+            .syscalls = requested;
         Ok(())
     }
 
@@ -2087,7 +2558,10 @@ impl Scheduler {
 
     /// 任务 `id` 的有效档位（含借来的档位；不存在、已退出或是引导线程时 `None`）。
     pub fn effective_qos(&self, id: TaskId) -> Option<Qos> {
-        self.live_slot(id).filter(|&i| i != BOOT_SLOT).and_then(|i| self.tasks[i].as_ref()).map(|t| t.sched.qos)
+        self.live_slot(id)
+            .filter(|&i| i != BOOT_SLOT)
+            .and_then(|i| self.tasks[i].as_ref())
+            .map(|t| t.sched.qos)
     }
 
     /// 修改当前任务的 QoS 档位：降低或不变总是允许；提升须在上限之内（判定见 `qos_change_allowed`）。
@@ -2118,23 +2592,31 @@ impl Scheduler {
     pub fn mark_current_exited(&mut self) {
         let cur = self.cur();
         self.checkpoint_running_budget(this_cpu(), self.ns_now);
-        if self.task(cur).is_some_and(|t| t.ns_budget.is_some_and(|b| b.enabled)) {
-            self.ns_budget_tasks = self.ns_budget_tasks.checked_sub(1)
+        if self
+            .task(cur)
+            .is_some_and(|t| t.ns_budget.is_some_and(|b| b.enabled))
+        {
+            self.ns_budget_tasks = self
+                .ns_budget_tasks
+                .checked_sub(1)
                 .expect("enabled budget task count underflow");
         }
         if let Some(timer) = self.task(cur).and_then(|t| t.timer) {
             let owner = self.ns_owners[timer.slot as usize];
-            self.ns_heap.remove(
-                &mut self.ns_entries,
-                &mut self.ns_positions,
-                &mut self.ns_owners,
-                timer.slot as usize,
-                timer.generation,
-            ).expect("ns exit identity");
+            self.ns_heap
+                .remove(
+                    &mut self.ns_entries,
+                    &mut self.ns_positions,
+                    &mut self.ns_owners,
+                    timer.slot as usize,
+                    timer.generation,
+                )
+                .expect("ns exit identity");
             if owner != NO_DEADLINE {
                 self.ns_root_dirty.insert(owner);
             }
-            self.timer_table.close(timer, cur as u32, &mut self.timer_budget)
+            self.timer_table
+                .close(timer, cur as u32, &mut self.timer_budget)
                 .expect("close live task timer identity");
             self.tasks.mark_dirty(cur);
         }
@@ -2142,7 +2624,9 @@ impl Scheduler {
         let mut pi_graph_changed = false;
         if is_worker(cur) && self.task(cur).is_some_and(|t| t.state != TaskState::Exited) {
             let r = self.epochs[cur].history().expect("exiting task identity");
-            self.epochs[cur].exit(r.token()).expect("exit live identity");
+            self.epochs[cur]
+                .exit(r.token())
+                .expect("exit live identity");
         }
         if let Some(r) = self.epochs.get(cur).and_then(SlotLifecycle::history) {
             self.remove_wake_deadline(cur, r.token().generation);
@@ -2150,9 +2634,14 @@ impl Scheduler {
         }
         let mut dequeue = false;
         if let Some(t) = self.tasks.get_mut(cur).and_then(|t| t.as_mut()) {
-            if let Some(key) = t.event_wait.pending() { t.event_wait.finish(key); }
+            if let Some(key) = t.event_wait.pending() {
+                t.event_wait.finish(key);
+            }
             if is_worker(cur) && t.state != TaskState::Exited {
-                self.workers = self.workers.checked_sub(1).expect("live worker count underflow");
+                self.workers = self
+                    .workers
+                    .checked_sub(1)
+                    .expect("live worker count underflow");
             }
             #[cfg(feature = "krn2-observe")]
             if t.raw_wake_round.take().is_some() {
@@ -2191,14 +2680,22 @@ impl Scheduler {
         }
         // No donor edge or incoming waiter: removing this isolated node
         // cannot alter any surviving task's effective QoS. Keep full fallback.
-        if pi_graph_changed { self.resolve_inheritance(); }
+        if pi_graph_changed {
+            self.resolve_inheritance();
+        }
     }
 
     fn ensure_id_index(&mut self) {
         if self.id_index.is_none() {
-            let mut index = TaskIndex::new(BootSlots::Inline([IndexNode::Free(usize::MAX); 2 * INLINE_SLOTS - 1]));
+            let mut index = TaskIndex::new(BootSlots::Inline(
+                [IndexNode::Free(usize::MAX); 2 * INLINE_SLOTS - 1],
+            ));
             for e in self.epochs.iter() {
-                if let Some(r) = e.history() { index.insert(r.label(), r.token()).expect("inline task label capacity"); }
+                if let Some(r) = e.history() {
+                    index
+                        .insert(r.label(), r.token())
+                        .expect("inline task label capacity");
+                }
             }
             self.id_index = Some(index);
         }
@@ -2212,13 +2709,21 @@ impl Scheduler {
         };
         let e = self.epochs.get(token.slot)?;
         let r = e.history()?;
-        if r.token() != token || r.label() != id.0 { return None; }
-        self.task(token.slot).filter(|t| t.id == id).map(|_| token.slot)
+        if r.token() != token || r.label() != id.0 {
+            return None;
+        }
+        self.task(token.slot)
+            .filter(|t| t.id == id)
+            .map(|_| token.slot)
     }
 
     /// 任务 `id` 所在槽位（只找尚未退出的任务；引导线程也算）。
     fn live_slot(&self, id: TaskId) -> Option<usize> {
-        self.historical_slot(id).filter(|&i| self.epochs[i].history().is_some_and(|r| self.epochs[i].live(r.token())))
+        self.historical_slot(id).filter(|&i| {
+            self.epochs[i]
+                .history()
+                .is_some_and(|r| self.epochs[i].live(r.token()))
+        })
     }
 
     /// 任务 `id` 是否存在且尚未退出。
@@ -2229,7 +2734,9 @@ impl Scheduler {
     /// 任务 `waiter` 此刻是否阻塞在等待 `owner`（等它持有的锁或等它退出；诊断与验收用）。
     /// Whether `waiter` is currently blocked on `owner`.
     pub fn waits_on(&self, waiter: TaskId, owner: TaskId) -> bool {
-        let (Some(wi), Some(oi)) = (self.live_slot(waiter), self.live_slot(owner)) else { return false };
+        let (Some(wi), Some(oi)) = (self.live_slot(waiter), self.live_slot(owner)) else {
+            return false;
+        };
         matches!(self.tasks[wi].as_ref(), Some(t) if t.state == TaskState::Blocked && t.waits_for == Some(oi))
     }
 
@@ -2243,11 +2750,19 @@ impl Scheduler {
     /// 按当前等待图重算全部任务的有效档位（整体重算，借出与归还不会残留）。
     fn resolve_inheritance(&mut self) {
         // 暂存与任务表同容量、预先分配（持锁路径上不分配内存，也不在栈上开与容量成比例的数组）。
-        let (base, waits, eff) = (&mut self.scratch_base, &mut self.scratch_waits, &mut self.scratch_eff);
+        let (base, waits, eff) = (
+            &mut self.scratch_base,
+            &mut self.scratch_waits,
+            &mut self.scratch_eff,
+        );
         #[cfg(feature = "krn2-observe")]
         let mut outer = kernel_core::pi_work::PiWork::EMPTY;
         #[cfg(feature = "krn2-observe")]
-        { outer.slots(base.len() as u64); outer.slots(waits.len() as u64); outer.slots(eff.len() as u64); }
+        {
+            outer.slots(base.len() as u64);
+            outer.slots(waits.len() as u64);
+            outer.slots(eff.len() as u64);
+        }
         base.fill(None);
         waits.fill(None);
         eff.fill(None);
@@ -2271,26 +2786,37 @@ impl Scheduler {
         let qos_changed = |slot: usize, t: &Option<Task>| matches!((t, eff.get(slot)), (Some(t), Some(Some(q))) if t.sched.qos != *q);
         for (slot, t) in self.tasks.iter_mut_where(qos_changed) {
             if let (Some(t), Some(q)) = (t.as_mut(), &eff[slot]) {
-                let token = self.epochs[slot].history().expect("PI task identity").token();
+                let token = self.epochs[slot]
+                    .history()
+                    .expect("PI task identity")
+                    .token();
                 let (_, sched) = with_leaf_hot(t.home, token, |_queue, sched| sched.qos = *q);
                 t.sched = sched;
                 t.pi_round = t.pi_round.wrapping_add(1).max(1);
                 if t.home != this_cpu() {
                     if let Some(history) = self.epochs[slot].history() {
-                        super::publish_pi_message(t.home, kernel_core::percpu_migration::PiMessage {
-                            token: kernel_core::percpu_migration::TaskToken {
-                                slot: slot as u32, generation: history.token().generation,
+                        super::publish_pi_message(
+                            t.home,
+                            kernel_core::percpu_migration::PiMessage {
+                                token: kernel_core::percpu_migration::TaskToken {
+                                    slot: slot as u32,
+                                    generation: history.token().generation,
+                                },
+                                round: t.pi_round,
+                                priority: q.index() as u8,
                             },
-                            round: t.pi_round, priority: q.index() as u8,
-                        });
+                        );
                         self.kicks.insert(t.home);
                     }
                 }
             }
         }
         #[cfg(feature = "krn2-observe")]
-        { outer.merge(measured); self.pi_total.merge(outer); self.pi_window.merge(outer); }
-
+        {
+            outer.merge(measured);
+            self.pi_total.merge(outer);
+            self.pi_window.merge(outer);
+        }
     }
 
     /// 让当前工作任务阻塞，直到持有者 `owner` 把它唤醒（交出锁或退出）；期间把有效档位借给持有者。
@@ -2329,10 +2855,15 @@ impl Scheduler {
     /// 其余等待者改为等交接对象（档位随之借给新持有者）；当前任务借来的档位归还。返回交接对象。
     pub fn hand_off(&mut self, key: u64) -> Option<TaskId> {
         let cur = self.cur();
-        let waiting_on = |t: &Task| t.state == TaskState::Blocked && t.waits_for == Some(cur) && t.wait_key == key;
-        let successor = inherit::pick_successor(
-            self.tasks.iter().enumerate().filter_map(|(i, t)| t.as_ref().filter(|t| waiting_on(t)).map(|t| (i, t.sched.qos, t.wait_seq))),
-        );
+        let waiting_on = |t: &Task| {
+            t.state == TaskState::Blocked && t.waits_for == Some(cur) && t.wait_key == key
+        };
+        let successor =
+            inherit::pick_successor(self.tasks.iter().enumerate().filter_map(|(i, t)| {
+                t.as_ref()
+                    .filter(|t| waiting_on(t))
+                    .map(|t| (i, t.sched.qos, t.wait_seq))
+            }));
         let Some(next) = successor else {
             self.resolve_inheritance();
             return None;
@@ -2352,11 +2883,15 @@ impl Scheduler {
     /// user-visible synchronization object loses its last external owner.
     /// Each resumed caller rechecks the object terminal state before return.
     pub fn cancel_waiters(&mut self, owner: TaskId, key: u64) -> usize {
-        let Some(owner_slot) = self.historical_slot(owner) else { return 0 };
+        let Some(owner_slot) = self.historical_slot(owner) else {
+            return 0;
+        };
         let mut count = 0;
         for i in 1..self.tasks.len() {
             let matches = self.tasks[i].as_ref().is_some_and(|t| {
-                t.state == TaskState::Blocked && t.waits_for == Some(owner_slot) && t.wait_key == key
+                t.state == TaskState::Blocked
+                    && t.waits_for == Some(owner_slot)
+                    && t.wait_key == key
             });
             if matches {
                 self.make_runnable(i);
@@ -2369,9 +2904,13 @@ impl Scheduler {
     /// 是否有可运行任务的有效档位高于当前任务（引导线程上：是否有任何可运行任务）。
     /// 交出锁、归还借来的档位之后据此决定是否立即让出。
     pub fn outranked(&self) -> bool {
-        let Some(top) = self.waiting(this_cpu()).highest() else { return false };
+        let Some(top) = self.waiting(this_cpu()).highest() else {
+            return false;
+        };
         match self.task(self.cur()) {
-            Some(t) if is_worker(self.cur()) => with_leaf(this_cpu(), |leaf| leaf.queue.policy().outranks(top, t.sched.qos)),
+            Some(t) if is_worker(self.cur()) => with_leaf(this_cpu(), |leaf| {
+                leaf.queue.policy().outranks(top, t.sched.qos)
+            }),
             _ => true,
         }
     }
@@ -2383,11 +2922,25 @@ impl Scheduler {
             return false;
         }
         let cur = self.cur();
-        let Some(generation) = self.epochs.get(cur).and_then(SlotLifecycle::history).map(|r| r.token().generation) else { return false };
+        let Some(generation) = self
+            .epochs
+            .get(cur)
+            .and_then(SlotLifecycle::history)
+            .map(|r| r.token().generation)
+        else {
+            return false;
+        };
         self.checkpoint_running_budget(this_cpu(), self.ns_now);
         if let Some(at) = wake_at {
             let home = self.task(cur).unwrap().home;
-            self.set_wake_deadline(home, Deadline { at, slot: cur, generation });
+            self.set_wake_deadline(
+                home,
+                Deadline {
+                    at,
+                    slot: cur,
+                    generation,
+                },
+            );
         } else {
             self.remove_wake_deadline(cur, generation);
         }
@@ -2418,8 +2971,15 @@ impl Scheduler {
         donation: Option<(TaskId, u64)>,
     ) -> Result<Option<kernel_core::event_wait::Key>, ()> {
         let cur = self.cur();
-        if !is_worker(cur) { return Err(()); }
-        let token = self.epochs.get(cur).and_then(|e| e.history()).ok_or(())?.token();
+        if !is_worker(cur) {
+            return Err(());
+        }
+        let token = self
+            .epochs
+            .get(cur)
+            .and_then(|e| e.history())
+            .ok_or(())?
+            .token();
         let (deadline_ns, at, now) = match deadline {
             Some(WaitDeadline::Nanos(at)) if self.ns_active => (true, Some(at), self.ns_now),
             Some(WaitDeadline::Nanos(at)) => {
@@ -2429,13 +2989,22 @@ impl Scheduler {
             }
             Some(WaitDeadline::Tick(at)) if self.ns_active => {
                 let wait = at.saturating_sub(self.now);
-                let at = self.ns_now.checked_add(
-                    wait.checked_mul(crate::hrtime::tick_ns()).ok_or(())?,
-                ).ok_or(())?;
+                let at = self
+                    .ns_now
+                    .checked_add(wait.checked_mul(crate::hrtime::tick_ns()).ok_or(())?)
+                    .ok_or(())?;
                 (true, Some(at), self.ns_now)
             }
             Some(WaitDeadline::Tick(at)) => (false, Some(at), self.now),
-            None => (self.ns_active, None, if self.ns_active { self.ns_now } else { self.now }),
+            None => (
+                self.ns_active,
+                None,
+                if self.ns_active {
+                    self.ns_now
+                } else {
+                    self.now
+                },
+            ),
         };
         let key = {
             let t = self.tasks.get_mut(cur).and_then(Option::as_mut).ok_or(())?;
@@ -2489,9 +3058,15 @@ impl Scheduler {
     /// 返回沿用make_runnable的本CPU抢占提示，远端通知仍由原事务发布。
     pub fn wake_event_wait(&mut self, key: kernel_core::event_wait::Key) -> bool {
         let i = key.task.slot;
-        if !self.epochs.get(i).is_some_and(|e| e.live(key.task)) { return false; }
-        let Some(t) = self.tasks.get_mut(i).and_then(Option::as_mut) else { return false; };
-        if t.state != TaskState::Blocked || !t.event_wait.finish(key) { return false; }
+        if !self.epochs.get(i).is_some_and(|e| e.live(key.task)) {
+            return false;
+        }
+        let Some(t) = self.tasks.get_mut(i).and_then(Option::as_mut) else {
+            return false;
+        };
+        if t.state != TaskState::Blocked || !t.event_wait.finish(key) {
+            return false;
+        }
         self.make_runnable(i)
     }
 
@@ -2507,30 +3082,50 @@ impl Scheduler {
     /// 返回是否应立即抢占**本处理器**的当前任务；放到别的处理器且应抢占那里时记入待发的重新调度请求。
     fn make_runnable(&mut self, i: usize) -> bool {
         let now = self.now;
-        if !self.task(i).is_some_and(|t| t.state == TaskState::Blocked) { return false; }
-        let generation = self.epochs[i].history().expect("waking task identity").token().generation;
+        if !self.task(i).is_some_and(|t| t.state == TaskState::Blocked) {
+            return false;
+        }
+        let generation = self.epochs[i]
+            .history()
+            .expect("waking task identity")
+            .token()
+            .generation;
         #[cfg(feature = "krn2-observe")]
         let absolute_ns_deadline = self.task(i).and_then(|t| t.wake_ns);
         #[cfg(feature = "krn2-observe")]
         let phase_source = self.raw_highres_phase;
         #[cfg(feature = "krn2-observe")]
         let wake_start = if let Some(counter) = crate::hrtime::now() {
-            kernel_core::raw_timing::Endpoint { cpu: this_cpu(), counter,
-                clock: kernel_core::raw_timing::ClockDomain::SharedNs }
+            kernel_core::raw_timing::Endpoint {
+                cpu: this_cpu(),
+                counter,
+                clock: kernel_core::raw_timing::ClockDomain::SharedNs,
+            }
         } else {
-            kernel_core::raw_timing::Endpoint { cpu: this_cpu(), counter: crate::arch::cycles(),
-                clock: kernel_core::raw_timing::ClockDomain::Raw }
+            kernel_core::raw_timing::Endpoint {
+                cpu: this_cpu(),
+                counter: crate::arch::cycles(),
+                clock: kernel_core::raw_timing::ClockDomain::Raw,
+            }
         };
         self.remove_wake_deadline(i, generation);
         let t = self.tasks[i].as_mut().unwrap();
         #[cfg(feature = "krn2-observe")]
         {
-            let token = kernel_core::task_index::Token { slot: i, generation };
-            if let Some(round) = t.raw_wake.begin(token, wake_start) { t.raw_wake_round = Some(round); }
-            else { self.raw_wake_errors[0] = self.raw_wake_errors[0].saturating_add(1); }
+            let token = kernel_core::task_index::Token {
+                slot: i,
+                generation,
+            };
+            if let Some(round) = t.raw_wake.begin(token, wake_start) {
+                t.raw_wake_round = Some(round);
+            } else {
+                self.raw_wake_errors[0] = self.raw_wake_errors[0].saturating_add(1);
+            }
         }
         // Author: chatgpt。超时/退出/普通wake也使本轮事件凭据失效。
-        if let Some(key) = t.event_wait.pending() { t.event_wait.finish(key); }
+        if let Some(key) = t.event_wait.pending() {
+            t.event_wait.finish(key);
+        }
         t.state = TaskState::Runnable;
         t.wake_at = None;
         t.wake_ns = None;
@@ -2548,50 +3143,77 @@ impl Scheduler {
         self.relist(i);
         #[cfg(feature = "krn2-observe")]
         if let Some(at) = absolute_ns_deadline.filter(|&at| at <= wake_start.counter) {
-            let (home, round) = self.task(i)
+            let (home, round) = self
+                .task(i)
                 .map(|t| (t.home, t.raw_wake_round.unwrap_or(0)))
                 .expect("due wake task");
             // 队列字段、策略入队状态和运行列表成员关系都已发布后，才取这里的端点。
             // Capture only after the queue fields, policy state, and run-list membership are published.
             let published = super::wake_endpoint();
-            let deadline = kernel_core::raw_timing::Endpoint { cpu: home, counter: at,
-                clock: kernel_core::raw_timing::ClockDomain::SharedNs };
-            self.deadline_to_runnable.record(&kernel_core::raw_timing::Sample {
-                path: 8, slot: i, generation, wait_round: round, start: deadline, end: published,
-            });
-            self.tasks[i].as_mut().expect("due wake task").raw_deadline_start = Some(deadline);
+            let deadline = kernel_core::raw_timing::Endpoint {
+                cpu: home,
+                counter: at,
+                clock: kernel_core::raw_timing::ClockDomain::SharedNs,
+            };
+            self.deadline_to_runnable
+                .record(&kernel_core::raw_timing::Sample {
+                    path: 8,
+                    slot: i,
+                    generation,
+                    wait_round: round,
+                    start: deadline,
+                    end: published,
+                });
+            self.tasks[i]
+                .as_mut()
+                .expect("due wake task")
+                .raw_deadline_start = Some(deadline);
             if let Some(source) = phase_source {
                 if source.interrupt_entry.clock == kernel_core::raw_timing::ClockDomain::SharedNs
                     && source.lock_acquired.clock == kernel_core::raw_timing::ClockDomain::SharedNs
                     && (source.interrupt_entry.counter < at || source.lock_acquired.counter < at)
                 {
-                    self.deadline_phase_errors[1] =
-                        self.deadline_phase_errors[1].saturating_add(1);
+                    self.deadline_phase_errors[1] = self.deadline_phase_errors[1].saturating_add(1);
                 } else if let Some(timeline) = kernel_core::raw_timing::DeadlineTimeline::new(
-                    deadline, source.interrupt_entry, source.lock_acquired, wake_start, published,
+                    deadline,
+                    source.interrupt_entry,
+                    source.lock_acquired,
+                    wake_start,
+                    published,
                 ) {
                     let samples = timeline.samples_to_published(i, generation, round);
                     for (hist, sample) in [
                         &mut self.deadline_to_interrupt,
                         &mut self.deadline_to_lock,
                         &mut self.deadline_to_wake,
-                    ].into_iter().zip(samples.into_iter().take(3)) {
+                    ]
+                    .into_iter()
+                    .zip(samples.into_iter().take(3))
+                    {
                         hist.record(&sample);
                     }
-                    self.tasks[i].as_mut().expect("timed wake task").raw_deadline = Some(timeline);
+                    self.tasks[i]
+                        .as_mut()
+                        .expect("timed wake task")
+                        .raw_deadline = Some(timeline);
                 } else {
-                    self.deadline_phase_errors[2] =
-                        self.deadline_phase_errors[2].saturating_add(1);
+                    self.deadline_phase_errors[2] = self.deadline_phase_errors[2].saturating_add(1);
                 }
             } else {
                 self.deadline_phase_errors[0] = self.deadline_phase_errors[0].saturating_add(1);
             }
         }
         // 被限速组的成员醒来也不抢占：令牌回正之前它本来就不会被选中。
-        let Some(t) = self.task(i).filter(|t| self.eligible(t)) else { return false };
+        let Some(t) = self.task(i).filter(|t| self.eligible(t)) else {
+            return false;
+        };
         let (woken, home) = (t.sched.qos, t.home);
         let target = leaf_current(home);
-        let running = if is_worker(target) { self.task(target).map(|t| t.sched.qos) } else { None };
+        let running = if is_worker(target) {
+            self.task(target).map(|t| t.sched.qos)
+        } else {
+            None
+        };
         let preempts = with_leaf(home, |leaf| leaf.queue.wake_preempts(woken, running));
         if home == this_cpu() {
             return preempts;
@@ -2605,13 +3227,17 @@ impl Scheduler {
     /// 为可运行且未被任何处理器占用的任务 `i` 重新选运行队列（亲和集合内按负载与迁移代价）。
     fn replace(&mut self, i: usize) {
         let Some(t) = self.task(i) else { return };
-        if t.rt_period != 0 { return; } // Partitioned RT is not load-balanced.
+        if t.rt_period != 0 {
+            return;
+        } // Partitioned RT is not load-balanced.
         if t.on_cpu.is_some() {
             // 还在被换下：等切换完成后由目标处理器的下一次检查（或窃取）接手，仍按原队列记
             return;
         }
         let loads = self.loads();
-        let Some(affinity) = self.affinity_view(i) else { return };
+        let Some(affinity) = self.affinity_view(i) else {
+            return;
+        };
         let home = {
             let task = self.task(i).expect("live rebalance task");
             self.balancer.place(
@@ -2632,64 +3258,127 @@ impl Scheduler {
     /// 把任务 `i` 的运行队列改为 `home`：它在某个队列上（可运行或运行中）时经迁移钩子换到新队列，
     /// 不在队列上（睡眠）时只改归属。
     fn rehome(&mut self, i: usize, home: usize) {
-        let generation = self.epochs[i].history().expect("migrating task identity").token().generation;
-        let hot_token = kernel_core::task_index::Token { slot: i, generation };
-        let token = kernel_core::percpu_migration::TaskToken { slot: i as u32, generation };
+        let generation = self.epochs[i]
+            .history()
+            .expect("migrating task identity")
+            .token()
+            .generation;
+        let hot_token = kernel_core::task_index::Token {
+            slot: i,
+            generation,
+        };
+        let token = kernel_core::percpu_migration::TaskToken {
+            slot: i as u32,
+            generation,
+        };
         let old_home = self.tasks[i].as_ref().expect("migrating live task").home;
-        let source = self.tasks.get(i).and_then(|t| t.as_ref()).and_then(|t| t.sched.queue());
+        let source = self
+            .tasks
+            .get(i)
+            .and_then(|t| t.as_ref())
+            .and_then(|t| t.sched.queue());
         let mut transaction = source.filter(|&q| q != home).map(|q| {
             kernel_core::percpu_migration::Migration::begin(
-                token, kernel_core::percpu_migration::Owner::Cpu(q), home,
-            ).expect("distinct in-range CPU migration")
+                token,
+                kernel_core::percpu_migration::Owner::Cpu(q),
+                home,
+            )
+            .expect("distinct in-range CPU migration")
         });
-        if let Some(tx) = transaction.as_mut() { tx.detach().expect("new migration is source-owned"); }
+        if let Some(tx) = transaction.as_mut() {
+            tx.detach().expect("new migration is source-owned");
+        }
         let r = match source {
-            Some(q) if q != home => {
-                with_leaf_pair(q, home, |src, dst| {
-                    let RunLeaf { queue, runs, links, hot, .. } = src;
-                    let owner = hot[i].get_mut(hot_token).expect("source task hot owner");
-                    let result = queue.migrate_to(&mut dst.queue, &mut owner.sched);
-                    if result.is_ok() {
-                        runs.remove(links, i).expect("source run-list member");
-                        dst.runs.insert(&mut dst.links, LEAF_QUEUE, i).expect("destination run-list capacity");
-                    }
-                    result
-                })
-            }
+            Some(q) if q != home => with_leaf_pair(q, home, |src, dst| {
+                let RunLeaf {
+                    queue,
+                    runs,
+                    links,
+                    hot,
+                    ..
+                } = src;
+                let owner = hot[i].get_mut(hot_token).expect("source task hot owner");
+                let result = queue.migrate_to(&mut dst.queue, &mut owner.sched);
+                if result.is_ok() {
+                    runs.remove(links, i).expect("source run-list member");
+                    dst.runs
+                        .insert(&mut dst.links, LEAF_QUEUE, i)
+                        .expect("destination run-list capacity");
+                }
+                result
+            }),
             _ => Ok(()),
         };
         // A failed queue hook must not publish a destination home.  Keep the
         // source owner so audit/retry cannot observe a task assigned to one CPU
         // while it remains linked on another CPU's queue.
         let actual_home = if r.is_ok() {
-            if let Some(tx) = transaction.as_mut() { tx.commit().expect("detached migration commits once"); }
+            if let Some(tx) = transaction.as_mut() {
+                tx.commit().expect("detached migration commits once");
+            }
             home
         } else {
-            if let Some(tx) = transaction.as_mut() { tx.abort().expect("detached migration aborts once"); }
+            if let Some(tx) = transaction.as_mut() {
+                tx.abort().expect("detached migration aborts once");
+            }
             source.unwrap_or_else(|| self.tasks[i].as_ref().unwrap().home)
         };
         if actual_home != old_home {
             with_leaf_pair(old_home, actual_home, |src, dst| {
                 let hot = src.hot[i].retire(hot_token).expect("source task hot owner");
-                dst.hot[i].publish(hot_token, hot).expect("empty destination task hot slot");
+                dst.hot[i]
+                    .publish(hot_token, hot)
+                    .expect("empty destination task hot slot");
             });
         }
         let t = self.tasks[i].as_mut().expect("migrating live task");
         t.home = actual_home;
-        t.sched = with_leaf(actual_home, |leaf| leaf.hot[i].get(hot_token).expect("migrated task hot owner").sched);
+        t.sched = with_leaf(actual_home, |leaf| {
+            leaf.hot[i]
+                .get(hot_token)
+                .expect("migrated task hot owner")
+                .sched
+        });
         let wake = t.wake_at;
-        let rt = (t.rt_period != 0 && t.ns_budget.is_none() && t.state != TaskState::Exited).then_some(t.rt_next_period);
-        if let Some(at) = wake { self.set_wake_deadline(actual_home, Deadline { at, slot: i, generation }); }
-        if let Some(at) = rt { self.set_rt_deadline(actual_home, Deadline { at, slot: i, generation }); }
+        let rt = (t.rt_period != 0 && t.ns_budget.is_none() && t.state != TaskState::Exited)
+            .then_some(t.rt_next_period);
+        if let Some(at) = wake {
+            self.set_wake_deadline(
+                actual_home,
+                Deadline {
+                    at,
+                    slot: i,
+                    generation,
+                },
+            );
+        }
+        if let Some(at) = rt {
+            self.set_rt_deadline(
+                actual_home,
+                Deadline {
+                    at,
+                    slot: i,
+                    generation,
+                },
+            );
+        }
         self.note(r);
-        if source.is_none() { self.relist(i); }
+        if source.is_none() {
+            self.relist(i);
+        }
     }
 
     /// 让槽位 `i` 的运行列表成员关系与它的实体队列字段一致（每次运行队列成员关系改变后调用）。
     fn relist(&mut self, i: usize) {
-        let want = self.tasks.get(i).and_then(|t| t.as_ref()).and_then(|t| t.sched.queue());
+        let want = self
+            .tasks
+            .get(i)
+            .and_then(|t| t.as_ref())
+            .and_then(|t| t.sched.queue());
         let have = (0..self.cpu_stats.len()).find(|&cpu| {
-            with_leaf(cpu, |leaf| leaf.links.get(i).and_then(Link::queue).is_some())
+            with_leaf(cpu, |leaf| {
+                leaf.links.get(i).and_then(Link::queue).is_some()
+            })
         });
         let result = match (have, want) {
             (a, b) if a == b => Ok(false),
@@ -2698,8 +3387,14 @@ impl Scheduler {
                 dst.runs.insert(&mut dst.links, LEAF_QUEUE, i)?;
                 Ok(true)
             }),
-            (Some(from), None) => with_leaf(from, |leaf| leaf.runs.remove(&mut leaf.links, i).map(|_| true)),
-            (None, Some(to)) => with_leaf(to, |leaf| leaf.runs.insert(&mut leaf.links, LEAF_QUEUE, i).map(|_| true)),
+            (Some(from), None) => with_leaf(from, |leaf| {
+                leaf.runs.remove(&mut leaf.links, i).map(|_| true)
+            }),
+            (None, Some(to)) => with_leaf(to, |leaf| {
+                leaf.runs
+                    .insert(&mut leaf.links, LEAF_QUEUE, i)
+                    .map(|_| true)
+            }),
             (None, None) => Ok(false),
         };
         if result.is_err() {
@@ -2709,7 +3404,8 @@ impl Scheduler {
 
     /// 处理器 `c` 运行列表上的任务（按槽位号升序；含运行中的任务）。
     fn listed(&self, c: usize) -> impl Iterator<Item = (usize, &Task)> + Clone + '_ {
-        LeafSlots::new(c).filter_map(move |i| self.tasks.get(i).and_then(|t| t.as_ref()).map(|t| (i, t)))
+        LeafSlots::new(c)
+            .filter_map(move |i| self.tasks.get(i).and_then(|t| t.as_ref()).map(|t| (i, t)))
     }
 
     /// 选择路径遍历量统计。
@@ -2733,9 +3429,13 @@ impl Scheduler {
     /// 已做的每轮校验次数（只有 `ns-dirty-audit` 构建非 0）。
     pub fn ns_audits(&self) -> u64 {
         #[cfg(feature = "ns-dirty-audit")]
-        { self.ns_audits }
+        {
+            self.ns_audits
+        }
         #[cfg(not(feature = "ns-dirty-audit"))]
-        { 0 }
+        {
+            0
+        }
     }
 
     /// 统一定时身份表的完整账目。 / Unified timer-identity accounting.
@@ -2797,7 +3497,9 @@ impl Scheduler {
         expect.resize(self.cpu_stats.len(), 0u32);
         let mut misplaced = 0u32;
         for (i, t) in self.tasks.iter().enumerate() {
-            let Some(t) = t.as_ref().filter(|_| is_worker(i)) else { continue };
+            let Some(t) = t.as_ref().filter(|_| is_worker(i)) else {
+                continue;
+            };
             let live = matches!(t.state, TaskState::Runnable | TaskState::Running);
             match (live, t.sched.queue()) {
                 (true, Some(q)) if q == t.home && q < expect.len() => expect[q] += 1,
@@ -2809,7 +3511,8 @@ impl Scheduler {
         let mut count_mismatch = 0;
         let mut list_mismatch = self.list_errors;
         for (c, e) in expect.into_iter().enumerate() {
-            let (q, run_len) = with_leaf(c, |leaf| (leaf.queue.queued(), leaf.runs.len(LEAF_QUEUE)));
+            let (q, run_len) =
+                with_leaf(c, |leaf| (leaf.queue.queued(), leaf.runs.len(LEAF_QUEUE)));
             queued += q;
             if q != e {
                 count_mismatch += 1;
@@ -2820,7 +3523,9 @@ impl Scheduler {
         }
         for (i, t) in self.tasks.iter().enumerate() {
             let listed = (0..self.cpu_stats.len()).find(|&cpu| {
-                with_leaf(cpu, |leaf| leaf.links.get(i).and_then(Link::queue).is_some())
+                with_leaf(cpu, |leaf| {
+                    leaf.links.get(i).and_then(Link::queue).is_some()
+                })
             });
             if t.as_ref().and_then(|t| t.sched.queue()) != listed {
                 list_mismatch += 1;
@@ -2837,8 +3542,10 @@ impl Scheduler {
                         context: (&task.context as *const TaskContext) as usize,
                         stack_top: is_worker(i).then(|| self.stacks.top(i)),
                         space: task.space,
-                        local_switchable: task.cpu_group.is_none() && task.rt_period == 0
-                            && task.ns_budget.is_none() && task.sched.qos == task.base_qos,
+                        local_switchable: task.cpu_group.is_none()
+                            && task.rt_period == 0
+                            && task.ns_budget.is_none()
+                            && task.sched.qos == task.base_qos,
                     },
                 ))
             });
@@ -2849,17 +3556,23 @@ impl Scheduler {
                     leaf.hot.get(i).and_then(|slot| {
                         slot.generation().map(|_| {
                             expected.is_some_and(|(home, token, value)| {
-                                cpu == home && slot.get(token).is_ok_and(|actual| {
-                                    let scheduling = actual.state == value.state
-                                        && actual.on_cpu == value.on_cpu && actual.sched == value.sched;
-                                    let executable = !is_worker(i)
-                                        || !matches!(value.state, TaskState::Runnable | TaskState::Running)
-                                        || (actual.context == value.context
-                                            && actual.stack_top == value.stack_top
-                                            && actual.space == value.space
-                                            && actual.local_switchable == value.local_switchable);
-                                    scheduling && executable
-                                })
+                                cpu == home
+                                    && slot.get(token).is_ok_and(|actual| {
+                                        let scheduling = actual.state == value.state
+                                            && actual.on_cpu == value.on_cpu
+                                            && actual.sched == value.sched;
+                                        let executable = !is_worker(i)
+                                            || !matches!(
+                                                value.state,
+                                                TaskState::Runnable | TaskState::Running
+                                            )
+                                            || (actual.context == value.context
+                                                && actual.stack_top == value.stack_top
+                                                && actual.space == value.space
+                                                && actual.local_switchable
+                                                    == value.local_switchable);
+                                        scheduling && executable
+                                    })
                             })
                         })
                     })
@@ -2873,13 +3586,25 @@ impl Scheduler {
                 #[cfg(feature = "krn3-fast-tick-verify")]
                 if let Some((home, token, value)) = expected {
                     let actual = with_leaf(home, |leaf| leaf.hot[i].get(token).ok().copied());
-                    crate::kprintln!("[JSR-KRN3-HOT-MISMATCH] slot={} home={} expected={:?} actual={:?}",
-                        i, home, value, actual);
+                    crate::kprintln!(
+                        "[JSR-KRN3-HOT-MISMATCH] slot={} home={} expected={:?} actual={:?}",
+                        i,
+                        home,
+                        value,
+                        actual
+                    );
                 }
                 list_mismatch += 1;
             }
         }
-        QueueAudit { queued, misplaced, count_mismatch, hook_errors: self.hook_errors, last_hook_error: self.last_hook_error, list_mismatch }
+        QueueAudit {
+            queued,
+            misplaced,
+            count_mismatch,
+            hook_errors: self.hook_errors,
+            last_hook_error: self.last_hook_error,
+            list_mismatch,
+        }
     }
 
     /// 显式唤醒 `id`（例如所属进程开始终止时，让睡眠中的线程尽快观察到）。
@@ -2887,10 +3612,15 @@ impl Scheduler {
     pub fn wake(&mut self, id: TaskId) -> bool {
         match self.live_slot(id).filter(|&i| is_worker(i)) {
             Some(i) => {
-                let Some(t) = self.task(i).filter(|t| t.state == TaskState::Blocked) else { return false };
+                let Some(t) = self.task(i).filter(|t| t.state == TaskState::Blocked) else {
+                    return false;
+                };
                 let home = t.home;
                 if home != this_cpu() {
-                    let token = self.epochs[i].history().expect("woken task identity").token();
+                    let token = self.epochs[i]
+                        .history()
+                        .expect("woken task identity")
+                        .token();
                     use kernel_core::wake_mailbox::Enqueue;
                     match super::publish_wake_token(home, token) {
                         Enqueue::Queued | Enqueue::Coalesced => {
@@ -2910,15 +3640,33 @@ impl Scheduler {
     // Run before any transaction mutation; revalidate generation and use actual
     // current affinity/home in make_runnable, rather than trusting routing data.
     pub fn consume_wake_token(&mut self, token: kernel_core::task_index::Token) {
-        if self.epochs.get(token.slot).is_some_and(|e| e.live(token)) { self.make_runnable(token.slot); }
+        if self.epochs.get(token.slot).is_some_and(|e| e.live(token)) {
+            self.make_runnable(token.slot);
+        }
     }
 
-    pub fn consume_pi_message(&mut self, cpu: usize, message: kernel_core::percpu_migration::PiMessage) {
+    pub fn consume_pi_message(
+        &mut self,
+        cpu: usize,
+        message: kernel_core::percpu_migration::PiMessage,
+    ) {
         let slot = message.token.slot as usize;
-        let live = kernel_core::task_index::Token { slot, generation: message.token.generation };
-        let Some(t) = self.tasks.get(slot).and_then(Option::as_ref) else { return };
-        if self.epochs.get(slot).is_none_or(|e| !e.live(live)) { return; }
-        if t.home != cpu || t.pi_round != message.round || t.sched.qos.index() as u8 != message.priority { return; }
+        let live = kernel_core::task_index::Token {
+            slot,
+            generation: message.token.generation,
+        };
+        let Some(t) = self.tasks.get(slot).and_then(Option::as_ref) else {
+            return;
+        };
+        if self.epochs.get(slot).is_none_or(|e| !e.live(live)) {
+            return;
+        }
+        if t.home != cpu
+            || t.pi_round != message.round
+            || t.sched.qos.index() as u8 != message.priority
+        {
+            return;
+        }
         // The global PI graph update is already committed. Consumption on the
         // target CPU makes the notification generation-safe and causes the
         // local scheduling point to observe that committed priority.
@@ -2928,16 +3676,24 @@ impl Scheduler {
     #[cfg(feature = "fault-inject")]
     pub fn fault_delay_deadline_timer(&mut self, c: usize, enable: bool) {
         assert!(c > 0 && c < MAX_CPUS);
-        if enable { self.delayed_deadline_timer.insert(c); self.deadline_trace[c] = DeadlineTrace::EMPTY; }
-        else { self.delayed_deadline_timer.remove(c); }
+        if enable {
+            self.delayed_deadline_timer.insert(c);
+            self.deadline_trace[c] = DeadlineTrace::EMPTY;
+        } else {
+            self.delayed_deadline_timer.remove(c);
+        }
         self.kicks.insert(c);
     }
     #[cfg(feature = "fault-inject")]
-    pub fn fault_deadline_trace(&self, c: usize) -> Option<DeadlineTrace> { self.deadline_trace.get(c).copied() }
+    pub fn fault_deadline_trace(&self, c: usize) -> Option<DeadlineTrace> {
+        self.deadline_trace.get(c).copied()
+    }
     pub fn deadline_owners(&self, id: TaskId) -> Option<(Option<usize>, Option<usize>)> {
         let i = self.historical_slot(id)?;
-        Some(((self.wake_owners[i] != NO_DEADLINE).then_some(self.wake_owners[i]),
-            (self.rt_owners[i] != NO_DEADLINE).then_some(self.rt_owners[i])))
+        Some((
+            (self.wake_owners[i] != NO_DEADLINE).then_some(self.wake_owners[i]),
+            (self.rt_owners[i] != NO_DEADLINE).then_some(self.rt_owners[i]),
+        ))
     }
     pub fn deadline_stats(&self) -> (Vec<u32>, Vec<u32>) {
         (
@@ -2945,31 +3701,59 @@ impl Scheduler {
             self.deadline_refills.iter().copied().collect(),
         )
     }
-    pub fn ns_sleeping(&self,id:TaskId)->bool {self.live_slot(id).and_then(|i|self.task(i)).is_some_and(|t|t.state==TaskState::Blocked && t.wake_ns.is_some())}
-    pub fn rt_ns_state(&self,id:TaskId)->Option<kernel_core::ns_budget::Budget>{self.task(self.live_slot(id)?)?.ns_budget}
-    pub fn task_affinity(&self,id:TaskId)->Option<CpuSet> {
+    pub fn ns_sleeping(&self, id: TaskId) -> bool {
+        self.live_slot(id)
+            .and_then(|i| self.task(i))
+            .is_some_and(|t| t.state == TaskState::Blocked && t.wake_ns.is_some())
+    }
+    pub fn rt_ns_state(&self, id: TaskId) -> Option<kernel_core::ns_budget::Budget> {
+        self.task(self.live_slot(id)?)?.ns_budget
+    }
+    pub fn task_affinity(&self, id: TaskId) -> Option<CpuSet> {
         let slot = self.live_slot(id)?;
         match self.task(slot)?.affinity {
             TaskAffinity::Bootstrap(set) => Some(set.to_cpu_set()),
             TaskAffinity::Dynamic => self.dynamic_affinities.as_ref()?.to_cpu_set(slot),
         }
     }
-    pub fn rt_utilisation(&self)->u32 {
-        self.tasks.iter().flatten().filter(|t|t.state!=TaskState::Exited && t.rt_period!=0)
-            .map(|t|t.ns_budget.filter(|b|b.enabled).map_or_else(||kernel_core::rt_partition::utilisation(t.rt_quota,t.rt_period).expect("valid RT declaration"),|b|kernel_core::ns_budget::utilisation(b.quota,b.period).expect("ns RT declaration"))).sum()
+    pub fn rt_utilisation(&self) -> u32 {
+        self.tasks
+            .iter()
+            .flatten()
+            .filter(|t| t.state != TaskState::Exited && t.rt_period != 0)
+            .map(|t| {
+                t.ns_budget.filter(|b| b.enabled).map_or_else(
+                    || {
+                        kernel_core::rt_partition::utilisation(t.rt_quota, t.rt_period)
+                            .expect("valid RT declaration")
+                    },
+                    |b| {
+                        kernel_core::ns_budget::utilisation(b.quota, b.period)
+                            .expect("ns RT declaration")
+                    },
+                )
+            })
+            .sum()
     }
-    pub fn rt_state(&self, id: TaskId) -> Option<(u32,u32,u64)> {
+    pub fn rt_state(&self, id: TaskId) -> Option<(u32, u32, u64)> {
         let t = self.task(self.live_slot(id)?)?;
-        Some((t.rt_remaining,t.rt_period,t.rt_next_period))
+        Some((t.rt_remaining, t.rt_period, t.rt_next_period))
     }
-    pub fn budget_tick_stats(&self) -> [u32; 2] { self.budget_tick_charges }
+    pub fn budget_tick_stats(&self) -> [u32; 2] {
+        self.budget_tick_charges
+    }
 
     #[cfg(feature = "krn3-fast-tick-verify")]
     pub fn task_cpu_ticks(&self, id: TaskId) -> Option<u64> {
         let slot = self.live_slot(id)?;
         let task = self.task(slot)?;
         let token = self.epochs.get(slot)?.history()?.token();
-        with_leaf(task.home, |leaf| leaf.hot[slot].get(token).ok().map(|hot| hot.sched.cpu_ticks))
+        with_leaf(task.home, |leaf| {
+            leaf.hot[slot]
+                .get(token)
+                .ok()
+                .map(|hot| hot.sched.cpu_ticks)
+        })
     }
 
     /// 尚未退出的工作任务数（可运行 + 运行中 + 睡眠）。
@@ -2998,13 +3782,21 @@ impl Scheduler {
         // No competing candidate means empty arbitration demand. Arbiter::pick
         // returns None without changing its aging state in that case; enabling
         // multi-mode alone must not disable this no-op optimization.
-        if self.candidates().next().is_some() { return allow; }
+        if self.candidates().next().is_some() {
+            return allow;
+        }
         for c in self.online.iter() {
             let (current, _, _, switching_from) = leaf_run_state(c);
-            if switching_from.is_some() { continue; }
+            if switching_from.is_some() {
+                continue;
+            }
             if let Some(t) = self.task(current).filter(|_| is_worker(current)) {
-                if t.state == TaskState::Running && t.home == c && t.cpu_group.is_none()
-                    && t.rt_period == 0 && self.decide(c).is_none() {
+                if t.state == TaskState::Running
+                    && t.home == c
+                    && t.cpu_group.is_none()
+                    && t.rt_period == 0
+                    && self.decide(c).is_none()
+                {
                     allow.insert(c);
                 }
             }
@@ -3036,8 +3828,9 @@ impl Scheduler {
                     continue;
                 };
                 let local_competition = self.waiting(c) != ClassMask::EMPTY;
-                let local_safe =
-                    local_competition && !self.arbiter_on && self.listed(c).all(|(_, task)| {
+                let local_safe = local_competition
+                    && !self.arbiter_on
+                    && self.listed(c).all(|(_, task)| {
                         task.home == c
                             && task.cpu_group.is_none()
                             && task.rt_period == 0
@@ -3071,9 +3864,9 @@ impl Scheduler {
                     if grp.parent.is_some() || grp.children != 0 {
                         continue;
                     }
-                    let allowance = grp
-                        .limit
-                        .deferred_tick_credits(u32::try_from(self.tick_publication.len()).unwrap_or(u32::MAX));
+                    let allowance = grp.limit.deferred_tick_credits(
+                        u32::try_from(self.tick_publication.len()).unwrap_or(u32::MAX),
+                    );
                     if !grp.publication_credit.grant(allowance) {
                         continue;
                     }
@@ -3096,8 +3889,11 @@ impl Scheduler {
         // At most C touched slots; no full group-table clear or hot allocation.
         for i in 0..touched_len {
             let group = self.tick_touched[i].expect("touched group remains recorded");
-            self.groups[group].as_mut().expect("publication group remains live")
-                .publication_credit.reset();
+            self.groups[group]
+                .as_mut()
+                .expect("publication group remains live")
+                .publication_credit
+                .reset();
         }
     }
     /// BSP global time does not need the cold mirrors of ordinary ungrouped
@@ -3107,40 +3903,71 @@ impl Scheduler {
         let mut cpus = CpuSet::first(1);
         for c in self.online.iter().filter(|&c| c != 0) {
             let slot = leaf_current(c);
-            if self.task(slot).is_some_and(|t| t.cpu_group.is_some() || t.rt_period != 0 || t.ns_budget.is_some()) {
+            if self
+                .task(slot)
+                .is_some_and(|t| t.cpu_group.is_some() || t.rt_period != 0 || t.ns_budget.is_some())
+            {
                 cpus.insert(c);
             }
         }
         cpus
     }
 
-    pub fn drain_local_ticks(&mut self, c: usize, owner: kernel_core::task_index::Token, ticks: u8) {
+    pub fn drain_local_ticks(
+        &mut self,
+        c: usize,
+        owner: kernel_core::task_index::Token,
+        ticks: u8,
+    ) {
         assert!(ticks != 0, "empty deferred tick batch");
-        assert!(self.epochs[owner.slot].live(owner), "deferred tick changed generation before drain");
+        assert!(
+            self.epochs[owner.slot].live(owner),
+            "deferred tick changed generation before drain"
+        );
         let t = self.task(owner.slot).expect("deferred tick task");
-        assert!(matches!(t.state, TaskState::Running | TaskState::Runnable),
-            "deferred tick owner left runnable lifecycle before drain");
-        assert!(t.rt_period == 0 || t.rt_remaining > 1, "RT credit exhausted before drain");
+        assert!(
+            matches!(t.state, TaskState::Running | TaskState::Runnable),
+            "deferred tick owner left runnable lifecycle before drain"
+        );
+        assert!(
+            t.rt_period == 0 || t.rt_remaining > 1,
+            "RT credit exhausted before drain"
+        );
         let group = t.cpu_group;
         if t.rt_period != 0 || group.is_some() {
-            assert_eq!(leaf_current(c), owner.slot,
-                "budgeted deferred tick changed owner before drain");
-            assert_eq!(t.state, TaskState::Running,
-                "budgeted deferred tick owner stopped before drain");
+            assert_eq!(
+                leaf_current(c),
+                owner.slot,
+                "budgeted deferred tick changed owner before drain"
+            );
+            assert_eq!(
+                t.state,
+                TaskState::Running,
+                "budgeted deferred tick owner stopped before drain"
+            );
         }
         // Entity/policy accounting already happened in the AP interrupt while
         // its TickLease excluded global mutation.  Refresh the cold mirror and
         // settle only global diagnostics/balancing here; never charge the
         // entity or advance the policy a second time.
-        let sched = with_leaf(c, |leaf| leaf.hot[owner.slot].get(owner).expect("drain fast tick hot owner").sched);
+        let sched = with_leaf(c, |leaf| {
+            leaf.hot[owner.slot]
+                .get(owner)
+                .expect("drain fast tick hot owner")
+                .sched
+        });
         self.tasks[owner.slot].as_mut().unwrap().sched = sched;
         self.local_ticks[c] += u64::from(ticks);
-        for _ in 0..ticks { self.charge_watchdog(owner.slot, self.now); }
+        for _ in 0..ticks {
+            self.charge_watchdog(owner.slot, self.now);
+        }
         self.cpu_stats[c].busy_ticks += u64::from(ticks);
         self.cpu_stats[c].idle_waiting = 0;
         if self.balancer.due(self.local_ticks[c]) {
             let loads = self.loads();
-            let pulled = self.balancer.pull(c, self.now, loads.as_slice(), self.candidates());
+            let pulled = self
+                .balancer
+                .pull(c, self.now, loads.as_slice(), self.candidates());
             self.restore_loads(loads);
             match pulled {
                 Ok(slot) => {
@@ -3164,7 +3991,10 @@ impl Scheduler {
             assert!(grp.limit.eligible(), "shared credit oversubscribed");
             grp.limit.charge();
             self.budget_tick_charges[1] = self.budget_tick_charges[1].wrapping_add(1);
-            assert!(grp.limit.eligible(), "shared credit must leave positive balance");
+            assert!(
+                grp.limit.eligible(),
+                "shared credit must leave positive balance"
+            );
         }
     }
     pub fn note_fast_yield(&mut self, c: usize) {
@@ -3182,10 +4012,17 @@ impl Scheduler {
             let mut m = ClassMask::EMPTY;
             for i in leaf.runs.iter(&leaf.links, LEAF_QUEUE) {
                 let Some(t) = self.task(i) else { continue };
-                let Some(token) = self.epochs[i].history().map(|r| r.token()) else { continue };
-                let Ok(hot) = leaf.hot[i].get(token) else { continue };
-                if i != current && t.home == c && hot.on_cpu.is_none()
-                    && hot.state == TaskState::Runnable && self.eligible(t)
+                let Some(token) = self.epochs[i].history().map(|r| r.token()) else {
+                    continue;
+                };
+                let Ok(hot) = leaf.hot[i].get(token) else {
+                    continue;
+                };
+                if i != current
+                    && t.home == c
+                    && hot.on_cpu.is_none()
+                    && hot.state == TaskState::Runnable
+                    && self.eligible(t)
                 {
                     m.insert(hot.sched.qos);
                 }
@@ -3196,18 +4033,32 @@ impl Scheduler {
 
     /// 是否有别的队列里的任务可以被处理器 `c` 窃取（可运行、未被占用、未被限速、亲和集合含 `c`）。
     fn stealable(&self, c: usize) -> bool {
-        self.online.contains(c) && self.candidates().any(|k| k.home != c && k.affinity.contains(c))
+        self.online.contains(c)
+            && self
+                .candidates()
+                .any(|k| k.home != c && k.affinity.contains(c))
     }
 
     /// 可以被搬动的任务：可运行、未被任何处理器占用、未被限速（只遍历各运行列表：可运行任务一定在列表上）。
     fn candidates(&self) -> impl Iterator<Item = Candidate<'_>> + Clone + '_ {
         let cpus = self.cpu_stats.len();
-        (0..cpus).flat_map(move |q| self.listed(q)).filter_map(move |(i, t)| {
-            (t.rt_period == 0 && t.state == TaskState::Runnable && t.on_cpu.is_none() && self.eligible(t))
+        (0..cpus)
+            .flat_map(move |q| self.listed(q))
+            .filter_map(move |(i, t)| {
+                (t.rt_period == 0
+                    && t.state == TaskState::Runnable
+                    && t.on_cpu.is_none()
+                    && self.eligible(t))
                 .then_some(())
                 .and_then(|_| self.affinity_view(i))
-                .map(|affinity| Candidate { slot: i, home: t.home, affinity, qos: t.sched.qos, last_ran: t.last_ran })
-        })
+                .map(|affinity| Candidate {
+                    slot: i,
+                    home: t.home,
+                    affinity,
+                    qos: t.sched.qos,
+                    last_ran: t.last_ran,
+                })
+            })
     }
 
     /// 各处理器的负载快照。
@@ -3225,7 +4076,13 @@ impl Scheduler {
             if self.online.contains(c) {
                 let cur = leaf_current(c);
                 load.online = true;
-                load.running = if is_worker(cur) { self.task(cur).filter(|t| t.state == TaskState::Running).map(|t| t.sched.qos) } else { None };
+                load.running = if is_worker(cur) {
+                    self.task(cur)
+                        .filter(|t| t.state == TaskState::Running)
+                        .map(|t| t.sched.qos)
+                } else {
+                    None
+                };
             }
         }
         for k in self.candidates() {
@@ -3246,7 +4103,11 @@ impl Scheduler {
     /// 处理器 `c` 参与调度（进入空闲执行流之前调用；重复调用无副作用）。
     /// Mark processor `c` as taking part in scheduling.
     pub fn cpu_online(&mut self, c: usize) {
-        assert_eq!(c, this_cpu(), "a CPU must register itself while its leaf is held");
+        assert_eq!(
+            c,
+            this_cpu(),
+            "a CPU must register itself while its leaf is held"
+        );
         if !self.online.contains(c) {
             if self.ns_active {
                 self.ns_at[c] = self.ns_now;
@@ -3297,13 +4158,18 @@ impl Scheduler {
             return Err("task-active");
         }
         if self.tasks.iter().flatten().any(|task| {
-            task.state != TaskState::Exited
-                && (task.home == c || task.on_cpu == Some(c))
+            task.state != TaskState::Exited && (task.home == c || task.on_cpu == Some(c))
         }) {
             return Err("task-bound");
         }
-        if self.tick_publication.get(c).is_some_and(|value| value.is_some())
-            || self.tick_touched.get(c).is_some_and(|value| value.is_some())
+        if self
+            .tick_publication
+            .get(c)
+            .is_some_and(|value| value.is_some())
+            || self
+                .tick_touched
+                .get(c)
+                .is_some_and(|value| value.is_some())
         {
             return Err("tick-lease");
         }
@@ -3332,7 +4198,12 @@ impl Scheduler {
         if is_worker(current) || self.waiting(c) != ClassMask::EMPTY {
             return Err("task-active");
         }
-        if self.tasks.iter().flatten().any(|task| task.on_cpu == Some(c)) {
+        if self
+            .tasks
+            .iter()
+            .flatten()
+            .any(|task| task.on_cpu == Some(c))
+        {
             return Err("task-running");
         }
         if self
@@ -3347,9 +4218,10 @@ impl Scheduler {
             return Err("tick-lease");
         }
         for (slot, task) in self.tasks.iter().enumerate() {
-            let Some(task) = task.as_ref().filter(|task| {
-                task.state != TaskState::Exited && task.home == c
-            }) else {
+            let Some(task) = task
+                .as_ref()
+                .filter(|task| task.state != TaskState::Exited && task.home == c)
+            else {
                 continue;
             };
             if task.rt_period != 0 {
@@ -3388,9 +4260,7 @@ impl Scheduler {
                 {
                     continue;
                 }
-                let affinity = self
-                    .affinity_view(slot)
-                    .ok_or("affinity-missing")?;
+                let affinity = self.affinity_view(slot).ok_or("affinity-missing")?;
                 let destination = (0..self.cpu_stats.len())
                     .find(|&destination| {
                         destination != c
@@ -3453,15 +4323,23 @@ impl Scheduler {
         if self.online.clone().intersect(set.clone()).is_empty() {
             return Err(AffinityError::NoOnlineCpu);
         }
-        let i = self.live_slot(id).filter(|&i| i != BOOT_SLOT).ok_or(AffinityError::NoTask)?;
-        let t=self.task(i).ok_or(AffinityError::NoTask)?;
-        if t.rt_period!=0 && !set.contains(t.home) { return Err(AffinityError::RtPartition); }
+        let i = self
+            .live_slot(id)
+            .filter(|&i| i != BOOT_SLOT)
+            .ok_or(AffinityError::NoTask)?;
+        let t = self.task(i).ok_or(AffinityError::NoTask)?;
+        if t.rt_period != 0 && !set.contains(t.home) {
+            return Err(AffinityError::RtPartition);
+        }
         let me = this_cpu();
         let (home, on_cpu) = (t.home, t.on_cpu);
         let dynamic = self.dynamic_affinities.is_some();
         if set.contains(home) && self.online.contains(home) {
             if dynamic {
-                assert!(self.copy_affinity_set(i, set.clone()), "preallocated affinity storage");
+                assert!(
+                    self.copy_affinity_set(i, set.clone()),
+                    "preallocated affinity storage"
+                );
             }
             self.task_mut(i).ok_or(AffinityError::NoTask)?.affinity = if dynamic {
                 TaskAffinity::Dynamic
@@ -3471,8 +4349,21 @@ impl Scheduler {
             return Ok(home == me || on_cpu != Some(me));
         }
         let loads = self.loads();
-        let (qos, last_ran) = self.task(i).map(|t| (t.sched.qos, t.last_ran)).unwrap_or((Qos::Background, None));
-        let new_home = self.balancer.place(CpuMembershipRef::Bootstrap(set.clone()), None, qos, last_ran, self.now, loads.as_slice()).map_err(|_| AffinityError::NoOnlineCpu);
+        let (qos, last_ran) = self
+            .task(i)
+            .map(|t| (t.sched.qos, t.last_ran))
+            .unwrap_or((Qos::Background, None));
+        let new_home = self
+            .balancer
+            .place(
+                CpuMembershipRef::Bootstrap(set.clone()),
+                None,
+                qos,
+                last_ran,
+                self.now,
+                loads.as_slice(),
+            )
+            .map_err(|_| AffinityError::NoOnlineCpu);
         let new_home_is_idle = new_home
             .as_ref()
             .ok()
@@ -3481,7 +4372,10 @@ impl Scheduler {
         self.restore_loads(loads);
         let new_home = new_home?;
         if dynamic {
-            assert!(self.copy_affinity_set(i, set.clone()), "preallocated affinity storage");
+            assert!(
+                self.copy_affinity_set(i, set.clone()),
+                "preallocated affinity storage"
+            );
         }
         self.task_mut(i).ok_or(AffinityError::NoTask)?.affinity = if dynamic {
             TaskAffinity::Dynamic
@@ -3528,8 +4422,10 @@ impl Scheduler {
     }
 
     /// Current busy/idle residency in the scheduler reference clock, including the open interval.
-    pub fn cpu_residency(&self,c:usize)->kernel_core::cpu_time::Totals {
-        self.cpu_residency[c].snapshot(self.now).expect("monotonic CPU residency snapshot")
+    pub fn cpu_residency(&self, c: usize) -> kernel_core::cpu_time::Totals {
+        self.cpu_residency[c]
+            .snapshot(self.now)
+            .expect("monotonic CPU residency snapshot")
     }
 
     /// 清零全部处理器的调度统计（每个测量场景开始前调用）。
@@ -3538,66 +4434,156 @@ impl Scheduler {
             *stats = CpuStats::default();
         }
         for ledger in self.cpu_residency.iter_mut() {
-            ledger.reset(self.now).expect("monotonic CPU residency reset");
+            ledger
+                .reset(self.now)
+                .expect("monotonic CPU residency reset");
         }
-        #[cfg(feature="s3-nohz-verify")]
-        { self.nohz_diag_start=self.now;self.nohz_diag_local=self.local_ticks;self.nohz_diag_missed=[0;MAX_CPUS]; }
+        #[cfg(feature = "s3-nohz-verify")]
+        {
+            self.nohz_diag_start = self.now;
+            self.nohz_diag_local = self.local_ticks;
+            self.nohz_diag_missed = [0; MAX_CPUS];
+        }
     }
 
-    #[cfg(feature="s3-nohz-verify")]
-    pub fn nohz_accounting(&self,c:usize)->(u64,u64,u64,u64,bool) {
-        let stats=self.cpu_stats[c];
-        (self.now-self.nohz_diag_start,self.local_ticks[c]-self.nohz_diag_local[c],self.nohz_diag_missed[c],stats.busy_ticks+stats.idle_ticks,self.nohz.stopped().contains(c))
+    #[cfg(feature = "s3-nohz-verify")]
+    pub fn nohz_accounting(&self, c: usize) -> (u64, u64, u64, u64, bool) {
+        let stats = self.cpu_stats[c];
+        (
+            self.now - self.nohz_diag_start,
+            self.local_ticks[c] - self.nohz_diag_local[c],
+            self.nohz_diag_missed[c],
+            stats.busy_ticks + stats.idle_ticks,
+            self.nohz.stopped().contains(c),
+        )
     }
 
     // Author: chatgpt. Per-owner roots; no task-table scan or remote drain.
     fn refresh_wake(&mut self, c: usize) {
-        self.next_wake[c] = self.wake_heap.peek(&self.wake_entries, &self.wake_positions, &self.wake_owners, c)
-            .expect("wake forest coherence").map(|e| e.at).unwrap_or(u64::MAX);
+        self.next_wake[c] = self
+            .wake_heap
+            .peek(
+                &self.wake_entries,
+                &self.wake_positions,
+                &self.wake_owners,
+                c,
+            )
+            .expect("wake forest coherence")
+            .map(|e| e.at)
+            .unwrap_or(u64::MAX);
     }
     fn refresh_rt(&mut self, c: usize) {
-        self.next_rt[c] = self.rt_heap.peek(&self.rt_entries, &self.rt_positions, &self.rt_owners, c)
-            .expect("RT forest coherence").map(|e| e.at).unwrap_or(u64::MAX);
+        self.next_rt[c] = self
+            .rt_heap
+            .peek(&self.rt_entries, &self.rt_positions, &self.rt_owners, c)
+            .expect("RT forest coherence")
+            .map(|e| e.at)
+            .unwrap_or(u64::MAX);
     }
     fn set_wake_deadline(&mut self, c: usize, e: Deadline) {
         let old = self.wake_owners[e.slot];
-        self.wake_heap.set(&mut self.wake_entries, &mut self.wake_positions, &mut self.wake_owners, c, e).expect("wake forest capacity/lifecycle");
+        self.wake_heap
+            .set(
+                &mut self.wake_entries,
+                &mut self.wake_positions,
+                &mut self.wake_owners,
+                c,
+                e,
+            )
+            .expect("wake forest capacity/lifecycle");
         self.refresh_wake(c);
-        if old != NO_DEADLINE && old != c { self.refresh_wake(old); }
-        if e.at <= self.now { self.kicks.insert(c); }
+        if old != NO_DEADLINE && old != c {
+            self.refresh_wake(old);
+        }
+        if e.at <= self.now {
+            self.kicks.insert(c);
+        }
     }
     fn set_rt_deadline(&mut self, c: usize, e: Deadline) {
         let old = self.rt_owners[e.slot];
-        self.rt_heap.set(&mut self.rt_entries, &mut self.rt_positions, &mut self.rt_owners, c, e).expect("RT forest capacity/lifecycle");
+        self.rt_heap
+            .set(
+                &mut self.rt_entries,
+                &mut self.rt_positions,
+                &mut self.rt_owners,
+                c,
+                e,
+            )
+            .expect("RT forest capacity/lifecycle");
         self.refresh_rt(c);
-        if old != NO_DEADLINE && old != c { self.refresh_rt(old); }
-        if e.at <= self.now { self.kicks.insert(c); }
+        if old != NO_DEADLINE && old != c {
+            self.refresh_rt(old);
+        }
+        if e.at <= self.now {
+            self.kicks.insert(c);
+        }
     }
     fn remove_wake_deadline(&mut self, slot: usize, generation: u64) {
         let old = self.wake_owners[slot];
-        self.wake_heap.remove(&mut self.wake_entries, &mut self.wake_positions, &mut self.wake_owners, slot, generation).expect("wake cancellation identity");
-        if old != NO_DEADLINE { self.refresh_wake(old); }
+        self.wake_heap
+            .remove(
+                &mut self.wake_entries,
+                &mut self.wake_positions,
+                &mut self.wake_owners,
+                slot,
+                generation,
+            )
+            .expect("wake cancellation identity");
+        if old != NO_DEADLINE {
+            self.refresh_wake(old);
+        }
     }
     fn remove_rt_deadline(&mut self, slot: usize, generation: u64) {
         let old = self.rt_owners[slot];
-        self.rt_heap.remove(&mut self.rt_entries, &mut self.rt_positions, &mut self.rt_owners, slot, generation).expect("RT cancellation identity");
-        if old != NO_DEADLINE { self.refresh_rt(old); }
+        self.rt_heap
+            .remove(
+                &mut self.rt_entries,
+                &mut self.rt_positions,
+                &mut self.rt_owners,
+                slot,
+                generation,
+            )
+            .expect("RT cancellation identity");
+        if old != NO_DEADLINE {
+            self.refresh_rt(old);
+        }
     }
     fn wake_due(&mut self, c: usize, now: u64) -> bool {
-        if now < self.next_wake[c] { return false; }
+        if now < self.next_wake[c] {
+            return false;
+        }
         self.scan.wake_scans += 1;
         let mut preempt = false;
-        while let Some(event) = self.wake_heap.pop_due(&mut self.wake_entries, &mut self.wake_positions,
-            &mut self.wake_owners, c, now).expect("wake forest coherence") {
-            let valid = self.epochs.get(event.slot).and_then(SlotLifecycle::history)
+        while let Some(event) = self
+            .wake_heap
+            .pop_due(
+                &mut self.wake_entries,
+                &mut self.wake_positions,
+                &mut self.wake_owners,
+                c,
+                now,
+            )
+            .expect("wake forest coherence")
+        {
+            let valid = self
+                .epochs
+                .get(event.slot)
+                .and_then(SlotLifecycle::history)
                 .is_some_and(|r| r.token().generation == event.generation)
-                && self.task(event.slot).is_some_and(|t| t.home == c && t.state == TaskState::Blocked && t.wake_at == Some(event.at));
+                && self.task(event.slot).is_some_and(|t| {
+                    t.home == c && t.state == TaskState::Blocked && t.wake_at == Some(event.at)
+                });
             if valid {
                 #[cfg(feature = "fault-inject")]
                 {
                     let trace = &mut self.deadline_trace[c];
-                    if trace.token.slot == event.slot && trace.token.generation == event.generation && trace.at == event.at {
-                        trace.ipis_after = crate::smp::percpu::get(c).unwrap().ipis(kernel_core::smp::IpiKind::Reschedule);
+                    if trace.token.slot == event.slot
+                        && trace.token.generation == event.generation
+                        && trace.at == event.at
+                    {
+                        trace.ipis_after = crate::smp::percpu::get(c)
+                            .unwrap()
+                            .ipis(kernel_core::smp::IpiKind::Reschedule);
                         trace.consumed_at = now;
                         trace.consumer = this_cpu();
                         trace.consumed = true;
@@ -3629,10 +4615,11 @@ impl Scheduler {
         }
     }
     pub fn tick(&mut self, now: u64, preemption: bool) -> Option<&'static str> {
-        if let Some((group,_,deadline,_,None))=self.budget_window {
-            if now>=deadline {
-                let st=self.group_stats(group).expect("watched group live");
-                self.budget_window.as_mut().unwrap().4=Some((now,(st.used_ticks,st.late_ticks)));
+        if let Some((group, _, deadline, _, None)) = self.budget_window {
+            if now >= deadline {
+                let st = self.group_stats(group).expect("watched group live");
+                self.budget_window.as_mut().unwrap().4 =
+                    Some((now, (st.used_ticks, st.late_ticks)));
             }
         }
         self.now = now;
@@ -3647,17 +4634,39 @@ impl Scheduler {
         for target in self.online.iter().filter(|&target| target != c) {
             #[cfg(feature = "fault-inject")]
             if self.delayed_deadline_timer.contains(target) && now >= self.next_wake[target] {
-                if let Some(event) = self.wake_heap.peek(&self.wake_entries, &self.wake_positions, &self.wake_owners, target).expect("trace heap coherence") {
-                    let token = kernel_core::task_index::Token { slot: event.slot, generation: event.generation };
-                    if self.deadline_trace[target].token != token || self.deadline_trace[target].at != event.at {
-                        self.deadline_trace[target] = DeadlineTrace { token, at: event.at, requested_at: now,
+                if let Some(event) = self
+                    .wake_heap
+                    .peek(
+                        &self.wake_entries,
+                        &self.wake_positions,
+                        &self.wake_owners,
+                        target,
+                    )
+                    .expect("trace heap coherence")
+                {
+                    let token = kernel_core::task_index::Token {
+                        slot: event.slot,
+                        generation: event.generation,
+                    };
+                    if self.deadline_trace[target].token != token
+                        || self.deadline_trace[target].at != event.at
+                    {
+                        self.deadline_trace[target] = DeadlineTrace {
+                            token,
+                            at: event.at,
+                            requested_at: now,
                             stopped: self.nohz.stopped().contains(target),
-                            ipis_before: crate::smp::percpu::get(target).unwrap().ipis(kernel_core::smp::IpiKind::Reschedule),
-                            ..DeadlineTrace::EMPTY };
+                            ipis_before: crate::smp::percpu::get(target)
+                                .unwrap()
+                                .ipis(kernel_core::smp::IpiKind::Reschedule),
+                            ..DeadlineTrace::EMPTY
+                        };
                     }
                 }
             }
-            if now >= self.next_wake[target] || now >= self.next_rt[target] { self.kicks.insert(target); }
+            if now >= self.next_wake[target] || now >= self.next_rt[target] {
+                self.kicks.insert(target);
+            }
         }
         self.kick_stopped();
         let cause = cause.or_else(|| self.decide(c));
@@ -3671,21 +4680,49 @@ impl Scheduler {
     /// 实时预算记账与周期补充（POL-4）。
     fn charge_rt(&mut self, cur: usize, now: u64) {
         if let Some(t) = self.tasks.get_mut(cur).and_then(|t| t.as_mut()) {
-            if t.state == TaskState::Running && t.ns_budget.is_none() && t.rt_period != 0 && t.rt_remaining > 0 {
+            if t.state == TaskState::Running
+                && t.ns_budget.is_none()
+                && t.rt_period != 0
+                && t.rt_remaining > 0
+            {
                 t.rt_remaining = t.rt_remaining.saturating_sub(1);
             }
         }
         self.refill_rt(this_cpu(), now);
     }
     fn refill_rt(&mut self, c: usize, now: u64) {
-        if now < self.next_rt[c] { return; }
-        while let Some(event) = self.rt_heap.pop_due(&mut self.rt_entries, &mut self.rt_positions,
-            &mut self.rt_owners, c, now).expect("RT forest coherence") {
-            let valid = self.epochs.get(event.slot).and_then(SlotLifecycle::history)
+        if now < self.next_rt[c] {
+            return;
+        }
+        while let Some(event) = self
+            .rt_heap
+            .pop_due(
+                &mut self.rt_entries,
+                &mut self.rt_positions,
+                &mut self.rt_owners,
+                c,
+                now,
+            )
+            .expect("RT forest coherence")
+        {
+            let valid = self
+                .epochs
+                .get(event.slot)
+                .and_then(SlotLifecycle::history)
                 .is_some_and(|r| r.token().generation == event.generation);
-            let Some(t) = self.tasks.get_mut(event.slot).and_then(|t| t.as_mut()) else { continue };
-            if !valid || t.home != c || t.rt_period == 0 || t.state == TaskState::Exited || t.rt_next_period != event.at { continue; }
-            let next = kernel_core::deadline::next_period(now, t.rt_next_period, t.rt_period).expect("RT monotonic clock exhausted");
+            let Some(t) = self.tasks.get_mut(event.slot).and_then(|t| t.as_mut()) else {
+                continue;
+            };
+            if !valid
+                || t.home != c
+                || t.rt_period == 0
+                || t.state == TaskState::Exited
+                || t.rt_next_period != event.at
+            {
+                continue;
+            }
+            let next = kernel_core::deadline::next_period(now, t.rt_next_period, t.rt_period)
+                .expect("RT monotonic clock exhausted");
             t.rt_remaining = t.rt_quota;
             t.rt_next_period = next;
             self.deadline_refills[c] = self.deadline_refills[c].wrapping_add(1);
@@ -3696,11 +4733,18 @@ impl Scheduler {
 
     /// Atomic admission and budget update from canonical task reservations.
     /// Rejection leaves old partition, period, budget and deadline untouched.
-    pub fn enable_highres(&mut self,now:u64) {
-        assert!(!self.tasks.iter().flatten().any(|t|t.rt_period!=0 && t.state!=TaskState::Exited),"enable before RT admission");
-        self.ns_now=now;
+    pub fn enable_highres(&mut self, now: u64) {
+        assert!(
+            !self
+                .tasks
+                .iter()
+                .flatten()
+                .any(|t| t.rt_period != 0 && t.state != TaskState::Exited),
+            "enable before RT admission"
+        );
+        self.ns_now = now;
         self.ns_at.fill(now);
-        self.ns_active=true;
+        self.ns_active = true;
         // 启用前的状态迁移没有发布过事件：第一轮全部同步一次。
         self.tasks.mark_all_dirty();
         for credit in self.ns_credit.iter_mut() {
@@ -3721,9 +4765,12 @@ impl Scheduler {
             return false;
         };
         let old = budget.next;
-        budget.settle(start, end, running).expect("ns budget clock exhausted");
+        budget
+            .settle(start, end, running)
+            .expect("ns budget clock exhausted");
         if budget.next != old {
-            task.rt_next_period = task.rt_next_period
+            task.rt_next_period = task
+                .rt_next_period
                 .checked_add((budget.next - old) / budget.period * u64::from(task.rt_period))
                 .expect("compat budget deadline overflow");
         }
@@ -3743,7 +4790,9 @@ impl Scheduler {
     /// 与只处理到期 CPU 的周期路径分开，不漏记切走前的最后一段执行。
     /// Settle the departing owner interval, then checkpoint the CPU.
     fn checkpoint_running_budget(&mut self, cpu: usize, now: u64) {
-        if !self.ns_active { return; }
+        if !self.ns_active {
+            return;
+        }
         if self.ns_budget_tasks == 0 {
             self.ns_at[cpu] = now;
             return;
@@ -3762,32 +4811,51 @@ impl Scheduler {
     /// 唤醒节点误当成预算补充；非运行任务不累积已经错过的周期。
     /// Settle only the budget event that names this exact heap boundary.
     fn settle_due_budget(&mut self, cpu: usize, slot: usize, at: u64, now: u64) -> bool {
-        let Some(task) = self.task(slot) else { return false; };
-        let Some(_) = task.ns_budget.filter(|b| b.enabled && b.next == at && at <= now) else {
+        let Some(task) = self.task(slot) else {
             return false;
         };
-        let running = task.state == TaskState::Running && task.home == cpu && leaf_current(cpu) == slot;
+        let Some(_) = task
+            .ns_budget
+            .filter(|b| b.enabled && b.next == at && at <= now)
+        else {
+            return false;
+        };
+        let running =
+            task.state == TaskState::Running && task.home == cpu && leaf_current(cpu) == slot;
         let start = if running { self.ns_at[cpu] } else { now };
         self.settle_ns_budget(slot, start, now, running)
     }
 
-    pub fn settle_highres(&mut self,now:u64) {
-        if !self.ns_active {return;}
+    pub fn settle_highres(&mut self, now: u64) {
+        if !self.ns_active {
+            return;
+        }
         let started = crate::arch::cycles();
         self.ns_budget.passes = self.ns_budget.passes.saturating_add(1);
-        assert!(now>=self.ns_now,"shared clock moved backwards");self.ns_now=now;
+        assert!(now >= self.ns_now, "shared clock moved backwards");
+        self.ns_now = now;
         // 运行预算只检查当前 CPU owner；只有配额耗尽或周期边界到达的 CPU 才取可变引用
         // 并结算。未到期 CPU 的 ns_at 保持不变，切走时由 checkpoint_running_budget 收尾。
-        self.ns_budget.budget_cpu_checks = self.ns_budget.budget_cpu_checks
+        self.ns_budget.budget_cpu_checks = self
+            .ns_budget
+            .budget_cpu_checks
             .saturating_add(self.online.len() as u64);
         let online = self.online.clone();
         for c in online.iter() {
             let slot = leaf_current(c);
-            let Some(task) = self.task(slot) else { continue; };
-            let Some(budget) = task.ns_budget.filter(|b| b.enabled) else { continue; };
-            if task.state != TaskState::Running { continue; }
+            let Some(task) = self.task(slot) else {
+                continue;
+            };
+            let Some(budget) = task.ns_budget.filter(|b| b.enabled) else {
+                continue;
+            };
+            if task.state != TaskState::Running {
+                continue;
+            }
             let start = self.ns_at[c];
-            let settle_at = budget.running_settle_at(start).expect("enabled budget has a checkpoint");
+            let settle_at = budget
+                .running_settle_at(start)
+                .expect("enabled budget has a checkpoint");
             if now >= settle_at {
                 self.settle_ns_budget(slot, start, now, true);
                 self.ns_at[c] = now;
@@ -3800,17 +4868,37 @@ impl Scheduler {
         // task remains published into its owner leaf by make_runnable(), and
         // remote targets are kicked only after the global guard is released.
         let due_cpus = self.online.clone();
-        self.ns_budget.due_cpu_checks = self.ns_budget.due_cpu_checks
+        self.ns_budget.due_cpu_checks = self
+            .ns_budget
+            .due_cpu_checks
             .saturating_add(due_cpus.len() as u64);
         for c in due_cpus.iter() {
-            if self.ns_roots[c].is_none_or(|at| at > now) { continue; }
+            if self.ns_roots[c].is_none_or(|at| at > now) {
+                continue;
+            }
             let before = self.ns_budget.due_events;
-            while let Some(e)=self.ns_heap.pop_due(&mut self.ns_entries,&mut self.ns_positions,&mut self.ns_owners,c,now).expect("ns heap coherent") {
+            while let Some(e) = self
+                .ns_heap
+                .pop_due(
+                    &mut self.ns_entries,
+                    &mut self.ns_positions,
+                    &mut self.ns_owners,
+                    c,
+                    now,
+                )
+                .expect("ns heap coherent")
+            {
                 self.ns_budget.due_events = self.ns_budget.due_events.saturating_add(1);
                 // 节点已弹出：没有被唤醒的任务（例如预算期限）要重新发布。
-                self.tasks.mark_dirty(e.slot);self.ns_root_dirty.insert(c);
-                let timer = TimerId { slot: e.slot as u32, generation: e.generation };
-                let fired = self.timer_table.expire(timer, now)
+                self.tasks.mark_dirty(e.slot);
+                self.ns_root_dirty.insert(c);
+                let timer = TimerId {
+                    slot: e.slot as u32,
+                    generation: e.generation,
+                };
+                let fired = self
+                    .timer_table
+                    .expire(timer, now)
                     .expect("one-shot task timer expiry cannot overflow");
                 let Some(fired) = fired else { continue };
                 let task = fired.owner as usize;
@@ -3821,7 +4909,9 @@ impl Scheduler {
                 // winning identity may observe this task's due request.
                 self.tasks.mark_dirty(task);
                 self.settle_due_budget(c, task, e.at, now);
-                if self.task(task).is_some_and(|t| t.state == TaskState::Blocked && t.wake_ns.is_some_and(|at| at <= now)) {
+                if self.task(task).is_some_and(|t| {
+                    t.state == TaskState::Blocked && t.wake_ns.is_some_and(|at| at <= now)
+                }) {
                     self.make_runnable(task);
                 }
             }
@@ -3829,162 +4919,281 @@ impl Scheduler {
                 self.ns_budget.due_cpus = self.ns_budget.due_cpus.saturating_add(1);
             }
         }
-        self.ns_budget.max_settle_cycles = self.ns_budget.max_settle_cycles
+        self.ns_budget.max_settle_cycles = self
+            .ns_budget
+            .max_settle_cycles
             .max(crate::arch::cycles().wrapping_sub(started));
     }
     /// 槽位当前应发布的期限事件：`(所有者处理器, 时刻, 定时身份)`。
     /// Current event for a task: owner CPU, instant and unified timer identity.
-    fn ns_event_wanted(&self,i:usize)->Option<(usize,u64,TimerId)> {
-        self.task(i).filter(|t|t.state!=TaskState::Exited).and_then(|t| {
-            let timer = t.timer?;
-            let sleep=(t.state==TaskState::Blocked).then_some(t.wake_ns).flatten();
-            let rt=t.ns_budget.filter(|b|b.enabled).map(|b|b.next);
-            sleep.into_iter().chain(rt).min().map(|at|(t.home,at,timer))
-        })
+    fn ns_event_wanted(&self, i: usize) -> Option<(usize, u64, TimerId)> {
+        self.task(i)
+            .filter(|t| t.state != TaskState::Exited)
+            .and_then(|t| {
+                let timer = t.timer?;
+                let sleep = (t.state == TaskState::Blocked)
+                    .then_some(t.wake_ns)
+                    .flatten();
+                let rt = t.ns_budget.filter(|b| b.enabled).map(|b| b.next);
+                sleep
+                    .into_iter()
+                    .chain(rt)
+                    .min()
+                    .map(|at| (t.home, at, timer))
+            })
     }
     /// 把脏槽位的期限事件同步进堆，再重读受影响处理器的根（issue #2）。工作量 O(字数 + 脏槽位数)。
     /// Syncs only dirty slots, then re-reads only the roots they could have changed.
     pub fn refresh_ns_events(&mut self) {
-        if !self.ns_active{return;}
-        self.ns_sync.passes=self.ns_sync.passes.saturating_add(1);
-        let mut from=0;
-        while let Some(i)=self.tasks.take_dirty(from) {
-            from=i+1;
-            let event=self.ns_event_wanted(i);
-            let Some(timer)=self.task(i).and_then(|t|t.timer) else {continue;};
-            let timer_slot=timer.slot as usize;
-            let old_owner=self.ns_owners[timer_slot];
+        if !self.ns_active {
+            return;
+        }
+        self.ns_sync.passes = self.ns_sync.passes.saturating_add(1);
+        let mut from = 0;
+        while let Some(i) = self.tasks.take_dirty(from) {
+            from = i + 1;
+            let event = self.ns_event_wanted(i);
+            let Some(timer) = self.task(i).and_then(|t| t.timer) else {
+                continue;
+            };
+            let timer_slot = timer.slot as usize;
+            let old_owner = self.ns_owners[timer_slot];
             match event {
-                Some((_,at,_)) => {
-                    self.timer_table.arm(timer, i as u32, Request {
-                        at,
-                        urgency: Urgency::Precise,
-                        period_ns: 0,
-                    }).expect("arm live task timer identity");
+                Some((_, at, _)) => {
+                    self.timer_table
+                        .arm(
+                            timer,
+                            i as u32,
+                            Request {
+                                at,
+                                urgency: Urgency::Precise,
+                                period_ns: 0,
+                            },
+                        )
+                        .expect("arm live task timer identity");
                 }
                 None => {
-                    self.timer_table.cancel(timer, i as u32)
+                    self.timer_table
+                        .cancel(timer, i as u32)
                         .expect("cancel live task timer identity");
                 }
             }
             // issue #2：与已发布节点相同则不写堆（不做无意义的 set/repair）。
             // Unchanged events no longer rewrite and repair their heap node.
-            let wanted=event.map(|(cpu,at,_)|(cpu,at));
-            let outcome=self.ns_heap.sync(
-                &mut self.ns_entries,
-                &mut self.ns_positions,
-                &mut self.ns_owners,
-                timer_slot,
-                timer.generation,
-                wanted,
-            ).expect("ns deadline identity and reserved capacity");
+            let wanted = event.map(|(cpu, at, _)| (cpu, at));
+            let outcome = self
+                .ns_heap
+                .sync(
+                    &mut self.ns_entries,
+                    &mut self.ns_positions,
+                    &mut self.ns_owners,
+                    timer_slot,
+                    timer.generation,
+                    wanted,
+                )
+                .expect("ns deadline identity and reserved capacity");
             self.ns_sync.record(outcome);
             if outcome.wrote() {
-                if old_owner!=NO_DEADLINE {self.ns_root_dirty.insert(old_owner);}
-                if let Some((c,_,_))=event {self.ns_root_dirty.insert(c);}
+                if old_owner != NO_DEADLINE {
+                    self.ns_root_dirty.insert(old_owner);
+                }
+                if let Some((c, _, _)) = event {
+                    self.ns_root_dirty.insert(c);
+                }
             }
         }
-        let dirty = self
-            .ns_root_dirty
-            .clone()
-            .intersect(self.online.clone());
+        let dirty = self.ns_root_dirty.clone().intersect(self.online.clone());
         for c in dirty.iter() {
-            let next=self.ns_heap.peek(&self.ns_entries,&self.ns_positions,&self.ns_owners,c).expect("ns root").map(|e|e.at);
-            if next.is_some_and(|at|self.ns_roots[c].is_none_or(|old|at<old)) && c!=this_cpu(){self.kicks.insert(c);}
-            self.ns_roots[c]=next;
+            let next = self
+                .ns_heap
+                .peek(&self.ns_entries, &self.ns_positions, &self.ns_owners, c)
+                .expect("ns root")
+                .map(|e| e.at);
+            if next.is_some_and(|at| self.ns_roots[c].is_none_or(|old| at < old)) && c != this_cpu()
+            {
+                self.kicks.insert(c);
+            }
+            self.ns_roots[c] = next;
             self.ns_root_dirty.remove(c);
         }
         #[cfg(feature = "ns-dirty-audit")]
         {
-            let bad=self.ns_audit();
-            assert!(bad==0,"ns dirty audit: {} mismatches at pass {}",bad,self.ns_sync.passes);
-            self.ns_audits=self.ns_audits.saturating_add(1);
+            let bad = self.ns_audit();
+            assert!(
+                bad == 0,
+                "ns dirty audit: {} mismatches at pass {}",
+                bad,
+                self.ns_sync.passes
+            );
+            self.ns_audits = self.ns_audits.saturating_add(1);
         }
     }
     /// 全表校验脏集合的不变量（issue #2）：没有待同步标记的槽位，已发布的节点必须等于应发布的事件；
     /// 没有待重读标记的在线处理器，缓存的根必须等于堆顶。返回不一致的项数。工作量 O(槽位数)，
     /// 默认构建只在启动汇总时调用一次；`ns-dirty-audit` 构建每轮刷新后都调用。
     /// Full-table check of the dirty-set invariant; returns the mismatch count.
-    pub fn ns_audit(&self)->u32 {
-        if !self.ns_active {return 0;}
-        let mut bad=0u32;
-        for i in 0..self.tasks.len() {
-            if self.tasks.is_dirty(i) {continue;}
-            let Some(timer)=self.task(i).and_then(|t|t.timer) else {continue;};
-            let published=self.ns_heap.published(
-                &self.ns_entries,
-                &self.ns_positions,
-                &self.ns_owners,
-                timer.slot as usize,
-            ).expect("ns published node").map(|(c,e)|(c,e.at,e.generation));
-            let wanted=self.ns_event_wanted(i).map(|(c,at,timer)|(c,at,timer.generation));
-            if published!=wanted {bad=bad.saturating_add(1);}
+    pub fn ns_audit(&self) -> u32 {
+        if !self.ns_active {
+            return 0;
         }
-        for c in self.online.iter().filter(|&c|!self.ns_root_dirty.contains(c)) {
-            let root=self.ns_heap.peek(&self.ns_entries,&self.ns_positions,&self.ns_owners,c).expect("ns root").map(|e|e.at);
-            if root!=self.ns_roots[c] {bad=bad.saturating_add(1);}
+        let mut bad = 0u32;
+        for i in 0..self.tasks.len() {
+            if self.tasks.is_dirty(i) {
+                continue;
+            }
+            let Some(timer) = self.task(i).and_then(|t| t.timer) else {
+                continue;
+            };
+            let published = self
+                .ns_heap
+                .published(
+                    &self.ns_entries,
+                    &self.ns_positions,
+                    &self.ns_owners,
+                    timer.slot as usize,
+                )
+                .expect("ns published node")
+                .map(|(c, e)| (c, e.at, e.generation));
+            let wanted = self
+                .ns_event_wanted(i)
+                .map(|(c, at, timer)| (c, at, timer.generation));
+            if published != wanted {
+                bad = bad.saturating_add(1);
+            }
+        }
+        for c in self
+            .online
+            .iter()
+            .filter(|&c| !self.ns_root_dirty.contains(c))
+        {
+            let root = self
+                .ns_heap
+                .peek(&self.ns_entries, &self.ns_positions, &self.ns_owners, c)
+                .expect("ns root")
+                .map(|e| e.at);
+            if root != self.ns_roots[c] {
+                bad = bad.saturating_add(1);
+            }
         }
         #[cfg(feature = "ns-dirty-audit")]
         {
-            let enabled = self.tasks.iter().flatten()
+            let enabled = self
+                .tasks
+                .iter()
+                .flatten()
                 .filter(|t| t.state != TaskState::Exited && t.ns_budget.is_some_and(|b| b.enabled))
                 .count();
-            if enabled != self.ns_budget_tasks { bad = bad.saturating_add(1); }
+            if enabled != self.ns_budget_tasks {
+                bad = bad.saturating_add(1);
+            }
         }
         bad
     }
     pub fn program_ns_local(&mut self) {
-        if !self.ns_active{return;}
+        if !self.ns_active {
+            return;
+        }
         // issue #3：各事件源经统一仲裁器取最早必须处理时刻；现有来源均为精确请求。
         // issue #3: every source goes through the unified arbiter; all current sources are precise.
-        use kernel_core::timer_event::{Arbiter,Urgency,arm_delay,needs_reprogram};
-        let c=this_cpu();let now=crate::hrtime::now().expect("calibrated clock available");
-        let mut arb=Arbiter::new();
-        arb.offer_opt(self.ns_roots[c],Urgency::Precise);
-        let current=leaf_current(c);
-        if let Some(t)=self.task(current).filter(|t|t.state==TaskState::Running && is_worker(current)) {
-            let tick=crate::hrtime::tick_ns();let base=self.ns_now/tick*tick;
-            arb.offer(base.checked_add(tick).expect("fallback clock overflow"),Urgency::Precise);
-            if let Some(b)=t.ns_budget.filter(|b|b.enabled) {
-                arb.offer(self.ns_now.checked_add(b.remaining.max(1)).expect("budget alarm overflow"),Urgency::Precise);
+        use kernel_core::timer_event::{arm_delay, needs_reprogram, Arbiter, Urgency};
+        let c = this_cpu();
+        let now = crate::hrtime::now().expect("calibrated clock available");
+        let mut arb = Arbiter::new();
+        arb.offer_opt(self.ns_roots[c], Urgency::Precise);
+        let current = leaf_current(c);
+        if let Some(t) = self
+            .task(current)
+            .filter(|t| t.state == TaskState::Running && is_worker(current))
+        {
+            let tick = crate::hrtime::tick_ns();
+            let base = self.ns_now / tick * tick;
+            arb.offer(
+                base.checked_add(tick).expect("fallback clock overflow"),
+                Urgency::Precise,
+            );
+            if let Some(b) = t.ns_budget.filter(|b| b.enabled) {
+                arb.offer(
+                    self.ns_now
+                        .checked_add(b.remaining.max(1))
+                        .expect("budget alarm overflow"),
+                    Urgency::Precise,
+                );
             }
-        }else if self.ns_need_tick[c] || self.next_wake[c]!=u64::MAX || self.next_rt[c]!=u64::MAX {
-            arb.offer(self.ns_now.checked_add(crate::hrtime::tick_ns()).expect("legacy alarm overflow"),Urgency::Precise);
+        } else if self.ns_need_tick[c]
+            || self.next_wake[c] != u64::MAX
+            || self.next_rt[c] != u64::MAX
+        {
+            arb.offer(
+                self.ns_now
+                    .checked_add(crate::hrtime::tick_ns())
+                    .expect("legacy alarm overflow"),
+                Urgency::Precise,
+            );
         }
-        let cur=self.task(current).filter(|t|t.state==TaskState::Running);
-        let cur_deadline=cur.and_then(|t|t.ns_budget.filter(|b|b.enabled)).map_or(u64::MAX,|b|b.next);
-        let ready_rt=self.listed(c).filter(|(_,t)|t.state==TaskState::Runnable && t.on_cpu.is_none() && self.eligible(t)).filter_map(|(_,t)|t.ns_budget.filter(|b|b.enabled).map(|b|b.next)).min();
-        if ready_rt.is_some_and(|deadline|deadline<cur_deadline) || cur.is_some_and(|t|t.ns_budget.is_some_and(|b|b.enabled && b.remaining==0)) {
-            arb.offer(now.checked_add(1).expect("prompt clock overflow"),Urgency::Precise);
+        let cur = self.task(current).filter(|t| t.state == TaskState::Running);
+        let cur_deadline = cur
+            .and_then(|t| t.ns_budget.filter(|b| b.enabled))
+            .map_or(u64::MAX, |b| b.next);
+        let ready_rt = self
+            .listed(c)
+            .filter(|(_, t)| {
+                t.state == TaskState::Runnable && t.on_cpu.is_none() && self.eligible(t)
+            })
+            .filter_map(|(_, t)| t.ns_budget.filter(|b| b.enabled).map(|b| b.next))
+            .min();
+        if ready_rt.is_some_and(|deadline| deadline < cur_deadline)
+            || cur.is_some_and(|t| t.ns_budget.is_some_and(|b| b.enabled && b.remaining == 0))
+        {
+            arb.offer(
+                now.checked_add(1).expect("prompt clock overflow"),
+                Urgency::Precise,
+            );
         }
-        let at=arb.program_at();
-        if !needs_reprogram(self.ns_programmed[c],at,now) {return;}
-        self.ns_programmed[c]=at;
+        let at = arb.program_at();
+        if !needs_reprogram(self.ns_programmed[c], at, now) {
+            return;
+        }
+        self.ns_programmed[c] = at;
         match at {
-            Some(at)=>{
-                let mut delay=arm_delay(at,now,100_000_000);
-                while !unsafe {crate::arch::timer_arm_after_ns(delay)} {
-                    assert!(delay>1,"high-res timer unsupported after calibration");delay=(delay/2).max(1);
+            Some(at) => {
+                let mut delay = arm_delay(at, now, 100_000_000);
+                while !unsafe { crate::arch::timer_arm_after_ns(delay) } {
+                    assert!(delay > 1, "high-res timer unsupported after calibration");
+                    delay = (delay / 2).max(1);
                 }
-            },
-            None=>crate::arch::timer_cancel_local(),
+            }
+            None => crate::arch::timer_cancel_local(),
         }
     }
-    pub fn block_current_ns(&mut self,deadline:u64)->bool {
-        if !self.ns_active || deadline<=self.ns_now {return false;}
-        if !self.block_current(None){return false;}
-        let c=self.cur();self.tasks[c].as_mut().unwrap().wake_ns=Some(deadline);true
+    pub fn block_current_ns(&mut self, deadline: u64) -> bool {
+        if !self.ns_active || deadline <= self.ns_now {
+            return false;
+        }
+        if !self.block_current(None) {
+            return false;
+        }
+        let c = self.cur();
+        self.tasks[c].as_mut().unwrap().wake_ns = Some(deadline);
+        true
     }
-    pub fn highres_idle(&mut self,c:usize,needs_tick:bool)->IdleStep {
-        self.ns_need_tick[c]=needs_tick;self.idle_enter(c,needs_tick)
+    pub fn highres_idle(&mut self, c: usize, needs_tick: bool) -> IdleStep {
+        self.ns_need_tick[c] = needs_tick;
+        self.idle_enter(c, needs_tick)
     }
-    pub fn highres_event(&mut self,preemption:bool)->(u64,Option<&'static str>) {
-        let c=this_cpu();self.ns_programmed[c]=None;
-        let (credits,delivered)=self.ns_credit[c].as_mut().unwrap().event(self.ns_now).expect("elapsed credit clock");
-        if c!=0 {
+    pub fn highres_event(&mut self, preemption: bool) -> (u64, Option<&'static str>) {
+        let c = this_cpu();
+        self.ns_programmed[c] = None;
+        let (credits, delivered) = self.ns_credit[c]
+            .as_mut()
+            .unwrap()
+            .event(self.ns_now)
+            .expect("elapsed credit clock");
+        if c != 0 {
             // 事件被推迟（中断晚到、vCPU 被宿主换下）时一次交付多个 tick：组按批计费，迟到部分单独计数
-            for _ in 0..credits {self.account(c);}
-            let cur=leaf_current(c);
+            for _ in 0..credits {
+                self.account(c);
+            }
+            let cur = leaf_current(c);
             if let Some(group) = self
                 .task(cur)
                 .filter(|task| task.state == TaskState::Running)
@@ -3999,110 +5208,260 @@ impl Scheduler {
                 self.charge_group_chain(group, credits, true);
             }
         }
-        let woke=self.wake_due(c,self.now);
-        let cause=self.decide(c).or(woke.then_some(Cause::WAKE));
-        (delivered,if preemption{cause}else{None})
+        let woke = self.wake_due(c, self.now);
+        let cause = self.decide(c).or(woke.then_some(Cause::WAKE));
+        (delivered, if preemption { cause } else { None })
     }
     /// 高精度模式下处理器 `c`（非计时处理器）由空闲切入任务之前：空闲期间流逝的 tick 记为空闲，
     /// 并留到下一次高精度事件一并交付（每核 tick 计数、设备配额），否则那次事件会把整段空闲时长
     /// 记到切入的任务及其 CPU 组上，组上限因此被突破。
     /// Settle ticks that elapsed while idle was current before a task is switched in.
-    fn settle_idle_credits(&mut self,c:usize) {
-        let credits=self.ns_credit[c].as_mut().unwrap().settle_idle(self.ns_now).expect("elapsed credit clock");
-        for _ in 0..credits {self.account(c);}
+    fn settle_idle_credits(&mut self, c: usize) {
+        let credits = self.ns_credit[c]
+            .as_mut()
+            .unwrap()
+            .settle_idle(self.ns_now)
+            .expect("elapsed credit clock");
+        for _ in 0..credits {
+            self.account(c);
+        }
     }
-    pub fn set_rt_ns(&mut self,id:TaskId,quota:u64,period:u64)->bool {
-        if !self.ns_active || (quota==0)!=(period==0) || quota>period {return false;}
-        let Some(slot)=self.live_slot(id).filter(|&s|is_worker(s)) else{return false;};
-        let old=self.task(slot).unwrap();
-        let running_home=(old.state==TaskState::Running).then_some(old.home);
-        if let Some(b)=old.ns_budget {
+    pub fn set_rt_ns(&mut self, id: TaskId, quota: u64, period: u64) -> bool {
+        if !self.ns_active || (quota == 0) != (period == 0) || quota > period {
+            return false;
+        }
+        let Some(slot) = self.live_slot(id).filter(|&s| is_worker(s)) else {
+            return false;
+        };
+        let old = self.task(slot).unwrap();
+        let running_home = (old.state == TaskState::Running).then_some(old.home);
+        if let Some(b) = old.ns_budget {
             if b.enabled {
-                if quota==b.quota && period==b.period{return true;}
-                if period!=0{return false;}
-                if let Some(cpu)=running_home{self.checkpoint_running_budget(cpu,self.ns_now);}
-                let t=self.tasks[slot].as_mut().unwrap();t.ns_budget.as_mut().unwrap().disable();t.rt_period=0;t.rt_quota=0;t.rt_remaining=0;
-                self.ns_budget_tasks=self.ns_budget_tasks.checked_sub(1).expect("enabled budget task count underflow");
+                if quota == b.quota && period == b.period {
+                    return true;
+                }
+                if period != 0 {
+                    return false;
+                }
+                if let Some(cpu) = running_home {
+                    self.checkpoint_running_budget(cpu, self.ns_now);
+                }
+                let t = self.tasks[slot].as_mut().unwrap();
+                t.ns_budget.as_mut().unwrap().disable();
+                t.rt_period = 0;
+                t.rt_quota = 0;
+                t.rt_remaining = 0;
+                self.ns_budget_tasks = self
+                    .ns_budget_tasks
+                    .checked_sub(1)
+                    .expect("enabled budget task count underflow");
                 return true;
             }
-            if period!=0 && self.ns_now<b.next{return false;}
-        }
-        if period==0{return true;}
-        if self.tasks.iter().flatten().filter(|t|t.state!=TaskState::Exited && t.rt_period!=0).count()>=crate::rt::admission_capacity(){return false;}
-        let Ok(budget)=kernel_core::ns_budget::Budget::new(self.ns_now,quota,period) else{return false;};
-        let Ok(added)=kernel_core::ns_budget::utilisation(quota,period) else{return false;};
-        let mut loads=[0u32;MAX_CPUS];
-        for (i,t) in self.tasks.iter().enumerate().filter_map(|(i,t)|t.as_ref().map(|t|(i,t))) {
-            if i==slot || t.state==TaskState::Exited || t.rt_period==0{continue;}
-            let usage=t.ns_budget.filter(|b|b.enabled).map_or_else(||kernel_core::rt_partition::utilisation(t.rt_quota,t.rt_period).unwrap(),|b|kernel_core::ns_budget::utilisation(b.quota,b.period).unwrap());
-            loads[t.home]=loads[t.home].checked_add(usage).expect("RT utilisation bounded");
-        }
-        let Some(affinity)=self.affinity_view(slot) else{return false;};
-        let mut best=None;
-        affinity.for_each(|cpu| {
-            if cpu>=loads.len() || !self.online.contains(cpu) {return;}
-            if old.on_cpu.is_some() && cpu!=old.home {return;}
-            if !loads[cpu].checked_add(added).is_some_and(|sum|sum<=900) {return;}
-            if best.is_none_or(|current|(loads[cpu],cpu)<(loads[current],current)) {
-                best=Some(cpu);
+            if period != 0 && self.ns_now < b.next {
+                return false;
             }
-        });
-        let Some(home)=best else{return false;};
-        let tick=crate::hrtime::tick_ns();let view_period=period.div_ceil(tick).min(u64::from(u32::MAX)) as u32;
-        let Some(view_next)=self.now.checked_add(u64::from(view_period)) else{return false;};
-        if let Some(cpu)=running_home{self.checkpoint_running_budget(cpu,self.ns_now);}
-        if home!=self.task(slot).unwrap().home{self.rehome(slot,home);}
-        let t=self.tasks[slot].as_mut().unwrap();t.ns_budget=Some(budget);t.rt_quota=quota.div_ceil(tick).min(u64::from(u32::MAX)) as u32;
-        t.rt_remaining=t.rt_quota;t.rt_period=view_period;t.rt_next_period=view_next;
-        self.ns_budget_tasks=self.ns_budget_tasks.checked_add(1).expect("enabled budget task count overflow");
-        if home!=this_cpu(){self.kicks.insert(home);}true
-    }
-    pub fn set_rt(&mut self, id: TaskId, quota: u32, period: u32, now: u64) -> bool {
-        if self.ns_active {return self.set_rt_ns(id,u64::from(quota)*crate::hrtime::tick_ns(),u64::from(period)*crate::hrtime::tick_ns());}
-        let Some(slot) = self.live_slot(id).filter(|&i|is_worker(i)) else { return false };
-        if (quota==0)!=(period==0) {return false;}
-        let old=self.task(slot).unwrap();
-        if old.rt_period!=0 {
-            // Re-applying a reservation is idempotent, never a budget refill.
-            if quota==old.rt_quota && period==old.rt_period {return true;}
-            // Explicit disable retains the previous period-end cooldown.
-            if period!=0 {return false;}
-            self.remove_rt_deadline(slot,self.epochs[slot].history().unwrap().token().generation);
-            let t=self.tasks[slot].as_mut().unwrap();
-            t.rt_quota=0;t.rt_period=0;t.rt_remaining=0;
+        }
+        if period == 0 {
             return true;
         }
-        if period==0 {return true;}
+        if self
+            .tasks
+            .iter()
+            .flatten()
+            .filter(|t| t.state != TaskState::Exited && t.rt_period != 0)
+            .count()
+            >= crate::rt::admission_capacity()
+        {
+            return false;
+        }
+        let Ok(budget) = kernel_core::ns_budget::Budget::new(self.ns_now, quota, period) else {
+            return false;
+        };
+        let Ok(added) = kernel_core::ns_budget::utilisation(quota, period) else {
+            return false;
+        };
+        let mut loads = [0u32; MAX_CPUS];
+        for (i, t) in self
+            .tasks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, t)| t.as_ref().map(|t| (i, t)))
+        {
+            if i == slot || t.state == TaskState::Exited || t.rt_period == 0 {
+                continue;
+            }
+            let usage = t.ns_budget.filter(|b| b.enabled).map_or_else(
+                || kernel_core::rt_partition::utilisation(t.rt_quota, t.rt_period).unwrap(),
+                |b| kernel_core::ns_budget::utilisation(b.quota, b.period).unwrap(),
+            );
+            loads[t.home] = loads[t.home]
+                .checked_add(usage)
+                .expect("RT utilisation bounded");
+        }
+        let Some(affinity) = self.affinity_view(slot) else {
+            return false;
+        };
+        let mut best = None;
+        affinity.for_each(|cpu| {
+            if cpu >= loads.len() || !self.online.contains(cpu) {
+                return;
+            }
+            if old.on_cpu.is_some() && cpu != old.home {
+                return;
+            }
+            if !loads[cpu].checked_add(added).is_some_and(|sum| sum <= 900) {
+                return;
+            }
+            if best.is_none_or(|current| (loads[cpu], cpu) < (loads[current], current)) {
+                best = Some(cpu);
+            }
+        });
+        let Some(home) = best else {
+            return false;
+        };
+        let tick = crate::hrtime::tick_ns();
+        let view_period = period.div_ceil(tick).min(u64::from(u32::MAX)) as u32;
+        let Some(view_next) = self.now.checked_add(u64::from(view_period)) else {
+            return false;
+        };
+        if let Some(cpu) = running_home {
+            self.checkpoint_running_budget(cpu, self.ns_now);
+        }
+        if home != self.task(slot).unwrap().home {
+            self.rehome(slot, home);
+        }
+        let t = self.tasks[slot].as_mut().unwrap();
+        t.ns_budget = Some(budget);
+        t.rt_quota = quota.div_ceil(tick).min(u64::from(u32::MAX)) as u32;
+        t.rt_remaining = t.rt_quota;
+        t.rt_period = view_period;
+        t.rt_next_period = view_next;
+        self.ns_budget_tasks = self
+            .ns_budget_tasks
+            .checked_add(1)
+            .expect("enabled budget task count overflow");
+        if home != this_cpu() {
+            self.kicks.insert(home);
+        }
+        true
+    }
+    pub fn set_rt(&mut self, id: TaskId, quota: u32, period: u32, now: u64) -> bool {
+        if self.ns_active {
+            return self.set_rt_ns(
+                id,
+                u64::from(quota) * crate::hrtime::tick_ns(),
+                u64::from(period) * crate::hrtime::tick_ns(),
+            );
+        }
+        let Some(slot) = self.live_slot(id).filter(|&i| is_worker(i)) else {
+            return false;
+        };
+        if (quota == 0) != (period == 0) {
+            return false;
+        }
+        let old = self.task(slot).unwrap();
+        if old.rt_period != 0 {
+            // Re-applying a reservation is idempotent, never a budget refill.
+            if quota == old.rt_quota && period == old.rt_period {
+                return true;
+            }
+            // Explicit disable retains the previous period-end cooldown.
+            if period != 0 {
+                return false;
+            }
+            self.remove_rt_deadline(
+                slot,
+                self.epochs[slot].history().unwrap().token().generation,
+            );
+            let t = self.tasks[slot].as_mut().unwrap();
+            t.rt_quota = 0;
+            t.rt_period = 0;
+            t.rt_remaining = 0;
+            return true;
+        }
+        if period == 0 {
+            return true;
+        }
         // Canonical live reservations only; exited tasks release their slot.
         // Boot configuration is atomic, avoiding a scheduler→legacy RT lock edge.
-        let active=self.tasks.iter().flatten().filter(|t|t.state!=TaskState::Exited && t.rt_period!=0).count();
-        if active>=crate::rt::admission_capacity() {return false;}
+        let active = self
+            .tasks
+            .iter()
+            .flatten()
+            .filter(|t| t.state != TaskState::Exited && t.rt_period != 0)
+            .count();
+        if active >= crate::rt::admission_capacity() {
+            return false;
+        }
         // Disabling/re-enabling cannot mint a second allowance in the same period.
-        if now<old.rt_next_period {return false;}
-        let Some(next) = now.checked_add(period as u64) else { return false };
-        let task=self.task(slot).unwrap();
-        let mut home=task.home;
-        if period!=0 {
-            let mut loads=[0u32;MAX_CPUS];
-            for (i,t) in self.tasks.iter().enumerate().filter_map(|(i,t)|t.as_ref().map(|t|(i,t))) {
-                if i==slot || t.state==TaskState::Exited || t.rt_period==0 {continue;}
-                let Ok(usage)=kernel_core::rt_partition::utilisation(t.rt_quota,t.rt_period) else {return false;};
-                let Some(sum)=loads[t.home].checked_add(usage) else {return false;};loads[t.home]=sum;
+        if now < old.rt_next_period {
+            return false;
+        }
+        let Some(next) = now.checked_add(period as u64) else {
+            return false;
+        };
+        let task = self.task(slot).unwrap();
+        let mut home = task.home;
+        if period != 0 {
+            let mut loads = [0u32; MAX_CPUS];
+            for (i, t) in self
+                .tasks
+                .iter()
+                .enumerate()
+                .filter_map(|(i, t)| t.as_ref().map(|t| (i, t)))
+            {
+                if i == slot || t.state == TaskState::Exited || t.rt_period == 0 {
+                    continue;
+                }
+                let Ok(usage) = kernel_core::rt_partition::utilisation(t.rt_quota, t.rt_period)
+                else {
+                    return false;
+                };
+                let Some(sum) = loads[t.home].checked_add(usage) else {
+                    return false;
+                };
+                loads[t.home] = sum;
             }
-            let Some(affinity)=self.affinity_view(slot) else {return false;};
-            let Some(mut allowed)=affinity.online_bits_u64(&self.online) else {return false;};
+            let Some(affinity) = self.affinity_view(slot) else {
+                return false;
+            };
+            let Some(mut allowed) = affinity.online_bits_u64(&self.online) else {
+                return false;
+            };
             // A currently running context cannot migrate before its old CPU stops.
-            if task.on_cpu.is_some() {allowed &= 1u64<<home;}
-            let Ok(chosen)=kernel_core::rt_partition::place(&loads,allowed,quota,period,900) else {return false;};
-            home=chosen;
+            if task.on_cpu.is_some() {
+                allowed &= 1u64 << home;
+            }
+            let Ok(chosen) = kernel_core::rt_partition::place(&loads, allowed, quota, period, 900)
+            else {
+                return false;
+            };
+            home = chosen;
         }
         let generation = self.epochs[slot].history().unwrap().token().generation;
-        if home!=self.task(slot).unwrap().home {self.rehome(slot,home);}
-        if period==0 {self.remove_rt_deadline(slot,generation);}
-        else {self.set_rt_deadline(home,Deadline {at:next,slot,generation});}
-        let t=self.tasks[slot].as_mut().unwrap();
-        t.rt_quota=quota;t.rt_period=period;t.rt_remaining=quota;t.rt_next_period=next;
-        if home!=this_cpu() {self.kicks.insert(home);}
+        if home != self.task(slot).unwrap().home {
+            self.rehome(slot, home);
+        }
+        if period == 0 {
+            self.remove_rt_deadline(slot, generation);
+        } else {
+            self.set_rt_deadline(
+                home,
+                Deadline {
+                    at: next,
+                    slot,
+                    generation,
+                },
+            );
+        }
+        let t = self.tasks[slot].as_mut().unwrap();
+        t.rt_quota = quota;
+        t.rt_period = period;
+        t.rt_remaining = quota;
+        t.rt_next_period = next;
+        if home != this_cpu() {
+            self.kicks.insert(home);
+        }
         true
     }
 
@@ -4115,7 +5474,11 @@ impl Scheduler {
         self.charge_local_tick(c, cur);
         let woke = self.wake_due(c, self.now);
         let cause = self.decide(c).or(woke.then_some(Cause::WAKE));
-        if preemption { cause } else { None }
+        if preemption {
+            cause
+        } else {
+            None
+        }
     }
 
     /// 补记其他处理器被前进保证推迟的 tick：只补运行量记账，唤醒与调度决定由随后的 [`Self::local_tick`] 统一做。
@@ -4131,9 +5494,12 @@ impl Scheduler {
     /// 一个本地 tick 的运行量记账。
     fn charge_local_tick(&mut self, c: usize, cur: usize) {
         self.account(c);
-        let charged_rt = self.task(cur).is_some_and(|t|
-            t.state == TaskState::Running && t.ns_budget.is_none()
-                && t.rt_period != 0 && t.rt_remaining > 0);
+        let charged_rt = self.task(cur).is_some_and(|t| {
+            t.state == TaskState::Running
+                && t.ns_budget.is_none()
+                && t.rt_period != 0
+                && t.rt_remaining > 0
+        });
         self.charge_rt(cur, self.now);
         if charged_rt {
             self.budget_tick_charges[0] = self.budget_tick_charges[0].wrapping_add(1);
@@ -4167,9 +5533,7 @@ impl Scheduler {
             let Some(slot) = self.group_slot(group) else {
                 return;
             };
-            let parent = self.groups[slot]
-                .as_ref()
-                .and_then(|group| group.parent);
+            let parent = self.groups[slot].as_ref().and_then(|group| group.parent);
             let Some(group) = self.groups[slot].as_mut() else {
                 return;
             };
@@ -4289,24 +5653,12 @@ impl Scheduler {
             .try_reserve_exact(load_capacity)
             .map_err(|_| kernel_core::tickless::StopStorageError::Allocation)?;
         load_scratch.resize(load_capacity, CoreLoad::OFFLINE);
-        let wake_layout = prepare_deadline_layout(
-            &self.wake_heap,
-            &self.wake_entries,
-            self.tasks.len(),
-            cpus,
-        )?;
-        let rt_layout = prepare_deadline_layout(
-            &self.rt_heap,
-            &self.rt_entries,
-            self.tasks.len(),
-            cpus,
-        )?;
-        let ns_layout = prepare_deadline_layout(
-            &self.ns_heap,
-            &self.ns_entries,
-            self.tasks.len(),
-            cpus,
-        )?;
+        let wake_layout =
+            prepare_deadline_layout(&self.wake_heap, &self.wake_entries, self.tasks.len(), cpus)?;
+        let rt_layout =
+            prepare_deadline_layout(&self.rt_heap, &self.rt_entries, self.tasks.len(), cpus)?;
+        let ns_layout =
+            prepare_deadline_layout(&self.ns_heap, &self.ns_entries, self.tasks.len(), cpus)?;
         let mut next_nohz = self.nohz.clone();
         next_nohz.reserve_capacity(cpus)?;
         let mut next_affinities = CpuAffinityTable::new(self.tasks.len(), cpus)
@@ -4320,7 +5672,8 @@ impl Scheduler {
                         }
                     }
                     TaskAffinity::Dynamic => {
-                        let source = self.dynamic_affinities
+                        let source = self
+                            .dynamic_affinities
                             .as_ref()
                             .and_then(|table| table.view(slot))
                             .unwrap_or_else(|| panic!("dynamic affinity slot {slot} missing"));
@@ -4401,7 +5754,11 @@ impl Scheduler {
         let at = self.next_wake[c].min(self.next_rt[c]);
         let deadline = (at != u64::MAX).then_some(at);
         #[cfg(feature = "fault-inject")]
-        let deadline = if self.delayed_deadline_timer.contains(c) { None } else { deadline };
+        let deadline = if self.delayed_deadline_timer.contains(c) {
+            None
+        } else {
+            deadline
+        };
         match plan_with(self.now, deadline, self.nohz_divisor, needs_tick) {
             TickPlan::Periodic => IdleStep::Sleep,
             TickPlan::OneShot(n) => match self.nohz.stop(c, self.now, self.local_ticks[c]) {
@@ -4418,8 +5775,12 @@ impl Scheduler {
         match self.nohz.restart(c, self.now, self.local_ticks[c]) {
             Some(missed) => {
                 self.cpu_stats[c].idle_ticks += missed;
-                #[cfg(feature="s3-nohz-verify")]
-                { self.nohz_diag_missed[c]=self.nohz_diag_missed[c].checked_add(missed).expect("nohz diagnostic overflow"); }
+                #[cfg(feature = "s3-nohz-verify")]
+                {
+                    self.nohz_diag_missed[c] = self.nohz_diag_missed[c]
+                        .checked_add(missed)
+                        .expect("nohz diagnostic overflow");
+                }
                 true
             }
             None => false,
@@ -4476,9 +5837,14 @@ impl Scheduler {
     fn account(&mut self, c: usize) {
         let cur = leaf_current(c);
         let waiting = self.waiting(c);
-        let worker = is_worker(cur) && self.task(cur).is_some_and(|t| t.state == TaskState::Running);
+        let worker = is_worker(cur)
+            && self
+                .task(cur)
+                .is_some_and(|t| t.state == TaskState::Running);
         let r = match worker.then(|| self.tasks[cur].as_ref().unwrap().sched.queue()) {
-            Some(Some(q)) if q == c => self.update_hot_sched(cur, |queue, sched| queue.tick(Some(sched), waiting)),
+            Some(Some(q)) if q == c => {
+                self.update_hot_sched(cur, |queue, sched| queue.tick(Some(sched), waiting))
+            }
             // 迁移途中的一个 tick（亲和变更后、在下一个检查点换下之前）：它的私有状态已属于目标队列，
             // 本处理器的策略实例不为它记账，只记 Core 运行量
             Some(_) => {
@@ -4488,7 +5854,9 @@ impl Scheduler {
             None => with_leaf(c, |leaf| leaf.queue.tick(None, waiting)),
         };
         self.note(r);
-        with_leaf(c, |leaf| leaf.slice_used = leaf.slice_used.saturating_add(1));
+        with_leaf(c, |leaf| {
+            leaf.slice_used = leaf.slice_used.saturating_add(1)
+        });
         self.local_ticks[c] += 1;
         let now = self.now;
         self.charge_watchdog(cur, now);
@@ -4507,7 +5875,9 @@ impl Scheduler {
         }
         if worker && self.balancer.due(self.local_ticks[c]) {
             let loads = self.loads();
-            let pulled = self.balancer.pull(c, now, loads.as_slice(), self.candidates());
+            let pulled = self
+                .balancer
+                .pull(c, now, loads.as_slice(), self.candidates());
             self.restore_loads(loads);
             match pulled {
                 Ok(slot) => {
@@ -4525,10 +5895,12 @@ impl Scheduler {
     fn decide(&self, c: usize) -> Option<&'static str> {
         let (cur, slice_used, slice_quantum, _) = leaf_run_state(c);
         let cur_task = self.task(cur).filter(|_| is_worker(cur));
-        let current_sched = cur_task.and_then(|_| {
-            let token = self.epochs[cur].history()?.token();
-            with_leaf(c, |leaf| leaf.hot[cur].get(token).ok().copied())
-        }).filter(|hot| hot.state == TaskState::Running);
+        let current_sched = cur_task
+            .and_then(|_| {
+                let token = self.epochs[cur].history()?.token();
+                with_leaf(c, |leaf| leaf.hot[cur].get(token).ok().copied())
+            })
+            .filter(|hot| hot.state == TaskState::Running);
         // A running task is detached from the old leaf before that CPU reaches
         // its migration checkpoint.  Its hot owner therefore already lives on
         // the destination leaf; check the cold home first instead of treating
@@ -4542,14 +5914,28 @@ impl Scheduler {
                 return Some(Cause::THROTTLE);
             }
         }
-        let earliest=kernel_core::rt_partition::edf(self.listed(c).filter_map(|(i,t)| {
-            (t.rt_period!=0 && self.eligible(t) && (i==cur || (t.state==TaskState::Runnable && t.on_cpu.is_none())))
-                .then_some((i,t.ns_budget.filter(|b|b.enabled).map_or(t.rt_next_period,|b|b.next)))
+        let earliest = kernel_core::rt_partition::edf(self.listed(c).filter_map(|(i, t)| {
+            (t.rt_period != 0
+                && self.eligible(t)
+                && (i == cur || (t.state == TaskState::Runnable && t.on_cpu.is_none())))
+            .then_some((
+                i,
+                t.ns_budget
+                    .filter(|b| b.enabled)
+                    .map_or(t.rt_next_period, |b| b.next),
+            ))
         }));
-        if let Some(slot)=earliest {return (slot!=cur).then_some(Cause::PREEMPT);}
+        if let Some(slot) = earliest {
+            return (slot != cur).then_some(Cause::PREEMPT);
+        }
         let waiting = self.waiting(c);
         let p = with_leaf(c, |leaf| {
-            leaf.queue.should_preempt(current_sched.as_ref().map(|hot| &hot.sched), slice_used, slice_quantum, waiting)
+            leaf.queue.should_preempt(
+                current_sched.as_ref().map(|hot| &hot.sched),
+                slice_used,
+                slice_quantum,
+                waiting,
+            )
         });
         if let Some(p) = p {
             return Some(Cause::of(p));
@@ -4614,10 +6000,16 @@ impl Scheduler {
             }
         }
         // 本队列（含刚换下、仍属于本处理器的自己）空了：空闲之前先窃取
-        let own_empty = self.waiting(c) == ClassMask::EMPTY && !(prev_runnable && self.task(prev).is_some_and(|t| t.home == c && self.eligible(t)));
+        let own_empty = self.waiting(c) == ClassMask::EMPTY
+            && !(prev_runnable
+                && self
+                    .task(prev)
+                    .is_some_and(|t| t.home == c && self.eligible(t)));
         if own_empty && self.online.contains(c) {
             let loads = self.loads();
-            let stolen = self.balancer.steal(c, now, loads.as_slice(), self.candidates());
+            let stolen = self
+                .balancer
+                .steal(c, now, loads.as_slice(), self.candidates());
             self.restore_loads(loads);
             if let Ok(slot) = stolen {
                 self.rehome(slot, c);
@@ -4636,12 +6028,24 @@ impl Scheduler {
         self.scan.picks += 1;
         self.scan.visited += visited as u64;
         self.scan.max_visited = self.scan.max_visited.max(visited);
-        let earliest=kernel_core::rt_partition::edf(self.listed(c).filter_map(|(i,t)| {
-            (t.rt_period!=0 && t.state==TaskState::Runnable && (t.on_cpu.is_none() || i==prev) && self.eligible(t))
-                .then_some((i,t.ns_budget.filter(|b|b.enabled).map_or(t.rt_next_period,|b|b.next)))
+        let earliest = kernel_core::rt_partition::edf(self.listed(c).filter_map(|(i, t)| {
+            (t.rt_period != 0
+                && t.state == TaskState::Runnable
+                && (t.on_cpu.is_none() || i == prev)
+                && self.eligible(t))
+            .then_some((
+                i,
+                t.ns_budget
+                    .filter(|b| b.enabled)
+                    .map_or(t.rt_next_period, |b| b.next),
+            ))
         }));
-        let choice = if let Some(slot)=earliest {
-            Some(kernel_core::sched::Choice {slot,quantum:self.task(slot).unwrap().rt_remaining.max(1),rescued:false})
+        let choice = if let Some(slot) = earliest {
+            Some(kernel_core::sched::Choice {
+                slot,
+                quantum: self.task(slot).unwrap().rt_remaining.max(1),
+                rescued: false,
+            })
         } else {
             let tasks = &self.tasks;
             let groups = &self.groups;
@@ -4662,7 +6066,7 @@ impl Scheduler {
                             && !(skip_prev && i == prev)
                             && wanted.is_none_or(|cl| arb_class(t) == cl)
                             && eligible_in(groups, t))
-                            .then_some((i, &owner.sched))
+                        .then_some((i, &owner.sched))
                     })
                 };
                 let it = runnable(yielding);
@@ -4674,11 +6078,18 @@ impl Scheduler {
                 let mut it = it;
                 let mut ch = queue.choose(&mut it);
                 if yielding && prev_runnable {
-                    let prev_qos = epochs.get(prev).and_then(SlotLifecycle::history)
-                        .and_then(|r| hot.get(prev)?.get(r.token()).ok()).map(|owner| owner.sched.qos);
-                    let worse = |slot: usize| match (epochs.get(slot).and_then(SlotLifecycle::history)
-                        .and_then(|r| hot.get(slot)?.get(r.token()).ok()), prev_qos)
-                    {
+                    let prev_qos = epochs
+                        .get(prev)
+                        .and_then(SlotLifecycle::history)
+                        .and_then(|r| hot.get(prev)?.get(r.token()).ok())
+                        .map(|owner| owner.sched.qos);
+                    let worse = |slot: usize| match (
+                        epochs
+                            .get(slot)
+                            .and_then(SlotLifecycle::history)
+                            .and_then(|r| hot.get(slot)?.get(r.token()).ok()),
+                        prev_qos,
+                    ) {
                         (Some(owner), Some(pq)) => queue.policy().outranks(pq, owner.sched.qos),
                         _ => false,
                     };
@@ -4714,8 +6125,10 @@ impl Scheduler {
                 idle_slot(c)
             }
         };
-        #[cfg(feature="rt1-verify")]
-        if let Some(t)=self.task(next) {crate::rt1_demo::record_dispatch(t.id);}
+        #[cfg(feature = "rt1-verify")]
+        if let Some(t) = self.task(next) {
+            crate::rt1_demo::record_dispatch(t.id);
+        }
         with_leaf(c, |leaf| leaf.slice_used = 0);
         let mut latency = None;
         let mut record_ran_on = None;
@@ -4736,8 +6149,12 @@ impl Scheduler {
             self.sync_hot(next);
         }
         if is_worker(next) && next != prev {
-            let r = self.epochs[next].history().expect("dispatched task identity");
-            self.epochs[next].dispatch(r.token()).expect("dispatch detached live task");
+            let r = self.epochs[next]
+                .history()
+                .expect("dispatched task identity");
+            self.epochs[next]
+                .dispatch(r.token())
+                .expect("dispatch detached live task");
         }
         if is_worker(next) {
             let r = self.update_hot_sched(next, |queue, sched| queue.dispatched(sched));
@@ -4760,7 +6177,9 @@ impl Scheduler {
             });
         }
         // Charge the old execution class before publishing the new current slot.
-        self.cpu_residency[c].transition(now,is_worker(next)).expect("monotonic CPU switch residency");
+        self.cpu_residency[c]
+            .transition(now, is_worker(next))
+            .expect("monotonic CPU switch residency");
         with_leaf(c, |leaf| {
             leaf.current = next;
             leaf.switching_from = Some(prev);
@@ -4768,7 +6187,11 @@ impl Scheduler {
         });
 
         let next_space = self.task(next).and_then(|t| t.space);
-        let next_stack_top = if is_worker(next) { Some(self.stacks.top(next)) } else { None };
+        let next_stack_top = if is_worker(next) {
+            Some(self.stacks.top(next))
+        } else {
+            None
+        };
         let old: *mut TaskContext = match self.tasks.get_mut(prev).and_then(|t| t.as_mut()) {
             Some(t) => &mut t.context,
             None => &mut self.idle_ctx[c],
@@ -4777,15 +6200,27 @@ impl Scheduler {
             Some(t) => &t.context,
             None => &self.idle_ctx[c],
         };
-        Some(SwitchPlan { old, new, next_stack_top, next_space, next_slot: next })
+        Some(SwitchPlan {
+            old,
+            new,
+            next_stack_top,
+            next_space,
+            next_slot: next,
+        })
     }
 
     // Author: chatgpt. Endpoint is captured on the resumed execution flow,
     // before acquiring this guard. IRQs remain masked, so current cannot migrate.
     #[cfg(feature = "krn2-observe")]
-    pub(super) fn note_raw_resume_for(&mut self, token: kernel_core::task_index::Token,
-        end: kernel_core::raw_timing::Endpoint, path: u16) {
-        if !is_worker(token.slot) || !self.epochs.get(token.slot).is_some_and(|e| e.live(token)) { return; }
+    pub(super) fn note_raw_resume_for(
+        &mut self,
+        token: kernel_core::task_index::Token,
+        end: kernel_core::raw_timing::Endpoint,
+        path: u16,
+    ) {
+        if !is_worker(token.slot) || !self.epochs.get(token.slot).is_some_and(|e| e.live(token)) {
+            return;
+        }
         let mut deadline = None;
         let mut timeline = None;
         let completion = self.task_mut(token.slot).and_then(|t| {
@@ -4798,8 +6233,12 @@ impl Scheduler {
             Some(Some(mut sample)) => {
                 if let Some((start, round)) = deadline {
                     let resume = kernel_core::raw_timing::Sample {
-                        path: 9, slot: token.slot, generation: token.generation,
-                        wait_round: round, start, end,
+                        path: 9,
+                        slot: token.slot,
+                        generation: token.generation,
+                        wait_round: round,
+                        start,
+                        end,
                     };
                     if resume.shared_ns_delta().is_some() {
                         self.deadline_to_resume.record(&resume);
@@ -4808,8 +6247,7 @@ impl Scheduler {
                             self.deadline_phase_errors[3].saturating_add(1);
                     }
                 } else if timeline.is_some() {
-                    self.deadline_phase_errors[3] =
-                        self.deadline_phase_errors[3].saturating_add(1);
+                    self.deadline_phase_errors[3] = self.deadline_phase_errors[3].saturating_add(1);
                 }
                 sample.path = path;
                 self.wake_latency.record(&sample);
@@ -4818,14 +6256,12 @@ impl Scheduler {
             Some(None) => {
                 self.raw_wake_errors[1] = self.raw_wake_errors[1].saturating_add(1);
                 if deadline.is_some() || timeline.is_some() {
-                    self.deadline_phase_errors[3] =
-                        self.deadline_phase_errors[3].saturating_add(1);
+                    self.deadline_phase_errors[3] = self.deadline_phase_errors[3].saturating_add(1);
                 }
             }
             None => {
                 if deadline.is_some() || timeline.is_some() {
-                    self.deadline_phase_errors[3] =
-                        self.deadline_phase_errors[3].saturating_add(1);
+                    self.deadline_phase_errors[3] = self.deadline_phase_errors[3].saturating_add(1);
                 }
             }
         }
@@ -4833,12 +6269,23 @@ impl Scheduler {
     #[cfg(feature = "krn2-observe")]
     pub(super) fn note_raw_resume(&mut self, end: kernel_core::raw_timing::Endpoint, path: u16) {
         let slot = self.cur();
-        let Some(token) = self.epochs.get(slot).and_then(SlotLifecycle::history).map(|r| r.token()) else { return; };
+        let Some(token) = self
+            .epochs
+            .get(slot)
+            .and_then(SlotLifecycle::history)
+            .map(|r| r.token())
+        else {
+            return;
+        };
         self.note_raw_resume_for(token, end, path);
     }
     #[cfg(feature = "krn2-observe")]
     pub(super) fn raw_pending_count(&self) -> usize {
-        self.tasks.iter().flatten().filter(|t| t.raw_wake_round.is_some()).count()
+        self.tasks
+            .iter()
+            .flatten()
+            .filter(|t| t.raw_wake_round.is_some())
+            .count()
     }
 
     /// Reconcile the cold task table and slot lifecycle after an owner-local
@@ -4846,15 +6293,34 @@ impl Scheduler {
     /// global scheduler entry consumes these records before doing other work,
     /// so global readers never operate on a stale execution owner.
     pub(super) fn settle_leaf_transition(&mut self, transition: LeafTransition) {
-        let LeafTransition { cpu, prev, next, cause } = transition;
-        assert_eq!(leaf_current(cpu), next, "cold transition changed leaf current");
+        let LeafTransition {
+            cpu,
+            prev,
+            next,
+            cause,
+        } = transition;
+        assert_eq!(
+            leaf_current(cpu),
+            next,
+            "cold transition changed leaf current"
+        );
         let (prev_hot, next_hot) = with_leaf(cpu, |leaf| {
-            let prev_generation = leaf.hot[prev].generation().expect("cold previous generation");
+            let prev_generation = leaf.hot[prev]
+                .generation()
+                .expect("cold previous generation");
             let next_generation = leaf.hot[next].generation().expect("cold next generation");
-            let prev_token = kernel_core::task_index::Token { slot: prev, generation: prev_generation };
-            let next_token = kernel_core::task_index::Token { slot: next, generation: next_generation };
-            (*leaf.hot[prev].get(prev_token).expect("cold previous owner"),
-             *leaf.hot[next].get(next_token).expect("cold next owner"))
+            let prev_token = kernel_core::task_index::Token {
+                slot: prev,
+                generation: prev_generation,
+            };
+            let next_token = kernel_core::task_index::Token {
+                slot: next,
+                generation: next_generation,
+            };
+            (
+                *leaf.hot[prev].get(prev_token).expect("cold previous owner"),
+                *leaf.hot[next].get(next_token).expect("cold next owner"),
+            )
         });
         if let Some(task) = self.tasks.get_mut(prev).and_then(Option::as_mut) {
             task.state = prev_hot.state;
@@ -4877,10 +6343,16 @@ impl Scheduler {
             self.record_ran_on(next, cpu);
         }
         if is_worker(next) {
-            let record = self.epochs[next].history().expect("cold dispatched identity");
-            self.epochs[next].dispatch(record.token()).expect("cold dispatch detached live task");
+            let record = self.epochs[next]
+                .history()
+                .expect("cold dispatched identity");
+            self.epochs[next]
+                .dispatch(record.token())
+                .expect("cold dispatch detached live task");
         }
-        if let Some((qos, delay)) = latency { self.latency[qos.index()].record(delay); }
+        if let Some((qos, delay)) = latency {
+            self.latency[qos.index()].record(delay);
+        }
         self.scan.picks = self.scan.picks.saturating_add(1);
         let visited = with_leaf(cpu, |leaf| leaf.runs.len(LEAF_QUEUE)) as u32;
         self.scan.visited = self.scan.visited.saturating_add(u64::from(visited));
@@ -4894,14 +6366,19 @@ impl Scheduler {
                 cause,
             });
         }
-        self.cpu_residency[cpu].transition(self.now, is_worker(next))
+        self.cpu_residency[cpu]
+            .transition(self.now, is_worker(next))
             .expect("monotonic local switch residency");
     }
 
     /// 切换完成（在被切入的执行流上、关中断时调用）：本处理器上一次换下的任务已保存好上下文，
     /// 清除它的 `on_cpu`，此后其他处理器才可以选中它、它的槽位（若已退出）才可以复用。
     /// Complete a switch: the previous task's context is saved, release it.
-    pub fn finish_switch(&mut self, c: usize, completed: Option<(usize, Option<kernel_core::task_index::Token>)>) {
+    pub fn finish_switch(
+        &mut self,
+        c: usize,
+        completed: Option<(usize, Option<kernel_core::task_index::Token>)>,
+    ) {
         if let Some((p, hot_token)) = completed {
             #[cfg(feature = "bench-profile")]
             record_completed_switch(c, p, hot_token);
@@ -4921,10 +6398,17 @@ impl Scheduler {
                 self.sync_hot(p);
             }
             if let Some(token) = hot_token {
-                assert!(self.epochs.get(p).and_then(SlotLifecycle::history).is_some_and(|record| record.token() == token),
-                    "finished leaf switch changed generation before cold detach");
+                assert!(
+                    self.epochs
+                        .get(p)
+                        .and_then(SlotLifecycle::history)
+                        .is_some_and(|record| record.token() == token),
+                    "finished leaf switch changed generation before cold detach"
+                );
                 if let Some(t) = self.task(p) {
-                    let hot = with_leaf(c, |leaf| *leaf.hot[p].get(token).expect("finished hot owner retained"));
+                    let hot = with_leaf(c, |leaf| {
+                        *leaf.hot[p].get(token).expect("finished hot owner retained")
+                    });
                     #[cfg(feature = "bench-profile")]
                     if hot.state != t.state || hot.on_cpu != t.on_cpu {
                         crate::kprintln!(
@@ -4938,36 +6422,38 @@ impl Scheduler {
                         );
                     }
                     assert_eq!(
-                        hot.state,
-                        t.state,
+                        hot.state, t.state,
                         "finished leaf state diverged hot={:?} cold={:?} cpu={} prev={}",
-                        hot.state,
-                        t.state,
-                        c,
-                        p
+                        hot.state, t.state, c, p
                     );
                     assert_eq!(
-                        hot.on_cpu,
-                        t.on_cpu,
+                        hot.on_cpu, t.on_cpu,
                         "finished leaf execution owner diverged hot={:?} cold={:?} cpu={} prev={}",
-                        hot.on_cpu,
-                        t.on_cpu,
-                        c,
-                        p
+                        hot.on_cpu, t.on_cpu, c, p
                     );
                 }
             }
             if is_worker(p) {
                 let r = self.epochs[p].history().expect("detached task identity");
-                self.epochs[p].detach(r.token()).expect("detach executing task");
+                self.epochs[p]
+                    .detach(r.token())
+                    .expect("detach executing task");
             }
             // 换下的任务若仍可运行但已不属于本处理器（迁移、亲和变更），叫醒它的新处理器接手
-            if let Some(t) = self.task(p).filter(|t| is_worker(p) && t.state == TaskState::Runnable && t.home != c) {
+            if let Some(t) = self
+                .task(p)
+                .filter(|t| is_worker(p) && t.state == TaskState::Runnable && t.home != c)
+            {
                 let home = t.home;
                 if self.online.contains(home) {
                     self.kicks.insert(home);
                     #[cfg(feature = "krn3-fast-tick-verify")]
-                    crate::kprintln!("[JSR-KRN3-COLD] cpu={} prev={} migration_home={} kick=true", c, p, home);
+                    crate::kprintln!(
+                        "[JSR-KRN3-COLD] cpu={} prev={} migration_home={} kick=true",
+                        c,
+                        p,
+                        home
+                    );
                 }
             }
         }
@@ -4997,7 +6483,9 @@ impl Scheduler {
             grp.refs = grp.refs.saturating_sub(1);
             if grp.refs == 0 {
                 let parent = grp.parent;
-                self.group_runs.remove(&mut self.group_links, slot).expect("live group indexed");
+                self.group_runs
+                    .remove(&mut self.group_links, slot)
+                    .expect("live group indexed");
                 self.groups[slot] = None;
                 if let Some(parent_slot) = parent.and_then(|parent| self.group_slot(parent)) {
                     if let Some(parent) = self.groups[parent_slot].as_mut() {
@@ -5010,7 +6498,11 @@ impl Scheduler {
 
     /// 新建 CPU 组（上限千分比、桶容量 tick），调用者持有一份引用，用完以 [`Scheduler::release_group`] 归还。
     /// Creates a CPU group; the caller holds one reference.
-    pub fn create_group(&mut self, limit_permille: u32, burst_ticks: u32) -> Result<CpuGroupId, GroupError> {
+    pub fn create_group(
+        &mut self,
+        limit_permille: u32,
+        burst_ticks: u32,
+    ) -> Result<CpuGroupId, GroupError> {
         self.create_group_with_parent(limit_permille, burst_ticks, None)
     }
 
@@ -5043,12 +6535,12 @@ impl Scheduler {
         });
         if let Some(parent) = parent {
             let parent_slot = self.group_slot(parent).ok_or(GroupError::Stale)?;
-            let parent = self.groups[parent_slot]
-                .as_mut()
-                .ok_or(GroupError::Stale)?;
+            let parent = self.groups[parent_slot].as_mut().ok_or(GroupError::Stale)?;
             parent.children = parent.children.saturating_add(1);
         }
-        self.group_runs.place(&mut self.group_links, slot, Some(0)).expect("new group slot unlisted");
+        self.group_runs
+            .place(&mut self.group_links, slot, Some(0))
+            .expect("new group slot unlisted");
         Ok(CpuGroupId { slot, gen })
     }
 
@@ -5060,27 +6552,47 @@ impl Scheduler {
     }
 
     /// 修改组的上限；非法值被拒且原上限不变。
-    pub fn set_group_limit(&mut self, g: CpuGroupId, limit_permille: u32) -> Result<(), GroupError> {
+    pub fn set_group_limit(
+        &mut self,
+        g: CpuGroupId,
+        limit_permille: u32,
+    ) -> Result<(), GroupError> {
         let slot = self.group_slot(g).ok_or(GroupError::Stale)?;
         let grp = self.groups[slot].as_mut().ok_or(GroupError::Stale)?;
-        grp.limit.set_limit(limit_permille).map_err(GroupError::Limit)
+        grp.limit
+            .set_limit(limit_permille)
+            .map_err(GroupError::Limit)
     }
 
     /// 组的记账快照。
     /// Arm at a serialized accounting boundary, before any measured workers spawn.
-    pub fn budget_window_arm(&mut self,g:CpuGroupId,window:u64)->u64 {
-        assert!(self.budget_window.is_none(), "one budget observer at a time");
-        let st=self.group_stats(g).expect("arm live group");
-        let start=self.now;
-        let deadline=start.checked_add(window).expect("budget window overflow");
-        self.budget_window=Some((g,start,deadline,(st.used_ticks,st.late_ticks),None)); deadline
+    pub fn budget_window_arm(&mut self, g: CpuGroupId, window: u64) -> u64 {
+        assert!(
+            self.budget_window.is_none(),
+            "one budget observer at a time"
+        );
+        let st = self.group_stats(g).expect("arm live group");
+        let start = self.now;
+        let deadline = start.checked_add(window).expect("budget window overflow");
+        self.budget_window = Some((g, start, deadline, (st.used_ticks, st.late_ticks), None));
+        deadline
     }
     /// Snapshot and clear under the same scheduler transaction (after pending drain).
-    pub fn budget_window_finish(&mut self)->Option<BudgetWindowReport> {
-        let (g,start,deadline,(used_start,late_start),cutoff)=self.budget_window.take()?;
-        let (cutoff,(used_cutoff,late_cutoff))=cutoff?;
-        let total=self.group_stats(g)?.used_ticks;
-        Some(BudgetWindowReport{start,deadline,cutoff,used_start,used_cutoff,late_start,late_cutoff,end:self.now,total})
+    pub fn budget_window_finish(&mut self) -> Option<BudgetWindowReport> {
+        let (g, start, deadline, (used_start, late_start), cutoff) = self.budget_window.take()?;
+        let (cutoff, (used_cutoff, late_cutoff)) = cutoff?;
+        let total = self.group_stats(g)?.used_ticks;
+        Some(BudgetWindowReport {
+            start,
+            deadline,
+            cutoff,
+            used_start,
+            used_cutoff,
+            late_start,
+            late_cutoff,
+            end: self.now,
+            total,
+        })
     }
     pub fn group_stats(&self, g: CpuGroupId) -> Option<CpuLimitStats> {
         let slot = self.group_slot(g)?;
@@ -5098,7 +6610,10 @@ impl Scheduler {
             Some(g) => Some(self.group_slot(g).ok_or(GroupError::Stale)?),
             None => None,
         };
-        let i = self.live_slot(id).filter(|&i| i != BOOT_SLOT).ok_or(GroupError::NoTask)?;
+        let i = self
+            .live_slot(id)
+            .filter(|&i| i != BOOT_SLOT)
+            .ok_or(GroupError::NoTask)?;
         let old = self.tasks[i].as_ref().and_then(|t| t.cpu_group);
         if old == new {
             return Ok(());
@@ -5136,7 +6651,9 @@ impl Scheduler {
         for q in 0..self.cpu_stats.len() {
             for i in LeafSlots::new(q) {
                 if let Some(t) = self.tasks.get(i).and_then(|t| t.as_ref()) {
-                    if let (Some(g), TaskState::Runnable | TaskState::Running) = (t.cpu_group, t.state) {
+                    if let (Some(g), TaskState::Runnable | TaskState::Running) =
+                        (t.cpu_group, t.state)
+                    {
                         self.scratch_wants[g] = true;
                     }
                 }
@@ -5171,7 +6688,9 @@ impl Scheduler {
                 .expect("indexed group remains live");
             let ran = ran_group.is_some_and(|ran| self.group_in_chain(ran, group));
             let wants = self.scratch_wants[slot];
-            let grp = self.groups[slot].as_mut().expect("indexed group remains live");
+            let grp = self.groups[slot]
+                .as_mut()
+                .expect("indexed group remains live");
             grp.limit.on_tick(ran, wants);
         }
     }
@@ -5190,9 +6709,7 @@ impl Scheduler {
             let Some(slot) = self.group_slot(group) else {
                 return false;
             };
-            current = self.groups[slot]
-                .as_ref()
-                .and_then(|group| group.parent);
+            current = self.groups[slot].as_ref().and_then(|group| group.parent);
             depth += 1;
         }
         false
@@ -5208,9 +6725,21 @@ impl Scheduler {
             return;
         }
         let wd = self.watchdog;
-        let Some(t) = self.tasks.get_mut(cur).and_then(|t| t.as_mut()).filter(|t| t.state == TaskState::Running) else { return };
+        let Some(t) = self
+            .tasks
+            .get_mut(cur)
+            .and_then(|t| t.as_mut())
+            .filter(|t| t.state == TaskState::Running)
+        else {
+            return;
+        };
         if let Some(streak) = wd.charge(&mut t.streak) {
-            let r = WatchdogReport { task: t.id.0, name: t.name, streak, at: now };
+            let r = WatchdogReport {
+                task: t.id.0,
+                name: t.name,
+                streak,
+                at: now,
+            };
             self.watchdog_log.push(r);
         }
     }
@@ -5269,7 +6798,9 @@ fn arb_class(t: &Task) -> kernel_core::arbiter::Class {
 
 fn eligible_in(groups: &[Option<CpuGroup>], t: &Task) -> bool {
     // 实时预算耗尽必须等归属CPU真正补充；仅时钟到下一周期不构成授权。
-    if t.ns_budget.is_some_and(|b|b.enabled && b.remaining==0) || (t.ns_budget.is_none() && t.rt_period != 0 && t.rt_remaining == 0) {
+    if t.ns_budget.is_some_and(|b| b.enabled && b.remaining == 0)
+        || (t.ns_budget.is_none() && t.rt_period != 0 && t.rt_remaining == 0)
+    {
         return false;
     }
     match t.cpu_group {

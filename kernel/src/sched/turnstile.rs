@@ -46,7 +46,10 @@ unsafe impl<T: Send> Send for KMutex<T> {}
 impl<T> KMutex<T> {
     /// 新建（空闲）。
     pub const fn new(data: T) -> Self {
-        KMutex { owner: IrqU64::new(FREE), data: UnsafeCell::new(data) }
+        KMutex {
+            owner: IrqU64::new(FREE),
+            data: UnsafeCell::new(data),
+        }
     }
 
     /// 等待对象的标识：锁自身的地址（按字对齐，不会与「等任务退出」的标识重合）。
@@ -83,7 +86,9 @@ impl<T> KMutex<T> {
                     // 阻塞之后醒来发现锁已交接给自己。
                     o if o == me.0 && blocked => Ok(Step::Acquired),
                     // 第一次尝试就发现自己持有：递归加锁。
-                    o if o == me.0 => Err(BlockError::Refused(super::policy::inherit::EdgeError::SelfWait)),
+                    o if o == me.0 => Err(BlockError::Refused(
+                        super::policy::inherit::EdgeError::SelfWait,
+                    )),
                     _ if s.on_boot() => Ok(Step::Retry),
                     o => s.block_on(TaskId(o), key).map(|_| Step::Blocked),
                 }
@@ -115,7 +120,8 @@ impl<T> KMutex<T> {
         let was_enabled = cpu::irq_save_disable();
         let outranked = super::with_mut(|s| {
             let next = s.hand_off(self.key());
-            self.owner.store(next.map(|t| t.0).unwrap_or(FREE), Ordering::Relaxed);
+            self.owner
+                .store(next.map(|t| t.0).unwrap_or(FREE), Ordering::Relaxed);
             s.outranked()
         });
         if outranked && super::PREEMPTION.load(Ordering::Relaxed) {

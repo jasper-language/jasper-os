@@ -226,6 +226,9 @@ bench-smoke = []
 # Fast scheduler-correctness iteration: retain topology, TSC skew, context
 # switch and resource gates while omitting unrelated memory/scalar metrics.
 bench-switch-only = []
+# Bounded physical diagnostic: one thousand real A-B-A round trips per CPU,
+# bounded deadlines/abort, no scalar benchmarks and no million-sample run.
+bench-switch-diagnostic = ["bench-switch-only", "noto-console"]
 # Verification-only completion: exit through the emulator debug port after the
 # benchmark has published final results. Never enabled in a physical profile.
 bench-exit = []

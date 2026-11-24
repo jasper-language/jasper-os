@@ -57,7 +57,8 @@ case "$CARGO_TARGET" in
 esac
 LIMIT="${ISSUE21_UEFI_TIMEOUT:-45}"
 MODE="${ISSUE21_UEFI_MODE:-normal}"
-if [ -z "${ISSUE21_UEFI_TIMEOUT:-}" ] && [ "$MODE" = bench-smp ]; then
+if [ -z "${ISSUE21_UEFI_TIMEOUT:-}" ] &&
+  { [ "$MODE" = bench-smp ] || [ "$MODE" = bench-switch-diagnostic ]; }; then
   LIMIT=300
 fi
 REUSE_ROOT="${ISSUE21_REUSE_ROOT:-0}"
@@ -178,6 +179,7 @@ case "$MODE" in
   driver-host-journal) KERNEL_FEATURES=driver-host-journal-verify ;;
   iommu-dma) KERNEL_FEATURES=iommu-dma-verify ;;
   bench-smp) KERNEL_FEATURES=smp-matrix-only,bench-exit,bench-smoke ;;
+  bench-switch-diagnostic) KERNEL_FEATURES=smp-matrix-only,bench-exit,bench-switch-diagnostic ;;
   android-ecosystem) KERNEL_FEATURES=lifecycle-root-exec-verify,android-ecosystem-verify ;;
   android-art) KERNEL_FEATURES=lifecycle-root-exec-verify,android-art-verify ;;
   android-apk) KERNEL_FEATURES=lifecycle-root-exec-verify,android-apk-verify ;;
@@ -375,7 +377,7 @@ QEMU_EXTRA=(-monitor none)
 if [ -n "${ISSUE21_MONITOR_SOCKET:-}" ]; then
   QEMU_EXTRA=(-monitor "unix:$ISSUE21_MONITOR_SOCKET,server=on,wait=off")
 fi
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = service-info ] || [ "$MODE" = bench-smp ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = compat-wine ] || [ "$MODE" = compat-jvm ] || [ "$MODE" = compat-dotnet ] || [ "$MODE" = compat-darling ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = service-info ] || [ "$MODE" = bench-smp ] || [ "$MODE" = bench-switch-diagnostic ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = compat-wine ] || [ "$MODE" = compat-jvm ] || [ "$MODE" = compat-dotnet ] || [ "$MODE" = compat-darling ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
   if [ "$MODE" = compat-jvm ] || [ "$MODE" = compat-dotnet ]; then
     CPU="${ISSUE21_QEMU_CPU:-max,-avx,-avx2}"
   else
@@ -476,7 +478,7 @@ rc=$?
 set -e
 exec 9>&-
 printf '%s\n' "$rc" >"$OUT/qemu.rc"
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = service-info ] || [ "$MODE" = bench-smp ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = compat-wine ] || [ "$MODE" = compat-jvm ] || [ "$MODE" = compat-dotnet ] || [ "$MODE" = compat-darling ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = service-info ] || [ "$MODE" = bench-smp ] || [ "$MODE" = bench-switch-diagnostic ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = compat-wine ] || [ "$MODE" = compat-jvm ] || [ "$MODE" = compat-dotnet ] || [ "$MODE" = compat-darling ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
   [ "$rc" -eq 33 ]
 else
   [ "$rc" -eq 124 ]
@@ -528,7 +530,7 @@ if [ "$MODE" = iommu-dma ]; then
   echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
   exit 0
 fi
-if [ "$MODE" = bench-smp ]; then
+if [ "$MODE" = bench-smp ] || [ "$MODE" = bench-switch-diagnostic ]; then
   grep -aq '^SMP CONCURRENT PERFORMANCE - SAME TESTS AS SINGLE CPU' "$OUT/serial.log"
   grep -aq '^\[JSR-TSC-SKEW\] mode=SMP_.* upper_bound_ns=[0-9][0-9]*' "$OUT/serial.log"
   grep -aqE 'SMP TOPOLOGY ONLINE=[2-9][0-9]* PROBED=[2-9][0-9]* PHYSICAL=[2-9][0-9]* LOGICAL=[2-9][0-9]*' "$OUT/serial.log"

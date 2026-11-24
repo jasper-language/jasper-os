@@ -43,8 +43,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use spin::Once;
 
-use crate::sync::{IrqSpinLock, IrqU64};
 use crate::arch::{self as cpu, switch_context};
+use crate::sync::{IrqSpinLock, IrqU64};
 use crate::task::TaskId;
 
 use kernel_core::smp::CpuSet;
@@ -53,9 +53,14 @@ use kernel_core::sync_origin::Origin;
 use policy::{
     kernel_policy, CpuLimitStats, KernelPolicy, LatencyHistogram, Qos, QosParams, WatchdogLog,
 };
-pub use scheduler::{AffinityError, CpuStats, NohzStats, ScanStats, SetCallsError, TimerIdentityAudit, WaitDeadline};
 pub use scheduler::GrowError;
-use scheduler::{BlockError, Cause, CpuGroupId, GroupError, IdleStep, QosError, Scheduler, SpawnError, SwitchObserver, WATCHDOG_LOG};
+pub use scheduler::{
+    AffinityError, CpuStats, NohzStats, ScanStats, SetCallsError, TimerIdentityAudit, WaitDeadline,
+};
+use scheduler::{
+    BlockError, Cause, CpuGroupId, GroupError, IdleStep, QosError, Scheduler, SpawnError,
+    SwitchObserver, WATCHDOG_LOG,
+};
 
 /// 内核调度器实例，由登记了级别的关中断自旋锁保护（多处理器下任何处理器都可安全访问）。
 ///
@@ -75,8 +80,10 @@ static YIELD_GATES: [kernel_core::yield_gate::YieldGate; kernel_core::smp::MAX_C
 // Lock order: global scheduler -> CPU leaves in ascending order. Fast timer
 // uses try_lock on its one leaf, drops it before any global fallback. IRQs are
 // already masked in timer context. No allocation or callbacks in the leaf path.
-static TICK_LEASES: [kernel_core::ticket::TicketLock<kernel_core::tick_lease::TickLease>; kernel_core::smp::MAX_CPUS] =
-    [const { kernel_core::ticket::TicketLock::new(kernel_core::tick_lease::TickLease::new()) }; kernel_core::smp::MAX_CPUS];
+static TICK_LEASES: [kernel_core::ticket::TicketLock<kernel_core::tick_lease::TickLease>;
+    kernel_core::smp::MAX_CPUS] =
+    [const { kernel_core::ticket::TicketLock::new(kernel_core::tick_lease::TickLease::new()) };
+        kernel_core::smp::MAX_CPUS];
 
 const PI_MAILBOX_CAPACITY: usize = 16; // JASPER-HARDCODE-REVIEW: issue=35 source=scheduler-mailbox-backpressure reason=interrupt-safe-fixed-mailbox-rejects-full-without-overwrite
 struct CpuInbox {
@@ -84,7 +91,12 @@ struct CpuInbox {
     pi: kernel_core::percpu_migration::PiMailbox<PI_MAILBOX_CAPACITY>,
 }
 impl CpuInbox {
-    const fn new() -> Self { Self { wake: kernel_core::wake_mailbox::WakeMailbox::new(), pi: kernel_core::percpu_migration::PiMailbox::new() } }
+    const fn new() -> Self {
+        Self {
+            wake: kernel_core::wake_mailbox::WakeMailbox::new(),
+            pi: kernel_core::percpu_migration::PiMailbox::new(),
+        }
+    }
 }
 static CPU_INBOXES: [kernel_core::ticket::TicketLock<CpuInbox>; kernel_core::smp::MAX_CPUS] =
     [const { kernel_core::ticket::TicketLock::new(CpuInbox::new()) }; kernel_core::smp::MAX_CPUS];
@@ -176,17 +188,13 @@ static EXTRA_TIMER_PROGRESS: CpuTail<TimerProgressCell> = CpuTail::new();
 static EXTRA_SYNC_WORK: CpuTail<[core::sync::atomic::AtomicU32; 4]> = CpuTail::new();
 
 fn yield_gate(cpu: usize) -> Option<&'static kernel_core::yield_gate::YieldGate> {
-    YIELD_GATES
-        .get(cpu)
-        .or_else(|| EXTRA_YIELD_GATES.get(cpu))
+    YIELD_GATES.get(cpu).or_else(|| EXTRA_YIELD_GATES.get(cpu))
 }
 
 fn tick_lease(
     cpu: usize,
 ) -> Option<&'static kernel_core::ticket::TicketLock<kernel_core::tick_lease::TickLease>> {
-    TICK_LEASES
-        .get(cpu)
-        .or_else(|| EXTRA_TICK_LEASES.get(cpu))
+    TICK_LEASES.get(cpu).or_else(|| EXTRA_TICK_LEASES.get(cpu))
 }
 
 fn tick_guard_slot(cpu: usize) -> Option<&'static TickGuardSlot> {
@@ -196,18 +204,12 @@ fn tick_guard_slot(cpu: usize) -> Option<&'static TickGuardSlot> {
 }
 
 fn cpu_inbox(cpu: usize) -> Option<&'static kernel_core::ticket::TicketLock<CpuInbox>> {
-    CPU_INBOXES
-        .get(cpu)
-        .or_else(|| EXTRA_CPU_INBOXES.get(cpu))
+    CPU_INBOXES.get(cpu).or_else(|| EXTRA_CPU_INBOXES.get(cpu))
 }
 
 #[cfg(feature = "krn2-observe")]
-fn sync_work(
-    cpu: usize,
-) -> Option<&'static [core::sync::atomic::AtomicU32; 4]> {
-    SYNC_WORK
-        .get(cpu)
-        .or_else(|| EXTRA_SYNC_WORK.get(cpu))
+fn sync_work(cpu: usize) -> Option<&'static [core::sync::atomic::AtomicU32; 4]> {
+    SYNC_WORK.get(cpu).or_else(|| EXTRA_SYNC_WORK.get(cpu))
 }
 
 pub fn prepare_cpu_slots(cpus: usize) -> Result<(), SchedulerCpuStorageError> {
@@ -258,15 +260,21 @@ static WAKE_FALLBACKS: AtomicU32 = AtomicU32::new(0);
 static REMOTE_PI: AtomicU32 = AtomicU32::new(0);
 static PI_FALLBACKS: AtomicU32 = AtomicU32::new(0);
 
-pub(super) fn publish_wake_token(cpu: usize, token: kernel_core::task_index::Token) -> kernel_core::wake_mailbox::Enqueue {
+pub(super) fn publish_wake_token(
+    cpu: usize,
+    token: kernel_core::task_index::Token,
+) -> kernel_core::wake_mailbox::Enqueue {
     let Some(inbox) = cpu_inbox(cpu) else {
         WAKE_FALLBACKS.fetch_add(1, Ordering::Relaxed);
         return kernel_core::wake_mailbox::Enqueue::Full;
     };
     let mut inbox = inbox.lock();
     let result = inbox.wake.push(token);
-    if !matches!(result, kernel_core::wake_mailbox::Enqueue::Full) { REMOTE_WAKES.fetch_add(1, Ordering::Relaxed); }
-    else { WAKE_FALLBACKS.fetch_add(1, Ordering::Relaxed); }
+    if !matches!(result, kernel_core::wake_mailbox::Enqueue::Full) {
+        REMOTE_WAKES.fetch_add(1, Ordering::Relaxed);
+    } else {
+        WAKE_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+    }
     result
 }
 
@@ -278,9 +286,13 @@ pub(super) fn publish_pi_message(cpu: usize, message: kernel_core::percpu_migrat
     };
     let result = inbox.lock().pi.push(message);
     match result {
-        PiEnqueue::Queued | PiEnqueue::Replaced => { REMOTE_PI.fetch_add(1, Ordering::Relaxed); }
+        PiEnqueue::Queued | PiEnqueue::Replaced => {
+            REMOTE_PI.fetch_add(1, Ordering::Relaxed);
+        }
         PiEnqueue::Stale => {}
-        PiEnqueue::Full => { PI_FALLBACKS.fetch_add(1, Ordering::Relaxed); }
+        PiEnqueue::Full => {
+            PI_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -289,40 +301,60 @@ struct LocalInbox {
     pi: [Option<kernel_core::percpu_migration::PiMessage>; PI_MAILBOX_CAPACITY],
 }
 fn take_local_inbox(cpu: usize) -> LocalInbox {
-    let mut out = LocalInbox { wakes: [None; scheduler::WAKE_MAILBOX_CAPACITY], pi: [None; PI_MAILBOX_CAPACITY] };
+    let mut out = LocalInbox {
+        wakes: [None; scheduler::WAKE_MAILBOX_CAPACITY],
+        pi: [None; PI_MAILBOX_CAPACITY],
+    };
     let Some(inbox) = cpu_inbox(cpu) else {
         crate::kprintln!("[JSR-SMP] reject=scheduler_inbox_missing cpu={}", cpu);
         crate::arch::halt_forever()
     };
     let mut inbox = inbox.lock();
-    for slot in &mut out.wakes { *slot = inbox.wake.pop(); if slot.is_none() { break; } }
-    for slot in &mut out.pi { *slot = inbox.pi.pop(); if slot.is_none() { break; } }
+    for slot in &mut out.wakes {
+        *slot = inbox.wake.pop();
+        if slot.is_none() {
+            break;
+        }
+    }
+    for slot in &mut out.pi {
+        *slot = inbox.pi.pop();
+        if slot.is_none() {
+            break;
+        }
+    }
     out
 }
 struct StateGuard(crate::sync::IrqSpinLockGuard<'static, Scheduler>, bool);
 impl core::ops::Deref for StateGuard {
     type Target = Scheduler;
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 impl core::ops::DerefMut for StateGuard {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 impl Drop for StateGuard {
     fn drop(&mut self) {
         #[cfg(feature = "krn2-observe")]
-        { self.0.raw_highres_phase = None; }
+        {
+            self.0.raw_highres_phase = None;
+        }
         // with_mut_from refreshes before extracting kicks. Repeating the full
         // task-table scan here doubled every mutating high-resolution timer
         // transaction and amplified multi-CPU wake contention. Direct guards
         // still refresh on drop.
-        if !self.1 { self.0.refresh_ns_events(); }
+        if !self.1 {
+            self.0.refresh_ns_events();
+        }
         self.0.program_ns_local();
         let allow = self.0.fast_yield_cpus();
         publish_yield_gates(&allow);
-        self.0
-            .publish_tick_lease_owners(|cpu, owner, permits| {
-                publish_and_release_tick_guard(cpu, owner, permits);
-            });
+        self.0.publish_tick_lease_owners(|cpu, owner, permits| {
+            publish_and_release_tick_guard(cpu, owner, permits);
+        });
     }
 }
 
@@ -412,13 +444,17 @@ static SYNC_WORK: [[core::sync::atomic::AtomicU32; 4]; kernel_core::smp::MAX_CPU
 pub fn sync_work_stats() -> [u32; 4] {
     let _state = lock_state(); // This observation transaction is included.
     let mut total = [0u32; 4];
-    for row in SYNC_WORK.iter().chain(EXTRA_SYNC_WORK.extras()) { for (sum, value) in total.iter_mut().zip(row) {
-        *sum = sum.wrapping_add(value.load(core::sync::atomic::Ordering::Relaxed));
-    }}
+    for row in SYNC_WORK.iter().chain(EXTRA_SYNC_WORK.extras()) {
+        for (sum, value) in total.iter_mut().zip(row) {
+            *sum = sum.wrapping_add(value.load(core::sync::atomic::Ordering::Relaxed));
+        }
+    }
     total
 }
 // Direct diagnostic/reset/snapshot transactions are explicitly attributed.
-fn lock_state() -> StateGuard { lock_state_from(Origin::Diagnostic) }
+fn lock_state() -> StateGuard {
+    lock_state_from(Origin::Diagnostic)
+}
 fn lock_state_from(origin: Origin) -> StateGuard {
     lock_state_from_observed(origin, None)
 }
@@ -433,8 +469,9 @@ fn lock_state_from_observed(
     let mut s = KERNEL_SCHED.lock();
     #[cfg(feature = "krn2-observe")]
     {
-        s.raw_highres_phase = highres_irq_entry.map(|interrupt_entry| {
-            scheduler::WakePhaseSource { interrupt_entry, lock_acquired: wake_endpoint() }
+        s.raw_highres_phase = highres_irq_entry.map(|interrupt_entry| scheduler::WakePhaseSource {
+            interrupt_entry,
+            lock_acquired: wake_endpoint(),
         });
     }
     #[cfg(not(feature = "krn2-observe"))]
@@ -451,12 +488,17 @@ fn lock_state_from_observed(
         }
         if let Some(completed) = scheduler::take_leaf_switch_completion(c) {
             #[cfg(feature = "krn2-observe")]
-            if let Some((token, end)) = completed.resume { s.note_raw_resume_for(token, end, 3); }
+            if let Some((token, end)) = completed.resume {
+                s.note_raw_resume_for(token, end, 3);
+            }
             s.finish_switch(c, Some((completed.prev, completed.token)));
         }
     }
     #[cfg(feature = "krn2-observe")]
-    { s.origin_total.record(_origin); s.origin_window.record(_origin); }
+    {
+        s.origin_total.record(_origin);
+        s.origin_window.record(_origin);
+    }
     // Author: chatgpt. Online membership only grows under this global lock.
     // Include the caller BEFORE its first cpu_online registration. Other offline
     // CPUs have never received permits; they cannot produce pending accounting.
@@ -493,9 +535,15 @@ fn lock_state_from_observed(
         }
     });
     take_yielded(|c| s.note_fast_yield(c));
-    for token in inbox.wakes.into_iter().flatten() { s.consume_wake_token(token); }
-    for message in inbox.pi.into_iter().flatten() { s.consume_pi_message(local_cpu, message); }
-    if crate::hrtime::enabled(){s.settle_highres(crate::hrtime::now().expect("high-res monotonic clock"));}
+    for token in inbox.wakes.into_iter().flatten() {
+        s.consume_wake_token(token);
+    }
+    for message in inbox.pi.into_iter().flatten() {
+        s.consume_pi_message(local_cpu, message);
+    }
+    if crate::hrtime::enabled() {
+        s.settle_highres(crate::hrtime::now().expect("high-res monotonic clock"));
+    }
     StateGuard(s, false)
 }
 
@@ -523,14 +571,27 @@ fn with_mut_from_observed<R>(
         #[cfg(feature = "krn2-observe")]
         let (slot, generation) = s.raw_callback_identity();
         #[cfg(feature = "krn2-observe")]
-        let start = kernel_core::raw_timing::Endpoint { cpu: cpu::cpu_index(), counter: cpu::cycles(), clock: kernel_core::raw_timing::ClockDomain::Raw };
+        let start = kernel_core::raw_timing::Endpoint {
+            cpu: cpu::cpu_index(),
+            counter: cpu::cycles(),
+            clock: kernel_core::raw_timing::ClockDomain::Raw,
+        };
         let r = f(&mut s);
         #[cfg(feature = "krn2-observe")]
         {
-            let end = kernel_core::raw_timing::Endpoint { cpu: cpu::cpu_index(), counter: cpu::cycles(), clock: kernel_core::raw_timing::ClockDomain::Raw };
+            let end = kernel_core::raw_timing::Endpoint {
+                cpu: cpu::cpu_index(),
+                counter: cpu::cycles(),
+                clock: kernel_core::raw_timing::ClockDomain::Raw,
+            };
             // Path 1 = callback only, NOT wake latency. No wait round exists.
             let _ = s.raw_callbacks.push(kernel_core::raw_timing::Sample {
-                path: 1, slot, generation, wait_round: 0, start, end,
+                path: 1,
+                slot,
+                generation,
+                wait_round: 0,
+                start,
+                end,
             });
         }
         s.refresh_ns_events();
@@ -608,21 +669,43 @@ pub fn lock_stats() -> crate::sync::LockStats {
 #[cfg(feature = "fault-inject")]
 pub fn fault_wake_batch(ids: &[TaskId]) {
     assert!(ids.len() <= scheduler::WAKE_MAILBOX_CAPACITY + 1);
-    with_mut(|s| { for &id in ids { s.wake(id); } });
+    with_mut(|s| {
+        for &id in ids {
+            s.wake(id);
+        }
+    });
 }
 #[cfg(feature = "fault-inject")]
-pub fn fault_delay_deadline_timer(c: usize, enable: bool) { with_mut(|s| s.fault_delay_deadline_timer(c, enable)); }
+pub fn fault_delay_deadline_timer(c: usize, enable: bool) {
+    with_mut(|s| s.fault_delay_deadline_timer(c, enable));
+}
 #[cfg(feature = "fault-inject")]
-pub fn fault_deadline_trace(c: usize) -> Option<scheduler::DeadlineTrace> { with(|s| s.fault_deadline_trace(c)) }
-pub fn deadline_owners(id: TaskId) -> Option<(Option<usize>, Option<usize>)> { with(|s| s.deadline_owners(id)) }
-pub fn deadline_stats() -> (Vec<u32>, Vec<u32>) { with(|s| s.deadline_stats()) }
-pub fn rt_utilisation()->u32 {with(|s|s.rt_utilisation())}
-pub fn rt_state(id: TaskId) -> Option<(u32,u32,u64)> { with(|s| s.rt_state(id)) }
+pub fn fault_deadline_trace(c: usize) -> Option<scheduler::DeadlineTrace> {
+    with(|s| s.fault_deadline_trace(c))
+}
+pub fn deadline_owners(id: TaskId) -> Option<(Option<usize>, Option<usize>)> {
+    with(|s| s.deadline_owners(id))
+}
+pub fn deadline_stats() -> (Vec<u32>, Vec<u32>) {
+    with(|s| s.deadline_stats())
+}
+pub fn rt_utilisation() -> u32 {
+    with(|s| s.rt_utilisation())
+}
+pub fn rt_state(id: TaskId) -> Option<(u32, u32, u64)> {
+    with(|s| s.rt_state(id))
+}
 pub fn remote_wake_stats() -> (u32, u32) {
-    (REMOTE_WAKES.load(Ordering::Relaxed), WAKE_FALLBACKS.load(Ordering::Relaxed))
+    (
+        REMOTE_WAKES.load(Ordering::Relaxed),
+        WAKE_FALLBACKS.load(Ordering::Relaxed),
+    )
 }
 pub fn remote_pi_stats() -> (u32, u32) {
-    (REMOTE_PI.load(Ordering::Relaxed), PI_FALLBACKS.load(Ordering::Relaxed))
+    (
+        REMOTE_PI.load(Ordering::Relaxed),
+        PI_FALLBACKS.load(Ordering::Relaxed),
+    )
 }
 
 pub fn local_tick_bypasses() -> u32 {
@@ -635,15 +718,27 @@ pub fn local_tick_bypasses() -> u32 {
 }
 
 #[cfg(feature = "krn3-fast-tick-verify")]
-pub fn leaf_finish_count() -> u32 { scheduler::leaf_finish_count() }
+pub fn leaf_finish_count() -> u32 {
+    scheduler::leaf_finish_count()
+}
 #[cfg(feature = "krn3-fast-tick-verify")]
-pub fn leaf_worker_finish_count() -> u32 { scheduler::leaf_worker_finish_count() }
-pub fn leaf_local_switch_count() -> u32 { scheduler::leaf_local_switch_count() }
+pub fn leaf_worker_finish_count() -> u32 {
+    scheduler::leaf_worker_finish_count()
+}
+pub fn leaf_local_switch_count() -> u32 {
+    scheduler::leaf_local_switch_count()
+}
 pub fn completed_switch_count(cpu: usize) -> u64 {
     scheduler::completed_switch_count(cpu)
 }
 pub fn completed_switch_last(cpu: usize) -> Option<(usize, u64)> {
     scheduler::completed_switch_last(cpu)
+}
+pub fn runtime_switch_count(cpu: usize) -> u64 {
+    scheduler::runtime_switch_count(cpu)
+}
+pub fn runtime_switch_last(cpu: usize) -> Option<(usize, u64, usize, u64)> {
+    scheduler::runtime_switch_last(cpu)
 }
 #[cfg(feature = "krn3-fast-tick-verify")]
 pub fn local_tick_batch_peak(cpu: usize) -> u8 {
@@ -671,9 +766,11 @@ pub fn reset_lock_stats() {
         state.pi_window = kernel_core::pi_work::PiWork::EMPTY;
         state.origin_window.clear();
         KERNEL_SCHED.reset_stats();
-        for row in SYNC_WORK.iter().chain(EXTRA_SYNC_WORK.extras()) { for value in row {
-            value.store(0, core::sync::atomic::Ordering::Relaxed);
-        }}
+        for row in SYNC_WORK.iter().chain(EXTRA_SYNC_WORK.extras()) {
+            for value in row {
+                value.store(0, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
     }
     #[cfg(not(feature = "krn2-observe"))]
     KERNEL_SCHED.reset_stats();
@@ -752,14 +849,10 @@ pub fn grow(slots: usize) -> Result<usize, GrowError> {
 /// Reconfigure all per-CPU policies from admitted runtime scheduling facts.
 pub fn init_runtime(tasks: usize) -> bool {
     let timer_hz = crate::config::ACTIVE.clock.timer_hz;
-    let Some(plan) = kernel_core::config::plan_qos_params(
-        crate::config::ACTIVE.sched.qos,
-        timer_hz,
-        tasks,
-    ) else {
-        crate::kprintln!(
-            "[JSR-SCHED] reject=qos_capacity timer_hz={timer_hz} tasks={tasks}"
-        );
+    let Some(plan) =
+        kernel_core::config::plan_qos_params(crate::config::ACTIVE.sched.qos, timer_hz, tasks)
+    else {
+        crate::kprintln!("[JSR-SCHED] reject=qos_capacity timer_hz={timer_hz} tasks={tasks}");
         return false;
     };
     if !with_mut(|scheduler| scheduler.reconfigure_qos(plan)) {
@@ -803,7 +896,13 @@ pub fn spawn(id: TaskId, name: &'static str, entry: fn()) -> Result<usize, Spawn
 /// 新建内核任务并指定亲和集合（允许运行的处理器）；任务按负载放进其中某个处理器的运行队列。
 /// 集合里没有在线处理器时拒绝（[`SpawnError::BadAffinity`]），状态不变。`group` 同 [`spawn_in`]。
 /// Spawns a kernel task with an explicit affinity set.
-pub fn spawn_on(id: TaskId, name: &'static str, entry: fn(), group: Option<CpuGroupId>, affinity: CpuSet) -> Result<usize, SpawnError> {
+pub fn spawn_on(
+    id: TaskId,
+    name: &'static str,
+    entry: fn(),
+    group: Option<CpuGroupId>,
+    affinity: CpuSet,
+) -> Result<usize, SpawnError> {
     with_mut(|s| s.spawn_on(id, name, entry, task_trampoline, group, Some(affinity)))
 }
 
@@ -895,10 +994,13 @@ pub fn idle_loop(c: usize) -> ! {
         let was_enabled = cpu::irq_save_disable();
         crate::smp::percpu::this().take_resched();
         if crate::hrtime::enabled() {
-            let needs_tick=crate::irq::device::cpu_needs_tick();
-            match with_mut(|s|s.highres_idle(c,needs_tick)) {
-                IdleStep::Run(cause)=>yield_with_cause(cause),
-                _=>{cpu::wait_for_interrupt();with_mut(|s|s.idle_exit(c));}
+            let needs_tick = crate::irq::device::cpu_needs_tick();
+            match with_mut(|s| s.highres_idle(c, needs_tick)) {
+                IdleStep::Run(cause) => yield_with_cause(cause),
+                _ => {
+                    cpu::wait_for_interrupt();
+                    with_mut(|s| s.idle_exit(c));
+                }
             }
             crate::smp::percpu::this().count_idle_wakeup();
             cpu::irq_restore(was_enabled);
@@ -940,16 +1042,12 @@ pub fn configure_idle_tick() -> u32 {
 }
 
 /// Reserve tickless-idle CPU bookkeeping before secondary CPUs are started.
-pub fn prepare_nohz_cpus(
-    cpus: usize,
-) -> Result<(), kernel_core::tickless::StopStorageError> {
+pub fn prepare_nohz_cpus(cpus: usize) -> Result<(), kernel_core::tickless::StopStorageError> {
     with_mut(|scheduler| scheduler.prepare_nohz_cpus(cpus))
 }
 
 /// Reserve scheduler run leaves before any secondary CPU starts.
-pub fn prepare_cpu_leaves(
-    cpus: usize,
-) -> Result<(), scheduler::LeafReserveError> {
+pub fn prepare_cpu_leaves(cpus: usize) -> Result<(), scheduler::LeafReserveError> {
     scheduler::reserve_cpu_leaves(cpus)
 }
 
@@ -966,7 +1064,12 @@ pub fn nohz_stats() -> NohzStats {
 }
 
 /// 新建内核任务并放入 CPU 组 `group`（受该组上限约束）。组无效时拒绝。
-pub fn spawn_in(id: TaskId, name: &'static str, entry: fn(), group: CpuGroupId) -> Result<usize, SpawnError> {
+pub fn spawn_in(
+    id: TaskId,
+    name: &'static str,
+    entry: fn(),
+    group: CpuGroupId,
+) -> Result<usize, SpawnError> {
     with_mut(|s| s.spawn_in(id, name, entry, task_trampoline, Some(group)))
 }
 
@@ -987,9 +1090,7 @@ pub fn create_child_cpu_group(
     parent: CpuGroupId,
     limit_permille: u32,
 ) -> Result<CpuGroupId, GroupError> {
-    with_mut(|s| {
-        s.create_group_with_parent(limit_permille, policy::CPU_BURST_TICKS, Some(parent))
-    })
+    with_mut(|s| s.create_group_with_parent(limit_permille, policy::CPU_BURST_TICKS, Some(parent)))
 }
 
 /// 归还 CPU 组的持有者引用（成员全部退出后组释放）。
@@ -1136,39 +1237,65 @@ pub fn set_arbiter(on: bool) -> bool {
 }
 
 /// Enable only after clock/LAPIC calibration and AP registration, before RT admission.
-pub fn enable_highres()->bool {
-    let Some(now)=crate::hrtime::now() else{return false;};
-    with_mut(|s|{s.enable_highres(now);crate::hrtime::enable();});true
+pub fn enable_highres() -> bool {
+    let Some(now) = crate::hrtime::now() else {
+        return false;
+    };
+    with_mut(|s| {
+        s.enable_highres(now);
+        crate::hrtime::enable();
+    });
+    true
 }
-pub fn ns_sleeping(id:TaskId)->bool{with(|s|s.ns_sleeping(id))}
+pub fn ns_sleeping(id: TaskId) -> bool {
+    with(|s| s.ns_sleeping(id))
+}
 /// Ring 内部期限统一使用纳秒；未校准高精度时钟时用 tick 的等间隔纳秒值。
 /// Ring deadlines use nanoseconds internally, with a tick-equivalent fallback.
-pub(crate) fn now_ns()->u64 {
+pub(crate) fn now_ns() -> u64 {
     crate::hrtime::now().unwrap_or_else(|| timer_ticks().saturating_mul(crate::hrtime::tick_ns()))
 }
 /// 把现有绝对 tick 边界转换成同一单调时钟里的纳秒时刻。
 /// Convert an existing absolute tick boundary to the monotonic nanosecond clock.
-pub(crate) fn tick_deadline_ns(deadline:u64)->Option<u64> {
-    let now_ticks=timer_ticks();
-    kernel_core::timer_units::tick_deadline_ns(now_ticks,now_ns(),deadline,crate::hrtime::tick_ns())
+pub(crate) fn tick_deadline_ns(deadline: u64) -> Option<u64> {
+    let now_ticks = timer_ticks();
+    kernel_core::timer_units::tick_deadline_ns(
+        now_ticks,
+        now_ns(),
+        deadline,
+        crate::hrtime::tick_ns(),
+    )
 }
-pub fn timer_identity_audit()->TimerIdentityAudit{with(|s|s.timer_identity_audit())}
-pub fn current_timer_identity()->Option<(kernel_core::timer_event::TimerId,u32)> {
-    with(|s|s.current_timer_identity())
+pub fn timer_identity_audit() -> TimerIdentityAudit {
+    with(|s| s.timer_identity_audit())
+}
+pub fn current_timer_identity() -> Option<(kernel_core::timer_event::TimerId, u32)> {
+    with(|s| s.current_timer_identity())
 }
 #[cfg(feature = "rt2-verify")]
-pub fn reject_stale_timer(id:kernel_core::timer_event::TimerId,owner:u32)->bool {
-    with_mut(|s|s.reject_stale_timer(id,owner))
+pub fn reject_stale_timer(id: kernel_core::timer_event::TimerId, owner: u32) -> bool {
+    with_mut(|s| s.reject_stale_timer(id, owner))
 }
-pub fn rt_ns_state(id:TaskId)->Option<kernel_core::ns_budget::Budget>{with(|s|s.rt_ns_state(id))}
-pub fn set_rt_ns(id:TaskId,quota:u64,period:u64)->bool {with_mut(|s|s.set_rt_ns(id,quota,period))}
+pub fn rt_ns_state(id: TaskId) -> Option<kernel_core::ns_budget::Budget> {
+    with(|s| s.rt_ns_state(id))
+}
+pub fn set_rt_ns(id: TaskId, quota: u64, period: u64) -> bool {
+    with_mut(|s| s.set_rt_ns(id, quota, period))
+}
 /// Absolute ns deadline. Spurious/exit wakes return to the caller to recheck.
-pub(crate) fn reserve_sleep_ns(deadline:u64)->bool {with_mut(|s|s.block_current_ns(deadline))}
-pub fn sleep_until_ns(deadline:u64)->Result<(),()> {
-    if !crate::hrtime::enabled(){return Err(());}
-    let irq=cpu::irq_save_disable();
-    if with_mut(|s|s.block_current_ns(deadline)){yield_with_cause(Cause::SLEEP);}
-    cpu::irq_restore(irq);Ok(())
+pub(crate) fn reserve_sleep_ns(deadline: u64) -> bool {
+    with_mut(|s| s.block_current_ns(deadline))
+}
+pub fn sleep_until_ns(deadline: u64) -> Result<(), ()> {
+    if !crate::hrtime::enabled() {
+        return Err(());
+    }
+    let irq = cpu::irq_save_disable();
+    if with_mut(|s| s.block_current_ns(deadline)) {
+        yield_with_cause(Cause::SLEEP);
+    }
+    cpu::irq_restore(irq);
+    Ok(())
 }
 /// 每个处理器的定时器前进状态。只在该处理器关中断时访问，所以不需要锁；用原子量是为了能放进静态数组。
 struct TimerProgressCell {
@@ -1220,7 +1347,10 @@ fn timer_progress_load(c: usize) -> kernel_core::timer_progress::Progress {
     }
 }
 
-fn timer_progress_update<R>(c: usize, f: impl FnOnce(&mut kernel_core::timer_progress::Progress) -> R) -> R {
+fn timer_progress_update<R>(
+    c: usize,
+    f: impl FnOnce(&mut kernel_core::timer_progress::Progress) -> R,
+) -> R {
     let mut p = timer_progress_load(c);
     let r = f(&mut p);
     let cell = timer_progress_cell(c);
@@ -1243,10 +1373,14 @@ fn timer_take_deferred() -> u32 {
 
 fn timer_record(entry: u64) {
     let exit = crate::arch::clock_counter();
-    timer_progress_update(cpu::cpu_index(), |p| p.record(entry, exit, crate::hrtime::tick_counts()));
+    timer_progress_update(cpu::cpu_index(), |p| {
+        p.record(entry, exit, crate::hrtime::tick_counts())
+    });
     TIMER_FULL.fetch_add(1, Ordering::Relaxed);
     let cost = exit.saturating_sub(entry);
-    if cost > TIMER_MAX_COST.load(Ordering::Relaxed) { TIMER_MAX_COST.store(cost, Ordering::Relaxed); }
+    if cost > TIMER_MAX_COST.load(Ordering::Relaxed) {
+        TIMER_MAX_COST.store(cost, Ordering::Relaxed);
+    }
 }
 
 /// 高精度事件被推迟：一次性定时器已经用掉，到可以做完整事务时再触发一次。
@@ -1259,7 +1393,9 @@ pub fn rearm_after_defer(now: u64) {
     // 低于一个 tick 的重试可能在 -icount 下让被打断的执行流连一条指令都无法完成；
     // 推迟重试至少保留一个正常定时周期。
     let floor = crate::hrtime::tick_ns().max(1);
-    let mut delay = crate::hrtime::counts_to_ns(left).unwrap_or(floor).max(floor);
+    let mut delay = crate::hrtime::counts_to_ns(left)
+        .unwrap_or(floor)
+        .max(floor);
     // SAFETY：中断上下文、关中断，本处理器的定时器模式由本路径独占；到期后重新走事务判定。
     while !unsafe { crate::arch::timer_arm_after_ns(delay) } {
         assert!(delay > 1, "high-res timer unsupported after calibration");
@@ -1279,22 +1415,23 @@ pub fn timer_progress_stats() -> (u64, u64, u64, u64, u64) {
     )
 }
 
-pub fn on_highres_timer(
-    entry: u64,
-    interrupt_entry: Option<kernel_core::raw_timing::Endpoint>,
-) {
+pub fn on_highres_timer(entry: u64, interrupt_entry: Option<kernel_core::raw_timing::Endpoint>) {
     crate::smp::percpu::this().take_resched();
     // Keep the due publication, scheduling decision and switch publication in
     // one transaction.  The old path returned a cause and immediately took
     // KERNEL_SCHED again through yield_with_cause(), adding another queue wait
     // to every simultaneous per-CPU deadline fanout.
-    let (credits,plan)=with_mut_from_observed(Origin::ApFallback,interrupt_entry,|s| {
-        let (credits,cause)=s.highres_event(PREEMPTION.load(Ordering::Relaxed));
-        (credits,cause.and_then(|cause|s.prepare_switch(cause)))
+    let (credits, plan) = with_mut_from_observed(Origin::ApFallback, interrupt_entry, |s| {
+        let (credits, cause) = s.highres_event(PREEMPTION.load(Ordering::Relaxed));
+        (credits, cause.and_then(|cause| s.prepare_switch(cause)))
     });
     timer_record(entry);
-    if cpu::cpu_index()!=0 {crate::irq::on_elapsed_cpu_ticks(credits);}
-    if let Some(plan)=plan {execute_switch_plan(plan);}
+    if cpu::cpu_index() != 0 {
+        crate::irq::on_elapsed_cpu_ticks(credits);
+    }
+    if let Some(plan) = plan {
+        execute_switch_plan(plan);
+    }
 }
 
 /// 睡到 tick `deadline`（已过则立即返回）。
@@ -1492,13 +1629,13 @@ pub fn run() {
 /// 表示截止时刻已到但仍有工作任务存在，调用方必须先终止并回收相关进程。
 /// English: run queued workers until they settle or the monotonic tick deadline.
 pub fn run_until(deadline: u64) -> bool {
-    yield_now();
+    yield_with_cause(Cause::YIELD);
     while !with(|s| s.workers_settled()) {
         if timer_ticks() >= deadline {
             return false;
         }
         if with(|s| s.has_runnable_worker()) {
-            yield_now();
+            yield_with_cause(Cause::YIELD);
         } else {
             let was_enabled = cpu::irq_save_disable();
             cpu::wait_for_interrupt();
@@ -1612,10 +1749,13 @@ pub fn on_timer_interrupt(entry: u64) {
     let deferred = timer_take_deferred();
     let plan = with_mut_from(Origin::BspTick, |s| {
         s.settle_deferred_ticks(deferred, now);
-        s.tick(now, preemption).and_then(|cause| s.prepare_switch(cause))
+        s.tick(now, preemption)
+            .and_then(|cause| s.prepare_switch(cause))
     });
     timer_record(entry);
-    if let Some(plan) = plan { execute_switch_plan(plan); }
+    if let Some(plan) = plan {
+        execute_switch_plan(plan);
+    }
 }
 
 /// 引导处理器时钟中断的简化路径：只推进全局时钟，运行量记账留到下一次完整事务。
@@ -1637,21 +1777,27 @@ pub fn on_local_timer(entry: u64) {
     if !requested && deferred == 0 {
         let fast = {
             let c = cpu::cpu_index();
-            tick_lease(c).and_then(|lease| lease.try_lock()).and_then(|mut lease| {
-                if yield_gate(c).is_none_or(kernel_core::yield_gate::YieldGate::pending_yield) {
-                    return None;
-                }
-                let owner = lease.try_tick_owner()?;
-                Some(match scheduler::fast_leaf_competing_tick(
-                    c, owner, PREEMPTION.load(Ordering::Relaxed),
-                ) {
-                    scheduler::FastLeafTick::Rejected => {
-                        scheduler::fast_leaf_tick(c, owner);
-                        scheduler::FastLeafTick::Continued
+            tick_lease(c)
+                .and_then(|lease| lease.try_lock())
+                .and_then(|mut lease| {
+                    if yield_gate(c).is_none_or(kernel_core::yield_gate::YieldGate::pending_yield) {
+                        return None;
                     }
-                    result => result,
+                    let owner = lease.try_tick_owner()?;
+                    Some(
+                        match scheduler::fast_leaf_competing_tick(
+                            c,
+                            owner,
+                            PREEMPTION.load(Ordering::Relaxed),
+                        ) {
+                            scheduler::FastLeafTick::Rejected => {
+                                scheduler::fast_leaf_tick(c, owner);
+                                scheduler::FastLeafTick::Continued
+                            }
+                            result => result,
+                        },
+                    )
                 })
-            })
         }; // leaf released before any path can take the global scheduler lock
         match fast {
             Some(scheduler::FastLeafTick::Continued) => {
@@ -1670,11 +1816,18 @@ pub fn on_local_timer(entry: u64) {
     let idle = crate::smp::percpu::this().current() == crate::smp::percpu::IDLE_SLOT;
     let plan = with_mut_from(Origin::ApFallback, |s| {
         s.settle_deferred_local_ticks(deferred);
-        if idle { s.local_tick(preemption); None }
-        else { s.local_tick(preemption).and_then(|cause| s.prepare_switch(cause)) }
+        if idle {
+            s.local_tick(preemption);
+            None
+        } else {
+            s.local_tick(preemption)
+                .and_then(|cause| s.prepare_switch(cause))
+        }
     });
     timer_record(entry);
-    if let Some(plan) = plan { execute_switch_plan(plan); }
+    if let Some(plan) = plan {
+        execute_switch_plan(plan);
+    }
 }
 
 /// 其他处理器时钟中断的简化路径：只记下欠账，运行量记账与到期唤醒留到下一次完整事务。
@@ -1686,7 +1839,9 @@ pub fn defer_local_tick() {
 
 // Author: chatgpt. Counts real tick-based AP RT and shared-group charges across
 // both the owner-local lease path and the globally serialized fallback path.
-pub fn budget_tick_stats() -> [u32; 2] { with(|s| s.budget_tick_stats()) }
+pub fn budget_tick_stats() -> [u32; 2] {
+    with(|s| s.budget_tick_stats())
+}
 
 // Author: chatgpt. Copy under the existing scheduler guard, print after release.
 // No additional lock or scheduler decision consumes these diagnostic records.
@@ -1711,9 +1866,21 @@ pub fn reset_raw_wakes() {
     s.raw_wake_errors = [0; 3];
 }
 #[cfg(feature = "krn2-observe")]
-pub fn raw_wake_snapshot() -> (kernel_core::raw_timing::Samples<64>, kernel_core::raw_timing::NanoSummary, [u64; 3], usize, usize) {
+pub fn raw_wake_snapshot() -> (
+    kernel_core::raw_timing::Samples<64>,
+    kernel_core::raw_timing::NanoSummary,
+    [u64; 3],
+    usize,
+    usize,
+) {
     let s = lock_state();
-    (s.raw_wakes, s.wake_latency.summary(), s.raw_wake_errors, s.raw_pending_at_reset, s.raw_pending_count())
+    (
+        s.raw_wakes,
+        s.wake_latency.summary(),
+        s.raw_wake_errors,
+        s.raw_pending_at_reset,
+        s.raw_pending_count(),
+    )
 }
 #[cfg(feature = "krn2-observe")]
 pub fn raw_deadline_snapshot() -> kernel_core::raw_timing::WakePhaseSummaries {
@@ -1740,7 +1907,11 @@ pub fn pi_work_stats() -> (kernel_core::pi_work::PiWork, kernel_core::pi_work::P
 // Author: chatgpt. Snapshot counts and aggregate in one existing global guard.
 // This diagnostic transaction is included; reset itself is cleared from window.
 #[cfg(feature = "krn2-observe")]
-pub fn global_origin_stats() -> (kernel_core::sync_origin::Counts, kernel_core::sync_origin::Counts, u64) {
+pub fn global_origin_stats() -> (
+    kernel_core::sync_origin::Counts,
+    kernel_core::sync_origin::Counts,
+    u64,
+) {
     let s = lock_state();
     let aggregate = SYNC_WORK
         .iter()
@@ -1750,20 +1921,32 @@ pub fn global_origin_stats() -> (kernel_core::sync_origin::Counts, kernel_core::
     (s.origin_total, s.origin_window, aggregate)
 }
 
-#[cfg(feature="s3-nohz-verify")]
-pub fn nohz_accounting(c:usize)->(u64,u64,u64,u64,bool) { with(|s|s.nohz_accounting(c)) }
+#[cfg(feature = "s3-nohz-verify")]
+pub fn nohz_accounting(c: usize) -> (u64, u64, u64, u64, bool) {
+    with(|s| s.nohz_accounting(c))
+}
 
 /// Reference-clock residency, distinct from local timer interrupt counters.
-pub fn cpu_residency(c:usize)->kernel_core::cpu_time::Totals { with(|s|s.cpu_residency(c)) }
+pub fn cpu_residency(c: usize) -> kernel_core::cpu_time::Totals {
+    with(|s| s.cpu_residency(c))
+}
 
 /// Diagnostic observation only; does not alter admission or charging.
-pub fn budget_window_arm(g:CpuGroupId,window:u64)->u64 { with_mut(|s|s.budget_window_arm(g,window)) }
-pub fn budget_window_finish()->Option<scheduler::BudgetWindowReport> { with_mut(|s|s.budget_window_finish()) }
+pub fn budget_window_arm(g: CpuGroupId, window: u64) -> u64 {
+    with_mut(|s| s.budget_window_arm(g, window))
+}
+pub fn budget_window_finish() -> Option<scheduler::BudgetWindowReport> {
+    with_mut(|s| s.budget_window_finish())
+}
 
 /// Return the current-task migration decision; caller must drop object guards
 /// before yielding when false. with_mut already publishes reschedule IPIs.
-pub(crate) fn set_affinity_deferred(id:TaskId,set:CpuSet)->Result<bool,AffinityError> {with_mut(|s|s.set_affinity(id,set))}
-pub(crate) fn task_affinity(id:TaskId)->Option<CpuSet> {with(|s|s.task_affinity(id))}
+pub(crate) fn set_affinity_deferred(id: TaskId, set: CpuSet) -> Result<bool, AffinityError> {
+    with_mut(|s| s.set_affinity(id, set))
+}
+pub(crate) fn task_affinity(id: TaskId) -> Option<CpuSet> {
+    with(|s| s.task_affinity(id))
+}
 pub(crate) fn set_task_syscalls(
     caller: TaskId,
     target: TaskId,

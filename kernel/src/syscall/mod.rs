@@ -741,11 +741,9 @@ syscall_dispatch! {
     SYSTEM_CHANNEL_SEND => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::ipc::sys_send(a.args[0], a.args[1]) },
     SYSTEM_TASK_RT_DEADLINE_SET => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::task_control::rt_set_ns(a.args[0]) },
     SYSTEM_TIME_DEADLINE_GET => |_e: &AbiEntry, _a: &SyscallArgs, _task_id: u64| {
-        if crate::hrtime::enabled() {
-            crate::hrtime::now().and_then(|n| i64::try_from(n).ok()).unwrap_or_else(|| err(SYSTEM_ERROR_INVALID_ARGUMENT))
-        } else {
-            err(SYSTEM_ERROR_UNSUPPORTED)
-        }
+        i64::try_from(crate::clock_fact::now_ns())
+            .map_err(|_| SYSTEM_ERROR_INVALID_ARGUMENT)
+            .unwrap_or_else(err)
     },
     SYSTEM_TIME_DEADLINE_WAIT => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { time_wait_ns(a.args[0]) },
     SYSTEM_TIME_TIMER_CREATE => |_e: &AbiEntry, a: &SyscallArgs, _task_id: u64| { crate::user_timer::sys_create(a.args[0], a.args[1], a.args[2]) },
@@ -1229,8 +1227,13 @@ fn device_virtio_notify(handle: u64, queue_index: u64) -> i64 {
         return err(SYSTEM_ERROR_RIGHTS_DENIED);
     };
     let resolved = kobj::with(|t| -> Result<Bdf, ProcError> {
-        let id =
-            proc::resolve_in(t, pid, handle_arg(handle), ObjectType::Device, Rights::CONTROL)?;
+        let id = proc::resolve_in(
+            t,
+            pid,
+            handle_arg(handle),
+            ObjectType::Device,
+            Rights::CONTROL,
+        )?;
         match t.get(id) {
             Ok(KObject::Device(device)) => Ok(device.bdf),
             _ => Err(ProcError::Handle(HandleError::Invalid)),
@@ -1259,9 +1262,7 @@ fn device_virtio_notify(handle: u64, queue_index: u64) -> i64 {
     };
     match transport.notify_queue(queue_index) {
         Ok(()) => 0,
-        Err(crate::virtio::VirtioError::BadQueueIndex) => {
-            err(SYSTEM_ERROR_INVALID_ARGUMENT)
-        }
+        Err(crate::virtio::VirtioError::BadQueueIndex) => err(SYSTEM_ERROR_INVALID_ARGUMENT),
         Err(error) => {
             kprintln!(
                 "[JSR-VIRTIO-SUBMIT] stage=notify bdf={:?} queue={} reason={}",

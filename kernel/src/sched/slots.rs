@@ -76,7 +76,10 @@ pub struct TrackedSlots<T, const I: usize, const W: usize> {
 impl<T, const I: usize, const W: usize> TrackedSlots<T, I, W> {
     /// 内联存储上的新表，初始全部未标记。
     pub const fn new(slots: [T; I]) -> Self {
-        Self { slots: BootSlots::Inline(slots), dirty: BootSlots::Inline([0; W]) }
+        Self {
+            slots: BootSlots::Inline(slots),
+            dirty: BootSlots::Inline([0; W]),
+        }
     }
 
     /// 可变访问一个槽位并标脏；越界返回 `None`。
@@ -86,12 +89,18 @@ impl<T, const I: usize, const W: usize> TrackedSlots<T, I, W> {
     }
 
     /// 可变遍历满足条件的槽位，只标脏这些槽位。
-    pub fn iter_mut_where<'a>(&'a mut self, mut wanted: impl FnMut(usize, &T) -> bool + 'a)
-        -> impl Iterator<Item = (usize, &'a mut T)> + 'a
-    where T: 'a {
+    pub fn iter_mut_where<'a>(
+        &'a mut self,
+        mut wanted: impl FnMut(usize, &T) -> bool + 'a,
+    ) -> impl Iterator<Item = (usize, &'a mut T)> + 'a
+    where
+        T: 'a,
+    {
         let (slots, dirty) = (&mut *self.slots, &mut *self.dirty);
         slots.iter_mut().enumerate().filter_map(move |(i, t)| {
-            if !wanted(i, t) { return None; }
+            if !wanted(i, t) {
+                return None;
+            }
             kernel_core::dirty_slots::mark(dirty, i);
             Some((i, t))
         })
@@ -121,7 +130,9 @@ impl<T, const I: usize, const W: usize> TrackedSlots<T, I, W> {
     /// 为扩到 `n` 项准备新存储，语义同 [`BootSlots::prepare`]。
     pub fn prepare(&self, n: usize, fill: impl FnMut() -> T) -> Option<(Box<[T]>, Box<[u64]>)> {
         let slots = self.slots.prepare(n, fill)?;
-        let dirty = self.dirty.prepare(kernel_core::dirty_slots::words_for(n), || 0)?;
+        let dirty = self
+            .dirty
+            .prepare(kernel_core::dirty_slots::words_for(n), || 0)?;
         Some((slots, dirty))
     }
 

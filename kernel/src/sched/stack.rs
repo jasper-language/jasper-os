@@ -74,15 +74,23 @@ impl StackPool {
     /// 构造一个栈大小的临时值，而当前栈本身也只有同样大小。
     pub fn reserve(&mut self, slots: usize) -> Result<usize, ReserveError> {
         if slots > self.heap.len() {
-            if self.heap.try_reserve_exact(slots - self.heap.len()).is_err() {
-                return Err(ReserveError { available: self.available() });
+            if self
+                .heap
+                .try_reserve_exact(slots - self.heap.len())
+                .is_err()
+            {
+                return Err(ReserveError {
+                    available: self.available(),
+                });
             }
             if self
                 .extended_state
                 .try_reserve_exact(slots - self.extended_state.len())
                 .is_err()
             {
-                return Err(ReserveError { available: self.available() });
+                return Err(ReserveError {
+                    available: self.available(),
+                });
             }
             self.heap.resize(slots, null_mut());
             self.extended_state.resize(slots, null_mut());
@@ -90,8 +98,10 @@ impl StackPool {
         let layout = Layout::new::<Stack>();
         let state_bytes = crate::arch::extended_state_bytes();
         let state_align = crate::arch::extended_state_align().max(1);
-        let state_layout = Layout::from_size_align(state_bytes, state_align)
-            .map_err(|_| ReserveError { available: self.available() })?;
+        let state_layout =
+            Layout::from_size_align(state_bytes, state_align).map_err(|_| ReserveError {
+                available: self.available(),
+            })?;
         for slot in 0..slots {
             if state_bytes != 0 && self.extended_state[slot].is_null() {
                 // SAFETY: the layout has non-zero size and the allocation is owned
@@ -99,7 +109,9 @@ impl StackPool {
                 // SAFETY：布局尺寸非零，分配由本只增不减的池持有到系统关闭。
                 let state = unsafe { alloc::alloc::alloc_zeroed(state_layout) };
                 if state.is_null() {
-                    return Err(ReserveError { available: self.available() });
+                    return Err(ReserveError {
+                        available: self.available(),
+                    });
                 }
                 self.extended_state[slot] = state;
             }
@@ -112,7 +124,9 @@ impl StackPool {
             // SAFETY：layout 尺寸非零；返回的内存只由本池持有，永不释放。
             let p = unsafe { alloc::alloc::alloc_zeroed(layout) } as *mut Stack;
             if p.is_null() {
-                return Err(ReserveError { available: self.available() });
+                return Err(ReserveError {
+                    available: self.available(),
+                });
             }
             self.heap[slot] = p;
         }
@@ -126,7 +140,9 @@ impl StackPool {
 
     /// 有栈可用的槽位总数。
     pub fn available(&self) -> usize {
-        (0..self.heap.len().max(STATIC_STACKS)).filter(|&s| self.has_stack(s)).count()
+        (0..self.heap.len().max(STATIC_STACKS))
+            .filter(|&s| self.has_stack(s))
+            .count()
     }
 
     /// `slot` 的栈底（最低地址）。调用者保证 [`StackPool::has_stack`]。
@@ -155,13 +171,13 @@ impl StackPool {
     ///
     /// # Safety
     /// 调用者保证该槽位有栈（[`StackPool::has_stack`]），且此刻没有任务在这块栈上运行。
-    pub unsafe fn prepare_initial_frame(&mut self, slot: usize, entry: extern "C" fn() -> !) -> TaskContext {
+    pub unsafe fn prepare_initial_frame(
+        &mut self,
+        slot: usize,
+        entry: extern "C" fn() -> !,
+    ) -> TaskContext {
         let base = self.base(slot);
-        let extended_state = self
-            .extended_state
-            .get(slot)
-            .copied()
-            .unwrap_or(null_mut());
+        let extended_state = self.extended_state.get(slot).copied().unwrap_or(null_mut());
         crate::arch::init_task_frame_with_extended_state(
             base.add(STACK_SIZE),
             entry,

@@ -12,13 +12,16 @@
 //!
 //! 约定：槽位 0 是引导线程（空闲时的落脚点），**不交给策略选择**；策略只在工作任务中挑选。
 
-pub use kernel_core::sched::balance::{BalanceParams, Balancer, Candidate, CoreLoad, PlaceError, Refusal};
+pub use kernel_core::sched::balance::{
+    BalanceParams, Balancer, Candidate, CoreLoad, PlaceError, Refusal,
+};
 pub use kernel_core::sched::class::{Arbiter, SchedClass, StrictOrder};
 pub use kernel_core::sched::limit::{CpuLimit, CpuLimitStats, LimitError};
 pub use kernel_core::sched::queue::{migrate, CoreQueue, QueueError};
 pub use kernel_core::sched::watchdog::{RunStreak, Watchdog, WatchdogLog, WatchdogReport};
 pub use kernel_core::sched::{
-    inherit, qos_change_allowed, Choice, ClassMask, Dequeue, Enqueue, LatencyHistogram, Preempt, Qos, QosParams, Requeue, SchedPolicy, QOS_CLASSES,
+    inherit, qos_change_allowed, Choice, ClassMask, Dequeue, Enqueue, LatencyHistogram, Preempt,
+    Qos, QosParams, Requeue, SchedPolicy, QOS_CLASSES,
 };
 
 /// 内核采用的调度策略：分时策略（默认构建）。
