@@ -225,6 +225,8 @@ smp-skip-init-deassert = []
 # Diagnostic only: start with SIPI directly for platforms that have already
 # placed APs into wait-for-SIPI during firmware handoff.
 smp-skip-init = []
+# Diagnostic only: force x2APIC MSR programming when CPUID advertises support.
+smp-force-x2apic = []
 # Diagnostic physical profile: discover firmware CPU topology but deliberately
 # do not start secondary processors.
 smp-bsp-only = []

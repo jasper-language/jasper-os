@@ -157,7 +157,18 @@ pub fn physical_base() -> u64 {
 /// 记录寄存器窗口位置（引导处理器上调用一次）；返回其物理地址。地址超出已映射的低 4 GiB 时返回 `None`。
 pub fn init_base(phys_offset: u64) -> Option<u64> {
     // SAFETY：IA32_APIC_BASE 在所有 64 位处理器上存在；只读。
-    let raw = unsafe { Msr::new(MSR_APIC_BASE).read() };
+    let mut raw = unsafe { Msr::new(MSR_APIC_BASE).read() };
+    #[cfg(feature = "smp-force-x2apic")]
+    {
+        // SAFETY: entry 1 always exists on x86_64. ECX[21] advertises x2APIC.
+        let supported = unsafe { core::arch::x86_64::__cpuid(1).ecx & (1 << 21) != 0 };
+        if !supported {
+            crate::early::mark("APIC X2APIC UNSUPPORTED");
+            return None;
+        }
+        raw |= APIC_BASE_X2APIC;
+        unsafe { Msr::new(MSR_APIC_BASE).write(raw) };
+    }
     let phys = raw & 0x000F_FFFF_FFFF_F000;
     if phys >= 1 << 32 {
         return None;
