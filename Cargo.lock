@@ -2292,6 +2292,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "user-timed"
+version = "0.1.0"
+dependencies = [
+ "jasper-rt",
+ "kernel-core",
+]
+
+[[package]]
+name = "user-timeprobe"
+version = "0.1.0"
+dependencies = [
+ "jasper-rt",
+ "kernel-core",
+]
+
+[[package]]
 name = "user-ui-service"
 version = "0.1.0"
 dependencies = [

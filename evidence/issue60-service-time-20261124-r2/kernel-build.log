@@ -1,0 +1,933 @@
+guarded-cargo: cpus=4-5 jobs=2 mem=19610860KiB disk=37060860KiB
+warning: method `insert` is never used
+   --> kernel-core/src/irq.rs:158:8
+    |
+133 | impl SlotSet {
+    | ------------ method in this implementation
+...
+158 |     fn insert(&mut self, slot: usize) -> bool {
+    |        ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: methods `permits` and `is_valid` are never used
+   --> kernel-core/src/mac.rs:277:14
+    |
+250 | impl MacRule {
+    | ------------ methods in this implementation
+...
+277 |     const fn permits(
+    |              ^^^^^^^
+...
+290 |     const fn is_valid(self) -> bool {
+    |              ^^^^^^^^
+
+warning: function `canonical_end` is never used
+   --> kernel-core/src/memory_capability.rs:724:4
+    |
+724 | fn canonical_end(start: u64, pages: u64) -> Option<u64> {
+    |    ^^^^^^^^^^^^^
+
+warning: method `reset` is never used
+   --> kernel-core/src/vmm_device.rs:142:8
+    |
+132 | impl QueueState {
+    | --------------- method in this implementation
+...
+142 |     fn reset(&mut self) {
+    |        ^^^^^
+
+warning: associated constant `NONE` is never used
+   --> kernel-core/src/vmm_device.rs:156:11
+    |
+155 | impl MmioWrite {
+    | -------------- associated constant in this implementation
+156 |     const NONE: Self = Self {
+    |           ^^^^
+
+warning: function `check_access` is never used
+   --> kernel-core/src/vmm_device.rs:388:4
+    |
+388 | fn check_access(offset: u64, width: u8) -> Result<(), MmioError> {
+    |    ^^^^^^^^^^^^
+
+warning: function `width_mask` is never used
+   --> kernel-core/src/vmm_device.rs:398:10
+    |
+398 | const fn width_mask(width: u8) -> u64 {
+    |          ^^^^^^^^^^
+
+warning: struct `Resource` is never constructed
+   --> kernel-core/src/virtio_gpu.rs:121:8
+    |
+121 | struct Resource {
+    |        ^^^^^^^^
+
+warning: struct `Scanout` is never constructed
+   --> kernel-core/src/virtio_gpu.rs:131:8
+    |
+131 | struct Scanout {
+    |        ^^^^^^^
+
+warning: function `nodata` is never used
+   --> kernel-core/src/virtio_gpu.rs:638:4
+    |
+638 | fn nodata(response: &mut [u8], header: ControlHeader) -> usize {
+    |    ^^^^^^
+
+warning: function `write_response` is never used
+   --> kernel-core/src/virtio_gpu.rs:643:4
+    |
+643 | fn write_response(response: &mut [u8], header: ControlHeader, command: u32) {
+    |    ^^^^^^^^^^^^^^
+
+warning: function `put_u32` is never used
+   --> kernel-core/src/virtio_gpu.rs:657:4
+    |
+657 | fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
+    |    ^^^^^^^
+
+warning: function `put_u64` is never used
+   --> kernel-core/src/virtio_gpu.rs:661:4
+    |
+661 | fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
+    |    ^^^^^^^
+
+warning: function `request_rect` is never used
+   --> kernel-core/src/virtio_gpu.rs:667:4
+    |
+667 | fn request_rect(request: &[u8]) -> (u32, u32, u32, u32) {
+    |    ^^^^^^^^^^^^
+
+warning: function `rect_inside` is never used
+   --> kernel-core/src/virtio_gpu.rs:676:4
+    |
+676 | fn rect_inside(rect: (u32, u32, u32, u32), width: u32, height: u32) -> bool {
+    |    ^^^^^^^^^^^
+
+warning: method `attenuates` is never used
+  --> kernel-core/src/workload.rs:78:8
+   |
+62 | impl ResourceLimits {
+   | ------------------- method in this implementation
+...
+78 |     fn attenuates(self, parent: Self) -> bool {
+   |        ^^^^^^^^^^
+
+warning: methods `checked_add`, `checked_sub`, and `within` are never used
+   --> kernel-core/src/workload.rs:96:8
+    |
+ 95 | impl ResourceUsage {
+    | ------------------ methods in this implementation
+ 96 |     fn checked_add(self, other: Self) -> Option<Self> {
+    |        ^^^^^^^^^^^
+...
+104 |     fn checked_sub(self, other: Self) -> Option<Self> {
+    |        ^^^^^^^^^^^
+...
+112 |     fn within(self, limits: ResourceLimits) -> bool {
+    |        ^^^^^^
+
+warning: methods `checked_add` and `checked_sub` are never used
+   --> kernel-core/src/workload.rs:130:8
+    |
+129 | impl IoUsage {
+    | ------------ methods in this implementation
+130 |     fn checked_add(self, other: Self) -> Option<Self> {
+    |        ^^^^^^^^^^^
+...
+137 |     fn checked_sub(self, other: Self) -> Option<Self> {
+    |        ^^^^^^^^^^^
+
+warning: method `can_transition` is never used
+   --> kernel-core/src/workload.rs:243:8
+    |
+238 | impl WorkloadState {
+    | ------------------ method in this implementation
+...
+243 |     fn can_transition(self, next: Self) -> bool {
+    |        ^^^^^^^^^^^^^^
+
+warning: method `is_valid` is never used
+  --> kernel-core/src/sandbox_image.rs:55:14
+   |
+54 | impl ImageVersion {
+   | ----------------- method in this implementation
+55 |     const fn is_valid(self) -> bool {
+   |              ^^^^^^^^
+
+warning: method `is_valid` is never used
+  --> kernel-core/src/sandbox_image.rs:74:14
+   |
+73 | impl SignedImage {
+   | ---------------- method in this implementation
+74 |     const fn is_valid(self) -> bool {
+   |              ^^^^^^^^
+
+warning: method `is_valid` is never used
+  --> kernel-core/src/sandbox_image.rs:88:14
+   |
+87 | impl ImageSpec {
+   | -------------- method in this implementation
+88 |     const fn is_valid(self) -> bool {
+   |              ^^^^^^^^
+
+warning: method `is_valid` is never used
+  --> kernel-core/src/sandbox_launch.rs:72:14
+   |
+71 | impl NetworkPolicyRef {
+   | --------------------- method in this implementation
+72 |     const fn is_valid(self) -> bool {
+   |              ^^^^^^^^
+
+warning: function `attenuates_limits` is never used
+   --> kernel-core/src/sandbox_launch.rs:735:4
+    |
+735 | fn attenuates_limits(child: ResourceLimits, parent: ResourceLimits) -> bool {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: function `validate_rate` is never used
+   --> kernel-core/src/sandbox_launch.rs:744:4
+    |
+744 | fn validate_rate(
+    |    ^^^^^^^^^^^^^
+
+warning: function `validate_devices` is never used
+   --> kernel-core/src/sandbox_launch.rs:764:4
+    |
+764 | fn validate_devices(
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `validate_data` is never used
+   --> kernel-core/src/sandbox_launch.rs:793:4
+    |
+793 | fn validate_data(
+    |    ^^^^^^^^^^^^^
+
+warning: `kernel-core` (lib) generated 27 warnings
+warning: constant `CPU_SET_WORDS` is never used
+   --> kernel-core/src/smp.rs:471:7
+    |
+471 | const CPU_SET_WORDS: usize = MAX_CPUS.div_ceil(64);
+    |       ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kernel-core` (lib) generated 1 warning
+   Compiling jasper-kernel v0.1.0 (/home/auth/.codex/worktrees/c72b/jasper-os-public/kernel)
+warning: unused import: `self`
+ --> kernel/src/arch/x86_64/watchdog.rs:9:25
+  |
+9 | use kernel_core::acpi::{self, Wdat, WdatInstruction, WdatRegister};
+  |                         ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `smp`
+  --> kernel/src/arch/x86_64/watchdog.rs:15:19
+   |
+15 | use super::{port, smp};
+   |                   ^^^
+
+warning: unused import: `user::enter_exec`
+  --> kernel/src/arch/x86_64/mod.rs:63:16
+   |
+63 | pub(crate) use user::enter_exec;
+   |                ^^^^^^^^^^^^^^^^
+
+warning: unused import: `user::enter_syscall_return`
+  --> kernel/src/arch/x86_64/mod.rs:64:16
+   |
+64 | pub(crate) use user::enter_syscall_return;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+   --> kernel/src/arch/x86_64/apic.rs:158:9
+    |
+158 |     let mut raw = unsafe { Msr::new(MSR_APIC_BASE).read() };
+    |         ----^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `lat`
+   --> kernel/src/irq_demo.rs:559:9
+    |
+559 |     let lat = sched::latency(Qos::Interactive);
+    |         ^^^ help: if this is intentional, prefix it with an underscore: `_lat`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `done`
+   --> kernel/src/irq_demo.rs:560:9
+    |
+560 |     let done = INTERACTIVE_DONE.load(Ordering::Relaxed);
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_done`
+
+warning: value assigned to `vectors_per_cpu` is never read
+   --> kernel/src/msi_demo.rs:102:31
+    |
+102 |     let mut vectors_per_cpu = 0usize;
+    |                               ^^^^^^ this value is reassigned later and never used
+...
+107 |             vectors_per_cpu = range.count as usize;
+    |             -------------------------------------- `vectors_per_cpu` is overwritten here before the previous value is read
+    |
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `linux_clear_child_tid`
+     --> kernel/src/proc/mod.rs:10594:5
+      |
+10594 |     linux_clear_child_tid: u64,
+      |     ^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_linux_clear_child_tid`
+
+warning: unused variable: `parent_deaths`
+     --> kernel/src/proc/mod.rs:11624:5
+      |
+11624 |     parent_deaths: &mut Vec<(ObjId, u32)>,
+      |     ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_parent_deaths`
+
+warning: unused variable: `parent_deaths`
+     --> kernel/src/proc/mod.rs:11733:19
+      |
+11733 |     let (started, parent_deaths) = begin_exit_in_table(pid, code);
+      |                   ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_parent_deaths`
+
+warning: variable does not need to be mutable
+    --> kernel/src/bench_demo.rs:1964:9
+     |
+1964 |     let mut switch_planned_samples = 0usize;
+     |         ----^^^^^^^^^^^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: function `mask_timer` is never used
+  --> kernel/src/arch/x86_64/pic.rs:35:8
+   |
+35 | pub fn mask_timer() {
+   |        ^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `enter_exec` is never used
+  --> kernel/src/arch/x86_64/user.rs:53:15
+   |
+53 | pub unsafe fn enter_exec(entry: u64, stack: u64) -> ! {
+   |               ^^^^^^^^^^
+
+warning: function `enter_syscall_return` is never used
+  --> kernel/src/arch/x86_64/user.rs:99:15
+   |
+99 | pub unsafe fn enter_syscall_return(
+   |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+   --> kernel/src/arch/x86_64/user.rs:165:18
+    |
+165 | struct SyncFrame(UnsafeCell<SyscallReturnFrame>);
+    |        --------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |        |
+    |        field in this struct
+    |
+    = help: consider removing this field
+
+warning: static `SYSCALL_RETURN_FRAMES` is never used
+   --> kernel/src/arch/x86_64/user.rs:176:8
+    |
+176 | static SYSCALL_RETURN_FRAMES: [SyncFrame; kernel_core::smp::MAX_CPUS] =
+    |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `return_frame` is never used
+   --> kernel/src/arch/x86_64/user.rs:181:4
+    |
+181 | fn return_frame(index: usize) -> Option<&'static SyncFrame> {
+    |    ^^^^^^^^^^^^
+
+warning: function `jsr_enter_exec` is never used
+  --> kernel/src/arch/x86_64/user.rs:64:8
+   |
+64 |     fn jsr_enter_exec(entry: u64, stack: u64, cs: u64, ss: u64) -> !;
+   |        ^^^^^^^^^^^^^^
+
+warning: function `jsr_enter_syscall_return_regs` is never used
+   --> kernel/src/arch/x86_64/user.rs:209:8
+    |
+209 |     fn jsr_enter_syscall_return_regs(frame: *const SyscallReturnFrame) -> !;
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACTION_SET_COUNTDOWN` is never used
+  --> kernel/src/arch/x86_64/watchdog.rs:18:7
+   |
+18 | const ACTION_SET_COUNTDOWN: u8 = 6;
+   |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACTION_SET_RUNNING` is never used
+  --> kernel/src/arch/x86_64/watchdog.rs:19:7
+   |
+19 | const ACTION_SET_RUNNING: u8 = 9;
+   |       ^^^^^^^^^^^^^^^^^^
+
+warning: constant `ACTION_SET_REBOOT` is never used
+  --> kernel/src/arch/x86_64/watchdog.rs:20:7
+   |
+20 | const ACTION_SET_REBOOT: u8 = 17;
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `ACTION_SET_STATUS` is never used
+  --> kernel/src/arch/x86_64/watchdog.rs:21:7
+   |
+21 | const ACTION_SET_STATUS: u8 = 33;
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `TIMEOUT_SECONDS` is never used
+  --> kernel/src/arch/x86_64/watchdog.rs:23:7
+   |
+23 | const TIMEOUT_SECONDS: u32 = 60;
+   |       ^^^^^^^^^^^^^^^
+
+warning: function `run_driver_host` is never used
+   --> kernel/src/device_demo.rs:157:15
+    |
+157 | pub(crate) fn run_driver_host() -> Option<bool> {
+    |               ^^^^^^^^^^^^^^^
+
+warning: fields `dpi_x` and `dpi_y` are never read
+  --> kernel/src/display.rs:59:5
+   |
+55 | struct Runtime {
+   |        ------- fields in this struct
+...
+59 |     dpi_x: u32,
+   |     ^^^^^
+60 |     dpi_y: u32,
+   |     ^^^^^
+
+warning: method `blend_pixel` is never used
+   --> kernel/src/display.rs:845:8
+    |
+623 | impl Runtime {
+    | ------------ method in this implementation
+...
+845 |     fn blend_pixel(&mut self, x: u32, y: u32, red: u8, green: u8, blue: u8, coverage: u8) {
+    |        ^^^^^^^^^^^
+
+warning: static `BOOT_DEADLINE` is never used
+  --> kernel/src/early.rs:34:8
+   |
+34 | static BOOT_DEADLINE: AtomicU64 = AtomicU64::new(0);
+   |        ^^^^^^^^^^^^^
+
+warning: function `blend_pixel` is never used
+   --> kernel/src/early.rs:583:4
+    |
+583 | fn blend_pixel(x: u32, y: u32, red: u8, green: u8, blue: u8, coverage: u8) {
+    |    ^^^^^^^^^^^
+
+warning: function `read_pixel` is never used
+   --> kernel/src/early.rs:604:4
+    |
+604 | fn read_pixel(x: u32, y: u32) -> Option<(u8, u8, u8)> {
+    |    ^^^^^^^^^^
+
+warning: function `create_in` is never used
+  --> kernel/src/exit_state.rs:38:15
+   |
+38 | pub(crate) fn create_in(t: &mut Table) -> Option<ObjId> {
+   |               ^^^^^^^^^
+
+warning: static `USER_HELLO` is never used
+  --> kernel/src/first_program.rs:23:8
+   |
+23 | static USER_HELLO: &[u8] = include_bytes!(env!("JSR_USER_HELLO"));
+   |        ^^^^^^^^^^
+
+warning: field `sender_security` is never read
+   --> kernel/src/ipc.rs:109:5
+    |
+ 99 | struct Message {
+    |        ------- field in this struct
+...
+109 |     sender_security: SecurityContext,
+    |     ^^^^^^^^^^^^^^^
+
+warning: function `queued_sender_security` is never used
+   --> kernel/src/ipc.rs:426:15
+    |
+426 | pub(crate) fn queued_sender_security(t: &mut Table, endpoint: ObjId) -> Option<SecurityContext> {
+    |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `probe_duplicate` is never used
+  --> kernel/src/kmain.rs:64:19
+   |
+56 | impl BootCtx {
+   | ------------ method in this implementation
+...
+64 |     pub(crate) fn probe_duplicate(&mut self, stage: Stage) -> bool {
+   |                   ^^^^^^^^^^^^^^^
+
+warning: associated function `borrowed` is never used
+   --> kernel/src/mm/space.rs:110:19
+    |
+ 86 | impl VmSpace {
+    | ------------ associated function in this implementation
+...
+110 |     pub(crate) fn borrowed(root: arch::SpaceRoot) -> Result<Self, MapError> {
+    |                   ^^^^^^^^
+
+warning: function `linux_metadata_capacity` is never used
+  --> kernel/src/proc/mod.rs:74:21
+   |
+74 | pub(crate) const fn linux_metadata_capacity() -> usize {
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `linux_global_metadata_capacity` is never used
+  --> kernel/src/proc/mod.rs:79:21
+   |
+79 | pub(crate) const fn linux_global_metadata_capacity() -> usize {
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `LINUX_LANDLOCK_HANDLE_BASE` is never used
+   --> kernel/src/proc/mod.rs:130:7
+    |
+130 | const LINUX_LANDLOCK_HANDLE_BASE: u64 = 0x0000_9000_0000_0000;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `file_offset` and `flags` are never read
+   --> kernel/src/proc/mod.rs:995:5
+    |
+991 | struct SharedMapping {
+    |        ------------- fields in this struct
+...
+995 |     file_offset: u64,
+    |     ^^^^^^^^^^^
+996 |     flags: MapFlags,
+    |     ^^^^^
+
+warning: fields `linux_clone`, `linux_fork_regs`, `linux_fork_args`, `clone_rdx`, and `clone_r8` are never read
+    --> kernel/src/proc/mod.rs:1036:5
+     |
+1030 | struct ThreadStart {
+     |        ----------- fields in this struct
+...
+1036 |     linux_clone: bool,
+     |     ^^^^^^^^^^^
+...
+1039 |     linux_fork_regs: Option<[u64; 6]>,
+     |     ^^^^^^^^^^^^^^^
+1040 |     linux_fork_args: Option<[u64; 6]>,
+     |     ^^^^^^^^^^^^^^^
+1041 |     clone_rdx: u64,
+     |     ^^^^^^^^^
+1042 |     clone_r8: u64,
+     |     ^^^^^^^^
+     |
+     = note: `ThreadStart` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: function `app_in` is never used
+    --> kernel/src/proc/mod.rs:1215:15
+     |
+1215 | pub(crate) fn app_in(t: &mut kobj::Table, pid: ObjId) -> Option<u32> {
+     |               ^^^^^^
+
+warning: function `current_space_root` is never used
+    --> kernel/src/proc/mod.rs:9495:15
+     |
+9495 | pub(crate) fn current_space_root(pid: ObjId) -> Option<crate::arch::SpaceRoot> {
+     |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `subscription_quota` is never used
+     --> kernel/src/proc/mod.rs:12272:15
+      |
+12272 | pub(crate) fn subscription_quota(pid: ObjId) -> Option<kernel_core::memory_object::Usage> {
+      |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `bindings` is never used
+   --> kernel/src/assembly.rs:180:15
+    |
+180 | pub(crate) fn bindings() -> &'static [Binding] {
+    |               ^^^^^^^^
+
+warning: function `start_runtime_module` is never used
+   --> kernel/src/assembly.rs:834:15
+    |
+834 | pub(crate) fn start_runtime_module(module: &str) -> Result<(), assembly::AssemblyError> {
+    |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `submit_subscription_for` is never used
+    --> kernel/src/ring.rs:1786:15
+     |
+1786 | pub(crate) fn submit_subscription_for(pid:ObjId,ring:HandleId,sub:HandleId,args:kernel_core::subscription_abi::WaitArgs)->Result<u...
+     |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `revoke` is never used
+  --> kernel/src/net_policy.rs:42:15
+   |
+42 | pub(crate) fn revoke(
+   |               ^^^^^^
+
+warning: method `text` is never used
+  --> kernel/src/bench_demo.rs:79:8
+   |
+71 | impl ReportRow {
+   | -------------- method in this implementation
+...
+79 |     fn text(&self) -> &str {
+   |        ^^^^
+
+warning: method `push_text` is never used
+   --> kernel/src/bench_demo.rs:115:8
+    |
+ 89 | impl ReportLog {
+    | -------------- method in this implementation
+...
+115 |     fn push_text(&mut self, text: &str) {
+    |        ^^^^^^^^^
+
+warning: function `capture_console_line` is never used
+   --> kernel/src/bench_demo.rs:159:15
+    |
+159 | pub(crate) fn capture_console_line(text: &str) {
+    |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `CONTEXT_PROGRESS_STEP` is never used
+   --> kernel/src/bench_demo.rs:236:7
+    |
+236 | const CONTEXT_PROGRESS_STEP: usize = 100_000;
+    |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `CS_SAMPLE_PTRS` is never used
+   --> kernel/src/bench_demo.rs:973:8
+    |
+973 | static CS_SAMPLE_PTRS: [AtomicUsize; kernel_core::smp::MAX_CPUS] =
+    |        ^^^^^^^^^^^^^^
+
+warning: static `CS_DONE` is never used
+   --> kernel/src/bench_demo.rs:975:8
+    |
+975 | static CS_DONE: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+    |        ^^^^^^^
+
+warning: static `CS_NONE` is never used
+   --> kernel/src/bench_demo.rs:977:8
+    |
+977 | static CS_NONE: [AtomicU32; kernel_core::smp::MAX_CPUS] =
+    |        ^^^^^^^
+
+warning: static `CS_RETRIES` is never used
+   --> kernel/src/bench_demo.rs:979:8
+    |
+979 | static CS_RETRIES: [AtomicU32; kernel_core::smp::MAX_CPUS] =
+    |        ^^^^^^^^^^
+
+warning: static `CS_UNEXPECTED` is never used
+   --> kernel/src/bench_demo.rs:981:8
+    |
+981 | static CS_UNEXPECTED: [AtomicU32; kernel_core::smp::MAX_CPUS] =
+    |        ^^^^^^^^^^^^^
+
+warning: static `CS_VALID` is never used
+   --> kernel/src/bench_demo.rs:983:8
+    |
+983 | static CS_VALID: [AtomicU32; kernel_core::smp::MAX_CPUS] =
+    |        ^^^^^^^^
+
+warning: static `CS_SWITCHES` is never used
+   --> kernel/src/bench_demo.rs:985:8
+    |
+985 | static CS_SWITCHES: [AtomicUsize; kernel_core::smp::MAX_CPUS] =
+    |        ^^^^^^^^^^^
+
+warning: static `CS_LAST_SLOT` is never used
+   --> kernel/src/bench_demo.rs:987:8
+    |
+987 | static CS_LAST_SLOT: [AtomicUsize; kernel_core::smp::MAX_CPUS] =
+    |        ^^^^^^^^^^^^
+
+warning: static `CS_LAST_GENERATION` is never used
+   --> kernel/src/bench_demo.rs:989:8
+    |
+989 | static CS_LAST_GENERATION: [AtomicUsize; kernel_core::smp::MAX_CPUS] =
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: static `CS_LAST_TO_SLOT` is never used
+   --> kernel/src/bench_demo.rs:991:8
+    |
+991 | static CS_LAST_TO_SLOT: [AtomicUsize; kernel_core::smp::MAX_CPUS] =
+    |        ^^^^^^^^^^^^^^^
+
+warning: static `CS_LAST_TO_GENERATION` is never used
+   --> kernel/src/bench_demo.rs:993:8
+    |
+993 | static CS_LAST_TO_GENERATION: [AtomicUsize; kernel_core::smp::MAX_CPUS] =
+    |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `CS_READY` is never used
+   --> kernel/src/bench_demo.rs:995:8
+    |
+995 | static CS_READY: AtomicU32 = AtomicU32::new(0);
+    |        ^^^^^^^^
+
+warning: static `CS_RELEASE` is never used
+   --> kernel/src/bench_demo.rs:996:8
+    |
+996 | static CS_RELEASE: AtomicBool = AtomicBool::new(false);
+    |        ^^^^^^^^^^
+
+warning: static `CS_ABORT` is never used
+   --> kernel/src/bench_demo.rs:997:8
+    |
+997 | static CS_ABORT: AtomicBool = AtomicBool::new(false);
+    |        ^^^^^^^^
+
+warning: static `CS_EXPECTED` is never used
+   --> kernel/src/bench_demo.rs:998:8
+    |
+998 | static CS_EXPECTED: AtomicU32 = AtomicU32::new(0);
+    |        ^^^^^^^^^^^
+
+warning: static `CS_RELEASE_CYCLES` is never used
+   --> kernel/src/bench_demo.rs:999:8
+    |
+999 | static CS_RELEASE_CYCLES: AtomicUsize = AtomicUsize::new(0);
+    |        ^^^^^^^^^^^^^^^^^
+
+warning: static `CS_SWITCH_DEADLINE` is never used
+    --> kernel/src/bench_demo.rs:1000:8
+     |
+1000 | static CS_SWITCH_DEADLINE: AtomicUsize = AtomicUsize::new(0);
+     |        ^^^^^^^^^^^^^^^^^^
+
+warning: static `CS_ITERATIONS` is never used
+    --> kernel/src/bench_demo.rs:1001:8
+     |
+1001 | static CS_ITERATIONS: AtomicUsize = AtomicUsize::new(0);
+     |        ^^^^^^^^^^^^^
+
+warning: static `CS_REQUEST` is never used
+    --> kernel/src/bench_demo.rs:1002:8
+     |
+1002 | static CS_REQUEST: [AtomicU64; kernel_core::smp::MAX_CPUS] =
+     |        ^^^^^^^^^^
+
+warning: static `CS_PARTNER_ACK` is never used
+    --> kernel/src/bench_demo.rs:1004:8
+     |
+1004 | static CS_PARTNER_ACK: [AtomicU64; kernel_core::smp::MAX_CPUS] =
+     |        ^^^^^^^^^^^^^^
+
+warning: static `CS_PARTNER_RUNS` is never used
+    --> kernel/src/bench_demo.rs:1006:8
+     |
+1006 | static CS_PARTNER_RUNS: [AtomicU64; kernel_core::smp::MAX_CPUS] =
+     |        ^^^^^^^^^^^^^^^
+
+warning: static `CS_LOGGED_MEASURER_START` is never used
+    --> kernel/src/bench_demo.rs:1008:8
+     |
+1008 | static CS_LOGGED_MEASURER_START: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `CS_LOGGED_PARTNER_START` is never used
+    --> kernel/src/bench_demo.rs:1010:8
+     |
+1010 | static CS_LOGGED_PARTNER_START: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+     |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `CS_LOGGED_PARTNER_WAIT` is never used
+    --> kernel/src/bench_demo.rs:1012:8
+     |
+1012 | static CS_LOGGED_PARTNER_WAIT: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+     |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `CS_LOGGED_FIRST_RESUME` is never used
+    --> kernel/src/bench_demo.rs:1014:8
+     |
+1014 | static CS_LOGGED_FIRST_RESUME: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+     |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `CS_LOGGED_FIRST_MISS` is never used
+    --> kernel/src/bench_demo.rs:1016:8
+     |
+1016 | static CS_LOGGED_FIRST_MISS: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+     |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: static `CS_LOGGED_FIRST_UNEXPECTED` is never used
+    --> kernel/src/bench_demo.rs:1018:8
+     |
+1018 | static CS_LOGGED_FIRST_UNEXPECTED: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `CS_LOGGED_FIRST_PARTNER_RUN` is never used
+    --> kernel/src/bench_demo.rs:1020:8
+     |
+1020 | static CS_LOGGED_FIRST_PARTNER_RUN: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SWITCH_RETRY_BUDGET` is never used
+    --> kernel/src/bench_demo.rs:1023:7
+     |
+1023 | const SWITCH_RETRY_BUDGET: u32 = 64;
+     |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SWITCH_WORKERS_PER_CPU` is never used
+    --> kernel/src/bench_demo.rs:1024:7
+     |
+1024 | const SWITCH_WORKERS_PER_CPU: usize = 2;
+     |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `SWITCH_BASELINES` is never used
+    --> kernel/src/bench_demo.rs:1025:8
+     |
+1025 | static SWITCH_BASELINES: [AtomicU64; kernel_core::smp::MAX_CPUS] =
+     |        ^^^^^^^^^^^^^^^^
+
+warning: static `SWITCH_TARGETS` is never used
+    --> kernel/src/bench_demo.rs:1027:8
+     |
+1027 | static SWITCH_TARGETS: [AtomicU64; kernel_core::smp::MAX_CPUS] =
+     |        ^^^^^^^^^^^^^^
+
+warning: static `SWITCH_BASELINE_SET` is never used
+    --> kernel/src/bench_demo.rs:1029:8
+     |
+1029 | static SWITCH_BASELINE_SET: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+     |        ^^^^^^^^^^^^^^^^^^^
+
+warning: static `SWITCH_WORKERS_DONE` is never used
+    --> kernel/src/bench_demo.rs:1031:8
+     |
+1031 | static SWITCH_WORKERS_DONE: AtomicU32 = AtomicU32::new(0);
+     |        ^^^^^^^^^^^^^^^^^^^
+
+warning: static `SWITCH_LAST_REPORTED` is never used
+    --> kernel/src/bench_demo.rs:1032:8
+     |
+1032 | static SWITCH_LAST_REPORTED: [AtomicU64; kernel_core::smp::MAX_CPUS] =
+     |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `switch_deadline_reached` is never used
+    --> kernel/src/bench_demo.rs:1035:4
+     |
+1035 | fn switch_deadline_reached() -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `parallel_switch_measurer` is never used
+    --> kernel/src/bench_demo.rs:1040:4
+     |
+1040 | fn parallel_switch_measurer() {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `parallel_switch_partner` is never used
+    --> kernel/src/bench_demo.rs:1196:4
+     |
+1196 | fn parallel_switch_partner() {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `run_parallel_context_switch` is never used
+    --> kernel/src/bench_demo.rs:1596:4
+     |
+1596 | fn run_parallel_context_switch(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `ServiceCatalogModuleLifecycle` is never constructed
+  --> kernel/src/native_module_catalog.rs:10:19
+   |
+10 | pub(crate) struct ServiceCatalogModuleLifecycle {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+  --> kernel/src/native_module_catalog.rs:15:19
+   |
+14 | impl ServiceCatalogModuleLifecycle {
+   | ---------------------------------- associated function in this implementation
+15 |     pub(crate) fn new() -> Self {
+   |                   ^^^
+
+warning: constant `INSTALLATION_HANDLE_RIGHTS` is never used
+  --> kernel/src/native_install_handle.rs:18:18
+   |
+18 | pub(crate) const INSTALLATION_HANDLE_RIGHTS: Rights = Rights::READ.union(Rights::DUPLICATE);
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `installation` is never read
+  --> kernel/src/native_install_handle.rs:22:5
+   |
+21 | pub struct InstallationObj {
+   |            --------------- field in this struct
+22 |     installation: InstallationKey,
+   |     ^^^^^^^^^^^^
+
+warning: function `create` is never used
+  --> kernel/src/native_install_handle.rs:27:15
+   |
+27 | pub(crate) fn create(pid: ObjId, installation: InstallationKey) -> Result<HandleId, ProcError> {
+   |               ^^^^^^
+
+warning: function `key` is never used
+  --> kernel/src/native_install_handle.rs:38:15
+   |
+38 | pub(crate) fn key(
+   |               ^^^
+
+warning: fields `switching_started_cycles` and `switching_cause` are never read
+   --> kernel/src/sched/scheduler.rs:141:5
+    |
+128 | struct RunLeaf {
+    |        ------- fields in this struct
+...
+141 |     switching_started_cycles: u64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+142 |     switching_cause: &'static str,
+    |     ^^^^^^^^^^^^^^^
+
+warning: function `registry_capacity` is never used
+  --> kernel/src/workload.rs:55:15
+   |
+55 | pub(crate) fn registry_capacity() -> usize {
+   |               ^^^^^^^^^^^^^^^^^
+
+warning: feature `const_index` is declared but not used
+  --> kernel/src/lib.rs:24:12
+   |
+24 | #![feature(const_index)]
+   |            ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_features)]` (part of `#[warn(unused)]`) on by default
+
+warning: `jasper-kernel` (lib) generated 101 warnings (run `cargo fix --lib -p jasper-kernel` to apply 11 suggestions)
+warning: constant `BOOT_TIMEOUT_SECONDS` is never used
+  --> kernel/src/main.rs:38:11
+   |
+38 |     const BOOT_TIMEOUT_SECONDS: u64 = 60;
+   |           ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `jasper-kernel` (bin "jasper-kernel") generated 1 warning
+warning: unused dependency `aes`
+  --> kernel/Cargo.toml:22:1
+   |
+22 | aes = { version = "=0.9.4", default-features = false }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `aes`
+warning: unused dependency `crc`
+  --> kernel/Cargo.toml:20:1
+   |
+20 | crc = "=3.4.0"
+   | ^^^^^^^^^^^^^^
+   |
+help: consider removing the dependency on `crc`
+warning: unused dependency `xts-mode`
+  --> kernel/Cargo.toml:24:1
+   |
+24 | xts-mode = { version = "=0.6.0", default-features = false }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: consider removing the dependency on `xts-mode`
+warning: `jasper-kernel` (manifest) generated 3 warnings
+    Finished `release` profile [optimized] target(s) in 16.10s
+warning: the following packages contain code that will be rejected by a future version of Rust: aes v0.9.4, half v2.7.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`

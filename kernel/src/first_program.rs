@@ -34,6 +34,9 @@ static USER_AGENTPROBE: &[u8] = include_bytes!(env!("JSR_USER_AGENTPROBE"));
 #[cfg(feature = "service-info-verify")]
 static USER_INFOPROBE: &[u8] = include_bytes!(env!("JSR_USER_INFOPROBE"));
 
+#[cfg(feature = "service-time-verify")]
+static USER_TIMEPROBE: &[u8] = include_bytes!(env!("JSR_USER_TIMEPROBE"));
+
 #[cfg(feature = "native-install-list-cli-verify")]
 static USER_UPDATE_LIST_CLI: &[u8] = include_bytes!(env!("JSR_USER_CLI"));
 
@@ -51,6 +54,10 @@ static USER_CLI: &[u8] = include_bytes!(env!("JSR_USER_CLI"));
 /// 返回生产首程序使用的同一份不可变 ELF 镜像。
 /// Returns the same immutable ELF image used by the production first program.
 pub(crate) fn image() -> &'static [u8] {
+    #[cfg(feature = "service-time-verify")]
+    {
+        return USER_TIMEPROBE;
+    }
     #[cfg(feature = "service-info-verify")]
     {
         return USER_INFOPROBE;
@@ -92,6 +99,7 @@ pub(crate) fn image() -> &'static [u8] {
         return USER_CLI;
     }
     #[cfg(not(any(
+        feature = "service-time-verify",
         feature = "service-info-verify",
         feature = "terminal-session-verify",
         feature = "sandbox-launch-verify",
@@ -193,6 +201,20 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         abi::SYSTEM_CHANNEL_RECV,
         abi::SYSTEM_TIME_NOW,
     ]);
+    #[cfg(feature = "service-time-verify")]
+    let allowed = SyscallSet::of(&[
+        abi::SYSTEM_CONSOLE_WRITE,
+        abi::SYSTEM_ABI_GET,
+        abi::SYSTEM_MEMORY_MAP,
+        abi::SYSTEM_MEMORY_UNMAP,
+        abi::SYSTEM_PROCESS_EXIT,
+        abi::SYSTEM_PROCESS_SPAWN,
+        abi::SYSTEM_PROCESS_WAIT,
+        abi::SYSTEM_HANDLE_CLOSE,
+        abi::SYSTEM_CHANNEL_SEND,
+        abi::SYSTEM_CHANNEL_RECV,
+        abi::SYSTEM_TIME_DEADLINE_GET,
+    ]);
     #[cfg(feature = "sandbox-launch-verify")]
     #[cfg(not(feature = "native-install-abi-verify"))]
     let allowed = SyscallSet::of(&[
@@ -265,6 +287,7 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
         abi::SYSTEM_INSTALL_UPDATE_LIST,
     ]));
     #[cfg(not(any(
+        feature = "service-time-verify",
         feature = "service-info-verify",
         feature = "terminal-session-verify",
         feature = "sandbox-launch-verify",
@@ -321,6 +344,13 @@ pub(crate) fn run() -> (Option<proc::ProcState>, bool) {
     }
     #[cfg(feature = "service-info-verify")]
     if proc::set_app(pid, 0x4f46_4e49).is_err() {
+        kprintln!("[JSR-PROD-DIAG] first_program application_bind=false");
+        let _ = proc::reap(pid);
+        kobj::run_cleanup(usize::MAX);
+        return (None, false);
+    }
+    #[cfg(feature = "service-time-verify")]
+    if proc::set_app(pid, 0x454d_4954).is_err() {
         kprintln!("[JSR-PROD-DIAG] first_program application_bind=false");
         let _ = proc::reap(pid);
         kobj::run_cleanup(usize::MAX);

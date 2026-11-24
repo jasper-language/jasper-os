@@ -57,6 +57,23 @@ untrusted/unsynchronized state, and both widths. This wiring establishes the
 fact-source path only; it does not authenticate wall time or claim nanosecond
 physical accuracy.
 
+`service.time` now has an independently deployed process projection over that
+fact. `user/timed` receives one bootstrap Channel and the least capabilities
+needed for `system.abi.get` and the kernel monotonic read. Its versioned
+response carries Time64 and an exactly derived Time128 view, with idempotent
+replay, request conflict rejection, explicit deadline expiry, service
+generation and missing-capability failure. `user/timeprobe` exercises the
+process boundary end to end. This remains an untrusted monotonic projection;
+it does not publish Unix/TAI time and does not replace the kernel read or
+deadline enforcement boundary.
+
+QEMU/OVMF evidence for this process boundary is retained at
+`evidence/issue60-service-time-20261124-r2`: describe, sample, exact
+Time64/Time128 coherence, replay, deadline, protocol rejection, restart and
+missing-capability denial all pass with the first program exiting at code zero
+and reclaiming its resources. It is not evidence of clock accuracy or wall-time
+trust.
+
 Time sources will be layered without a new time authority:
 
 - Kernel: clock reads, counter domains, deadlines/wakeups and controlled

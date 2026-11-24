@@ -939,6 +939,7 @@ const FULL: &[Step] = &[
     feature = "update-agent-verify",
     feature = "terminal-session-verify",
     feature = "service-info-verify",
+    feature = "service-time-verify",
     feature = "driver-host-journal-verify",
     feature = "iommu-dma-verify",
 )))]
@@ -2204,7 +2205,8 @@ mod dedicated {
         feature = "native-install-list-cli-verify",
         feature = "native-install-abi-verify",
         feature = "update-agent-verify",
-        feature = "service-info-verify"
+        feature = "service-info-verify",
+        feature = "service-time-verify"
     ))
 ))]
 mod dedicated {
@@ -2245,6 +2247,40 @@ mod dedicated {
     use super::*;
 
     pub const NAME: &str = "service-info";
+
+    fn finish(_: &mut BootCtx) {
+        let (state, reclaimed) = crate::first_program::run();
+        kprintln!(
+            "[JSR-PROD] first_program state={:?} reclaimed={}",
+            state,
+            reclaimed
+        );
+        let ok = state == Some(crate::proc::ProcState::Exited { code: 0 }) && reclaimed;
+        exit_on(u64::from(!ok));
+    }
+
+    pub const PLAN: &[&[Step]] = &[
+        PREFIX,
+        &[
+            st(Stage::Space),
+            case("mm-space", Stage::Space, "mm", mm_space),
+            st(Stage::Smp),
+            case("smp-checks", Stage::Smp, "smp", smp_checks),
+        ],
+        &[
+            st(Stage::HighRes),
+            st(Stage::IdleTick),
+            st(Stage::UserRuntime),
+            PlanItem::Finish(finish),
+        ],
+    ];
+}
+
+#[cfg(all(feature = "service-time-verify", target_arch = "x86_64"))]
+mod dedicated {
+    use super::*;
+
+    pub const NAME: &str = "service-time";
 
     fn finish(_: &mut BootCtx) {
         let (state, reclaimed) = crate::first_program::run();
@@ -2564,6 +2600,7 @@ mod dedicated {
     feature = "update-agent-verify",
     feature = "terminal-session-verify",
     feature = "service-info-verify",
+    feature = "service-time-verify",
     feature = "driver-host-journal-verify",
     feature = "iommu-dma-verify",
 ))]

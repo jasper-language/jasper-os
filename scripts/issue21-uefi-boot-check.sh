@@ -176,6 +176,7 @@ case "$MODE" in
   update-list) KERNEL_FEATURES=native-install-list-cli-verify ;;
   update-agent) KERNEL_FEATURES=lifecycle-ab-health,update-agent-verify ;;
   service-info) KERNEL_FEATURES=service-info-verify ;;
+  service-time) KERNEL_FEATURES=service-time-verify ;;
   driver-host-journal) KERNEL_FEATURES=driver-host-journal-verify ;;
   iommu-dma) KERNEL_FEATURES=iommu-dma-verify ;;
   bench-smp) KERNEL_FEATURES=smp-matrix-only,bench-exit,bench-smoke ;;
@@ -202,7 +203,7 @@ if [ -n "${ISSUE21_EXTRA_KERNEL_FEATURES:-}" ]; then
   KERNEL_FEATURES="$KERNEL_FEATURES,${ISSUE21_EXTRA_KERNEL_FEATURES}"
 fi
 KERNEL_DEFAULT_FEATURES=()
-if [ "$MODE" = terminal-recovery ] || [ "$MODE" = update-agent ] || [ "$MODE" = service-info ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ]; then
+if [ "$MODE" = terminal-recovery ] || [ "$MODE" = update-agent ] || [ "$MODE" = service-info ] || [ "$MODE" = service-time ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ]; then
   KERNEL_DEFAULT_FEATURES=(--no-default-features)
 fi
 if [ "$PREBUILT" = 1 ]; then
@@ -377,7 +378,7 @@ QEMU_EXTRA=(-monitor none)
 if [ -n "${ISSUE21_MONITOR_SOCKET:-}" ]; then
   QEMU_EXTRA=(-monitor "unix:$ISSUE21_MONITOR_SOCKET,server=on,wait=off")
 fi
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = service-info ] || [ "$MODE" = bench-smp ] || [ "$MODE" = bench-switch-diagnostic ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = compat-wine ] || [ "$MODE" = compat-jvm ] || [ "$MODE" = compat-dotnet ] || [ "$MODE" = compat-darling ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = terminal-recovery ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = service-info ] || [ "$MODE" = service-time ] || [ "$MODE" = bench-smp ] || [ "$MODE" = bench-switch-diagnostic ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = compat-wine ] || [ "$MODE" = compat-jvm ] || [ "$MODE" = compat-dotnet ] || [ "$MODE" = compat-darling ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
   if [ "$MODE" = compat-jvm ] || [ "$MODE" = compat-dotnet ]; then
     CPU="${ISSUE21_QEMU_CPU:-max,-avx,-avx2}"
   else
@@ -478,7 +479,7 @@ rc=$?
 set -e
 exec 9>&-
 printf '%s\n' "$rc" >"$OUT/qemu.rc"
-if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = service-info ] || [ "$MODE" = bench-smp ] || [ "$MODE" = bench-switch-diagnostic ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = compat-wine ] || [ "$MODE" = compat-jvm ] || [ "$MODE" = compat-dotnet ] || [ "$MODE" = compat-darling ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
+if [ "$MODE" = root-exec ] || [ "$MODE" = sandbox-launch ] || [ "$MODE" = native-install-abi ] || [ "$MODE" = terminal-session ] || [ "$MODE" = update-list ] || [ "$MODE" = update-agent ] || [ "$MODE" = service-info ] || [ "$MODE" = service-time ] || [ "$MODE" = bench-smp ] || [ "$MODE" = bench-switch-diagnostic ] || [ "$MODE" = driver-host-journal ] || [ "$MODE" = iommu-dma ] || [ "$MODE" = android-ecosystem ] || [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] || [ "$MODE" = compat-wine ] || [ "$MODE" = compat-jvm ] || [ "$MODE" = compat-dotnet ] || [ "$MODE" = compat-darling ] || [ "$MODE" = vulkan-metal2vulkan ] || [ "$MODE" = vulkan-swiftshader ]; then
   [ "$rc" -eq 33 ]
 else
   [ "$rc" -eq 124 ]
@@ -495,6 +496,13 @@ fi
 if [ "$MODE" = service-info ]; then
   grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
   grep -aq '\[JSR-SERVICE-INFO\] describe=true snapshot=true replay=true deadline=true protocol=true conflict=true conflict_status=1 restart=true denied_capability=true ok=true' "$OUT/serial.log"
+  ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
+  echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
+  exit 0
+fi
+if [ "$MODE" = service-time ]; then
+  grep -aq '^\[JSR-PROD\] first_program state=Some(Exited { code: 0 }) reclaimed=true' "$OUT/serial.log"
+  grep -aq '\[JSR-SERVICE-TIME\] describe=true sample=true replay=true deadline=true protocol=true conflict=true restart=true denied_capability=true time64_time128_coherent=true ok=true' "$OUT/serial.log"
   ! grep -aqE '^\[JSR-(PANIC|LINUX-ABI-FAIL|COMPAT-DYNAMIC-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
   echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
   exit 0

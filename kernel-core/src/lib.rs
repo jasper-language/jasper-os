@@ -249,6 +249,7 @@ pub mod file_event;
 
 pub mod extension_abi;
 pub mod service_protocol;
+pub mod service_time;
 pub mod clock_contract;
 pub mod clock_provider;
 pub mod service_info;

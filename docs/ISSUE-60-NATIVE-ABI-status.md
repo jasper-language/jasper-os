@@ -101,6 +101,36 @@ child process, native Channel transport, process/module kernel read
 boundaries, fresh restart, request replay/conflict and a deliberately reduced
 capability set for denial.
 
+The second independently deployed service vertical is `service.time`:
+
+- `kernel_core::service_time` defines a versioned describe/sample protocol,
+  request identity, deadline failure, replay/conflict identity, service
+  generation and a stable 80-byte response carrying Time64 plus the canonical
+  Time128 view;
+- `user/timed` is a separate least-capability process. It receives one
+  bootstrap Channel and can only project `system.time.deadline.get` and
+  `system.abi.get`; it cannot authorize, set wall time or create a second
+  clock;
+- `user/timeprobe` verifies describe, monotonic sampling, exact Time64/Time128
+  conversion, replay, expired request rejection, malformed-version rejection,
+  request-ID conflict, clean restart and missing-capability denial.
+
+This vertical intentionally leaves `system.time.deadline.get` as a
+`retain-kernel` operation. The kernel read/enforcement boundary remains the
+source of the fact; the service response is a bounded projection and does not
+claim a wall clock, trusted source or physical precision. The corresponding
+QEMU/OVMF acceptance mode is `service-time`. It now passes the real child
+process, native Channel, replay/conflict, deadline, restart, denial and complete
+resource-reclamation gate:
+
+```text
+[JSR-SERVICE-TIME] describe=true sample=true replay=true deadline=true
+protocol=true conflict=true restart=true denied_capability=true
+time64_time128_coherent=true ok=true
+```
+
+Evidence: `evidence/issue60-service-time-20261124-r2`.
+
 ## Framework updates incorporated
 
 The latest #24/#61/#77/#82/#84 constraints establish one shared Charset and
