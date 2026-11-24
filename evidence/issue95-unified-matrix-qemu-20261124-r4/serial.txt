@@ -1,0 +1,629 @@
+[2J[001;001H[=3h[2J[001;001H[2J[001;001H[8;042;160t[2J[001;001H[2J[001;001H[8;056;240t[2J[001;001HBdsDxe: loading Boot0002 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x4,0x0)
+BdsDxe: starting Boot0002 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x4,0x0)
+Jasper-OS boot manager starting
+selecting slot=A reason=ConfirmedRelease attempt=1 release=1 kernel_bytes=2875664
+INFO : Framebuffer info: FrameBufferInfo { byte_len: 4096000, width: 1280, height: 800, pixel_format: Bgr, bytes_per_pixel: 4, stride: 1280 }
+INFO : Jasper-OS mature bootloader common starting
+TRACE: exiting boot services
+INFO : Elf file loaded at Pointer {
+    addr: 0x000000001da4d000,
+    metadata: 2875664,
+}
+INFO : virtual_address_offset: 0x10000000000
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(4), offset: 0, virtual_addr: 0, physical_addr: 0, file_size: 36a34, mem_size: 36a34, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(5), offset: 36a40, virtual_addr: 37a40, physical_addr: 37a40, file_size: 106aef, mem_size: 106aef, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 13d530, virtual_addr: 13f530, physical_addr: 13f530, file_size: 153c8, mem_size: 15ad0, align: 1000 })
+INFO : Mapping bss section
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 152900, virtual_addr: 155900, physical_addr: 155900, file_size: 107680, mem_size: 221ab0, align: 1000 })
+INFO : Mapping bss section
+INFO : Entry point at: 0x10000037dc0
+INFO : Creating GDT at PhysAddr(0x273000)
+INFO : Map framebuffer
+INFO : Map physical memory
+INFO : Allocate bootinfo
+INFO : Create Memory Map
+INFO : Create bootinfo
+INFO : Jumping to kernel entry point at VirtAddr(0x10000037dc0)
+[JSR-EARLY] stage=entry cpu=x86_64 framebuffer=probe
+[JSR-EARLY] stage=K01 BOOTINFO
+[JSR-EARLY] stage=K02 MEMORY MAP
+[JSR-EARLY] stage=K03 KMAIN
+[JSR-EARLY] stage=console
+[JSR-BOOT] jasper-os rust kernel 0.0.1 x86_64
+[JSR-CONFIG] profile=standard valid=ok params=28
+[JSR-CONFIG] timer_hz=100
+[JSR-CONFIG] boot_ticks=25
+[JSR-CONFIG] quantum.0=2
+[JSR-CONFIG] quantum.1=2
+[JSR-CONFIG] quantum.2=4
+[JSR-CONFIG] quantum.3=4
+[JSR-CONFIG] decay_period=8
+[JSR-CONFIG] max_tasks=64
+[JSR-CONFIG] max_rt=8
+[JSR-CONFIG] kernel_stack_bytes=131072
+[JSR-CONFIG] watchdog_ticks=50
+[JSR-CONFIG] watchdog_log=16
+[JSR-CONFIG] cpu_burst_ticks=4
+[JSR-CONFIG] heap_grow_step=65536
+[JSR-CONFIG] pressure_low_permille=125
+[JSR-CONFIG] pressure_critical_permille=50
+[JSR-CONFIG] pressure_reserve_frames=256
+[JSR-CONFIG] max_process_frames=0
+[JSR-CONFIG] max_vm_guest_frames=32768
+[JSR-CONFIG] max_map_pages=1024
+[JSR-CONFIG] max_objects=1024
+[JSR-CONFIG] handles_per_process=64
+[JSR-CONFIG] max_endpoints_per_process=64
+[JSR-CONFIG] ipc_max_queue_bytes=1048576
+[JSR-CONFIG] ipc_max_process_bytes=4194304
+[JSR-CONFIG] ipc_max_total_bytes=16777216
+[JSR-CONFIG] trace_capacity=32
+[JSR-CONFIG] irq_queue_len=64
+[JSR-CAP] cpu_bootstrap_slots=128 tasks=64 objects=1024 handles=64 frames=0 rings=0 endpoints=64
+[ OK ] console elapsed_ns=4039859 heap_used=0 heap_peak=0 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6415749350,"component":"console","status":"ok","elapsed_ns":4039859,"heap_used":0,"heap_peak":0,"heap_mapped":0,"free_frames":0,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=console done_mask=0x1
+[JSR-EARLY] stage=platform
+[JSR-GDT] ok
+[JSR-XSAVE] enabled=true avx=true avx_size=256 capacity=832
+[JSR-IDT] ok
+[JSR-EXC] breakpoint handler verified
+[ OK ] platform elapsed_ns=2793225 heap_used=0 heap_peak=0 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6415749350,"component":"platform","status":"ok","elapsed_ns":2793225,"heap_used":0,"heap_peak":0,"heap_mapped":0,"free_frames":0,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=platform done_mask=0x3
+[JSR-EARLY] stage=timer
+[JSR-TICK] n=1
+[JSR-TICK] n=2
+[JSR-TICK] n=3
+[JSR-TICK] n=4
+[JSR-TICK] n=5
+[JSR-TICK] n=6
+[JSR-TICK] n=7
+[JSR-TICK] n=8
+[JSR-TICK] n=9
+[JSR-TICK] n=10
+[JSR-TICK] n=11
+[JSR-TICK] n=12
+[JSR-TICK] n=13
+[JSR-TICK] n=14
+[JSR-TICK] n=15
+[JSR-TICK] n=16
+[JSR-TICK] n=17
+[JSR-TICK] n=18
+[JSR-TICK] n=19
+[JSR-TICK] n=20
+[JSR-TICK] n=21
+[JSR-TICK] n=22
+[JSR-TICK] n=23
+[JSR-TICK] n=24
+[JSR-TICK] n=25
+[ OK ] timer elapsed_ns=240246701 heap_used=0 heap_peak=0 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6415749350,"component":"timer","status":"ok","elapsed_ns":240246701,"heap_used":0,"heap_peak":0,"heap_mapped":0,"free_frames":0,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=timer done_mask=0x7
+[JSR-EARLY] stage=frames
+[ OK ] frames elapsed_ns=2370050 heap_used=0 heap_peak=0 heap_delta=0 mapped_delta=0 frame_delta=-127358
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6415749350,"component":"frames","status":"ok","elapsed_ns":2370050,"heap_used":0,"heap_peak":0,"heap_mapped":0,"free_frames":127358,"heap_delta":0,"mapped_delta":0,"frame_delta":-127358}
+[JSR-BOOT-STAGE] done stage=frames done_mask=0xf
+[JSR-EARLY] stage=kernel_map
+[ OK ] kernel_map elapsed_ns=294344 heap_used=0 heap_peak=0 heap_delta=0 mapped_delta=0 frame_delta=1
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6415749350,"component":"kernel_map","status":"ok","elapsed_ns":294344,"heap_used":0,"heap_peak":0,"heap_mapped":0,"free_frames":127357,"heap_delta":0,"mapped_delta":0,"frame_delta":1}
+[JSR-BOOT-STAGE] done stage=kernel_map done_mask=0x1f
+[JSR-EARLY] stage=heap
+[JSR-TERM] capacity input=131072 output=131072 uart_pump=2048 available=521576448
+[ OK ] heap elapsed_ns=1865340 heap_used=262144 heap_peak=262144 heap_delta=262144 mapped_delta=335872 frame_delta=85
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6415749350,"component":"heap","status":"ok","elapsed_ns":1865340,"heap_used":262144,"heap_peak":262144,"heap_mapped":335872,"free_frames":127272,"heap_delta":262144,"mapped_delta":335872,"frame_delta":85}
+[JSR-BOOT-STAGE] done stage=heap done_mask=0x3f
+[JSR-EARLY] stage=capacity
+[JSR-SPAWN] child_limit=8 tasks=64 source=boot_capacity
+[JSR-WORKLOAD] capacity workloads=64 members=256 tasks=64 budget=521306112 dynamic=true
+[JSR-SCHED] qos quantum=[1, 1, 1, 1] decay=8 owed_cap=2000 timer_hz=100 tasks=64 dynamic=true
+[JSR-RING] capacity rings=64 in_flight=1024 tasks=64 objects=1024 dynamic=true
+[JSR-IPC] capacity endpoints=8 queue_bytes=262144 process_bytes=1048576 total_bytes=16777216 tasks=64 objects=1024 budget=521240576 dynamic=true
+[JSR-SANDBOX] capacity sandboxes=64 workloads=64 budget=521240576 dynamic=true
+[JSR-SANDBOX-STORAGE] capacity images=128 layers=2048 volumes=512 sandboxes=64 budget=521240576 dynamic=true
+[ OK ] capacity elapsed_ns=5313007 heap_used=369664 heap_peak=369664 heap_delta=107520 mapped_delta=65536 frame_delta=16
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6415749350,"component":"capacity","status":"ok","elapsed_ns":5313007,"heap_used":369664,"heap_peak":369664,"heap_mapped":401408,"free_frames":127256,"heap_delta":107520,"mapped_delta":65536,"frame_delta":16}
+[JSR-BOOT-STAGE] done stage=capacity done_mask=0x7f
+[JSR-EARLY] stage=devices
+[JSR-EARLY] stage=DEVICES SKIP PROFILE
+[ OK ] devices elapsed_ns=948466 heap_used=369664 heap_peak=369664 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6415749350,"component":"devices","status":"ok","elapsed_ns":948466,"heap_used":369664,"heap_peak":369664,"heap_mapped":401408,"free_frames":127256,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=devices done_mask=0xff
+[JSR-EARLY] stage=profile
+[JSR-PROFILE] table idx=0 name=headless valid=true modules=9 services=25 capabilities=10 min_tasks=32 min_objects=256 hot_load=0
+[JSR-PROFILE] table idx=1 name=headless-min valid=true modules=5 services=20 capabilities=5 min_tasks=32 min_objects=128 hot_load=0
+[JSR-PROFILE] active name=bench-head valid=true params=standard modules=8 services=24 capabilities=9 guarantees=2 dynamic=true
+[ OK ] profile elapsed_ns=3747107 heap_used=370432 heap_peak=370704 heap_delta=768 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6415749350,"component":"profile","status":"ok","elapsed_ns":3747107,"heap_used":370432,"heap_peak":370704,"heap_mapped":401408,"free_frames":127256,"heap_delta":768,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=profile done_mask=0x1ff
+[JSR-EARLY] stage=assembly
+[JSR-EARLY] stage=ASM PLAN
+[JSR-ASSEMBLY] capacity modules=8 capabilities=9 services=24 metadata=1688 budget=509024 dynamic=true
+[JSR-EARLY] stage=ASM CORE
+[JSR-LIFE] release_dispatch closing_locks=true outside_lock=5 none=11 none_empty=true destroyed_when_none=0 hooks_match_registry=true
+[JSR-ASSEMBLY] activate module=core objects=1024
+[JSR-EARLY] stage=ASM OK CORE
+[JSR-EARLY] stage=ASM MEMORY
+[JSR-EARLY] stage=ASM OK MEMORY
+[JSR-EARLY] stage=ASM TIME
+[JSR-EARLY] stage=ASM OK TIME
+[JSR-EARLY] stage=ASM SCHED
+[JSR-ASSEMBLY] activate module=sched tasks=64 stacks=64
+[JSR-EARLY] stage=ASM OK SCHED
+[JSR-EARLY] stage=ASM CHANNEL
+[JSR-EARLY] stage=ASM OK CHANNEL
+[JSR-EARLY] stage=ASM REALTIME
+[JSR-ASSEMBLY] activate module=realtime rt=8
+[JSR-EARLY] stage=ASM OK REALTIME
+[JSR-EARLY] stage=ASM JOB
+[JSR-ASSEMBLY] activate module=job queue=empty
+[JSR-EARLY] stage=ASM OK JOB
+[JSR-EARLY] stage=ASM ASYNC
+[JSR-EARLY] stage=ASM OK ASYNC
+[JSR-ASSEMBLY] module=core order=0 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=memory order=1 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=time order=2 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=sched order=3 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=channel order=4 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=realtime order=5 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=job order=6 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=async order=7 state=ready reason= version=1.0.0
+[JSR-CAP] boot source=derived objects=1024 tasks=64 rt=8 task_stacks=64 mem_limit=477577216
+[JSR-K06] profile=bench-head ops=109 kernel_base=72 module_service=37 active_unavailable=8 unclaimed=0 gate_mismatch=0 ring=available time=available sync=available
+[JSR-ASSEMBLY] summary profile=bench-head modules=8 ready=8 failed=0 blocked=0 declared=9 published=9 pre_publish=0 audit=ok restart=system.module.error.already_started stop_core=system.module.error.in_use stop_devices=system.module.error.not_loaded generation=0 readers=0
+[ OK ] assembly elapsed_ns=164950256 heap_used=10411360 heap_peak=10411360 heap_delta=10040928 mapped_delta=10088448 frame_delta=2468
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6415749350,"component":"assembly","status":"ok","elapsed_ns":164950256,"heap_used":10411360,"heap_peak":10411360,"heap_mapped":10489856,"free_frames":124788,"heap_delta":10040928,"mapped_delta":10088448,"frame_delta":2468}
+[JSR-BOOT-STAGE] done stage=assembly done_mask=0x3ff
+[JSR-EARLY] stage=sched_mode
+[JSR-SCHED] mode=multi
+[JSR-CAPABILITY] domain=system.memory.boot-map state=verified inventory=complete discovered=142 supported=142 admitted=142 rejected=0 unsupported=0 enabled=142 exposed=142 verified=142 fault=none
+[JSR-CAPABILITY] domain=system.cpu.xstate state=exposed inventory=complete discovered=6 supported=6 admitted=3 rejected=0 unsupported=3 enabled=3 exposed=3 verified=0 fault=none
+[JSR-CAPABILITY] domain=system.device.pci-capabilities state=unsupported inventory=complete discovered=0 supported=0 admitted=0 rejected=0 unsupported=0 enabled=0 exposed=0 verified=0 fault=none
+[JSR-CAPABILITY] domain=system.network state=discovery-failed inventory=failed discovered=0 supported=0 admitted=0 rejected=0 unsupported=0 enabled=0 exposed=0 verified=0 fault=none
+[JSR-CAPABILITY] domain=system.device.gpu state=discovery-failed inventory=failed discovered=0 supported=0 admitted=0 rejected=0 unsupported=0 enabled=0 exposed=0 verified=0 fault=none
+[ OK ] sched_mode elapsed_ns=3147847 heap_used=10411360 heap_peak=10411360 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6415749350,"component":"sched_mode","status":"ok","elapsed_ns":3147847,"heap_used":10411360,"heap_peak":10411360,"heap_mapped":10489856,"free_frames":124788,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=sched_mode done_mask=0x7ff
+[JSR-EARLY] stage=space
+[ OK ] space elapsed_ns=713760 heap_used=10411360 heap_peak=10411360 heap_delta=0 mapped_delta=0 frame_delta=256
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6415749350,"component":"space","status":"ok","elapsed_ns":713760,"heap_used":10411360,"heap_peak":10411360,"heap_mapped":10489856,"free_frames":124532,"heap_delta":0,"mapped_delta":0,"frame_delta":256}
+[JSR-BOOT-STAGE] done stage=space done_mask=0xfff
+[JSR-EARLY] stage=smp
+[JSR-EARLY] stage=SMP DISCOVER
+[JSR-SMP] apic mode=xapic base=0xfee00000 bsp_id=0
+[JSR-IOAPIC] controllers=1 pins=24 exposed=2 unsupported=22 invalid=0 dropped=0
+[JSR-IOAPIC] line=0 name=serial vector=80 gsi_pin=4 controlled=true
+[JSR-IOAPIC] line=1 name=rtc vector=81 gsi_pin=8 controlled=true
+[JSR-SMP] firmware raw=2 enabled_records=2 disabled_records=0 duplicate_records=0 conflicting_duplicates=0 unique_enabled=2 unique_disabled=0 source=acpi.madt
+[JSR-EARLY] stage=SMP PREP
+[JSR-SMP] admit present=2 enabled=2 disabled=0 per_cpu_bytes=16384 required_bytes=32768 available_bytes=510083072 source=resource-budget
+[JSR-EARLY] stage=SMP START 1
+[JSR-EARLY] stage=AP SEND 1 apic=1 vector=0x1000
+[JSR-EARLY] stage=AP INIT ASSERT
+[JSR-EARLY] stage=AP INIT ASSERT OK
+[JSR-EARLY] stage=AP INIT DEASSERT
+[JSR-EARLY] stage=AP INIT DEASSERT WRITE DONE
+[JSR-EARLY] stage=AP INIT DEASSERT OK
+[JSR-EARLY] stage=AP SIPI 1
+[JSR-EARLY] stage=AP SIPI 1 OK
+[JSR-EARLY] stage=AP 1 RUST ENTRY apic=0x1
+[JSR-EARLY] stage=AP SIPI 2
+[JSR-EARLY] stage=AP 1 GDT apic=0x1
+[JSR-EARLY] stage=AP SIPI 2 OK
+[JSR-EARLY] stage=AP 1 IDT apic=0x1
+[JSR-XSAVE] enabled=true avx=true avx_size=256 capacity=832
+[JSR-EARLY] stage=AP 1 XSAVE apic=0x1
+[JSR-EARLY] stage=SMP WAIT 1
+[JSR-EARLY] stage=AP 1 SYSCALL apic=0x1
+[JSR-EARLY] stage=AP 1 APIC apic=0x1
+[JSR-EARLY] stage=AP 1 TIMER apic=0x1
+[JSR-EARLY] stage=SMP DONE
+[JSR-SMP] start present=2 online=2 failed=0 source=acpi.madt dropped=0 disabled=0
+[JSR-IRQ] topology source=smp_ready discovered=2 admitted=2 rejected=0 capacity=2 budget=497536 dynamic=true complete=true
+[ OK ] smp elapsed_ns=142200664 heap_used=10475168 heap_peak=11047216 heap_delta=63808 mapped_delta=602112 frame_delta=148
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6415749350,"component":"smp","status":"ok","elapsed_ns":142200664,"heap_used":10475168,"heap_peak":11047216,"heap_mapped":11091968,"free_frames":124384,"heap_delta":63808,"mapped_delta":602112,"frame_delta":148}
+[JSR-BOOT-STAGE] done stage=smp done_mask=0x1fff
+[JSR-EARLY] stage=highres
+[JSR-RT2] high_resolution=true legacy_tick_abi=true
+[ OK ] highres elapsed_ns=989591 heap_used=10475168 heap_peak=11047216 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6415749350,"component":"highres","status":"ok","elapsed_ns":989591,"heap_used":10475168,"heap_peak":11047216,"heap_mapped":11091968,"free_frames":124384,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=highres done_mask=0x3fff
+[JSR-EARLY] stage=idle_tick
+[JSR-NOHZ] configured power=tickless divisor=4 cpus=2
+[ OK ] idle_tick elapsed_ns=343597 heap_used=10475168 heap_peak=11047216 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6415749350,"component":"idle_tick","status":"ok","elapsed_ns":343597,"heap_used":10475168,"heap_peak":11047216,"heap_mapped":11091968,"free_frames":124384,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=idle_tick done_mask=0x7fff
+[JSR-EARLY] stage=user_runtime
+[JSR-STAGE] user_runtime embedded_programs=true
+[ OK ] user_runtime elapsed_ns=148972 heap_used=10475168 heap_peak=11047216 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6415749350,"component":"user_runtime","status":"ok","elapsed_ns":148972,"heap_used":10475168,"heap_peak":11047216,"heap_mapped":11091968,"free_frames":124384,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=user_runtime done_mask=0xffff
+[JSR-PLAN] finish plan=physical-bench stages=0xffff cases=0
+HW CPU VENDOR=AuthenticAMD FAMILY=6 MODEL=6 STEPPING=3 BRAND=QEMU TCG CPU version 2.5+
+HW CPU RAW_RECORDS=2 ENABLED_RECORDS=2 DISABLED_RECORDS=0 DUPLICATES=0 CONFLICTING_DUPLICATES=0 UNIQUE_ENABLED=2 UNIQUE_DISABLED=0 ADMITTED=2 ONLINE=2 PARTICIPATING=2
+HW CPU TOPOLOGY LOGICAL_PER_PACKAGE=2 CORES_PER_PACKAGE=2 THREADS_PER_CORE=1 NODES_PER_PROCESSOR=1 DIES_PER_PACKAGE=1 SMT=false SOURCE=cpuid.amd.8000001e+80000008
+HW TOPOLOGY PACKAGES=1 SOURCE=cpuid+firmware-inventory
+HW ISA EXTENSIONS=x86_64,sse2,ssse3,sse4_1,sse4_2,aes,xsave,osxsave,avx,f16c,rdrand,hypervisor,bmi1,avx2,bmi2,rdseed,smap,clflushopt,sha,svm,lzcnt,nx,rdtscp
+HW VIRTUALIZATION HYPERVISOR=none VMX=false SVM=true
+HW TIME BACKEND=tsc frequency_hz=3602213400 source=pit.channel2 nominal_frequency_hz=unknown bus_frequency_hz=unknown invariant=false rdtscp=true resolution_ns=1
+HW MEMORY USABLE_KIB=509432 FREE_KIB=497536 HEAP_TOTAL_KIB=10832 HEAP_USED_KIB=10229 HEAP_PEAK_KIB=10788 HEAP_FREE_KIB=602 HEAP_MAPPED_KIB=10832
+HW NUMA NODES=unavailable source=system.firmware.error.no_srat
+HW FIRMWARE VENDOR=unavailable VERSION=unavailable DATE=unavailable ACPI_OEM_ID=BOCHS ACPI_OEM_TABLE_ID=BXPC ACPI_OEM_REVISION=1 ACPI_CREATOR_ID=BXPC ACPI_CREATOR_REVISION=1 SMBIOS=unavailable
+HW BOARD VENDOR=unavailable PRODUCT=unavailable VERSION=unavailable SYSTEM_VENDOR=unavailable SYSTEM_PRODUCT=unavailable
+HW PLATFORM PROFILE=bench-head KERNEL=0.0.1 COMMIT=60f85f27a4c4
+HW CACHE level=1 type=data size_kib=64 shared_threads=1
+{"schema":"jasper.hardware.v1","kind":"cache","level":1,"cache_type":"data","size_bytes":65536,"shared_threads":1}
+HW CACHE level=1 type=instruction size_kib=64 shared_threads=1
+{"schema":"jasper.hardware.v1","kind":"cache","level":1,"cache_type":"instruction","size_bytes":65536,"shared_threads":1}
+HW CACHE level=2 type=unified size_kib=512 shared_threads=1
+{"schema":"jasper.hardware.v1","kind":"cache","level":2,"cache_type":"unified","size_bytes":524288,"shared_threads":1}
+HW CACHE level=3 type=unified size_kib=16384 shared_threads=2
+{"schema":"jasper.hardware.v1","kind":"cache","level":3,"cache_type":"unified","size_bytes":16777216,"shared_threads":2}
+{"schema":"jasper.hardware.v1","kind":"system","cpu_vendor":"AuthenticAMD","cpu_brand":"QEMU TCG CPU version 2.5+","family":6,"model":6,"stepping":3,"topology_source":"cpuid.amd.8000001e+80000008","packages":1,"packages_source":"cpuid+firmware-inventory","raw_cpu_records":2,"enabled_cpu_records":2,"disabled_cpu_records":0,"duplicate_cpu_records":0,"conflicting_duplicate_records":0,"unique_enabled_cpus":2,"unique_disabled_cpus":0,"admitted_cpus":2,"online_cpus":2,"participating_cpus":2,"logical_per_package":2,"cores_per_package":2,"threads_per_core":1,"nodes_per_processor":1,"dies_per_package":1,"isa_extensions":"x86_64,sse2,ssse3,sse4_1,sse4_2,aes,xsave,osxsave,avx,f16c,rdrand,hypervisor,bmi1,avx2,bmi2,rdseed,smap,clflushopt,sha,svm,lzcnt,nx,rdtscp","hypervisor":"none","vmx":false,"svm":true,"invariant_tsc":false,"rdtscp":true,"timer_backend":"tsc","tsc_hz":3602213400,"tsc_source":"pit.channel2","nominal_frequency_hz":null,"bus_frequency_hz":null,"timer_resolution_ns":1,"usable_kib":509432,"free_kib":497536,"heap_total_kib":10832,"heap_used_kib":10229,"heap_peak_kib":10788,"heap_free_kib":602,"heap_mapped_kib":10832,"numa_nodes":null,"numa_localities":null,"acpi_oem_id":"BOCHS","acpi_oem_table_id":"BXPC","acpi_oem_revision":1,"acpi_creator_id":"BXPC","acpi_creator_revision":1,"firmware_vendor":null,"firmware_version":null,"firmware_date":null,"board_vendor":null,"board_product":null,"board_version":null,"system_vendor":null,"system_product":null,"smbios_major":null,"smbios_minor":null,"profile":"bench-head","kernel":"0.0.1","commit":"60f85f27a4c4"}
+[JSR-CLOCK-FACT] scale=monotonic epoch=boot:6415749350 generation=6415749350 domain=1 source=architecture-timer trust=untrusted synchronized=false time64_ns=209766732 time128_sec=0 time128_fraction=3869513220382419760 resolution_ns=Nanoseconds(1) uncertainty=unknown
+[READY] HEADLESS bsp=0 raw_records=2 enabled_records=2 unique_enabled=2 unique_disabled=0 admitted=2 online=2 participating=2 usable_frames=127358 free_frames=124384 heap_mapped=11091968 ticks=25 capabilities=0x1ff
+[READY] CONSOLE / TERMINAL
+[SKIP] shell READY reason=authorized_jucs_command_not_run
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6415749350,"component":"shell","status":"skipped","reason":"authorized_jucs_command_not_run"}
+[SKIP] remote READY reason=network_service_profile_not_assembled
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6415749350,"component":"remote","status":"skipped","reason":"network_service_profile_not_assembled"}
+[SKIP] ui_services READY reason=headless_benchmark_profile
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6415749350,"component":"ui_services","status":"skipped","reason":"headless_benchmark_profile"}
+[SKIP] desktop READY reason=headless_benchmark_profile
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6415749350,"component":"desktop","status":"skipped","reason":"headless_benchmark_profile"}
+[SKIP] compat_assembly READY reason=benchmark_excludes_compatibility_profiles
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6415749350,"component":"compat_assembly","status":"skipped","reason":"benchmark_excludes_compatibility_profiles"}
+SMP CONCURRENT PERFORMANCE - SAME TESTS AS SINGLE CPU
+[JSR-BENCH] calibrate source=pit.channel2 cycles_per_second=3602213400 timer_hz=100
+SMP TOPOLOGY ONLINE=2 PROBED=2 PHYSICAL=2 LOGICAL=2
+[JSR-SMP-MEMORY] mode=SMP_SINGLE phase=before usable_kib=509432 free_kib=495544 used_kib=13888 heap_used_kib=10229 heap_peak_kib=10788 heap_free_kib=2590 heap_mapped_kib=12820
+[JSR-TSC-SKEW] mode=SMP_SINGLE cpus=1 upper_bound_ns=0 semantics=same_barrier_including_release_latency
+[JSR-SMP-BENCH] stage=start mode=SMP_SINGLE metric=TIMER.READ_OVERHEAD cpus=1
+[JSR-SMP-BENCH] stage=posted mode=SMP_SINGLE metric=TIMER.READ_OVERHEAD posted=0
+[JSR-SMP-BENCH] stage=ready mode=SMP_SINGLE metric=TIMER.READ_OVERHEAD ready=1/1
+[JSR-SMP-BENCH] stage=collected mode=SMP_SINGLE metric=TIMER.READ_OVERHEAD ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_SINGLE","name":"TIMER.READ_OVERHEAD","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":47,"p99_ns":48,"p999_ns":55,"p9999_ns":91,"p99999_ns":3222,"max_ns":27685}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_SINGLE","name":"TIMER.READ_OVERHEAD","planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"work_window_ns":7796370,"summarize_ns":3936363,"min_ns":45,"mean_ns":47,"p50_ns":47,"p90_ns":47,"p95_ns":47,"p99_ns":48,"p999_ns":55,"p9999_ns":91,"p99999_ns":3222,"max_ns":27685,"over_1us":6,"over_10us":1,"over_50us":0}
+[JSR-SMP-BENCH] stage=start mode=SMP_SINGLE metric=FRAME.ALLOC cpus=1
+[JSR-SMP-BENCH] stage=posted mode=SMP_SINGLE metric=FRAME.ALLOC posted=0
+[JSR-SMP-BENCH] stage=ready mode=SMP_SINGLE metric=FRAME.ALLOC ready=1/1
+[JSR-SMP-BENCH] stage=collected mode=SMP_SINGLE metric=FRAME.ALLOC ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_SINGLE","name":"FRAME.ALLOC","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":1756,"p99_ns":1913,"p999_ns":9710,"p9999_ns":187826,"p99999_ns":198238,"max_ns":198582}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_SINGLE","name":"FRAME.ALLOC","planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"work_window_ns":361508620,"summarize_ns":5011588,"min_ns":1660,"mean_ns":1825,"p50_ns":1756,"p90_ns":1783,"p95_ns":1792,"p99_ns":1913,"p999_ns":9710,"p9999_ns":187826,"p99999_ns":198238,"max_ns":198582,"over_1us":100000,"over_10us":99,"over_50us":25}
+[JSR-SMP-BENCH] stage=start mode=SMP_SINGLE metric=FRAME.FREE cpus=1
+[JSR-SMP-BENCH] stage=posted mode=SMP_SINGLE metric=FRAME.FREE posted=0
+[JSR-SMP-BENCH] stage=ready mode=SMP_SINGLE metric=FRAME.FREE ready=1/1
+[JSR-SMP-BENCH] stage=collected mode=SMP_SINGLE metric=FRAME.FREE ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_SINGLE","name":"FRAME.FREE","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":1745,"p99_ns":2896,"p999_ns":12080,"p9999_ns":40538,"p99999_ns":202061,"max_ns":213827}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_SINGLE","name":"FRAME.FREE","planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"work_window_ns":363210838,"summarize_ns":4722651,"min_ns":1666,"mean_ns":1794,"p50_ns":1745,"p90_ns":1771,"p95_ns":1781,"p99_ns":2896,"p999_ns":12080,"p9999_ns":40538,"p99999_ns":202061,"max_ns":213827,"over_1us":100000,"over_10us":109,"over_50us":8}
+[JSR-SMP-BENCH] stage=start mode=SMP_SINGLE metric=HEAP.ALLOC_FREE_64 cpus=1
+[JSR-SMP-BENCH] stage=posted mode=SMP_SINGLE metric=HEAP.ALLOC_FREE_64 posted=0
+[JSR-SMP-BENCH] stage=ready mode=SMP_SINGLE metric=HEAP.ALLOC_FREE_64 ready=1/1
+[JSR-SMP-BENCH] stage=collected mode=SMP_SINGLE metric=HEAP.ALLOC_FREE_64 ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_SINGLE","name":"HEAP.ALLOC_FREE_64","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":3599,"p99_ns":3737,"p999_ns":21013,"p9999_ns":194142,"p99999_ns":213606,"max_ns":272957}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_SINGLE","name":"HEAP.ALLOC_FREE_64","planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"work_window_ns":374756358,"summarize_ns":5126255,"min_ns":3451,"mean_ns":3714,"p50_ns":3599,"p90_ns":3653,"p95_ns":3669,"p99_ns":3737,"p999_ns":21013,"p9999_ns":194142,"p99999_ns":213606,"max_ns":272957,"over_1us":100000,"over_10us":240,"over_50us":38}
+[JSR-SMP-BENCH] stage=start mode=SMP_SINGLE metric=HEAP.ALLOC_FREE_4096 cpus=1
+[JSR-SMP-BENCH] stage=posted mode=SMP_SINGLE metric=HEAP.ALLOC_FREE_4096 posted=0
+[JSR-SMP-BENCH] stage=ready mode=SMP_SINGLE metric=HEAP.ALLOC_FREE_4096 ready=1/1
+[JSR-SMP-BENCH] stage=collected mode=SMP_SINGLE metric=HEAP.ALLOC_FREE_4096 ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_SINGLE","name":"HEAP.ALLOC_FREE_4096","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":3636,"p99_ns":3748,"p999_ns":16851,"p9999_ns":189595,"p99999_ns":202110,"max_ns":205403}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_SINGLE","name":"HEAP.ALLOC_FREE_4096","planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"work_window_ns":376587338,"summarize_ns":5030180,"min_ns":3515,"mean_ns":3734,"p50_ns":3636,"p90_ns":3682,"p95_ns":3696,"p99_ns":3748,"p999_ns":16851,"p9999_ns":189595,"p99999_ns":202110,"max_ns":205403,"over_1us":100000,"over_10us":171,"over_50us":38}
+[JSR-SMP-BENCH] stage=start mode=SMP_SINGLE metric=SYSCALLSET.CONTAINS.CURRENT cpus=1
+[JSR-SMP-BENCH] stage=posted mode=SMP_SINGLE metric=SYSCALLSET.CONTAINS.CURRENT posted=0
+[JSR-SMP-BENCH] stage=ready mode=SMP_SINGLE metric=SYSCALLSET.CONTAINS.CURRENT ready=1/1
+[JSR-SMP-BENCH] stage=collected mode=SMP_SINGLE metric=SYSCALLSET.CONTAINS.CURRENT ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_SINGLE","name":"SYSCALLSET.CONTAINS.CURRENT","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":40,"p99_ns":41,"p999_ns":47,"p9999_ns":208,"p99999_ns":7327,"max_ns":57269}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_SINGLE","name":"SYSCALLSET.CONTAINS.CURRENT","planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"work_window_ns":6674179,"summarize_ns":2404208,"min_ns":38,"mean_ns":41,"p50_ns":40,"p90_ns":40,"p95_ns":41,"p99_ns":41,"p999_ns":47,"p9999_ns":208,"p99999_ns":7327,"max_ns":57269,"over_1us":7,"over_10us":1,"over_50us":1}
+[JSR-SMP-BENCH] stage=start mode=SMP_SINGLE metric=SYSCALLSET.CONTAINS.U64-REFERENCE cpus=1
+[JSR-SMP-BENCH] stage=posted mode=SMP_SINGLE metric=SYSCALLSET.CONTAINS.U64-REFERENCE posted=0
+[JSR-SMP-BENCH] stage=ready mode=SMP_SINGLE metric=SYSCALLSET.CONTAINS.U64-REFERENCE ready=1/1
+[JSR-SMP-BENCH] stage=collected mode=SMP_SINGLE metric=SYSCALLSET.CONTAINS.U64-REFERENCE ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_SINGLE","name":"SYSCALLSET.CONTAINS.U64-REFERENCE","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":36,"p99_ns":36,"p999_ns":44,"p9999_ns":59,"p99999_ns":6987,"max_ns":28662}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_SINGLE","name":"SYSCALLSET.CONTAINS.U64-REFERENCE","planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"work_window_ns":6199512,"summarize_ns":2406333,"min_ns":34,"mean_ns":36,"p50_ns":36,"p90_ns":36,"p95_ns":36,"p99_ns":36,"p999_ns":44,"p9999_ns":59,"p99999_ns":6987,"max_ns":28662,"over_1us":5,"over_10us":1,"over_50us":0}
+[JSR-SMP-BENCH] stage=start mode=SMP_SINGLE metric=SYSCALLSET.SUBSET.CURRENT cpus=1
+[JSR-SMP-BENCH] stage=posted mode=SMP_SINGLE metric=SYSCALLSET.SUBSET.CURRENT posted=0
+[JSR-SMP-BENCH] stage=ready mode=SMP_SINGLE metric=SYSCALLSET.SUBSET.CURRENT ready=1/1
+[JSR-SMP-BENCH] stage=collected mode=SMP_SINGLE metric=SYSCALLSET.SUBSET.CURRENT ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_SINGLE","name":"SYSCALLSET.SUBSET.CURRENT","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":39,"p99_ns":40,"p999_ns":108,"p9999_ns":173,"p99999_ns":6545,"max_ns":39417}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_SINGLE","name":"SYSCALLSET.SUBSET.CURRENT","planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"work_window_ns":6605381,"summarize_ns":2489836,"min_ns":37,"mean_ns":40,"p50_ns":39,"p90_ns":39,"p95_ns":39,"p99_ns":40,"p999_ns":108,"p9999_ns":173,"p99999_ns":6545,"max_ns":39417,"over_1us":7,"over_10us":1,"over_50us":0}
+[JSR-SMP-BENCH] stage=start mode=SMP_SINGLE metric=SYSCALLSET.SUBSET.U64-REFERENCE cpus=1
+[JSR-SMP-BENCH] stage=posted mode=SMP_SINGLE metric=SYSCALLSET.SUBSET.U64-REFERENCE posted=0
+[JSR-SMP-BENCH] stage=ready mode=SMP_SINGLE metric=SYSCALLSET.SUBSET.U64-REFERENCE ready=1/1
+[JSR-SMP-BENCH] stage=collected mode=SMP_SINGLE metric=SYSCALLSET.SUBSET.U64-REFERENCE ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_SINGLE","name":"SYSCALLSET.SUBSET.U64-REFERENCE","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":32,"p99_ns":32,"p999_ns":39,"p9999_ns":47,"p99999_ns":4452,"max_ns":9755}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_SINGLE","name":"SYSCALLSET.SUBSET.U64-REFERENCE","planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"work_window_ns":5811322,"summarize_ns":2419527,"min_ns":30,"mean_ns":32,"p50_ns":32,"p90_ns":32,"p95_ns":32,"p99_ns":32,"p999_ns":39,"p9999_ns":47,"p99999_ns":4452,"max_ns":9755,"over_1us":3,"over_10us":0,"over_50us":0}
+[JSR-SMP-BENCH] stage=start mode=SMP_SINGLE metric=SYSCALLSET.COPY.CURRENT cpus=1
+[JSR-SMP-BENCH] stage=posted mode=SMP_SINGLE metric=SYSCALLSET.COPY.CURRENT posted=0
+[JSR-SMP-BENCH] stage=ready mode=SMP_SINGLE metric=SYSCALLSET.COPY.CURRENT ready=1/1
+[JSR-SMP-BENCH] stage=collected mode=SMP_SINGLE metric=SYSCALLSET.COPY.CURRENT ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_SINGLE","name":"SYSCALLSET.COPY.CURRENT","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":40,"p99_ns":41,"p999_ns":112,"p9999_ns":205,"p99999_ns":7616,"max_ns":27427}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_SINGLE","name":"SYSCALLSET.COPY.CURRENT","planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"work_window_ns":6769849,"summarize_ns":2373502,"min_ns":38,"mean_ns":41,"p50_ns":40,"p90_ns":40,"p95_ns":41,"p99_ns":41,"p999_ns":112,"p9999_ns":205,"p99999_ns":7616,"max_ns":27427,"over_1us":7,"over_10us":1,"over_50us":0}
+[JSR-SMP-BENCH] stage=start mode=SMP_SINGLE metric=SYSCALLSET.COPY.U64-REFERENCE cpus=1
+[JSR-SMP-BENCH] stage=posted mode=SMP_SINGLE metric=SYSCALLSET.COPY.U64-REFERENCE posted=0
+[JSR-SMP-BENCH] stage=ready mode=SMP_SINGLE metric=SYSCALLSET.COPY.U64-REFERENCE ready=1/1
+[JSR-SMP-BENCH] stage=collected mode=SMP_SINGLE metric=SYSCALLSET.COPY.U64-REFERENCE ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_SINGLE","name":"SYSCALLSET.COPY.U64-REFERENCE","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":33,"p99_ns":34,"p999_ns":103,"p9999_ns":206,"p99999_ns":6574,"max_ns":13739}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_SINGLE","name":"SYSCALLSET.COPY.U64-REFERENCE","planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"work_window_ns":5944536,"summarize_ns":2494040,"min_ns":31,"mean_ns":33,"p50_ns":33,"p90_ns":33,"p95_ns":33,"p99_ns":34,"p999_ns":103,"p9999_ns":206,"p99999_ns":6574,"max_ns":13739,"over_1us":5,"over_10us":1,"over_50us":0}
+[JSR-SMP-BENCH] stage=start mode=SMP_SINGLE metric=SPAWN.DECODE.CURRENT cpus=1
+[JSR-SMP-BENCH] stage=posted mode=SMP_SINGLE metric=SPAWN.DECODE.CURRENT posted=0
+[JSR-SMP-BENCH] stage=ready mode=SMP_SINGLE metric=SPAWN.DECODE.CURRENT ready=1/1
+[JSR-SMP-BENCH] stage=collected mode=SMP_SINGLE metric=SPAWN.DECODE.CURRENT ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_SINGLE","name":"SPAWN.DECODE.CURRENT","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":92,"p99_ns":104,"p999_ns":114,"p9999_ns":2171,"p99999_ns":23699,"max_ns":95022}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_SINGLE","name":"SPAWN.DECODE.CURRENT","planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"work_window_ns":12091968,"summarize_ns":3114803,"min_ns":89,"mean_ns":94,"p50_ns":92,"p90_ns":94,"p95_ns":102,"p99_ns":104,"p999_ns":114,"p9999_ns":2171,"p99999_ns":23699,"max_ns":95022,"over_1us":12,"over_10us":3,"over_50us":1}
+[JSR-SMP-BENCH] stage=start mode=SMP_SINGLE metric=SPAWN.CALLS.DECODE.CURRENT cpus=1
+[JSR-SMP-BENCH] stage=posted mode=SMP_SINGLE metric=SPAWN.CALLS.DECODE.CURRENT posted=0
+[JSR-SMP-BENCH] stage=ready mode=SMP_SINGLE metric=SPAWN.CALLS.DECODE.CURRENT ready=1/1
+[JSR-SMP-BENCH] stage=collected mode=SMP_SINGLE metric=SPAWN.CALLS.DECODE.CURRENT ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_SINGLE","name":"SPAWN.CALLS.DECODE.CURRENT","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":59,"p99_ns":68,"p999_ns":71,"p9999_ns":2082,"p99999_ns":25046,"max_ns":43015}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_SINGLE","name":"SPAWN.CALLS.DECODE.CURRENT","planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"work_window_ns":8766910,"summarize_ns":2851006,"min_ns":57,"mean_ns":61,"p50_ns":59,"p90_ns":61,"p95_ns":62,"p99_ns":68,"p999_ns":71,"p9999_ns":2082,"p99999_ns":25046,"max_ns":43015,"over_1us":11,"over_10us":3,"over_50us":0}
+[JSR-SMP-BENCH] stage=start mode=SMP_SINGLE metric=SPAWN.CALLS.DECODE.U64-REFERENCE cpus=1
+[JSR-SMP-BENCH] stage=posted mode=SMP_SINGLE metric=SPAWN.CALLS.DECODE.U64-REFERENCE posted=0
+[JSR-SMP-BENCH] stage=ready mode=SMP_SINGLE metric=SPAWN.CALLS.DECODE.U64-REFERENCE ready=1/1
+[JSR-SMP-BENCH] stage=collected mode=SMP_SINGLE metric=SPAWN.CALLS.DECODE.U64-REFERENCE ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_SINGLE","name":"SPAWN.CALLS.DECODE.U64-REFERENCE","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":32,"p99_ns":102,"p999_ns":103,"p9999_ns":157,"p99999_ns":2811,"max_ns":13302}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_SINGLE","name":"SPAWN.CALLS.DECODE.U64-REFERENCE","planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"work_window_ns":6336878,"summarize_ns":2655776,"min_ns":31,"mean_ns":35,"p50_ns":32,"p90_ns":33,"p95_ns":39,"p99_ns":102,"p999_ns":103,"p9999_ns":157,"p99999_ns":2811,"max_ns":13302,"over_1us":4,"over_10us":1,"over_50us":0}
+[JSR-SMP-BENCH] stage=start mode=SMP_SINGLE metric=FRAME.ALLOC_FREE_PAIR cpus=1
+[JSR-SMP-BENCH] stage=posted mode=SMP_SINGLE metric=FRAME.ALLOC_FREE_PAIR posted=0
+[JSR-SMP-BENCH] stage=ready mode=SMP_SINGLE metric=FRAME.ALLOC_FREE_PAIR ready=1/1
+[JSR-SMP-BENCH] stage=collected mode=SMP_SINGLE metric=FRAME.ALLOC_FREE_PAIR ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_SINGLE","name":"FRAME.ALLOC_FREE_PAIR","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":3443,"p99_ns":3640,"p999_ns":19153,"p9999_ns":190919,"p99999_ns":209300,"max_ns":217411}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_SINGLE","name":"FRAME.ALLOC_FREE_PAIR","planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"work_window_ns":358950957,"summarize_ns":5321721,"min_ns":3344,"mean_ns":3552,"p50_ns":3443,"p90_ns":3487,"p95_ns":3506,"p99_ns":3640,"p999_ns":19153,"p9999_ns":190919,"p99999_ns":209300,"max_ns":217411,"over_1us":100000,"over_10us":202,"over_50us":35}
+[JSR-SMP-SW] stage=spawned cpus=1 expected_tasks=2 spawned=true
+[JSR-SMP-SW] stage=progress cpu=0 sample=0/10000 valid=1 retries=0 missed=0 switches=1
+[JSR-SMP-SW] stage=progress cpu=0 sample=4096/10000 valid=4097 retries=0 missed=0 switches=8235
+[JSR-SMP-SW] stage=progress cpu=0 sample=8192/10000 valid=8193 retries=0 missed=0 switches=16461
+[JSR-SMP-SW] stage=run_returned ready=2/2
+[JSR-SMP-MEMORY] mode=SMP_SINGLE phase=during_raw_retained usable_kib=509432 free_kib=495544 used_kib=13888 heap_used_kib=10307 heap_peak_kib=11017 heap_free_kib=2512 heap_mapped_kib=12820
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_SINGLE","cpu":0,"planned":10000,"observed":10000,"valid":10000,"failed_ops":0,"incomplete":0,"retries":0,"switches":20075,"last_slot":1,"last_generation":1,"p50_ns":37567,"p99_ns":77328,"p999_ns":256388,"p9999_ns":4188940,"p99999_ns":5013890,"max_ns":5013890}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_SINGLE","name":"SCHED.CONTEXT_SWITCH","planned":10000,"observed":10000,"valid":10000,"failed_ops":0,"incomplete":0,"work_window_ns":876793874,"summarize_ns":1390504,"min_ns":36854,"mean_ns":41403,"p50_ns":37567,"p90_ns":39889,"p95_ns":45716,"p99_ns":77328,"p999_ns":256388,"p9999_ns":4188940,"p99999_ns":5013890,"max_ns":5013890,"over_1us":10000,"over_10us":10000,"over_50us":415}
+SMP_SINGLE RESULT COMPLETE=true TOTAL_METRICS=16 PLANNED_SAMPLES=1510000 MEM_USED_KIB=13888 HEAP_USED_KIB=10229 HEAP_MAPPED_KIB=12820
+[JSR-SMP-RESOURCE] mode=SMP_SINGLE frames=123886/123886 objects=0/0 pending=0/0 pins=0,0 retained_heap_pages=0 reclaimed=true
+[JSR-SMP-MEMORY] mode=SMP_SINGLE phase=after usable_kib=509432 free_kib=495544 used_kib=13888 heap_used_kib=10229 heap_peak_kib=11017 heap_free_kib=2590 heap_mapped_kib=12820
+[JSR-SMP-MEMORY] mode=SMP_PHYSICAL phase=before usable_kib=509432 free_kib=495544 used_kib=13888 heap_used_kib=10229 heap_peak_kib=11017 heap_free_kib=2590 heap_mapped_kib=12820
+[JSR-TSC-SKEW] mode=SMP_PHYSICAL cpus=2 upper_bound_ns=29717 semantics=same_barrier_including_release_latency
+[JSR-SMP-BENCH] stage=start mode=SMP_PHYSICAL metric=TIMER.READ_OVERHEAD cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_PHYSICAL metric=TIMER.READ_OVERHEAD posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_PHYSICAL metric=TIMER.READ_OVERHEAD ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_PHYSICAL metric=TIMER.READ_OVERHEAD ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"TIMER.READ_OVERHEAD","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":183,"p99_ns":3672,"p999_ns":19851,"p9999_ns":37093,"p99999_ns":49444,"max_ns":52636}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"TIMER.READ_OVERHEAD","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":183,"p99_ns":3983,"p999_ns":29770,"p9999_ns":124853,"p99999_ns":254605,"max_ns":395020}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_PHYSICAL","name":"TIMER.READ_OVERHEAD","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":48606561,"summarize_ns":13593406,"min_ns":43,"mean_ns":312,"p50_ns":183,"p90_ns":190,"p95_ns":194,"p99_ns":3866,"p999_ns":23045,"p9999_ns":90328,"p99999_ns":254369,"max_ns":395020,"over_1us":4163,"over_10us":767,"over_50us":51}
+[JSR-SMP-BENCH] stage=start mode=SMP_PHYSICAL metric=FRAME.ALLOC cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_PHYSICAL metric=FRAME.ALLOC posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_PHYSICAL metric=FRAME.ALLOC ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_PHYSICAL metric=FRAME.ALLOC ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"FRAME.ALLOC","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":2586,"p99_ns":4602,"p999_ns":19833,"p9999_ns":31937,"p99999_ns":40126,"max_ns":42914}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"FRAME.ALLOC","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":3819,"p99_ns":5993,"p999_ns":22231,"p9999_ns":32453,"p99999_ns":46955,"max_ns":55831}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_PHYSICAL","name":"FRAME.ALLOC","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":777795866,"summarize_ns":28520745,"min_ns":1651,"mean_ns":3384,"p50_ns":3472,"p90_ns":4272,"p95_ns":4506,"p99_ns":5244,"p999_ns":21280,"p9999_ns":32290,"p99999_ns":42914,"max_ns":55831,"over_1us":200000,"over_10us":538,"over_50us":1}
+[JSR-SMP-BENCH] stage=start mode=SMP_PHYSICAL metric=FRAME.FREE cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_PHYSICAL metric=FRAME.FREE posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_PHYSICAL metric=FRAME.FREE ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_PHYSICAL metric=FRAME.FREE ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"FRAME.FREE","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":2600,"p99_ns":4519,"p999_ns":20882,"p9999_ns":29707,"p99999_ns":35267,"max_ns":46169}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"FRAME.FREE","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":3651,"p99_ns":5432,"p999_ns":22692,"p9999_ns":30235,"p99999_ns":33081,"max_ns":33759}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_PHYSICAL","name":"FRAME.FREE","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":774748779,"summarize_ns":27636984,"min_ns":1657,"mean_ns":3307,"p50_ns":3390,"p90_ns":4069,"p95_ns":4293,"p99_ns":4999,"p999_ns":21823,"p9999_ns":30150,"p99999_ns":33759,"max_ns":46169,"over_1us":200000,"over_10us":720,"over_50us":0}
+[JSR-SMP-BENCH] stage=start mode=SMP_PHYSICAL metric=HEAP.ALLOC_FREE_64 cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_PHYSICAL metric=HEAP.ALLOC_FREE_64 posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_PHYSICAL metric=HEAP.ALLOC_FREE_64 ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_PHYSICAL metric=HEAP.ALLOC_FREE_64 ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"HEAP.ALLOC_FREE_64","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":5840,"p99_ns":9092,"p999_ns":24461,"p9999_ns":34649,"p99999_ns":46742,"max_ns":63182}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"HEAP.ALLOC_FREE_64","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":8462,"p99_ns":15217,"p999_ns":27408,"p9999_ns":44101,"p99999_ns":53016,"max_ns":138568}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_PHYSICAL","name":"HEAP.ALLOC_FREE_64","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":876691166,"summarize_ns":35021943,"min_ns":3626,"mean_ns":7346,"p50_ns":7680,"p90_ns":9083,"p95_ns":9500,"p99_ns":13538,"p999_ns":26116,"p9999_ns":37091,"p99999_ns":53016,"max_ns":138568,"over_1us":200000,"over_10us":5273,"over_50us":6}
+[JSR-SMP-BENCH] stage=start mode=SMP_PHYSICAL metric=HEAP.ALLOC_FREE_4096 cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_PHYSICAL metric=HEAP.ALLOC_FREE_4096 posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_PHYSICAL metric=HEAP.ALLOC_FREE_4096 ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_PHYSICAL metric=HEAP.ALLOC_FREE_4096 ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"HEAP.ALLOC_FREE_4096","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":5891,"p99_ns":9915,"p999_ns":25902,"p9999_ns":36150,"p99999_ns":59984,"max_ns":76988}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"HEAP.ALLOC_FREE_4096","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":8499,"p99_ns":16332,"p999_ns":30325,"p9999_ns":45229,"p99999_ns":62803,"max_ns":65642}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_PHYSICAL","name":"HEAP.ALLOC_FREE_4096","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":890834668,"summarize_ns":36802274,"min_ns":3608,"mean_ns":7482,"p50_ns":7796,"p90_ns":9177,"p95_ns":9671,"p99_ns":15032,"p999_ns":27947,"p9999_ns":40416,"p99999_ns":62803,"max_ns":76988,"over_1us":200000,"over_10us":7346,"over_50us":10}
+[JSR-SMP-BENCH] stage=start mode=SMP_PHYSICAL metric=SYSCALLSET.CONTAINS.CURRENT cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_PHYSICAL metric=SYSCALLSET.CONTAINS.CURRENT posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_PHYSICAL metric=SYSCALLSET.CONTAINS.CURRENT ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_PHYSICAL metric=SYSCALLSET.CONTAINS.CURRENT ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"SYSCALLSET.CONTAINS.CURRENT","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":105,"p99_ns":3540,"p999_ns":9927,"p9999_ns":19520,"p99999_ns":41221,"max_ns":43734}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"SYSCALLSET.CONTAINS.CURRENT","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":106,"p99_ns":2671,"p999_ns":9319,"p9999_ns":26828,"p99999_ns":80112,"max_ns":227147}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_PHYSICAL","name":"SYSCALLSET.CONTAINS.CURRENT","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":36546200,"summarize_ns":17987611,"min_ns":38,"mean_ns":253,"p50_ns":106,"p90_ns":384,"p95_ns":883,"p99_ns":3133,"p999_ns":9755,"p9999_ns":20127,"p99999_ns":67296,"max_ns":227147,"over_1us":9063,"over_10us":189,"over_50us":4}
+[JSR-SMP-BENCH] stage=start mode=SMP_PHYSICAL metric=SYSCALLSET.CONTAINS.U64-REFERENCE cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_PHYSICAL metric=SYSCALLSET.CONTAINS.U64-REFERENCE posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_PHYSICAL metric=SYSCALLSET.CONTAINS.U64-REFERENCE ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_PHYSICAL metric=SYSCALLSET.CONTAINS.U64-REFERENCE ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"SYSCALLSET.CONTAINS.U64-REFERENCE","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":96,"p99_ns":1959,"p999_ns":19320,"p9999_ns":39813,"p99999_ns":58744,"max_ns":60357}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"SYSCALLSET.CONTAINS.U64-REFERENCE","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":96,"p99_ns":2079,"p999_ns":16014,"p9999_ns":42772,"p99999_ns":74197,"max_ns":93112}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_PHYSICAL","name":"SYSCALLSET.CONTAINS.U64-REFERENCE","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":31857401,"summarize_ns":13783111,"min_ns":33,"mean_ns":177,"p50_ns":96,"p90_ns":103,"p95_ns":106,"p99_ns":2006,"p999_ns":17869,"p9999_ns":41876,"p99999_ns":68317,"max_ns":93112,"over_1us":2490,"over_10us":558,"over_50us":12}
+[JSR-SMP-BENCH] stage=start mode=SMP_PHYSICAL metric=SYSCALLSET.SUBSET.CURRENT cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_PHYSICAL metric=SYSCALLSET.SUBSET.CURRENT posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_PHYSICAL metric=SYSCALLSET.SUBSET.CURRENT ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_PHYSICAL metric=SYSCALLSET.SUBSET.CURRENT ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"SYSCALLSET.SUBSET.CURRENT","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":103,"p99_ns":3759,"p999_ns":16749,"p9999_ns":33558,"p99999_ns":56763,"max_ns":56876}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"SYSCALLSET.SUBSET.CURRENT","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":102,"p99_ns":3547,"p999_ns":15315,"p9999_ns":52059,"p99999_ns":135905,"max_ns":196888}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_PHYSICAL","name":"SYSCALLSET.SUBSET.CURRENT","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":35631420,"summarize_ns":13459135,"min_ns":37,"mean_ns":212,"p50_ns":103,"p90_ns":107,"p95_ns":111,"p99_ns":3653,"p999_ns":16096,"p9999_ns":41494,"p99999_ns":92535,"max_ns":196888,"over_1us":4159,"over_10us":517,"over_50us":14}
+[JSR-SMP-BENCH] stage=start mode=SMP_PHYSICAL metric=SYSCALLSET.SUBSET.U64-REFERENCE cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_PHYSICAL metric=SYSCALLSET.SUBSET.U64-REFERENCE posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_PHYSICAL metric=SYSCALLSET.SUBSET.U64-REFERENCE ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_PHYSICAL metric=SYSCALLSET.SUBSET.U64-REFERENCE ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"SYSCALLSET.SUBSET.U64-REFERENCE","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":96,"p99_ns":1837,"p999_ns":14274,"p9999_ns":25469,"p99999_ns":38820,"max_ns":46391}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"SYSCALLSET.SUBSET.U64-REFERENCE","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":96,"p99_ns":2158,"p999_ns":13739,"p9999_ns":57098,"p99999_ns":198068,"max_ns":242465}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_PHYSICAL","name":"SYSCALLSET.SUBSET.U64-REFERENCE","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":33152854,"summarize_ns":11373941,"min_ns":28,"mean_ns":165,"p50_ns":96,"p90_ns":98,"p95_ns":100,"p99_ns":2030,"p999_ns":14186,"p9999_ns":38820,"p99999_ns":133659,"max_ns":242465,"over_1us":2823,"over_10us":363,"over_50us":13}
+[JSR-SMP-BENCH] stage=start mode=SMP_PHYSICAL metric=SYSCALLSET.COPY.CURRENT cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_PHYSICAL metric=SYSCALLSET.COPY.CURRENT posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_PHYSICAL metric=SYSCALLSET.COPY.CURRENT ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_PHYSICAL metric=SYSCALLSET.COPY.CURRENT ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"SYSCALLSET.COPY.CURRENT","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":101,"p99_ns":3870,"p999_ns":12377,"p9999_ns":25032,"p99999_ns":62347,"max_ns":67144}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"SYSCALLSET.COPY.CURRENT","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":105,"p99_ns":2006,"p999_ns":6593,"p9999_ns":20110,"p99999_ns":28566,"max_ns":32141}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_PHYSICAL","name":"SYSCALLSET.COPY.CURRENT","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":34013262,"summarize_ns":15813331,"min_ns":37,"mean_ns":219,"p50_ns":103,"p90_ns":268,"p95_ns":683,"p99_ns":2867,"p999_ns":10934,"p9999_ns":22631,"p99999_ns":56865,"max_ns":67144,"over_1us":7557,"over_10us":241,"over_50us":4}
+[JSR-SMP-BENCH] stage=start mode=SMP_PHYSICAL metric=SYSCALLSET.COPY.U64-REFERENCE cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_PHYSICAL metric=SYSCALLSET.COPY.U64-REFERENCE posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_PHYSICAL metric=SYSCALLSET.COPY.U64-REFERENCE ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_PHYSICAL metric=SYSCALLSET.COPY.U64-REFERENCE ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"SYSCALLSET.COPY.U64-REFERENCE","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":98,"p99_ns":2268,"p999_ns":5064,"p9999_ns":18162,"p99999_ns":22676,"max_ns":27349}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"SYSCALLSET.COPY.U64-REFERENCE","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":99,"p99_ns":1995,"p999_ns":4834,"p9999_ns":18462,"p99999_ns":21937,"max_ns":26619}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_PHYSICAL","name":"SYSCALLSET.COPY.U64-REFERENCE","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":36382549,"summarize_ns":17069296,"min_ns":30,"mean_ns":256,"p50_ns":98,"p90_ns":666,"p95_ns":1049,"p99_ns":2169,"p999_ns":4995,"p9999_ns":18348,"p99999_ns":22676,"max_ns":27349,"over_1us":10890,"over_10us":65,"over_50us":0}
+[JSR-SMP-BENCH] stage=start mode=SMP_PHYSICAL metric=SPAWN.DECODE.CURRENT cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_PHYSICAL metric=SPAWN.DECODE.CURRENT posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_PHYSICAL metric=SPAWN.DECODE.CURRENT ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_PHYSICAL metric=SPAWN.DECODE.CURRENT ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"SPAWN.DECODE.CURRENT","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":129,"p99_ns":227,"p999_ns":307,"p9999_ns":14803,"p99999_ns":25270,"max_ns":26512}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"SPAWN.DECODE.CURRENT","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":113,"p99_ns":282,"p999_ns":396,"p9999_ns":13200,"p99999_ns":26548,"max_ns":26937}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_PHYSICAL","name":"SPAWN.DECODE.CURRENT","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":19689819,"summarize_ns":14333966,"min_ns":89,"mean_ns":135,"p50_ns":121,"p90_ns":178,"p95_ns":193,"p99_ns":254,"p999_ns":375,"p9999_ns":14803,"p99999_ns":26512,"max_ns":26937,"over_1us":64,"over_10us":23,"over_50us":0}
+[JSR-SMP-BENCH] stage=start mode=SMP_PHYSICAL metric=SPAWN.CALLS.DECODE.CURRENT cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_PHYSICAL metric=SPAWN.CALLS.DECODE.CURRENT posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_PHYSICAL metric=SPAWN.CALLS.DECODE.CURRENT ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_PHYSICAL metric=SPAWN.CALLS.DECODE.CURRENT ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"SPAWN.CALLS.DECODE.CURRENT","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":292,"p99_ns":315,"p999_ns":525,"p9999_ns":18239,"p99999_ns":19890,"max_ns":24315}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"SPAWN.CALLS.DECODE.CURRENT","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":292,"p99_ns":479,"p999_ns":674,"p9999_ns":19218,"p99999_ns":26775,"max_ns":27305}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_PHYSICAL","name":"SPAWN.CALLS.DECODE.CURRENT","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":36819587,"summarize_ns":16713209,"min_ns":58,"mean_ns":263,"p50_ns":292,"p90_ns":303,"p95_ns":307,"p99_ns":323,"p999_ns":669,"p9999_ns":18891,"p99999_ns":24549,"max_ns":27305,"over_1us":146,"over_10us":79,"over_50us":0}
+[JSR-SMP-BENCH] stage=start mode=SMP_PHYSICAL metric=SPAWN.CALLS.DECODE.U64-REFERENCE cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_PHYSICAL metric=SPAWN.CALLS.DECODE.U64-REFERENCE posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_PHYSICAL metric=SPAWN.CALLS.DECODE.U64-REFERENCE ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_PHYSICAL metric=SPAWN.CALLS.DECODE.U64-REFERENCE ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"SPAWN.CALLS.DECODE.U64-REFERENCE","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":97,"p99_ns":541,"p999_ns":8286,"p9999_ns":40398,"p99999_ns":96414,"max_ns":98349}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"SPAWN.CALLS.DECODE.U64-REFERENCE","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":33,"p99_ns":3844,"p999_ns":20295,"p9999_ns":49471,"p99999_ns":123046,"max_ns":145694}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_PHYSICAL","name":"SPAWN.CALLS.DECODE.U64-REFERENCE","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":28687938,"summarize_ns":12153613,"min_ns":29,"mean_ns":157,"p50_ns":96,"p90_ns":100,"p95_ns":102,"p99_ns":1765,"p999_ns":17043,"p9999_ns":43338,"p99999_ns":98349,"max_ns":145694,"over_1us":2486,"over_10us":466,"over_50us":16}
+[JSR-SMP-BENCH] stage=start mode=SMP_PHYSICAL metric=FRAME.ALLOC_FREE_PAIR cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_PHYSICAL metric=FRAME.ALLOC_FREE_PAIR posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_PHYSICAL metric=FRAME.ALLOC_FREE_PAIR ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_PHYSICAL metric=FRAME.ALLOC_FREE_PAIR ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"FRAME.ALLOC_FREE_PAIR","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":5541,"p99_ns":8974,"p999_ns":22363,"p9999_ns":32611,"p99999_ns":45793,"max_ns":50010}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_PHYSICAL","name":"FRAME.ALLOC_FREE_PAIR","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":7632,"p99_ns":13122,"p999_ns":27573,"p9999_ns":46241,"p99999_ns":554619,"max_ns":572248}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_PHYSICAL","name":"FRAME.ALLOC_FREE_PAIR","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":792213160,"summarize_ns":33749694,"min_ns":3368,"mean_ns":6804,"p50_ns":7021,"p90_ns":8259,"p95_ns":8654,"p99_ns":11619,"p999_ns":25949,"p9999_ns":39481,"p99999_ns":141539,"max_ns":572248,"over_1us":200000,"over_10us":3235,"over_50us":11}
+[JSR-SMP-SW] stage=spawned cpus=2 expected_tasks=4 spawned=true
+[JSR-SMP-SW] stage=progress cpu=0 sample=0/10000 valid=1 retries=0 missed=0 switches=2
+[JSR-SMP-SW] stage=progress cpu=1 sample=0/10000 valid=1 retries=0 missed=0 switches=2
+[JSR-SMP-SW] stage=progress cpu=1 sample=4096/10000 valid=4097 retries=0 missed=0 switches=8210
+[JSR-SMP-SW] stage=progress cpu=0 sample=4096/10000 valid=4097 retries=0 missed=0 switches=8259
+[JSR-SMP-SW] stage=progress cpu=1 sample=8192/10000 valid=8193 retries=0 missed=0 switches=16424
+[JSR-SMP-SW] stage=progress cpu=0 sample=8192/10000 valid=8193 retries=0 missed=0 switches=16508
+[JSR-SMP-SW] stage=run_returned ready=4/4
+[JSR-SMP-MEMORY] mode=SMP_PHYSICAL phase=during_raw_retained usable_kib=509432 free_kib=495544 used_kib=13888 heap_used_kib=10386 heap_peak_kib=11804 heap_free_kib=2433 heap_mapped_kib=12820
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_PHYSICAL","cpu":0,"planned":10000,"observed":10000,"valid":10000,"failed_ops":0,"incomplete":0,"retries":0,"switches":20143,"last_slot":1,"last_generation":2,"p50_ns":80138,"p99_ns":132529,"p999_ns":187247,"p9999_ns":254016,"p99999_ns":264314,"max_ns":264314}
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_PHYSICAL","cpu":1,"planned":10000,"observed":10000,"valid":10000,"failed_ops":0,"incomplete":0,"retries":0,"switches":20058,"last_slot":3,"last_generation":1,"p50_ns":80014,"p99_ns":126976,"p999_ns":155943,"p9999_ns":217488,"p99999_ns":252514,"max_ns":252514}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_PHYSICAL","name":"SCHED.CONTEXT_SWITCH","planned":20000,"observed":20000,"valid":20000,"failed_ops":0,"incomplete":0,"work_window_ns":1682048455,"summarize_ns":4324675,"min_ns":37201,"mean_ns":82934,"p50_ns":80077,"p90_ns":89382,"p95_ns":103760,"p99_ns":131100,"p999_ns":174041,"p9999_ns":252514,"p99999_ns":264314,"max_ns":264314,"over_1us":20000,"over_10us":20000,"over_50us":19869}
+SMP_PHYSICAL RESULT COMPLETE=true TOTAL_METRICS=16 PLANNED_SAMPLES=3020000 MEM_USED_KIB=13888 HEAP_USED_KIB=10229 HEAP_MAPPED_KIB=12820
+[JSR-SMP-RESOURCE] mode=SMP_PHYSICAL frames=123886/123886 objects=0/0 pending=0/0 pins=0,0 retained_heap_pages=0 reclaimed=true
+[JSR-SMP-MEMORY] mode=SMP_PHYSICAL phase=after usable_kib=509432 free_kib=495544 used_kib=13888 heap_used_kib=10229 heap_peak_kib=11804 heap_free_kib=2590 heap_mapped_kib=12820
+[JSR-SMP-MEMORY] mode=SMP_LOGICAL phase=before usable_kib=509432 free_kib=495544 used_kib=13888 heap_used_kib=10229 heap_peak_kib=11804 heap_free_kib=2590 heap_mapped_kib=12820
+[JSR-TSC-SKEW] mode=SMP_LOGICAL cpus=2 upper_bound_ns=7012 semantics=same_barrier_including_release_latency
+[JSR-SMP-BENCH] stage=start mode=SMP_LOGICAL metric=TIMER.READ_OVERHEAD cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_LOGICAL metric=TIMER.READ_OVERHEAD posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_LOGICAL metric=TIMER.READ_OVERHEAD ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_LOGICAL metric=TIMER.READ_OVERHEAD ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"TIMER.READ_OVERHEAD","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":183,"p99_ns":3487,"p999_ns":18865,"p9999_ns":37220,"p99999_ns":68596,"max_ns":82766}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"TIMER.READ_OVERHEAD","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":183,"p99_ns":3537,"p999_ns":25898,"p9999_ns":189091,"p99999_ns":476945,"max_ns":545640}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_LOGICAL","name":"TIMER.READ_OVERHEAD","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":48321618,"summarize_ns":13591488,"min_ns":43,"mean_ns":307,"p50_ns":183,"p90_ns":189,"p95_ns":193,"p99_ns":3517,"p999_ns":21596,"p9999_ns":93540,"p99999_ns":378506,"max_ns":545640,"over_1us":3739,"over_10us":715,"over_50us":45}
+[JSR-SMP-BENCH] stage=start mode=SMP_LOGICAL metric=FRAME.ALLOC cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_LOGICAL metric=FRAME.ALLOC posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_LOGICAL metric=FRAME.ALLOC ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_LOGICAL metric=FRAME.ALLOC ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"FRAME.ALLOC","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":2498,"p99_ns":4913,"p999_ns":21421,"p9999_ns":29439,"p99999_ns":42931,"max_ns":49386}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"FRAME.ALLOC","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":3642,"p99_ns":6658,"p999_ns":22182,"p9999_ns":30512,"p99999_ns":38686,"max_ns":47381}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_LOGICAL","name":"FRAME.ALLOC","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":764828339,"summarize_ns":27853306,"min_ns":1648,"mean_ns":3272,"p50_ns":3336,"p90_ns":4085,"p95_ns":4332,"p99_ns":6086,"p999_ns":21883,"p9999_ns":30366,"p99999_ns":42931,"max_ns":49386,"over_1us":200000,"over_10us":690,"over_50us":0}
+[JSR-SMP-BENCH] stage=start mode=SMP_LOGICAL metric=FRAME.FREE cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_LOGICAL metric=FRAME.FREE posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_LOGICAL metric=FRAME.FREE ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_LOGICAL metric=FRAME.FREE ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"FRAME.FREE","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":2843,"p99_ns":4330,"p999_ns":20430,"p9999_ns":31315,"p99999_ns":39720,"max_ns":43931}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"FRAME.FREE","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":3608,"p99_ns":6593,"p999_ns":21869,"p9999_ns":31959,"p99999_ns":45474,"max_ns":54409}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_LOGICAL","name":"FRAME.FREE","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":747593298,"summarize_ns":27628352,"min_ns":1670,"mean_ns":3323,"p50_ns":3372,"p90_ns":4003,"p95_ns":4245,"p99_ns":6087,"p999_ns":21209,"p9999_ns":31935,"p99999_ns":43931,"max_ns":54409,"over_1us":200000,"over_10us":600,"over_50us":1}
+[JSR-SMP-BENCH] stage=start mode=SMP_LOGICAL metric=HEAP.ALLOC_FREE_64 cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_LOGICAL metric=HEAP.ALLOC_FREE_64 posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_LOGICAL metric=HEAP.ALLOC_FREE_64 ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_LOGICAL metric=HEAP.ALLOC_FREE_64 ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"HEAP.ALLOC_FREE_64","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":5682,"p99_ns":9415,"p999_ns":26576,"p9999_ns":34325,"p99999_ns":48568,"max_ns":53336}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"HEAP.ALLOC_FREE_64","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":8112,"p99_ns":15027,"p999_ns":29566,"p9999_ns":37868,"p99999_ns":55220,"max_ns":58233}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_LOGICAL","name":"HEAP.ALLOC_FREE_64","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":843339782,"summarize_ns":32585056,"min_ns":3675,"mean_ns":7136,"p50_ns":7517,"p90_ns":8669,"p95_ns":9022,"p99_ns":13196,"p999_ns":28476,"p9999_ns":36505,"p99999_ns":53336,"max_ns":58233,"over_1us":200000,"over_10us":3647,"over_50us":4}
+[JSR-SMP-BENCH] stage=start mode=SMP_LOGICAL metric=HEAP.ALLOC_FREE_4096 cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_LOGICAL metric=HEAP.ALLOC_FREE_4096 posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_LOGICAL metric=HEAP.ALLOC_FREE_4096 ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_LOGICAL metric=HEAP.ALLOC_FREE_4096 ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"HEAP.ALLOC_FREE_4096","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":5663,"p99_ns":9033,"p999_ns":26527,"p9999_ns":34181,"p99999_ns":44191,"max_ns":124788}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"HEAP.ALLOC_FREE_4096","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":8090,"p99_ns":15432,"p999_ns":30985,"p9999_ns":44784,"p99999_ns":50969,"max_ns":126969}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_LOGICAL","name":"HEAP.ALLOC_FREE_4096","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":845954650,"summarize_ns":33325334,"min_ns":3546,"mean_ns":7123,"p50_ns":7481,"p90_ns":8633,"p95_ns":9003,"p99_ns":14053,"p999_ns":28882,"p9999_ns":38816,"p99999_ns":50969,"max_ns":126969,"over_1us":200000,"over_10us":4251,"over_50us":5}
+[JSR-SMP-BENCH] stage=start mode=SMP_LOGICAL metric=SYSCALLSET.CONTAINS.CURRENT cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_LOGICAL metric=SYSCALLSET.CONTAINS.CURRENT posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_LOGICAL metric=SYSCALLSET.CONTAINS.CURRENT ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_LOGICAL metric=SYSCALLSET.CONTAINS.CURRENT ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"SYSCALLSET.CONTAINS.CURRENT","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":106,"p99_ns":2759,"p999_ns":8759,"p9999_ns":25407,"p99999_ns":47378,"max_ns":101949}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"SYSCALLSET.CONTAINS.CURRENT","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":104,"p99_ns":3279,"p999_ns":12004,"p9999_ns":37151,"p99999_ns":62361,"max_ns":209353}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_LOGICAL","name":"SYSCALLSET.CONTAINS.CURRENT","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":34675153,"summarize_ns":15378880,"min_ns":37,"mean_ns":224,"p50_ns":105,"p90_ns":179,"p95_ns":695,"p99_ns":3021,"p999_ns":10551,"p9999_ns":32440,"p99999_ns":62361,"max_ns":209353,"over_1us":7440,"over_10us":228,"over_50us":6}
+[JSR-SMP-BENCH] stage=start mode=SMP_LOGICAL metric=SYSCALLSET.CONTAINS.U64-REFERENCE cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_LOGICAL metric=SYSCALLSET.CONTAINS.U64-REFERENCE posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_LOGICAL metric=SYSCALLSET.CONTAINS.U64-REFERENCE ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_LOGICAL metric=SYSCALLSET.CONTAINS.U64-REFERENCE ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"SYSCALLSET.CONTAINS.U64-REFERENCE","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":101,"p99_ns":245,"p999_ns":6593,"p9999_ns":19395,"p99999_ns":26420,"max_ns":36911}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"SYSCALLSET.CONTAINS.U64-REFERENCE","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":36,"p99_ns":266,"p999_ns":14181,"p9999_ns":44971,"p99999_ns":141883,"max_ns":455280}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_LOGICAL","name":"SYSCALLSET.CONTAINS.U64-REFERENCE","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":28818845,"summarize_ns":11628060,"min_ns":33,"mean_ns":122,"p50_ns":98,"p90_ns":104,"p95_ns":106,"p99_ns":250,"p999_ns":10690,"p9999_ns":28217,"p99999_ns":130093,"max_ns":455280,"over_1us":1479,"over_10us":220,"over_50us":7}
+[JSR-SMP-BENCH] stage=start mode=SMP_LOGICAL metric=SYSCALLSET.SUBSET.CURRENT cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_LOGICAL metric=SYSCALLSET.SUBSET.CURRENT posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_LOGICAL metric=SYSCALLSET.SUBSET.CURRENT ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_LOGICAL metric=SYSCALLSET.SUBSET.CURRENT ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"SYSCALLSET.SUBSET.CURRENT","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":106,"p99_ns":2114,"p999_ns":12698,"p9999_ns":41613,"p99999_ns":69521,"max_ns":90336}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"SYSCALLSET.SUBSET.CURRENT","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":104,"p99_ns":2565,"p999_ns":14320,"p9999_ns":50216,"p99999_ns":302433,"max_ns":403894}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_LOGICAL","name":"SYSCALLSET.SUBSET.CURRENT","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":34735345,"summarize_ns":12392507,"min_ns":36,"mean_ns":181,"p50_ns":105,"p90_ns":109,"p95_ns":111,"p99_ns":2371,"p999_ns":13597,"p9999_ns":44572,"p99999_ns":190021,"max_ns":403894,"over_1us":3118,"over_10us":343,"over_50us":16}
+[JSR-SMP-BENCH] stage=start mode=SMP_LOGICAL metric=SYSCALLSET.SUBSET.U64-REFERENCE cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_LOGICAL metric=SYSCALLSET.SUBSET.U64-REFERENCE posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_LOGICAL metric=SYSCALLSET.SUBSET.U64-REFERENCE ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_LOGICAL metric=SYSCALLSET.SUBSET.U64-REFERENCE ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"SYSCALLSET.SUBSET.U64-REFERENCE","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":99,"p99_ns":268,"p999_ns":10672,"p9999_ns":40258,"p99999_ns":100460,"max_ns":100760}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"SYSCALLSET.SUBSET.U64-REFERENCE","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":33,"p99_ns":1146,"p999_ns":22706,"p9999_ns":74385,"p99999_ns":253003,"max_ns":306114}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_LOGICAL","name":"SYSCALLSET.SUBSET.U64-REFERENCE","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":31774915,"summarize_ns":11278829,"min_ns":28,"mean_ns":153,"p50_ns":99,"p90_ns":102,"p95_ns":102,"p99_ns":654,"p999_ns":15059,"p9999_ns":63589,"p99999_ns":181416,"max_ns":306114,"over_1us":1728,"over_10us":325,"over_50us":45}
+[JSR-SMP-BENCH] stage=start mode=SMP_LOGICAL metric=SYSCALLSET.COPY.CURRENT cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_LOGICAL metric=SYSCALLSET.COPY.CURRENT posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_LOGICAL metric=SYSCALLSET.COPY.CURRENT ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_LOGICAL metric=SYSCALLSET.COPY.CURRENT ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"SYSCALLSET.COPY.CURRENT","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":108,"p99_ns":2199,"p999_ns":8802,"p9999_ns":25891,"p99999_ns":63625,"max_ns":64399}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"SYSCALLSET.COPY.CURRENT","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":57,"p99_ns":3287,"p999_ns":16027,"p9999_ns":101478,"p99999_ns":198651,"max_ns":423701}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_LOGICAL","name":"SYSCALLSET.COPY.CURRENT","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":33015868,"summarize_ns":14394482,"min_ns":37,"mean_ns":202,"p50_ns":107,"p90_ns":112,"p95_ns":270,"p99_ns":2719,"p999_ns":13045,"p9999_ns":63625,"p99999_ns":196967,"max_ns":423701,"over_1us":5036,"over_10us":282,"over_50us":29}
+[JSR-SMP-BENCH] stage=start mode=SMP_LOGICAL metric=SYSCALLSET.COPY.U64-REFERENCE cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_LOGICAL metric=SYSCALLSET.COPY.U64-REFERENCE posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_LOGICAL metric=SYSCALLSET.COPY.U64-REFERENCE ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_LOGICAL metric=SYSCALLSET.COPY.U64-REFERENCE ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"SYSCALLSET.COPY.U64-REFERENCE","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":101,"p99_ns":2135,"p999_ns":4964,"p9999_ns":20308,"p99999_ns":25940,"max_ns":29600}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"SYSCALLSET.COPY.U64-REFERENCE","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":98,"p99_ns":2180,"p999_ns":5217,"p9999_ns":22170,"p99999_ns":30964,"max_ns":55324}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_LOGICAL","name":"SYSCALLSET.COPY.U64-REFERENCE","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":35912023,"summarize_ns":18296987,"min_ns":30,"mean_ns":251,"p50_ns":99,"p90_ns":601,"p95_ns":999,"p99_ns":2165,"p999_ns":5132,"p9999_ns":21087,"p99999_ns":29600,"max_ns":55324,"over_1us":9990,"over_10us":85,"over_50us":1}
+[JSR-SMP-BENCH] stage=start mode=SMP_LOGICAL metric=SPAWN.DECODE.CURRENT cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_LOGICAL metric=SPAWN.DECODE.CURRENT posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_LOGICAL metric=SPAWN.DECODE.CURRENT ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_LOGICAL metric=SPAWN.DECODE.CURRENT ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"SPAWN.DECODE.CURRENT","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":132,"p99_ns":230,"p999_ns":257,"p9999_ns":2605,"p99999_ns":7180,"max_ns":9172}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"SPAWN.DECODE.CURRENT","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":113,"p99_ns":288,"p999_ns":300,"p9999_ns":2185,"p99999_ns":10413,"max_ns":15719}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_LOGICAL","name":"SPAWN.DECODE.CURRENT","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":19587200,"summarize_ns":14133164,"min_ns":91,"mean_ns":132,"p50_ns":117,"p90_ns":178,"p95_ns":195,"p99_ns":231,"p999_ns":299,"p9999_ns":2413,"p99999_ns":9176,"max_ns":15719,"over_1us":36,"over_10us":2,"over_50us":0}
+[JSR-SMP-BENCH] stage=start mode=SMP_LOGICAL metric=SPAWN.CALLS.DECODE.CURRENT cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_LOGICAL metric=SPAWN.CALLS.DECODE.CURRENT posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_LOGICAL metric=SPAWN.CALLS.DECODE.CURRENT ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_LOGICAL metric=SPAWN.CALLS.DECODE.CURRENT ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"SPAWN.CALLS.DECODE.CURRENT","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":303,"p99_ns":312,"p999_ns":323,"p9999_ns":3263,"p99999_ns":7867,"max_ns":7971}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"SPAWN.CALLS.DECODE.CURRENT","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":302,"p99_ns":310,"p999_ns":326,"p9999_ns":2888,"p99999_ns":9788,"max_ns":15145}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_LOGICAL","name":"SPAWN.CALLS.DECODE.CURRENT","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":39194501,"summarize_ns":12118551,"min_ns":59,"mean_ns":291,"p50_ns":303,"p90_ns":306,"p95_ns":308,"p99_ns":310,"p999_ns":324,"p9999_ns":3170,"p99999_ns":9463,"max_ns":15145,"over_1us":85,"over_10us":1,"over_50us":0}
+[JSR-SMP-BENCH] stage=start mode=SMP_LOGICAL metric=SPAWN.CALLS.DECODE.U64-REFERENCE cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_LOGICAL metric=SPAWN.CALLS.DECODE.U64-REFERENCE posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_LOGICAL metric=SPAWN.CALLS.DECODE.U64-REFERENCE ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_LOGICAL metric=SPAWN.CALLS.DECODE.U64-REFERENCE ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"SPAWN.CALLS.DECODE.U64-REFERENCE","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":99,"p99_ns":767,"p999_ns":13971,"p9999_ns":35212,"p99999_ns":101073,"max_ns":101135}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"SPAWN.CALLS.DECODE.U64-REFERENCE","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":57,"p99_ns":1787,"p999_ns":14713,"p9999_ns":181705,"p99999_ns":624421,"max_ns":689986}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_LOGICAL","name":"SPAWN.CALLS.DECODE.U64-REFERENCE","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":32963080,"summarize_ns":11247664,"min_ns":29,"mean_ns":175,"p50_ns":99,"p90_ns":102,"p95_ns":103,"p99_ns":1443,"p999_ns":14215,"p9999_ns":92357,"p99999_ns":612893,"max_ns":689986,"over_1us":2305,"over_10us":313,"over_50us":35}
+[JSR-SMP-BENCH] stage=start mode=SMP_LOGICAL metric=FRAME.ALLOC_FREE_PAIR cpus=2
+[JSR-SMP-BENCH] stage=posted mode=SMP_LOGICAL metric=FRAME.ALLOC_FREE_PAIR posted=1
+[JSR-SMP-BENCH] stage=ready mode=SMP_LOGICAL metric=FRAME.ALLOC_FREE_PAIR ready=2/2
+[JSR-SMP-BENCH] stage=collected mode=SMP_LOGICAL metric=FRAME.ALLOC_FREE_PAIR ok=true
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"FRAME.ALLOC_FREE_PAIR","cpu":0,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":5271,"p99_ns":8877,"p999_ns":26383,"p9999_ns":34129,"p99999_ns":128589,"max_ns":947715}
+{"schema":"jasper.perf.v1","kind":"parallel_cpu","mode":"SMP_LOGICAL","name":"FRAME.ALLOC_FREE_PAIR","cpu":1,"planned":100000,"observed":100000,"valid":100000,"failed_ops":0,"incomplete":0,"p50_ns":7288,"p99_ns":11506,"p999_ns":29438,"p9999_ns":40025,"p99999_ns":64069,"max_ns":130973}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_LOGICAL","name":"FRAME.ALLOC_FREE_PAIR","planned":200000,"observed":200000,"valid":200000,"failed_ops":0,"incomplete":0,"work_window_ns":755518145,"summarize_ns":32748965,"min_ns":3302,"mean_ns":6518,"p50_ns":6738,"p90_ns":7870,"p95_ns":8232,"p99_ns":10249,"p999_ns":28136,"p9999_ns":38768,"p99999_ns":128589,"max_ns":947715,"over_1us":200000,"over_10us":2153,"over_50us":5}
+[JSR-SMP-SW] stage=spawned cpus=2 expected_tasks=4 spawned=true
+[JSR-SMP-SW] stage=progress cpu=1 sample=0/10000 valid=1 retries=0 missed=0 switches=1
+[JSR-SMP-SW] stage=progress cpu=0 sample=0/10000 valid=1 retries=0 missed=0 switches=2
+[JSR-SMP-SW] stage=progress cpu=1 sample=4096/10000 valid=4097 retries=0 missed=0 switches=8227
+[JSR-SMP-SW] stage=progress cpu=0 sample=4096/10000 valid=4097 retries=0 missed=0 switches=8263
+[JSR-SMP-SW] stage=progress cpu=1 sample=8192/10000 valid=8193 retries=0 missed=0 switches=16462
+[JSR-SMP-SW] stage=progress cpu=0 sample=8192/10000 valid=8193 retries=0 missed=0 switches=16472
+[JSR-SMP-SW] stage=run_returned ready=4/4
+[JSR-SMP-MEMORY] mode=SMP_LOGICAL phase=during_raw_retained usable_kib=509432 free_kib=495544 used_kib=13888 heap_used_kib=10386 heap_peak_kib=11804 heap_free_kib=2433 heap_mapped_kib=12820
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_LOGICAL","cpu":0,"planned":10000,"observed":10000,"valid":10000,"failed_ops":0,"incomplete":0,"retries":0,"switches":20085,"last_slot":1,"last_generation":3,"p50_ns":80240,"p99_ns":144306,"p999_ns":190488,"p9999_ns":263454,"p99999_ns":268307,"max_ns":268307}
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_LOGICAL","cpu":1,"planned":10000,"observed":10000,"valid":10000,"failed_ops":0,"incomplete":0,"retries":0,"switches":20092,"last_slot":3,"last_generation":2,"p50_ns":80073,"p99_ns":117588,"p999_ns":164736,"p9999_ns":208130,"p99999_ns":221536,"max_ns":221536}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_LOGICAL","name":"SCHED.CONTEXT_SWITCH","planned":20000,"observed":20000,"valid":20000,"failed_ops":0,"incomplete":0,"work_window_ns":1664853835,"summarize_ns":4374661,"min_ns":37988,"mean_ns":82251,"p50_ns":80157,"p90_ns":86174,"p95_ns":97897,"p99_ns":129561,"p999_ns":171292,"p9999_ns":221536,"p99999_ns":268307,"max_ns":268307,"over_1us":20000,"over_10us":20000,"over_50us":19899}
+SMP_LOGICAL RESULT COMPLETE=true TOTAL_METRICS=16 PLANNED_SAMPLES=3020000 MEM_USED_KIB=13888 HEAP_USED_KIB=10229 HEAP_MAPPED_KIB=12820
+[JSR-SMP-RESOURCE] mode=SMP_LOGICAL frames=123886/123886 objects=0/0 pending=0/0 pins=0,0 retained_heap_pages=0 reclaimed=true
+[JSR-SMP-MEMORY] mode=SMP_LOGICAL phase=after usable_kib=509432 free_kib=495544 used_kib=13888 heap_used_kib=10229 heap_peak_kib=11804 heap_free_kib=2590 heap_mapped_kib=12820
+SMP CONCURRENT FINAL SINGLE=true PHYSICAL=true LOGICAL=true SINGLE_CPUS=1 PHYSICAL_CPUS=2 LOGICAL_CPUS=2 SMT=false RECLAIMED=true FAILED=0 TIMING_FAILED=0
+[JSR-MEM-USAGE] MEM smp-after RAM USABLE 497 MIB FREE 483 MIB USED 13888 KIB HEAP USED 10229 KIB PEAK 11804 KIB FREE 2590 KIB MAPPED 12820 KIB PHYSICAL_HEADROOM 483 MIB BLOCKS 3 GROWTH=on-demand
+SMP BENCH RESULT FAILED=0 TIMING_FAILED=0
+{"schema":"jasper.perf.v1","kind":"summary","metrics":62,"failed":0,"timing_failed":0,"checks":55,"resources_reclaimed":true,"discovered_cpus":2,"online_cpus":2,"parallel_matrix_run":true,"single_mode_run":true,"physical_mode_run":true,"logical_mode_run":true}

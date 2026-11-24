@@ -16,9 +16,19 @@ use noto_sans_mono_bitmap::{get_raster, FontWeight, RasterHeight};
 #[cfg(target_arch = "x86_64")]
 const TEXT_CELL_WIDTH: u32 = 12;
 #[cfg(target_arch = "x86_64")]
-const TEXT_CELL_HEIGHT: u32 = 20;
+const TEXT_GLYPH_HEIGHT: u32 = 20;
 #[cfg(target_arch = "x86_64")]
-const TEXT_TOP: u32 = 24;
+const TEXT_LINE_HEIGHT: u32 = 24;
+#[cfg(target_arch = "x86_64")]
+const TEXT_LEFT: u32 = 12;
+#[cfg(target_arch = "x86_64")]
+const TEXT_RIGHT_MARGIN: u32 = 12;
+#[cfg(target_arch = "x86_64")]
+const TEXT_TOP: u32 = 32;
+#[cfg(target_arch = "x86_64")]
+const TEXT_FOREGROUND: (u8, u8, u8) = (0xd8, 0xf3, 0xea);
+#[cfg(target_arch = "x86_64")]
+const TEXT_BACKGROUND: (u8, u8, u8) = (0x08, 0x11, 0x18);
 
 static SERIAL_READY: AtomicBool = AtomicBool::new(false);
 static BOOT_DEADLINE: AtomicU64 = AtomicU64::new(0);
@@ -117,7 +127,13 @@ pub fn install(framebuffer: &mut FrameBuffer) -> bool {
     DISPLAY_READY.store(true, Ordering::Release);
 
     fill(0x08, 0x11, 0x18);
-    draw_text(12, 8, 1, b"JASPER-OS BOOT CONSOLE");
+    let width = FRAMEBUFFER_WIDTH.load(Ordering::Relaxed) as u32;
+    draw_text(
+        TEXT_LEFT,
+        8,
+        width.saturating_sub(TEXT_LEFT + TEXT_RIGHT_MARGIN),
+        "JASPER-OS BOOT CONSOLE",
+    );
     TEXT_ROW.store(2, Ordering::Release);
     append_kind("[INIT] ", "K00 ENTRY");
     true
@@ -170,7 +186,13 @@ pub fn results_begin() {
         return;
     }
     fill(0x08, 0x11, 0x18);
-    draw_text(12, 8, 1, b"JASPER-OS PERFORMANCE");
+    let width = FRAMEBUFFER_WIDTH.load(Ordering::Relaxed) as u32;
+    draw_text(
+        TEXT_LEFT,
+        8,
+        width.saturating_sub(TEXT_LEFT + TEXT_RIGHT_MARGIN),
+        "JASPER-OS PERFORMANCE",
+    );
     TEXT_ROW.store(2, Ordering::Release);
 }
 
@@ -180,19 +202,7 @@ pub fn append_line(text: &str) {
     if !DISPLAY_READY.load(Ordering::Acquire) {
         return;
     }
-    let row = TEXT_ROW.fetch_add(1, Ordering::Relaxed);
-    let y = text_row_y(row);
-    let width = FRAMEBUFFER_WIDTH.load(Ordering::Relaxed) as u32;
-    fill_rect(
-        8,
-        y.saturating_sub(1),
-        width.saturating_sub(16),
-        TEXT_CELL_HEIGHT,
-        0x08,
-        0x11,
-        0x18,
-    );
-    draw_text(12, y, 1, text.as_bytes());
+    append_text("", text);
 }
 
 /// Draw transient benchmark progress on a dedicated footer row without
@@ -204,17 +214,22 @@ pub fn append_progress(text: &str) {
     }
     let height = FRAMEBUFFER_HEIGHT.load(Ordering::Relaxed) as u32;
     let width = FRAMEBUFFER_WIDTH.load(Ordering::Relaxed) as u32;
-    let y = height.saturating_sub(TEXT_CELL_HEIGHT);
+    let y = height.saturating_sub(TEXT_LINE_HEIGHT);
     fill_rect(
-        8,
+        TEXT_LEFT.saturating_sub(4),
         y.saturating_sub(1),
-        width.saturating_sub(16),
-        TEXT_CELL_HEIGHT,
-        0x08,
-        0x11,
-        0x18,
+        width.saturating_sub(TEXT_LEFT + TEXT_RIGHT_MARGIN - 4),
+        TEXT_LINE_HEIGHT,
+        TEXT_BACKGROUND.0,
+        TEXT_BACKGROUND.1,
+        TEXT_BACKGROUND.2,
     );
-    draw_text(12, y, 1, text.as_bytes());
+    draw_text(
+        TEXT_LEFT,
+        y + (TEXT_LINE_HEIGHT - TEXT_GLYPH_HEIGHT) / 2,
+        width.saturating_sub(TEXT_LEFT + TEXT_RIGHT_MARGIN),
+        text,
+    );
 }
 
 #[cfg(not(target_arch = "x86_64"))]
@@ -311,84 +326,256 @@ fn paint_stage(stage: &str) {
 
 #[cfg(target_arch = "x86_64")]
 fn append_kind(kind: &str, text: &str) {
-    let row = TEXT_ROW.fetch_add(1, Ordering::Relaxed);
-    let y = text_row_y(row);
+    append_text(kind, text);
+}
+
+#[cfg(target_arch = "x86_64")]
+fn append_text(prefix: &str, text: &str) {
     let width = FRAMEBUFFER_WIDTH.load(Ordering::Relaxed) as u32;
-    fill_rect(
-        8,
-        y.saturating_sub(1),
-        width.saturating_sub(16),
-        TEXT_CELL_HEIGHT,
-        0x08,
-        0x11,
-        0x18,
-    );
-    draw_text(12, y, 1, kind.as_bytes());
-    draw_text(
-        12 + kind.len() as u32 * TEXT_CELL_WIDTH,
-        y,
-        1,
-        text.as_bytes(),
-    );
-}
-
-#[cfg(target_arch = "x86_64")]
-fn text_row_y(row: u32) -> u32 {
-    let height = FRAMEBUFFER_HEIGHT.load(Ordering::Relaxed) as u32;
-    let rows = height
-        .saturating_sub(TEXT_TOP)
-        .checked_div(TEXT_CELL_HEIGHT)
-        .unwrap_or(1)
-        .max(1);
-    TEXT_TOP.saturating_add((row % rows) * TEXT_CELL_HEIGHT)
-}
-
-#[cfg(target_arch = "x86_64")]
-fn draw_text(mut x: u32, y: u32, scale: u32, text: &[u8]) {
-    for byte in text.iter().copied().take(90) {
-        if byte == b' ' {
-            x = x.saturating_add(TEXT_CELL_WIDTH);
-            continue;
-        }
-        #[cfg(feature = "noto-console")]
-        if let Some(glyph) = get_raster(char::from(byte), FontWeight::Regular, RasterHeight::Size20)
-        {
-            for (row, pixels) in glyph.raster().iter().enumerate() {
-                for (column, value) in pixels.iter().copied().enumerate() {
-                    if value != 0 {
-                        fill_rect(
-                            x.saturating_add(column as u32),
-                            y.saturating_add(row as u32),
-                            1,
-                            1,
-                            0xd8,
-                            0xf3,
-                            0xea,
-                        );
+    let right = width.saturating_sub(TEXT_RIGHT_MARGIN);
+    let available = right.saturating_sub(TEXT_LEFT);
+    let columns = available / TEXT_CELL_WIDTH;
+    if columns == 0 {
+        return;
+    }
+    let mut x = TEXT_LEFT;
+    let mut y = begin_text_row();
+    for character in prefix.chars().chain(text.chars()) {
+        match character {
+            '\r' => continue,
+            '\n' => {
+                x = TEXT_LEFT;
+                y = begin_text_row();
+                continue;
+            }
+            '\t' => {
+                let column = x.saturating_sub(TEXT_LEFT) / TEXT_CELL_WIDTH;
+                let next_stop = (column / 4 + 1) * 4;
+                while x.saturating_sub(TEXT_LEFT) / TEXT_CELL_WIDTH < next_stop {
+                    x = x.saturating_add(TEXT_CELL_WIDTH);
+                    if x + TEXT_CELL_WIDTH > right {
+                        x = TEXT_LEFT;
+                        y = begin_text_row();
                     }
                 }
+                continue;
             }
-            x = x.saturating_add(TEXT_CELL_WIDTH);
+            character if character.is_control() => {
+                if !draw_character(x, y, '?', 1) {
+                    return;
+                }
+                x = x.saturating_add(TEXT_CELL_WIDTH);
+                continue;
+            }
+            _ => {}
+        }
+
+        let cell_columns = character_cell_width(character);
+        if cell_columns == 0 {
+            // The early path has no full shaping engine. The complete original
+            // string remains available on the independent serial/log path.
             continue;
         }
-        let glyph = crate::display::glyph(byte);
-        for (row, bits) in glyph.iter().copied().enumerate() {
-            for column in 0..5u8 {
-                if bits & (1u8 << (4 - column)) != 0 {
-                    fill_rect(
-                        x + u32::from(column) * scale,
-                        y + row as u32 * scale,
-                        scale,
-                        scale,
-                        0xd8,
-                        0xf3,
-                        0xea,
+        let character_width = TEXT_CELL_WIDTH.saturating_mul(cell_columns as u32);
+        if x.saturating_add(character_width) > right {
+            x = TEXT_LEFT;
+            y = begin_text_row();
+        }
+        if !draw_character(x, y, character, cell_columns) {
+            return;
+        }
+        x = x.saturating_add(character_width);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn begin_text_row() -> u32 {
+    let rows = text_rows();
+    let row = TEXT_ROW.load(Ordering::Acquire);
+    let row = if row >= rows {
+        scroll_text_rows();
+        rows.saturating_sub(1)
+    } else {
+        row
+    };
+    TEXT_ROW.store(row.saturating_add(1), Ordering::Release);
+    let y = TEXT_TOP.saturating_add(row * TEXT_LINE_HEIGHT);
+    clear_text_row(y);
+    y
+}
+
+#[cfg(target_arch = "x86_64")]
+fn text_rows() -> u32 {
+    let height = FRAMEBUFFER_HEIGHT.load(Ordering::Relaxed) as u32;
+    height
+        .saturating_sub(TEXT_TOP)
+        .saturating_sub(TEXT_LINE_HEIGHT)
+        .checked_div(TEXT_LINE_HEIGHT)
+        .unwrap_or(1)
+        .max(1)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn clear_text_row(y: u32) {
+    let width = FRAMEBUFFER_WIDTH.load(Ordering::Relaxed) as u32;
+    fill_rect(
+        TEXT_LEFT.saturating_sub(4),
+        y.saturating_sub(2),
+        width.saturating_sub(TEXT_LEFT + TEXT_RIGHT_MARGIN - 4),
+        TEXT_LINE_HEIGHT,
+        TEXT_BACKGROUND.0,
+        TEXT_BACKGROUND.1,
+        TEXT_BACKGROUND.2,
+    );
+}
+
+#[cfg(target_arch = "x86_64")]
+fn scroll_text_rows() {
+    let rows = text_rows();
+    if rows <= 1 {
+        return;
+    }
+    let base = FRAMEBUFFER_BASE.load(Ordering::Relaxed);
+    let len = FRAMEBUFFER_LEN.load(Ordering::Relaxed);
+    let stride = FRAMEBUFFER_STRIDE.load(Ordering::Relaxed);
+    let bpp = FRAMEBUFFER_BPP.load(Ordering::Relaxed);
+    let Some(row_bytes) = stride
+        .checked_mul(bpp)
+        .and_then(|value| value.checked_mul(TEXT_LINE_HEIGHT as usize))
+    else {
+        return;
+    };
+    let Some(top) = (TEXT_TOP as usize)
+        .checked_mul(stride)
+        .and_then(|value| value.checked_mul(bpp))
+    else {
+        return;
+    };
+    let Some(area) = row_bytes.checked_mul(rows as usize) else {
+        return;
+    };
+    let Some(bottom) = top.checked_add(area) else {
+        return;
+    };
+    if base == 0 || bottom > len {
+        return;
+    }
+    unsafe {
+        let pointer = base as *mut u8;
+        core::ptr::copy(
+            pointer.add(top + row_bytes),
+            pointer.add(top),
+            area - row_bytes,
+        );
+    }
+    clear_text_row(
+        TEXT_TOP.saturating_add(rows.saturating_sub(1).saturating_mul(TEXT_LINE_HEIGHT)),
+    );
+}
+
+#[cfg(target_arch = "x86_64")]
+fn character_cell_width(character: char) -> u8 {
+    let value = character as u32;
+    if matches!(
+        value,
+        0x0300..=0x036f
+            | 0x1ab0..=0x1aff
+            | 0x1dc0..=0x1dff
+            | 0x20d0..=0x20ff
+            | 0xfe20..=0xfe2f
+    ) {
+        return 0;
+    }
+    if matches!(
+        value,
+        0x1100..=0x115f
+            | 0x2329..=0x232a
+            | 0x2e80..=0xa4cf
+            | 0xac00..=0xd7a3
+            | 0xf900..=0xfaff
+            | 0xfe10..=0xfe19
+            | 0xfe30..=0xfe6f
+            | 0xff00..=0xff60
+            | 0xffe0..=0xffe6
+            | 0x1f300..=0x1faff
+            | 0x20000..=0x3fffd
+    ) {
+        2
+    } else {
+        1
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn draw_text(x: u32, y: u32, max_width: u32, text: &str) -> bool {
+    let mut cursor = x;
+    let right = x.saturating_add(max_width);
+    for character in text.chars() {
+        let columns = character_cell_width(character);
+        if columns == 0 {
+            continue;
+        }
+        let width = TEXT_CELL_WIDTH.saturating_mul(columns as u32);
+        if cursor.saturating_add(width) > right {
+            return true;
+        }
+        if !draw_character(cursor, y, character, columns) {
+            return false;
+        }
+        cursor = cursor.saturating_add(width);
+    }
+    true
+}
+
+#[cfg(target_arch = "x86_64")]
+fn draw_character(x: u32, y: u32, character: char, columns: u8) -> bool {
+    if character == ' ' {
+        return true;
+    }
+    #[cfg(feature = "noto-console")]
+    if let Some(glyph) = get_raster(character, FontWeight::Regular, RasterHeight::Size20) {
+        for (row, pixels) in glyph.raster().iter().enumerate() {
+            for (column, coverage) in pixels.iter().copied().enumerate() {
+                if coverage != 0 {
+                    blend_pixel(
+                        x.saturating_add(column as u32),
+                        y.saturating_add(row as u32),
+                        TEXT_FOREGROUND.0,
+                        TEXT_FOREGROUND.1,
+                        TEXT_FOREGROUND.2,
+                        coverage,
                     );
                 }
             }
         }
-        x = x.saturating_add(TEXT_CELL_WIDTH);
+        return true;
     }
+
+    let fallback = if character.is_ascii() {
+        character as u8
+    } else {
+        b'?'
+    };
+    let glyph = crate::display::glyph(fallback);
+    let scale = 2;
+    let origin_x = x.saturating_add((TEXT_CELL_WIDTH.saturating_mul(columns as u32) - 10) / 2);
+    let origin_y = y.saturating_add(3);
+    for (row, bits) in glyph.iter().copied().enumerate() {
+        for column in 0..5u8 {
+            if bits & (1u8 << (4 - column)) != 0 {
+                fill_rect(
+                    origin_x + u32::from(column) * scale,
+                    origin_y + row as u32 * scale,
+                    scale,
+                    scale,
+                    TEXT_FOREGROUND.0,
+                    TEXT_FOREGROUND.1,
+                    TEXT_FOREGROUND.2,
+                );
+            }
+        }
+    }
+    true
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -408,6 +595,64 @@ fn fill_rect(x: u32, y: u32, width: u32, height: u32, red: u8, green: u8, blue: 
         for column in x..right {
             pixel(column, row, red, green, blue);
         }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn blend_pixel(x: u32, y: u32, red: u8, green: u8, blue: u8, coverage: u8) {
+    if coverage == 0 {
+        return;
+    }
+    if coverage == 255 {
+        pixel(x, y, red, green, blue);
+        return;
+    }
+    let Some((background_red, background_green, background_blue)) = read_pixel(x, y) else {
+        return;
+    };
+    pixel(
+        x,
+        y,
+        kernel_core::raster::blend_coverage(red, background_red, coverage),
+        kernel_core::raster::blend_coverage(green, background_green, coverage),
+        kernel_core::raster::blend_coverage(blue, background_blue, coverage),
+    );
+}
+
+#[cfg(target_arch = "x86_64")]
+fn read_pixel(x: u32, y: u32) -> Option<(u8, u8, u8)> {
+    let base = FRAMEBUFFER_BASE.load(Ordering::Relaxed);
+    let len = FRAMEBUFFER_LEN.load(Ordering::Relaxed);
+    let stride = FRAMEBUFFER_STRIDE.load(Ordering::Relaxed);
+    let bpp = FRAMEBUFFER_BPP.load(Ordering::Relaxed);
+    let format = FRAMEBUFFER_FORMAT.load(Ordering::Relaxed);
+    let offset = (y as usize)
+        .checked_mul(stride)?
+        .checked_add(x as usize)?
+        .checked_mul(bpp)?;
+    let end = offset.checked_add(bpp)?;
+    if base == 0 || end > len {
+        return None;
+    }
+    let pointer = base as *const u8;
+    unsafe {
+        Some(match format {
+            0 => (
+                core::ptr::read_volatile(pointer.add(offset)),
+                core::ptr::read_volatile(pointer.add(offset + 1)),
+                core::ptr::read_volatile(pointer.add(offset + 2)),
+            ),
+            1 => (
+                core::ptr::read_volatile(pointer.add(offset + 2)),
+                core::ptr::read_volatile(pointer.add(offset + 1)),
+                core::ptr::read_volatile(pointer.add(offset)),
+            ),
+            2 => {
+                let gray = core::ptr::read_volatile(pointer.add(offset));
+                (gray, gray, gray)
+            }
+            _ => return None,
+        })
     }
 }
 

@@ -44,6 +44,25 @@ Native framebuffer verification passed with the pinned Noto backend:
 The separate Headless First boot-console framebuffer capture is retained at
 `evidence/issue93-headless-noto-console-20261124-r2`.
 
+The later observer issue update identified two additional defects in the
+early console: non-zero Noto coverage was drawn as an opaque pixel, and text
+was interpreted as bytes with a fixed 90-byte limit. The current early path
+now:
+
+- blends each RGB channel with integer 8-bit coverage and nearest rounding;
+- renders UTF-8 scalar values rather than individual UTF-8 bytes;
+- derives columns and rows from framebuffer width/height and shared margins;
+- wraps on cell boundaries and scrolls the text region at the bottom;
+- reserves two cells for recognized East Asian wide ranges and displays a
+  visible fallback when the early bitmap font has no glyph;
+- retains the complete original text on the independent serial/log path.
+
+QEMU/OVMF evidence for this correction is retained at
+`evidence/issue93-headless-noto-console-20261124-r3`. This is still only the
+early console slice. It is not EDID/display-mode evidence, physical DPI
+qualification, CJK font coverage, normal `os-terminal + Swash` integration or
+#84 complete Chinese acceptance.
+
 This closes the bounded native framebuffer font/terminal integration gate. It
 does not claim that `os-terminal` + Swash or Ratatui are yet the production
 userspace terminal stack.
