@@ -43,6 +43,13 @@ any operation can be removed or migrated. A migration still requires a real
 consumer matrix, replacement service/gate, security boundary, wire and ABI
 snapshot decisions, failure/cancel/recovery tests, and public runtime changes.
 
+USI v1 metadata now exposes canonical service names (`service.info.get`,
+`service.process.list`, `service.module.*` and `service.time.now`) while the
+existing syscall entries and numeric IDs retain their legacy registry names
+for current callers. Wire service IDs are unchanged, and the old name remains
+available as an explicit migration label. This is a naming vertical, not yet an
+independently deployed Info/Process/Module service.
+
 Run:
 
 ```text

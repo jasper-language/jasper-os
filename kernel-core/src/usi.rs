@@ -25,7 +25,19 @@ pub enum Service {
 }
 
 impl Service {
+    /// Canonical service-protocol name.
     pub const fn name(self) -> &'static str {
+        match self {
+            Service::Info => "service.info.get",
+            Service::ProcessList => "service.process.list",
+            Service::ModuleList => "service.module.list",
+            Service::ModuleLifecycle => "service.module.lifecycle",
+            Service::TimeNow => "service.time.now",
+        }
+    }
+
+    /// Stable syscall registry names retained while old callers migrate.
+    pub const fn legacy_kernel_call_name(self) -> &'static str {
         match self {
             Service::Info => "system.info.get",
             Service::ProcessList => "system.process.list",
@@ -56,12 +68,7 @@ pub struct Header {
 }
 
 impl Header {
-    pub const fn new(
-        request_id: u64,
-        service: Service,
-        payload_bytes: u32,
-        records: u32,
-    ) -> Self {
+    pub const fn new(request_id: u64, service: Service, payload_bytes: u32, records: u32) -> Self {
         Self {
             request_id,
             service,
@@ -312,7 +319,10 @@ mod tests {
     #[test]
     fn fixed_records_round_trip() {
         let header = Header::new(7, Service::ProcessList, 64, 2).encode();
-        assert_eq!(Header::decode(&header), Some(Header::new(7, Service::ProcessList, 64, 2)));
+        assert_eq!(
+            Header::decode(&header),
+            Some(Header::new(7, Service::ProcessList, 64, 2))
+        );
 
         let info = Info {
             abi: 3,
@@ -360,5 +370,19 @@ mod tests {
             .encode();
         version[39] = MAX_MODULE_VERSION as u8 + 1;
         assert_eq!(Module::decode(&version), None);
+    }
+
+    #[test]
+    fn canonical_service_names_do_not_extend_retired_namespaces() {
+        for service in [
+            Service::Info,
+            Service::ProcessList,
+            Service::ModuleList,
+            Service::ModuleLifecycle,
+            Service::TimeNow,
+        ] {
+            assert!(service.name().starts_with("service."));
+            assert!(service.legacy_kernel_call_name().starts_with("system."));
+        }
     }
 }
