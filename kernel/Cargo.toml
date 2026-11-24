@@ -229,6 +229,9 @@ bench-switch-only = []
 # Bounded physical diagnostic: one thousand real A-B-A round trips per CPU,
 # bounded deadlines/abort, no scalar benchmarks and no million-sample run.
 bench-switch-diagnostic = ["bench-switch-only", "noto-console"]
+# Explicit diagnostic profile: omit the single-CPU group while keeping the
+# result marked SKIPPED. This never counts as a completed three-group matrix.
+bench-skip-single = []
 # Verification-only completion: exit through the emulator debug port after the
 # benchmark has published final results. Never enabled in a physical profile.
 bench-exit = []
@@ -301,6 +304,9 @@ update-agent-verify = [
 # End-to-end independently deployed service.info process, discovery, projected
 # process/module counts, idempotency, restart and capability-denial gates.
 service-info-verify = ["user-programs"]
+# End-to-end independently deployed service.time process over the kernel
+# monotonic fact, Time64/Time128 coherence, replay, restart and denial.
+service-time-verify = ["user-programs"]
 # Native Sandbox launch-plan guest acceptance as the first user program.
 sandbox-launch-verify = ["user-programs"]
 # Pixel 6a (Google Tensor GS101) early-boot probe: Samsung UART only, no scheduler/IRQ start.

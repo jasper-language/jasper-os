@@ -57,6 +57,12 @@ static LAST_SINGLE_MODE: AtomicBool = AtomicBool::new(false);
 static LAST_PHYSICAL_MODE: AtomicBool = AtomicBool::new(false);
 static LAST_LOGICAL_MODE: AtomicBool = AtomicBool::new(false);
 
+fn all_concurrent_modes_ok() -> bool {
+    LAST_PHYSICAL_MODE.load(Ordering::Acquire)
+        && LAST_LOGICAL_MODE.load(Ordering::Acquire)
+        && (cfg!(feature = "bench-skip-single") || LAST_SINGLE_MODE.load(Ordering::Acquire))
+}
+
 /// Result-log slots are test-fixture metadata, not a hardware capacity.
 const REPORT_ROWS: usize = 64;
 /// One framebuffer result row, retaining slightly more text than the display width.
@@ -1255,6 +1261,7 @@ fn parallel_switch_partner() {
     }
 }
 
+#[cfg(feature = "bench-profile")]
 fn general_switch_worker() {
     let cpu = arch::cpu_index();
     let ready = CS_READY.fetch_add(1, Ordering::AcqRel) + 1;
@@ -1318,6 +1325,7 @@ fn general_switch_worker() {
 /// Measure every real scheduler handoff completed while a small task workload
 /// runs. Scheduler policy decides the task order; this fixture supplies runnable
 /// tasks and a stop target but never requires a particular A/B sequence.
+#[cfg(feature = "bench-profile")]
 fn run_general_switch_workload(
     mode: &str,
     cpus: &[usize],
@@ -1960,7 +1968,7 @@ fn run_parallel_mode(mode: &str, cpus: &[usize], cal: &Calibration) -> bool {
         ok &= run_parallel_metric(mode, metric, cpus, cal);
     }
     let mut switch_planned_samples = 0usize;
-    #[cfg(feature = "bench-switch-diagnostic")]
+    #[cfg(all(feature = "bench-switch-diagnostic", feature = "bench-profile"))]
     {
         for iterations in [1usize, 10, 1_000] {
             early::append_progress(&alloc::format!(
@@ -1986,7 +1994,7 @@ fn run_parallel_mode(mode: &str, cpus: &[usize], cal: &Calibration) -> bool {
         ok &= run_parallel_context_switch(mode, cpus, cal, 1_000);
         switch_planned_samples = switch_planned_samples.saturating_add(1_000 * cpus.len());
     }
-    #[cfg(not(feature = "bench-switch-diagnostic"))]
+    #[cfg(all(not(feature = "bench-switch-diagnostic"), feature = "bench-profile"))]
     {
         early::append_progress(&alloc::format!("{} RUNNING SCHED.CONTEXT_SWITCH", mode));
         ok &= run_general_switch_workload(mode, cpus, cal, CONTEXT_ITERS);
@@ -2125,8 +2133,17 @@ pub fn run_smp_concurrent() {
     }
     let before = baseline();
     let before_heap_mapped = heap::stats().3;
-    let single_ok = run_parallel_mode("SMP_SINGLE", &single, &cal);
-    LAST_SINGLE_MODE.store(single_ok, Ordering::Release);
+    #[cfg(not(feature = "bench-skip-single"))]
+    {
+        let single_ok = run_parallel_mode("SMP_SINGLE", &single, &cal);
+        LAST_SINGLE_MODE.store(single_ok, Ordering::Release);
+    }
+    #[cfg(feature = "bench-skip-single")]
+    {
+        record_result(format_args!(
+            "SMP_SINGLE SKIPPED reason=explicit_physical_diagnostic"
+        ));
+    }
     let physical_ok = run_parallel_mode("SMP_PHYSICAL", &physical, &cal);
     LAST_PHYSICAL_MODE.store(physical_ok, Ordering::Release);
     let logical_ok = run_parallel_mode("SMP_LOGICAL", &logical, &cal);
@@ -2136,10 +2153,20 @@ pub fn run_smp_concurrent() {
     LAST_RECLAIMED.store(reclaimed, Ordering::Release);
     let final_result = format_args!(
         "SMP CONCURRENT FINAL SINGLE={} PHYSICAL={} LOGICAL={} SINGLE_CPUS={} PHYSICAL_CPUS={} LOGICAL_CPUS={} SMT={} RECLAIMED={} FAILED={} TIMING_FAILED={}",
-        single_ok,
+        if cfg!(feature = "bench-skip-single") {
+            "SKIPPED"
+        } else if LAST_SINGLE_MODE.load(Ordering::Acquire) {
+            "true"
+        } else {
+            "false"
+        },
         physical_ok,
         logical_ok,
-        single.len(),
+        if cfg!(feature = "bench-skip-single") {
+            0
+        } else {
+            single.len()
+        },
         physical.len(),
         logical.len(),
         logical.len() > physical.len(),
@@ -2220,11 +2247,12 @@ pub fn publish_results(failed: u32, timing_failed: u32) {
             "SMP DISCOVERED={} ONLINE={} PARALLEL_MATRIX={} SINGLE={} PHYSICAL={} LOGICAL={}",
             discovered,
             online,
-            if LAST_SINGLE_MODE.load(Ordering::Acquire)
-                && LAST_PHYSICAL_MODE.load(Ordering::Acquire)
-                && LAST_LOGICAL_MODE.load(Ordering::Acquire)
-            {
-                "single+physical+logical"
+            if all_concurrent_modes_ok() {
+                if cfg!(feature = "bench-skip-single") {
+                    "physical+logical"
+                } else {
+                    "single+physical+logical"
+                }
             } else {
                 "incomplete"
             },
@@ -2243,9 +2271,7 @@ pub fn publish_results(failed: u32, timing_failed: u32) {
         LAST_RECLAIMED.load(Ordering::Acquire),
         crate::smp::unique_enabled_cpu_count().max(1),
         crate::smp::online_set().len(),
-        LAST_SINGLE_MODE.load(Ordering::Acquire)
-            && LAST_PHYSICAL_MODE.load(Ordering::Acquire)
-            && LAST_LOGICAL_MODE.load(Ordering::Acquire),
+        all_concurrent_modes_ok(),
         LAST_SINGLE_MODE.load(Ordering::Acquire),
         LAST_PHYSICAL_MODE.load(Ordering::Acquire),
         LAST_LOGICAL_MODE.load(Ordering::Acquire)
