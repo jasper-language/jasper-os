@@ -268,6 +268,7 @@ pub mod rt_partition;
 pub mod rt_abi;
 
 pub mod timer_units;
+pub mod time128;
 pub mod sandbox;
 pub mod sandbox_image;
 pub mod sandbox_abi;

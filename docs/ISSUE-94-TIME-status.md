@@ -2,8 +2,8 @@
 
 Updated: 2026-11-24.
 
-Status: **architecture baseline; no multi-source trusted-time implementation
-or physical precision claim.**
+Status: **width-explicit representation primitives implemented; no
+multi-source trusted-time implementation or physical precision claim.**
 
 The stable defaults are:
 
@@ -21,6 +21,13 @@ The current x86 wall clock reads CMOS RTC at one-second resolution. TSC is
 calibrated for monotonic nanoseconds, but that does not make wall time a
 trusted nanosecond clock. QEMU and unit arithmetic are not physical timing
 qualification.
+
+`kernel_core::time128` now contains `Time64` and `Time128` representation
+types with checked arithmetic, floor-normalized negative seconds, and a
+documented round-to-nearest nanosecond conversion. The unit tests cover
+negative epochs, representative round trips and fixed 8/16-byte layout. This
+is not yet wired into the native ABI or scheduler, and no provider or physical
+accuracy claim follows from it.
 
 Time sources will be layered without a new time authority:
 
