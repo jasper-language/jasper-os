@@ -15,7 +15,7 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use kernel_core::frame::{PhysFrame, FRAME_SIZE};
+use kernel_core::frame::{FrameAllocator, FrameError, PhysFrame, FRAME_SIZE};
 use kernel_core::heap::LinkedListHeap;
 use kernel_core::paging::{MapFlags, VirtPage};
 use super::{frame, map};
@@ -35,6 +35,7 @@ struct HeapState {
 static HEAP: IrqSpinLock<HeapState> =
     IrqSpinLock::ranked(crate::lockorder::MEMORY_HEAP, HeapState { heap: LinkedListHeap::empty(), mapped_end: HEAP_START });
 static HEAP_PEAK_USED: AtomicUsize = AtomicUsize::new(0);
+static HEAP_TABLE_FRAMES: AtomicUsize = AtomicUsize::new(0);
 
 /// 增长失败的原因（诊断用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,13 +70,48 @@ impl GrowEnv for KernelGrowEnv {
         frame::allocate().map_err(|_| GrowError::OutOfFrames)
     }
     fn map(&mut self, page: VirtPage, f: PhysFrame) -> Result<(), GrowError> {
-        map::map(page, f, MapFlags::WRITE | MapFlags::GLOBAL).map_err(|_| GrowError::MapFailed)
+        map::map_with(
+            page,
+            f,
+            MapFlags::WRITE | MapFlags::GLOBAL,
+            &mut HeapTableFrames,
+        )
+        .map_err(|_| GrowError::MapFailed)
     }
     fn unmap(&mut self, page: VirtPage) -> Option<PhysFrame> {
         map::unmap(page).ok()
     }
     fn free(&mut self, f: PhysFrame) {
         let _ = frame::deallocate(f);
+    }
+}
+
+/// Frame allocator used only for heap page-table growth. Its allocation and
+/// rollback counts are exact even when other CPUs allocate unrelated frames
+/// concurrently.
+struct HeapTableFrames;
+
+impl FrameAllocator for HeapTableFrames {
+    fn allocate(&mut self) -> Result<PhysFrame, FrameError> {
+        let frame = frame::allocate()?;
+        HEAP_TABLE_FRAMES.fetch_add(1, Ordering::AcqRel);
+        Ok(frame)
+    }
+
+    fn deallocate(&mut self, frame: PhysFrame) -> Result<(), FrameError> {
+        let result = frame::deallocate(frame);
+        if result.is_ok() {
+            HEAP_TABLE_FRAMES.fetch_sub(1, Ordering::AcqRel);
+        }
+        result
+    }
+
+    fn free_frames(&self) -> usize {
+        frame::free_frames()
+    }
+
+    fn usable_frames(&self) -> usize {
+        frame::usable_frames()
     }
 }
 
@@ -231,6 +267,14 @@ pub fn ensure_free(bytes: usize) -> Result<(), GrowError> {
 pub fn stats() -> (usize, usize, usize, u64) {
     let s = HEAP.lock();
     (s.heap.total_bytes(), s.heap.free_bytes(), s.heap.free_blocks(), s.mapped_end - HEAP_START)
+}
+
+/// Physical frames retained by the current heap mapping: data pages plus
+/// intermediate page-table frames. Heap pages are intentionally not returned
+/// once mapped, so reclaim checks must include both.
+pub fn physical_frames() -> usize {
+    let mapped_pages = stats().3 as usize / FRAME_SIZE as usize;
+    mapped_pages.saturating_add(HEAP_TABLE_FRAMES.load(Ordering::Acquire))
 }
 
 /// Peak bytes ever allocated from the kernel heap in this boot.

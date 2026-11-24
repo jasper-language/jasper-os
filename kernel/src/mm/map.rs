@@ -56,6 +56,17 @@ pub fn map(page: VirtPage, frame: PhysFrame, flags: MapFlags) -> Result<(), MapE
     with(|m| m.map(page, frame, flags, &mut GlobalFrames))
 }
 
+/// Map one kernel page using an explicit frame allocator for intermediate
+/// page-table frames.
+pub(crate) fn map_with(
+    page: VirtPage,
+    frame: PhysFrame,
+    flags: MapFlags,
+    frames: &mut dyn FrameAllocator,
+) -> Result<(), MapError> {
+    with(|m| m.map(page, frame, flags, frames))
+}
+
 /// 取消映射、等待所有在线处理器完成击落，然后返回原帧（帧不归还，由调用者决定）。
 ///
 /// 击落失败时映射已经撤销，但不返回帧；调用者不得把任何仍可能被旧 TLB 引用的帧放回分配器。

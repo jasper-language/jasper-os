@@ -275,7 +275,7 @@ pub fn run() {
     let prev_preemption = sched::set_preemption(false);
     let was_enabled = arch::irq_save_disable();
     let start = baseline();
-    let start_heap_mapped = heap::stats().3;
+    let start_heap_frames = heap::physical_frames();
     arch::watchdog_pet_force();
     let cal = calibrate();
     check(cal.is_some(), "周期计数器校准失败");
@@ -300,8 +300,8 @@ pub fn run() {
         }
     }
     let end = baseline();
-    let end_heap_mapped = heap::stats().3;
-    let reclaimed = resources_reclaimed(start, end, start_heap_mapped, end_heap_mapped);
+    let end_heap_frames = heap::physical_frames();
+    let reclaimed = resources_reclaimed(start, end, start_heap_frames, end_heap_frames);
     check(reclaimed, "基准演练结束后资源未回到起点");
     LAST_RECLAIMED.store(reclaimed, Ordering::Release);
     arch::irq_restore(was_enabled);
@@ -1034,6 +1034,8 @@ static SWITCH_TARGETS: [AtomicU64; kernel_core::smp::MAX_CPUS] =
     [const { AtomicU64::new(0) }; kernel_core::smp::MAX_CPUS];
 static SWITCH_BASELINE_SET: [AtomicBool; kernel_core::smp::MAX_CPUS] =
     [const { AtomicBool::new(false) }; kernel_core::smp::MAX_CPUS];
+static SWITCH_BASELINE_READY: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; kernel_core::smp::MAX_CPUS];
 static SWITCH_CPU_READY: [AtomicU32; kernel_core::smp::MAX_CPUS] =
     [const { AtomicU32::new(0) }; kernel_core::smp::MAX_CPUS];
 static SWITCH_CPU_RELEASE: [AtomicBool; kernel_core::smp::MAX_CPUS] =
@@ -1308,8 +1310,20 @@ fn general_switch_worker() {
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
     {
+        let interrupts_were_enabled = arch::irq_save_disable();
         SWITCH_BASELINES[cpu].store(sched::runtime_switch_count(cpu), Ordering::Release);
         sched::reset_switch_sample_count(cpu);
+        SWITCH_BASELINE_READY[cpu].store(true, Ordering::Release);
+        arch::irq_restore(interrupts_were_enabled);
+    }
+    while !SWITCH_BASELINE_READY[cpu].load(Ordering::Acquire)
+        && !CS_ABORT.load(Ordering::Acquire)
+        && !switch_deadline_reached()
+    {
+        sched::yield_with_cause("yield");
+    }
+    if !SWITCH_BASELINE_READY[cpu].load(Ordering::Acquire) {
+        CS_ABORT.store(true, Ordering::Release);
     }
     let baseline = SWITCH_BASELINES[cpu].load(Ordering::Acquire);
     let target = SWITCH_TARGETS[cpu].load(Ordering::Acquire);
@@ -1378,7 +1392,7 @@ fn report_general_switch_state(
         ));
     }
     let line = alloc::format!(
-        "{} SWITCH STATE stage={} SCHED_ONLINE={} SPAWNED={}/{} LIVE={} READY={}/{} DONE={}/{} QUEUED={} RUNNABLE={} MISPLACED={} COUNT_MISMATCH={} LIST_MISMATCH={} HOOK_ERRORS={}",
+        "{} SWITCH STATE stage={} SCHED_ONLINE={} SPAWNED={}/{} LIVE={} READY={}/{} DONE={}/{}",
         mode,
         stage,
         scheduler_online.len(),
@@ -1388,7 +1402,14 @@ fn report_general_switch_state(
         CS_READY.load(Ordering::Acquire),
         expected_workers,
         SWITCH_WORKERS_DONE.load(Ordering::Acquire),
-        expected_workers,
+        expected_workers
+    );
+    kprintln!("[JSR-SMP-SW] {}", line);
+    early::append_progress(&line);
+    let line = alloc::format!(
+        "{} SWITCH QUEUE stage={} QUEUED={} RUNNABLE={} MISPLACED={} COUNT_MISMATCH={} LIST_MISMATCH={} HOOK_ERRORS={}",
+        mode,
+        stage,
         audit.queued,
         runnable,
         audit.misplaced,
@@ -1398,6 +1419,28 @@ fn report_general_switch_state(
     );
     kprintln!("[JSR-SMP-SW] {}", line);
     early::append_progress(&line);
+    if stage == "spawned" {
+        for &cpu in cpus {
+            let Some(per_cpu) = crate::smp::percpu::get(cpu) else {
+                continue;
+            };
+            let line = alloc::format!(
+                "{} SWITCH AP cpu={} hw={} tick={} rsc={} call={} wake={} pending={} current={} q={}",
+                mode,
+                cpu,
+                per_cpu.hw_id(),
+                per_cpu.ticks(),
+                per_cpu.ipis(kernel_core::smp::IpiKind::Reschedule),
+                per_cpu.ipis(kernel_core::smp::IpiKind::Call),
+                per_cpu.idle_wakeups(),
+                per_cpu.resched_pending(),
+                per_cpu.current(),
+                sched::runnable_workers_on(cpu)
+            );
+            kprintln!("[JSR-SMP-SW] {}", line);
+            early::append_progress(&line);
+        }
+    }
 }
 
 /// Drive the boot task while the real scheduler runs the switch workload.
@@ -1431,6 +1474,11 @@ fn drive_general_switch_workload(
             core::hint::spin_loop();
         }
         if now >= next_report {
+            for &cpu in cpus {
+                if cpu != arch::cpu_index() {
+                    let _ = crate::smp::reschedule(cpu);
+                }
+            }
             report_general_switch_state(mode, "waiting", cpus, spawned, expected_workers);
             next_report = now.saturating_add(report_interval);
         }
@@ -1492,6 +1540,7 @@ fn run_general_switch_workload(
         SWITCH_BASELINES[cpu].store(0, Ordering::Release);
         SWITCH_TARGETS[cpu].store(target_per_cpu as u64, Ordering::Release);
         SWITCH_BASELINE_SET[cpu].store(false, Ordering::Release);
+        SWITCH_BASELINE_READY[cpu].store(false, Ordering::Release);
         SWITCH_CPU_READY[cpu].store(0, Ordering::Release);
         SWITCH_CPU_RELEASE[cpu].store(false, Ordering::Release);
         let start = index.saturating_mul(per_cpu_capacity);
@@ -1613,12 +1662,16 @@ fn run_general_switch_workload(
         expected_workers
     ));
 
+    let workers_done = SWITCH_WORKERS_DONE.load(Ordering::Acquire) as usize;
+    let sample_buffer_reclaimable = settled && workers_done == expected_workers;
     let mut accepted = Vec::new();
     let mut overflow = Vec::new();
     if accepted.try_reserve_exact(cpus.len()).is_err()
         || overflow.try_reserve_exact(cpus.len()).is_err()
     {
-        core::mem::forget(records);
+        if !sample_buffer_reclaimable {
+            core::mem::forget(records);
+        }
         return false;
     }
     for &cpu in cpus {
@@ -1626,7 +1679,6 @@ fn run_general_switch_workload(
         accepted.push(count);
         overflow.push(over);
     }
-    let workers_done = SWITCH_WORKERS_DONE.load(Ordering::Acquire) as usize;
     let complete = settled
         && spawned == expected_workers
         && workers_done == expected_workers
@@ -1635,7 +1687,9 @@ fn run_general_switch_workload(
             .iter()
             .all(|&count| count >= target_per_cpu as u64);
     if !complete {
-        core::mem::forget(records);
+        if !sample_buffer_reclaimable {
+            core::mem::forget(records);
+        }
         check(false, "通用上下文切换工作负载未完整收敛");
         record_result(format_args!(
             "{} SCHED.CONTEXT_SWITCH BLOCKED settled={} tasks={}/{} done={}/{} overflow={:?} accepted={:?} target={}",
@@ -1654,7 +1708,6 @@ fn run_general_switch_workload(
 
     let mut durations = Vec::new();
     if durations.try_reserve_exact(cpus.len().saturating_mul(target_per_cpu)).is_err() {
-        core::mem::forget(records);
         return false;
     }
     let mut identities_valid = true;
@@ -1711,12 +1764,10 @@ fn run_general_switch_workload(
         );
     }
     if !identities_valid {
-        core::mem::forget(records);
         check(false, "真实切换事件缺少任务身份或序号不单调");
         return false;
     }
     let Some(summary) = summarize(&mut durations) else {
-        core::mem::forget(records);
         return false;
     };
     let counts = cal.threshold_counts(&durations);
@@ -2114,7 +2165,7 @@ fn run_parallel_context_switch(
 fn run_parallel_mode(mode: &str, cpus: &[usize], cal: &Calibration) -> bool {
     report_parallel_memory(mode, "before");
     let before = baseline();
-    let before_heap_mapped = heap::stats().3;
+    let before_heap_frames = heap::physical_frames();
     let skew = measure_tsc_skew(mode, cpus);
     check(skew.is_some(), "跨核周期计数器屏障观测失败");
     if let Some(skew_ns) = skew {
@@ -2211,13 +2262,12 @@ fn run_parallel_mode(mode: &str, cpus: &[usize], cal: &Calibration) -> bool {
     kprintln!("{}", result);
     record_result(result);
     let after = baseline();
-    let after_heap_mapped = heap::stats().3;
-    let reclaimed = resources_reclaimed(before, after, before_heap_mapped, after_heap_mapped);
-    let retained_heap_pages =
-        after_heap_mapped.saturating_sub(before_heap_mapped) / kernel_core::frame::FRAME_SIZE;
+    let after_heap_frames = heap::physical_frames();
+    let reclaimed = resources_reclaimed(before, after, before_heap_frames, after_heap_frames);
+    let retained_heap_frames = after_heap_frames.saturating_sub(before_heap_frames);
     check(reclaimed, "单个并发模式结束后资源未回到起点");
     kprintln!(
-        "[JSR-SMP-RESOURCE] mode={} frames={}/{} objects={}/{} pending={}/{} pins={},{} retained_heap_pages={} reclaimed={}",
+        "[JSR-SMP-RESOURCE] mode={} frames={}/{} objects={}/{} pending={}/{} pins={},{} retained_heap_frames={} reclaimed={}",
         mode,
         after.free_frames,
         before.free_frames,
@@ -2227,11 +2277,11 @@ fn run_parallel_mode(mode: &str, cpus: &[usize], cal: &Calibration) -> bool {
         before.pending,
         after.pins.0,
         after.pins.1,
-        retained_heap_pages,
+        retained_heap_frames,
         reclaimed
     );
     record_result(format_args!(
-        "{} RESOURCE FRAMES={}/{} OBJECTS={}/{} PENDING={}/{} PINS={},{} PINS_BEFORE={},{} RETAINED_HEAP_PAGES={} RECLAIMED={}",
+        "{} RESOURCE FRAMES={}/{} OBJECTS={}/{} PENDING={}/{} PINS={},{} PINS_BEFORE={},{} RETAINED_HEAP_FRAMES={} RECLAIMED={}",
         mode,
         after.free_frames,
         before.free_frames,
@@ -2243,7 +2293,7 @@ fn run_parallel_mode(mode: &str, cpus: &[usize], cal: &Calibration) -> bool {
         after.pins.1,
         before.pins.0,
         before.pins.1,
-        retained_heap_pages,
+        retained_heap_frames,
         reclaimed
     ));
     report_parallel_memory(mode, "after");
@@ -2315,7 +2365,7 @@ pub fn run_smp_concurrent() {
         return;
     }
     let before = baseline();
-    let before_heap_mapped = heap::stats().3;
+    let before_heap_frames = heap::physical_frames();
     #[cfg(not(feature = "bench-skip-single"))]
     {
         let single_ok = run_parallel_mode("SMP_SINGLE", &single, &cal);
@@ -2331,7 +2381,12 @@ pub fn run_smp_concurrent() {
     LAST_PHYSICAL_MODE.store(physical_ok, Ordering::Release);
     let logical_ok = run_parallel_mode("SMP_LOGICAL", &logical, &cal);
     LAST_LOGICAL_MODE.store(logical_ok, Ordering::Release);
-    let reclaimed = resources_reclaimed(before, baseline(), before_heap_mapped, heap::stats().3);
+    let reclaimed = resources_reclaimed(
+        before,
+        baseline(),
+        before_heap_frames,
+        heap::physical_frames(),
+    );
     check(reclaimed, "并发基准结束后资源未回到起点");
     LAST_RECLAIMED.store(reclaimed, Ordering::Release);
     let final_result = format_args!(
@@ -2464,21 +2519,20 @@ pub fn publish_results(failed: u32, timing_failed: u32) {
 fn resources_reclaimed(
     start: crate::baseline::Baseline,
     end: crate::baseline::Baseline,
-    start_heap_mapped: u64,
-    end_heap_mapped: u64,
+    start_heap_frames: usize,
+    end_heap_frames: usize,
 ) -> bool {
     if start.objects != end.objects || start.pending != end.pending || start.pins != end.pins {
         return false;
     }
     #[cfg(feature = "bench-profile")]
     {
-        let retained_heap_pages =
-            end_heap_mapped.saturating_sub(start_heap_mapped) / kernel_core::frame::FRAME_SIZE;
-        end.free_frames.saturating_add(retained_heap_pages as usize) == start.free_frames
+        let retained_heap_frames = end_heap_frames.saturating_sub(start_heap_frames);
+        end.free_frames.saturating_add(retained_heap_frames) == start.free_frames
     }
     #[cfg(not(feature = "bench-profile"))]
     {
-        let _ = (start_heap_mapped, end_heap_mapped);
+        let _ = (start_heap_frames, end_heap_frames);
         end.free_frames == start.free_frames
     }
 }
@@ -2948,7 +3002,7 @@ fn switch_partner() {
 
 fn context_switch(cal: &Calibration) -> Option<Summary> {
     let before = baseline();
-    let before_heap_mapped = heap::stats().3;
+    let before_heap_frames = heap::physical_frames();
     {
         let mut samples = SWITCH_SAMPLES.lock();
         samples.clear();
@@ -2977,15 +3031,15 @@ fn context_switch(cal: &Calibration) -> Option<Summary> {
         "完成切换计数少于有效样本数",
     );
     let after = baseline();
-    let retained_heap_pages =
-        heap::stats().3.saturating_sub(before_heap_mapped) / kernel_core::frame::FRAME_SIZE;
+    let retained_heap_frames =
+        heap::physical_frames().saturating_sub(before_heap_frames);
     check(
         after.objects == before.objects
             && after.pending == before.pending
             && after.pins == before.pins
             && after
                 .free_frames
-                .saturating_add(retained_heap_pages as usize)
+                .saturating_add(retained_heap_frames)
                 == before.free_frames,
         "切换基准后资源未回到基线",
     );
@@ -3010,7 +3064,7 @@ fn context_switch(cal: &Calibration) -> Option<Summary> {
 
 fn frames(cal: &Calibration) {
     let before = baseline();
-    let before_heap_mapped = heap::stats().3;
+    let before_heap_frames = heap::physical_frames();
     let mut alloc = Vec::with_capacity(TAIL_ITERS);
     let mut free = Vec::with_capacity(TAIL_ITERS);
     let mut ok = true;
@@ -3051,7 +3105,12 @@ fn frames(cal: &Calibration) {
     };
     check(refused, "重复释放页帧未被拒绝或改动了空闲帧数");
     let after = baseline();
-    let reclaimed = resources_reclaimed(before, after, before_heap_mapped, heap::stats().3);
+    let reclaimed = resources_reclaimed(
+        before,
+        after,
+        before_heap_frames,
+        heap::physical_frames(),
+    );
     check(reclaimed, "页帧基准后资源未回到基线");
     kprintln!(
         "[JSR-BENCH] case=frame_refusal double_free_refused={} free_unchanged={} reclaimed={}",
@@ -3113,15 +3172,15 @@ fn heap_paths(cal: &Calibration) {
 
 fn user_program(cal: &Calibration) {
     let before = baseline();
-    let before_heap_mapped = heap::stats().3;
+    let before_heap_frames = heap::physical_frames();
     let trace = crate::syscall::set_trace(false);
     let res = run_program_arg("bench", USER_BENCH, 0, cal.cycles_per_second(), rt_calls());
     crate::syscall::set_trace(trace);
     let ok_exit = matches!(res, Some((Some(ProcState::Exited { code: 0 }), Some(0))));
     check(ok_exit, "user/bench 未以 0 退出");
     let after = baseline();
-    let after_heap_mapped = heap::stats().3;
-    let reclaimed = resources_reclaimed(before, after, before_heap_mapped, after_heap_mapped);
+    let after_heap_frames = heap::physical_frames();
+    let reclaimed = resources_reclaimed(before, after, before_heap_frames, after_heap_frames);
     check(reclaimed, "用户基准后资源未回到基线");
     kprintln!(
         "[JSR-BENCH] case=user exit={:?} reclaimed={}",
