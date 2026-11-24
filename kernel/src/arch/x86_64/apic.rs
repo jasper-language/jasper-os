@@ -68,6 +68,7 @@ const ICR_LEVEL_ASSERT: u32 = 1 << 14;
 const ICR_LEVEL_TRIGGER: u32 = 1 << 15;
 const ICR_INIT: u32 = 0b101 << 8;
 const ICR_STARTUP: u32 = 0b110 << 8;
+const ICR_IDLE_SPINS: u32 = 100_000;
 /// 定时器分频 16。
 const DIVIDE_BY_16: u32 = 0b0011;
 /// 校准窗口（毫秒）。
@@ -225,8 +226,19 @@ fn send(dest: u32, low: u32) -> bool {
     wait_icr_idle()
 }
 
+/// Issue an xAPIC ICR command without waiting for the delivery-status bit to
+/// clear afterwards. Used only for the INIT deassert diagnostic path.
+fn send_no_wait(dest: u32, low: u32) -> bool {
+    if !wait_icr_idle() || is_x2apic() {
+        return false;
+    }
+    write(REG_ICR_HIGH, (dest & 0xff) << 24);
+    write(REG_ICR_LOW, low);
+    true
+}
+
 fn wait_icr_idle() -> bool {
-    for _ in 0..1_000_000 {
+    for _ in 0..ICR_IDLE_SPINS {
         if read(REG_ICR_LOW) & ICR_PENDING == 0 {
             return true;
         }
@@ -278,9 +290,11 @@ pub fn send_init_startup(dest: u32, start_page: u8) -> bool {
         #[cfg(not(feature = "smp-skip-init-deassert"))]
         {
             crate::early::mark("AP INIT DEASSERT");
-            if !send(dest, ICR_INIT | ICR_LEVEL_TRIGGER) {
+            if !send_no_wait(dest, ICR_INIT | ICR_LEVEL_TRIGGER) {
                 return false;
             }
+            crate::early::mark("AP INIT DEASSERT WRITE DONE");
+            pit::delay_us(INIT_ASSERT_HOLD_US);
             crate::early::mark("AP INIT DEASSERT OK");
         }
         #[cfg(feature = "smp-skip-init-deassert")]
