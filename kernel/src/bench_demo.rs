@@ -234,6 +234,9 @@ pub fn run() {
         config::ACTIVE.clock.timer_hz,
         CALIBRATION_TICKS
     );
+    screen_line("BENCH START - MILLION-SAMPLE KERNEL TESTS\n");
+    #[cfg(feature = "bench-profile")]
+    early::append_progress("BENCH calibrating cycle counter");
     let prev_preemption = sched::set_preemption(false);
     let was_enabled = arch::irq_save_disable();
     let start = baseline();
@@ -250,11 +253,11 @@ pub fn run() {
         arch::watchdog_pet_force();
         syscall_set_paths(&cal);
         arch::watchdog_pet_force();
-        user_program(&cal);
-        arch::watchdog_pet_force();
         let switch = context_switch(&cal);
         arch::watchdog_pet_force();
         publish_checkpoint();
+        user_program(&cal);
+        arch::watchdog_pet_force();
         #[cfg(feature = "bench-long-run")]
         {
             // Tick-driven sampling needs one interrupt per retained observation,
@@ -306,7 +309,7 @@ pub fn publish_checkpoint() {
     #[cfg(feature = "bench-profile")]
     {
         early::results_begin();
-        early::append_line("FAST RESULTS - KERNEL TIMER IRQ STILL RUNNING");
+        early::append_line("FAST KERNEL RESULTS - USER BENCHMARK RUNNING");
         early::append_line("ROW 1: N/P50/P99/P99.9   ROW 2: P99.99/P99.999/MAX/THRESHOLDS");
         for row in &report.rows[..report.len] {
             let text = row.text();
