@@ -828,7 +828,6 @@ fn context_switch(cal: &Calibration) -> Option<Summary> {
     check(SWITCH_NONE.load(Ordering::Relaxed) == 0, "有可运行对手时让出却没有切换");
     let mut samples = core::mem::take(&mut *SWITCH_SAMPLES.lock());
     check(samples.len() == CONTEXT_ITERS, "切换样本数不足");
-    let sum = report_values("sched.context_switch", &mut samples, cal, CONTEXT_ITERS);
     let after = baseline();
     let retained_heap_pages =
         heap::stats().3.saturating_sub(before_heap_mapped) / kernel_core::frame::FRAME_SIZE;
@@ -840,7 +839,7 @@ fn context_switch(cal: &Calibration) -> Option<Summary> {
                 == before.free_frames,
         "切换基准后资源未回到基线",
     );
-    sum
+    report_values("sched.context_switch", &mut samples, cal, CONTEXT_ITERS)
 }
 
 // ---------------------------------------------------------------------------
@@ -876,8 +875,6 @@ fn frames(cal: &Calibration) {
         }
     }
     check(ok, "页帧分配/释放失败");
-    report_values("frame.alloc", &mut alloc, cal, TAIL_ITERS);
-    report_values("frame.free", &mut free, cal, TAIL_ITERS);
     // 失败路径：重复释放被拒，空闲帧数不变
     let refused = match frame::allocate() {
         Ok(f) => {
@@ -898,6 +895,8 @@ fn frames(cal: &Calibration) {
     );
     check(reclaimed, "页帧基准后资源未回到基线");
     kprintln!("[JSR-BENCH] case=frame_refusal double_free_refused={} free_unchanged={} reclaimed={}", refused, refused, reclaimed);
+    report_values("frame.alloc", &mut alloc, cal, TAIL_ITERS);
+    report_values("frame.free", &mut free, cal, TAIL_ITERS);
 }
 
 // ---------------------------------------------------------------------------
@@ -925,8 +924,6 @@ fn heap_paths(cal: &Calibration) {
             report_progress(i + 1);
         }
     }
-    report_values("heap.alloc_free_64", &mut small, cal, TAIL_ITERS);
-    report_values("heap.alloc_free_4096", &mut page, cal, TAIL_ITERS);
     // 失败路径：超出架构虚拟窗口的申请被拒，堆的统计不变
     let stats_before = heap::stats();
     let mut v: Vec<u8> = Vec::new();
@@ -939,6 +936,8 @@ fn heap_paths(cal: &Calibration) {
     let after = baseline();
     check(after == before, "堆基准后资源未回到基线");
     kprintln!("[JSR-BENCH] case=heap_refusal refused={} heap_unchanged={} reclaimed={}", refused, unchanged, after == before);
+    report_values("heap.alloc_free_64", &mut small, cal, TAIL_ITERS);
+    report_values("heap.alloc_free_4096", &mut page, cal, TAIL_ITERS);
 }
 
 // ---------------------------------------------------------------------------
