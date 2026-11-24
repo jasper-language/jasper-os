@@ -19,8 +19,10 @@
 
 每个并行指标现在分别输出 `planned / observed / valid / failed_ops /
 incomplete`。多核百分位仍由全部保留原始样本计算，不平均各 CPU 百分位。
-`SCHED.CONTEXT_SWITCH` 若遇到正常 yield gate 抑制、没有发生真实切换，
-该次尝试不进入样本，重试后只有真实完成的切换才计入百分位；重试数单独记录。
+`SCHED.CONTEXT_SWITCH` 的测量任务直接进入原有完整调度事务，而不是调用允许
+立即返回的通用 `yield_now` 快路；否则单核实机可能被正常 yield gate 无限抑制。
+若仍未发生真实切换，该次尝试不进入样本，重试后只有真实完成的切换才计入
+百分位；重试数单独记录。
 
 每个模式输出 `before / during_raw_retained / after` 三个阶段的内存事实，
 包含可用/空闲/已用内存、堆使用、堆峰值、堆空闲与映射量。

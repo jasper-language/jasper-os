@@ -1005,7 +1005,11 @@ fn parallel_switch_measurer() {
             loop {
                 let n0 = sched::completed_switch_count(cpu);
                 let c0 = arch::measure_cycles();
-                sched::yield_now();
+                // Enter the complete existing scheduler transaction directly.
+                // `yield_now` is allowed to return immediately through the
+                // normal yield gate; that is correct for general scheduling,
+                // but cannot prove that a context-switch sample occurred.
+                sched::yield_with_cause("yield");
                 let dt = arch::measure_cycles().wrapping_sub(c0);
                 let n = sched::completed_switch_count(cpu).wrapping_sub(n0);
                 if n == 0 {
