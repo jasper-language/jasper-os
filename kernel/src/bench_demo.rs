@@ -1281,6 +1281,12 @@ fn general_switch_worker() {
             slot,
             SWITCH_CPU_READY[cpu].load(Ordering::Acquire) + 1
         );
+        if cpu == 0 {
+            early::append_progress(&alloc::format!(
+                "SMP_PHYSICAL SWITCH CPU0 WORKER READY slot={}",
+                slot
+            ));
+        }
     }
     let global_ready = CS_READY.fetch_add(1, Ordering::AcqRel) + 1;
     let cpu_ready = SWITCH_CPU_READY[cpu].fetch_add(1, Ordering::AcqRel) + 1;
@@ -1338,6 +1344,13 @@ fn general_switch_worker() {
                     target,
                     crate::smp::percpu::this().current()
                 );
+                if cpu == 0 {
+                    early::append_progress(&alloc::format!(
+                        "SMP_PHYSICAL SWITCH CPU0 {}/{}",
+                        observed,
+                        target
+                    ));
+                }
             }
         }
     }
@@ -1442,6 +1455,12 @@ fn run_general_switch_workload(
         expected_workers,
         target_per_cpu
     );
+    early::append_progress(&alloc::format!(
+        "SMP_PHYSICAL SWITCH N={} SPAWNED={}/{}",
+        target_per_cpu,
+        spawned,
+        expected_workers
+    ));
     let started = CS_RELEASE_CYCLES.load(Ordering::Acquire) as u64;
     if spawned != expected_workers {
         CS_ABORT.store(true, Ordering::Release);
@@ -1464,6 +1483,13 @@ fn run_general_switch_workload(
         expected_workers,
         target_per_cpu
     );
+    early::append_progress(&alloc::format!(
+        "SMP_PHYSICAL SWITCH N={} SETTLED={} DONE={}/{}",
+        target_per_cpu,
+        settled,
+        SWITCH_WORKERS_DONE.load(Ordering::Acquire),
+        expected_workers
+    ));
 
     let mut accepted = Vec::new();
     let mut overflow = Vec::new();
