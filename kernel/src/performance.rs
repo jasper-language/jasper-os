@@ -33,6 +33,7 @@ fn finish(ctx: &mut BootCtx) {
     };
     #[cfg(feature = "smp-matrix-only")]
     {
+        crate::smp_performance::publish_results();
         report_memory("smp-after");
         let line = alloc::format!("SMP MATRIX RESULT FAILED={}\n", smp_failed);
         emit(line.as_str());

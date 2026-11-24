@@ -2,11 +2,15 @@
 //! scheduler admitted.
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::hint::black_box;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{arch, early, hardware, kprintln, mm, smp};
+
+static REPORT: kernel_core::sync::SpinLock<Vec<String>> =
+    kernel_core::sync::SpinLock::new(Vec::new());
 
 /// Each worker performs this many individually executed, compiler-visible
 /// workload operations.
@@ -232,6 +236,20 @@ fn run_mode(
     );
     early::append_line(line.trim_end());
     kprintln!("{}", line.trim_end());
+    REPORT.lock().push(alloc::format!(
+        "{} workers={}/{} total_ops={} elapsed_ns={} throughput_ops_s={} scaling_ppm={} worker_min_ns={} worker_max_ns={} failed={} reclaimed={}",
+        mode,
+        completed,
+        expected,
+        total_operations,
+        elapsed_ns,
+        throughput,
+        scaling,
+        min_ns,
+        max_ns,
+        failed,
+        reclaimed
+    ));
     kprintln!(
         "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"parallel-mode\",\"mode\":\"{}\",\"workers_expected\":{},\"workers_completed\":{},\"operations_per_worker\":{},\"total_operations\":{},\"elapsed_ns\":{},\"throughput_ops_s\":{},\"scaling_permille\":{},\"worker_mean_ns\":{},\"worker_min_ns\":{},\"worker_max_ns\":{},\"failed_workers\":{},\"resources_reclaimed\":{},\"usable_kib_before\":{},\"free_kib_before\":{},\"heap_used_kib_before\":{},\"heap_mapped_kib_before\":{}}}",
         mode,
@@ -309,6 +327,17 @@ fn run_contention(kind: ContentionKind, cpus: &[usize]) -> Option<u64> {
     );
     early::append_line(&line);
     kprintln!("{}", line);
+    REPORT.lock().push(alloc::format!(
+        "{} workers={}/{} total_ops={} elapsed_ns={} throughput_ops_s={} worker_min_ns={} worker_max_ns={}",
+        kind.name(),
+        worker_cycles.len(),
+        cpus.len(),
+        operations,
+        elapsed_ns,
+        throughput,
+        min_ns,
+        max_ns
+    ));
     kprintln!(
         "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"parallel-operation\",\"operation\":\"{}\",\"workers_expected\":{},\"workers_completed\":{},\"operations_per_worker\":{},\"total_operations\":{},\"elapsed_ns\":{},\"throughput_ops_s\":{},\"worker_min_ns\":{},\"worker_max_ns\":{}}}",
         kind.name(),
@@ -346,6 +375,7 @@ fn memory() -> (usize, usize, usize, usize, usize, u64) {
 
 /// Run single-core, one-thread-per-physical-core, and all-logical-CPU modes.
 pub fn run() {
+    REPORT.lock().clear();
     let physical = physical_cpus();
     let logical = logical_cpus();
     let online = smp::online_set().len();
@@ -387,5 +417,17 @@ pub fn run() {
         ] {
             run_contention(kind, &logical);
         }
+    }
+}
+
+/// Render the SMP result records after discovery and all matrices have
+/// completed, so boot-stage output cannot scroll them off the screen.
+pub fn publish_results() {
+    let report = REPORT.lock();
+    early::results_begin();
+    early::append_line("SMP PERFORMANCE MATRIX");
+    early::append_line("Scalar: single/all-physical/all-logical; then contention/memory paths");
+    for line in report.iter() {
+        early::append_line(line);
     }
 }
