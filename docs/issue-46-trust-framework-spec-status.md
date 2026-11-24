@@ -2,6 +2,10 @@
 
 状态：规范已定义；生产实现、硬件 Provider 和行业 Profile 未完成。
 
+2026-11-24 补充：规范保持单一原生 Trust/SEC 权威；RATS/EAT、CBOR/COSE、
+TPM/DICE/SPDM、UEFI、TUF/in-toto/SLSA、SPDX/CycloneDX/CSAF 等按各自职责
+复用，不按国家/行业建立平行信任架构。标准或密码算法支持不等于产品认证。
+
 ## 本次交付
 
 - `docs/TRUST-FRAMEWORK-SPEC.md`：角色、证据等级、Challenge/Evidence/Result、
