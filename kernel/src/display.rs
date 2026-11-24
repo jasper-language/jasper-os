@@ -141,8 +141,8 @@ pub fn start() -> Result<(), DisplayInputError> {
     let keyboard = crate::arch::x86_64::keyboard::init(); // JASPER-ISA-REFERENCE: x86_64 input backend.
     #[cfg(not(target_arch = "x86_64"))]
     let keyboard = false;
-    let input_capacity =
-        plan_key_queue_capacity(required, mm::heap::limit()).ok_or(DisplayInputError::Failed)?;
+    let input_capacity = plan_key_queue_capacity(required, mm::heap::physical_headroom())
+        .ok_or(DisplayInputError::Failed)?;
     let session = DynamicDisplayInputSession::open(
         DisplayCapabilities {
             backend: Some(DisplayBackend::Framebuffer),

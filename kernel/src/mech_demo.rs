@@ -368,14 +368,14 @@ fn exercise_assembly(c: &Checker) -> Option<Assembly> {
         Err(errors) => {
             let (heap_total, heap_free, heap_blocks, heap_mapped) = crate::mm::heap::stats();
             kprintln!(
-                "[JSR-MECH-ASSEMBLY] errors={} truncated={} heap_total={} heap_free={} heap_blocks={} heap_mapped={} heap_limit={}",
+                "[JSR-MECH-ASSEMBLY] errors={} truncated={} heap_total={} heap_free={} heap_blocks={} heap_mapped={} physical_headroom={}",
                 errors.len(),
                 errors.truncated(),
                 heap_total,
                 heap_free,
                 heap_blocks,
                 heap_mapped,
-                crate::mm::heap::limit()
+                crate::mm::heap::physical_headroom()
             );
             for error in errors.iter() {
                 kprintln!(

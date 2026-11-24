@@ -33,7 +33,7 @@ static REGISTRY_PLAN: Once<SandboxRegistryPlan> = Once::new();
 
 /// Admit Sandbox identity metadata from runtime Workload and heap capacity.
 pub fn init_registry(workload_slots: usize) -> bool {
-    let memory_budget = crate::mm::heap::limit();
+    let memory_budget = crate::mm::heap::physical_headroom();
     let Some(plan) = plan_sandbox_registry(memory_budget, workload_slots) else {
         crate::kprintln!(
             "[JSR-SANDBOX] reject=registry_capacity workloads={workload_slots} budget={memory_budget}"

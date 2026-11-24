@@ -116,7 +116,7 @@ fn initialize(service: &mut Option<Service>) -> bool {
     if service.is_some() {
         return true;
     }
-    let Ok(capacity) = usize::try_from(crate::mm::heap::limit() / 1024) else {
+    let Ok(capacity) = usize::try_from(crate::mm::heap::physical_headroom() / 1024) else {
         return false;
     };
     if capacity == 0 {

@@ -100,7 +100,7 @@ fn resolve(t: &mut Table, pid: ObjId, h: HandleId, rights: Rights) -> Result<Obj
 
 pub fn create_for(pid: ObjId, backend: Backend) -> Result<HandleId, VcpuError> {
     let second_level = SecondLevel::new(backend).map_err(VcpuError::Table)?;
-    let capacity = plan_guest_mapping_capacity(crate::mm::heap::limit())
+    let capacity = plan_guest_mapping_capacity(crate::mm::heap::physical_headroom())
         .ok_or(VcpuError::Capacity)?;
     let guest = DynamicGuestMap::new(capacity).ok_or(VcpuError::Capacity)?;
     let mut pins = Vec::new();
@@ -110,7 +110,7 @@ pub fn create_for(pid: ObjId, backend: Backend) -> Result<HandleId, VcpuError> {
     crate::kprintln!(
         "[JSR-VCPU] mapping_capacity={} budget={}",
         capacity,
-        crate::mm::heap::limit()
+        crate::mm::heap::physical_headroom()
     );
     kobj::with(|t| {
         if !proc::running_in(t, pid) {

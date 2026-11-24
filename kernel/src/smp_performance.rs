@@ -26,13 +26,12 @@ fn scalar_work(seed: u64) -> u64 {
     arch::measure_cycles().wrapping_sub(start)
 }
 
-fn cycles_to_ns(cycles: u64) -> u64 {
+fn cycles_to_ns(cycles: u64) -> Option<u64> {
     early::tsc_frequency_hz()
         .map(|hz| {
             (u128::from(cycles) * 1_000_000_000u128 / u128::from(hz.max(1)))
                 .min(u128::from(u64::MAX)) as u64
         })
-        .unwrap_or(0)
 }
 
 fn physical_cpus() -> Vec<usize> {
@@ -84,36 +83,62 @@ fn run_mode(
         }
     }
     let bsp_cycles = scalar_work(0);
-    worker_ns.push(cycles_to_ns(bsp_cycles));
+    let Some(bsp_ns) = cycles_to_ns(bsp_cycles) else {
+        kprintln!("[JSR-PERF-SMP] mode={} status=invalid reason=bsp_clock_unavailable", mode);
+        return None;
+    };
+    worker_ns.push(bsp_ns);
     let mut completed = 1usize;
     let mut failed = 0usize;
     for cpu in posted {
         match smp::collect_call(cpu) {
             Ok(cycles) if cycles != 0 => {
-                worker_ns.push(cycles_to_ns(cycles));
+                let Some(ns) = cycles_to_ns(cycles) else {
+                    kprintln!(
+                        "[JSR-PERF-SMP] mode={} status=invalid reason=worker_clock_unavailable cpu={}",
+                        mode,
+                        cpu
+                    );
+                    return None;
+                };
+                worker_ns.push(ns);
                 completed += 1;
             }
             _ => failed += 1,
         }
     }
-    let elapsed_ns = cycles_to_ns(arch::measure_cycles().wrapping_sub(start));
+    let Some(elapsed_ns) = cycles_to_ns(arch::measure_cycles().wrapping_sub(start)) else {
+        kprintln!("[JSR-PERF-SMP] mode={} status=invalid reason=elapsed_clock_unavailable", mode);
+        return None;
+    };
+    let Some(throughput) = total_throughput(completed, elapsed_ns) else {
+        kprintln!("[JSR-PERF-SMP] mode={} status=invalid reason=zero_elapsed", mode);
+        return None;
+    };
     let total_operations = OPERATIONS_PER_WORKER.saturating_mul(completed as u64);
-    let throughput = total_operations
-        .saturating_mul(1_000_000_000)
-        .checked_div(elapsed_ns.max(1))
-        .unwrap_or(0);
-    let min_ns = worker_ns.iter().copied().min().unwrap_or(0);
-    let max_ns = worker_ns.iter().copied().max().unwrap_or(0);
-    let mean_ns = worker_ns
+    let (Some(min_ns), Some(max_ns)) =
+        (worker_ns.iter().copied().min(), worker_ns.iter().copied().max())
+    else {
+        kprintln!("[JSR-PERF-SMP] mode={} status=invalid reason=worker_result_missing", mode);
+        return None;
+    };
+    let Some(mean_ns) = worker_ns
         .iter()
         .copied()
         .fold(0u64, u64::saturating_add)
         .checked_div(completed.max(1) as u64)
-        .unwrap_or(0);
-    let scaling = single_throughput
-        .filter(|base| *base != 0)
-        .map(|base| throughput.saturating_mul(1000) / base)
-        .unwrap_or(1000);
+    else {
+        kprintln!("[JSR-PERF-SMP] mode={} status=invalid reason=worker_mean_unavailable", mode);
+        return None;
+    };
+    let scaling = match single_throughput {
+        None => 1000,
+        Some(base) if base != 0 => throughput.saturating_mul(1000) / base,
+        Some(_) => {
+            kprintln!("[JSR-PERF-SMP] mode={} status=invalid reason=single_throughput_zero", mode);
+            return None;
+        }
+    };
     let (usable_after, free_after, heap_total_after, heap_free_after, _, mapped_after) = memory();
     let reclaimed = usable == usable_after
         && free == free_after
@@ -162,6 +187,14 @@ fn run_mode(
     Some(throughput)
 }
 
+fn total_throughput(completed: usize, elapsed_ns: u64) -> Option<u64> {
+    OPERATIONS_PER_WORKER
+        .saturating_mul(completed as u64)
+        .saturating_mul(1_000_000_000)
+        .checked_div(elapsed_ns)
+        .filter(|value| *value != 0)
+}
+
 fn memory() -> (usize, usize, usize, usize, usize, u64) {
     let (heap_total, heap_free, blocks, heap_mapped) = mm::heap::stats();
     (
@@ -193,7 +226,10 @@ pub fn run() {
         physical.len(),
         logical.len()
     );
-    let single = run_mode("single", &[0], None).unwrap_or(0);
+    let Some(single) = run_mode("single", &[0], None) else {
+        kprintln!("[JSR-PERF-SMP] matrix=unavailable reason=single_mode_failed");
+        return;
+    };
     if physical.len() > 1 {
         run_mode("all_physical_cores", &physical, Some(single));
     } else {

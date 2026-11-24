@@ -53,7 +53,7 @@ static RUNTIME_PLAN: Once<IpcParams> = Once::new();
 
 /// Admit IPC endpoint and byte quotas from the runtime heap/task/object facts.
 pub fn init_runtime(tasks: usize, objects: usize) -> bool {
-    let memory_budget = crate::mm::heap::limit();
+    let memory_budget = crate::mm::heap::physical_headroom();
     let Some(plan) = plan_ipc_quotas(
         memory_budget,
         tasks,

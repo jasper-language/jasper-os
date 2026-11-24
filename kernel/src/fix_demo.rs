@@ -170,10 +170,12 @@ fn teardown(start: u64, end: u64) {
 /// 堆回滚演练每次扩容的字节数：至少 16 页（让注入的第 5 次分配、第 3 次映射失败一定落在扩容中途），
 /// 且不小于配置档的堆增长步长（扩容至少按步长进行）。
 const DRILL_GROW: u64 = if heap::GROW_STEP > 16 * FRAME_SIZE { heap::GROW_STEP } else { 16 * FRAME_SIZE };
+/// Dedicated probe-window address outside the heap's architecture-reserved span.
+const HEAP_DRILL_START: u64 = arch::KERNEL_PROBE_VA + 0x80_0000;
 
 /// 2. 内核堆扩容中途失败的回滚。使用独立的演练堆与紧邻真实堆的演练窗口，不影响全局分配器。
 fn heap_rollback() {
-    let start = heap::HEAP_START + heap::limit();
+    let start = HEAP_DRILL_START;
     let window_end = start + 1024 * 1024;
     let mut h = LinkedListHeap::empty();
     let mut end = start;

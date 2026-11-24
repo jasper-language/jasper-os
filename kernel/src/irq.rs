@@ -813,7 +813,8 @@ pub mod device {
         *TOPOLOGY.call_once(|| {
             let discovered = arch::device_irq_count();
             let cost = line_cost(crate::smp::cpu_count()).max(1);
-            let metadata_budget = match usize::try_from(crate::mm::heap::limit() / 1024) {
+            let metadata_budget =
+                match usize::try_from(crate::mm::heap::physical_headroom() / 1024) {
                 Ok(budget) => budget,
                 Err(_) => 0,
             };

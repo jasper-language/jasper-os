@@ -370,7 +370,9 @@ pub fn boot() -> u32 {
             return 1;
         }
     };
-    let Some(capacity) = assembly::plan_assembly_capacity(&ACTIVE, crate::mm::heap::limit()) else {
+    let Some(capacity) =
+        assembly::plan_assembly_capacity(&ACTIVE, crate::mm::heap::physical_headroom())
+    else {
         kprintln!("[JSR-ASSEMBLY] reject=metadata_budget");
         return 1;
     };

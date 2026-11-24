@@ -30,7 +30,7 @@ pub const WORKLOAD_TERMINATED_CODE: i64 = -3;
 
 /// Admit runtime registry counts from task capacity and the heap budget.
 pub fn init_registry(tasks: usize) -> bool {
-    let memory_budget = crate::mm::heap::limit();
+    let memory_budget = crate::mm::heap::physical_headroom();
     let Some(plan) = plan_workload_registry(memory_budget, tasks) else {
         crate::kprintln!(
             "[JSR-WORKLOAD] reject=registry_capacity tasks={tasks} budget={memory_budget}"

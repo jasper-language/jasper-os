@@ -78,7 +78,8 @@ fn discover_topology() -> Result<DiscoveredTopology, &'static str> {
         .map_err(|_| "facts")?;
 
     let max_frame_bytes = usize::from(mtu).saturating_add(14);
-    let memory_budget = usize::try_from(crate::mm::heap::limit() / 64).unwrap_or(0);
+    let memory_budget =
+        usize::try_from(crate::mm::heap::physical_headroom() / 64).unwrap_or(0);
     let tasks = sched::capacity().max(1);
     let per_socket = max_frame_bytes.saturating_mul(4).max(1);
     let udp_sockets = tasks.min((memory_budget / per_socket).max(1));

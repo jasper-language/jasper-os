@@ -26,7 +26,7 @@ static REGISTRY_PLAN: Once<SandboxStorageRegistryPlan> = Once::new();
 
 /// Admit storage metadata from runtime Sandbox capacity and the heap budget.
 pub fn init_registry(sandbox_slots: usize) -> bool {
-    let memory_budget = crate::mm::heap::limit();
+    let memory_budget = crate::mm::heap::physical_headroom();
     let Some(plan) = plan_sandbox_storage_registry(memory_budget, sandbox_slots) else {
         crate::kprintln!(
             "[JSR-SANDBOX-STORAGE] reject=registry_capacity sandboxes={sandbox_slots} budget={memory_budget}"

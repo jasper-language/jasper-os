@@ -69,7 +69,7 @@ fn report_memory(phase: &str) {
     let (heap_total, heap_free, heap_blocks, heap_mapped) = mm::heap::stats();
     let heap_peak = mm::heap::peak_used();
     let line = alloc::format!(
-        "MEM {} RAM USABLE {} MIB FREE {} MIB USED {} KIB\nHEAP USED {} KIB PEAK {} KIB FREE {} KIB MAPPED {} KIB LIMIT {} MIB BLOCKS {}\n",
+        "MEM {} RAM USABLE {} MIB FREE {} MIB USED {} KIB\nHEAP USED {} KIB PEAK {} KIB FREE {} KIB MAPPED {} KIB PHYSICAL_HEADROOM {} MIB BLOCKS {} GROWTH=on-demand\n",
         phase,
         usable.saturating_mul(4096) / (1024 * 1024),
         free.saturating_mul(4096) / (1024 * 1024),
@@ -78,7 +78,7 @@ fn report_memory(phase: &str) {
         heap_peak / 1024,
         heap_free / 1024,
         heap_mapped / 1024,
-        mm::heap::limit() / (1024 * 1024),
+        mm::heap::physical_headroom() / (1024 * 1024),
         heap_blocks
     );
     kprintln!("[JSR-MEM-USAGE] {}", line.replace('\n', " "));

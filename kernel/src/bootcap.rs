@@ -68,7 +68,7 @@ pub fn try_leak<T>(n: usize, fill: impl FnMut() -> T) -> Option<&'static mut [T]
 /// actual heap, whichever is smaller. This keeps boot metadata admissible on
 /// small discovered-memory topologies without making IPC quota build-time fixed.
 fn mem_limit() -> usize {
-    let heap = crate::mm::heap::limit() as usize;
+    let heap = usize::try_from(crate::mm::heap::physical_headroom()).unwrap_or(0);
     let reserve = (2 * ACTIVE.ipc.max_total_bytes).min(heap / 4);
     heap.saturating_sub(reserve)
 }

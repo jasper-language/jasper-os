@@ -2,7 +2,7 @@
 //!
 //! # 职责
 //! * 在平台预留的 [`HEAP_START`, `KERNEL_HEAP_END`) 虚拟跨度内按需增长；
-//!   实际物理上限在初始化时由空闲页帧预算推导。
+//!   实际可增长量由当前物理页帧分配器决定，不存在启动时计算的固定字节上限。
 //! * 实现 `GlobalAlloc`，使内核可以使用 `alloc`（`Box` / `Vec` / `String` …）
 //!
 //! # 为什么按需增长、不预先映射全部
@@ -18,8 +18,6 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use kernel_core::frame::{PhysFrame, FRAME_SIZE};
 use kernel_core::heap::LinkedListHeap;
 use kernel_core::paging::{MapFlags, VirtPage};
-use spin::Once;
-
 use super::{frame, map};
 use crate::sync::IrqSpinLock;
 
@@ -27,10 +25,6 @@ use crate::sync::IrqSpinLock;
 pub const HEAP_START: u64 = crate::arch::KERNEL_HEAP_BASE;
 /// 每次至少增长的字节数。
 pub const GROW_STEP: u64 = crate::config::ACTIVE.memory.heap_grow_step;
-/// Policy share of the free physical-frame inventory admitted to the heap.
-/// The byte limit itself is derived at boot, not fixed at build time.
-const HEAP_BUDGET_PERMILLE: u64 = crate::config::ACTIVE.memory.heap_budget_permille as u64;
-
 /// 堆状态：算法本体 + 已映射到的位置。
 struct HeapState {
     heap: LinkedListHeap,
@@ -40,7 +34,6 @@ struct HeapState {
 
 static HEAP: IrqSpinLock<HeapState> =
     IrqSpinLock::ranked(crate::lockorder::MEMORY_HEAP, HeapState { heap: LinkedListHeap::empty(), mapped_end: HEAP_START });
-static HEAP_LIMIT: Once<u64> = Once::new();
 static HEAP_PEAK_USED: AtomicUsize = AtomicUsize::new(0);
 
 /// 增长失败的原因（诊断用）。
@@ -143,11 +136,10 @@ pub fn grow_in(
 
 /// 至少增长 `bytes` 字节（调用者已持有堆锁）。
 fn grow(state: &mut HeapState, bytes: u64) -> Result<(), GrowError> {
-    let limit = HEAP_LIMIT.get().copied().ok_or(GrowError::LimitReached)?;
     grow_in(
         &mut state.heap,
         &mut state.mapped_end,
-        HEAP_START + limit,
+        crate::arch::KERNEL_HEAP_END,
         bytes,
         &mut KernelGrowEnv,
     )
@@ -195,24 +187,9 @@ pub fn grow_for_verify(requested: u64) -> Result<GrowthRecord, GrowError> {
 
 /// 初始化堆：映射首批页。需在页帧与映射服务就绪之后调用。
 pub fn init() -> Result<(), GrowError> {
-    let available = (frame::free_frames() as u64)
-        .checked_mul(FRAME_SIZE)
-        .ok_or(GrowError::LimitReached)?;
-    let physical_budget = available
-        .checked_mul(HEAP_BUDGET_PERMILLE)
-        .ok_or(GrowError::LimitReached)?
-        / 1000;
-    let virtual_budget = crate::arch::KERNEL_HEAP_END
-        .checked_sub(HEAP_START)
-        .ok_or(GrowError::LimitReached)?;
-    let limit = physical_budget
-        .min(virtual_budget)
-        / FRAME_SIZE
-        * FRAME_SIZE;
-    if limit < GROW_STEP {
+    if virtual_capacity() < GROW_STEP {
         return Err(GrowError::LimitReached);
     }
-    HEAP_LIMIT.call_once(|| limit);
     let mut s = HEAP.lock();
     if s.heap.total_bytes() == 0 {
         grow(&mut s, GROW_STEP)?;
@@ -220,9 +197,20 @@ pub fn init() -> Result<(), GrowError> {
     Ok(())
 }
 
-/// Runtime-admitted physical heap window. Zero before heap initialisation.
-pub fn limit() -> u64 {
-    HEAP_LIMIT.get().copied().unwrap_or(0)
+/// Current physical-memory headroom available to every frame consumer.
+///
+/// This is an observation of the live frame allocator, not a heap cap. It can
+/// increase when resources are released and decrease as any subsystem allocates.
+pub fn physical_headroom() -> u64 {
+    (frame::free_frames() as u64).saturating_mul(FRAME_SIZE)
+}
+
+/// Architecture-reserved virtual address span available to the heap.
+///
+/// This is an address-space boundary required by page tables, not a target or
+/// policy capacity for physical memory.
+pub fn virtual_capacity() -> u64 {
+    crate::arch::KERNEL_HEAP_END.saturating_sub(HEAP_START)
 }
 
 /// 保证堆里至少有 `bytes` 字节空闲（不足时一次增长补齐）。
@@ -257,12 +245,6 @@ unsafe impl GlobalAlloc for KernelHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         #[cfg(feature = "fault-inject")]
         if crate::fault_inject::HEAP.hit() { return core::ptr::null_mut(); }
-        if HEAP_LIMIT
-            .get()
-            .is_some_and(|limit| layout.size() as u64 > *limit)
-        {
-            return core::ptr::null_mut();
-        }
         let mut s = HEAP.lock();
         let p = s.heap.allocate(layout.size(), layout.align());
         if !p.is_null() {

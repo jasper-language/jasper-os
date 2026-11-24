@@ -77,7 +77,7 @@ fn finish(ctx: &mut BootCtx) {
         capacity.map(|value| value.objects).unwrap_or(0),
         capacity.map(|value| value.tasks).unwrap_or(0),
         ctx.frames.map(|stats| stats.usable).unwrap_or(0),
-        crate::mm::heap::limit()
+        crate::mm::heap::physical_headroom()
     );
     #[cfg(feature = "pixel6a-el2-observable")] // JASPER-HARDCODE-REVIEW: issue=21 source=pixel-el2-observation-window reason=physical-boot-carrier-probe-only
     if crate::arch::aarch64::boot::entry_exception_level() == 2 {

@@ -35,8 +35,7 @@ pub fn init() -> bool {
     }
     let available = mm::frame::free_frames()
         .checked_mul(FRAME_SIZE as usize)
-        .and_then(|free| u64::try_from(free).ok())
-        .map(|free| free.min(mm::heap::limit()));
+        .and_then(|free| u64::try_from(free).ok());
     let Some(available) = available else {
         crate::kprintln!("[JSR-TERM] reject=capacity_budget_overflow");
         return false;

@@ -138,10 +138,6 @@ pub fn run() {
     if let Some(cal) = cal {
         counter_read_overhead(&cal);
         arch::watchdog_pet_force();
-        let tick = timer_irq(&cal);
-        arch::watchdog_pet_force();
-        let switch = context_switch(&cal);
-        arch::watchdog_pet_force();
         frames(&cal);
         arch::watchdog_pet_force();
         heap_paths(&cal);
@@ -149,6 +145,12 @@ pub fn run() {
         syscall_set_paths(&cal);
         arch::watchdog_pet_force();
         user_program(&cal);
+        arch::watchdog_pet_force();
+        let switch = context_switch(&cal);
+        arch::watchdog_pet_force();
+        // Tick-driven sampling needs one interrupt per retained observation, so
+        // it runs after every fast metric has published a usable result.
+        let tick = timer_irq(&cal);
         arch::watchdog_pet_force();
         if let (Some(tick), Some(switch)) = (tick, switch) {
             tuning(&cal, tick.p50, switch.p50);
@@ -680,10 +682,13 @@ fn heap_paths(cal: &Calibration) {
     }
     report_values("heap.alloc_free_64", &mut small, cal, TAIL_ITERS);
     report_values("heap.alloc_free_4096", &mut page, cal, TAIL_ITERS);
-    // 失败路径：超出运行时堆预算的申请被拒，堆的统计不变
+    // 失败路径：超出架构虚拟窗口的申请被拒，堆的统计不变
     let stats_before = heap::stats();
     let mut v: Vec<u8> = Vec::new();
-    let refused = v.try_reserve(heap::limit() as usize + 4096).is_err();
+    let beyond_window = heap::virtual_capacity()
+        .saturating_add(kernel_core::frame::FRAME_SIZE);
+    let refused = usize::try_from(beyond_window)
+        .is_ok_and(|bytes| v.try_reserve(bytes).is_err());
     let unchanged = heap::stats() == stats_before && v.capacity() == 0;
     check(refused && unchanged, "超大堆申请未被拒绝或改动了堆");
     let after = baseline();

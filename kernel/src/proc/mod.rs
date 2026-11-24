@@ -1349,7 +1349,7 @@ pub(crate) fn linux_pipe2(
     close_on_exec: bool,
     nonblocking: bool,
 ) -> Option<(u32, u32)> {
-    let byte_budget = usize::try_from(crate::mm::heap::limit()).ok()?;
+    let byte_budget = usize::try_from(crate::mm::heap::physical_headroom()).ok()?;
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
         let reader_handle = linux.next_pipe_handle;
@@ -1412,7 +1412,7 @@ pub(crate) fn linux_socketpair(
     nonblocking: bool,
     packet_mode: bool,
 ) -> Option<(u32, u32)> {
-    let byte_budget = usize::try_from(crate::mm::heap::limit()).ok()?;
+    let byte_budget = usize::try_from(crate::mm::heap::physical_headroom()).ok()?;
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
         let first_handle = linux.next_socket_handle;
@@ -1490,8 +1490,8 @@ pub(crate) fn linux_socket_create(
     nonblocking: bool,
     packet_mode: bool,
 ) -> Result<u32, LinuxSocketError> {
-    let byte_budget =
-        usize::try_from(crate::mm::heap::limit()).map_err(|_| LinuxSocketError::NoSpace)?;
+    let byte_budget = usize::try_from(crate::mm::heap::physical_headroom())
+        .map_err(|_| LinuxSocketError::NoSpace)?;
     with_proc(pid, |p| {
         let linux = p.linux.as_mut().ok_or(ProcError::Exited)?;
         linux
@@ -7819,7 +7819,7 @@ fn create_process(
     syscalls: SyscallSet,
     initialize: impl FnOnce(&mut Process),
 ) -> Result<ObjId, ProcError> {
-    let memory_budget = crate::mm::heap::limit();
+    let memory_budget = crate::mm::heap::physical_headroom();
     let process_slots = sched::slots();
     let Some(capability_plan) =
         plan_memory_capability_capacity(memory_budget, process_slots)
