@@ -31,6 +31,28 @@ fn finish(ctx: &mut BootCtx) {
     } else {
         0
     };
+    #[cfg(feature = "smp-matrix-only")]
+    {
+        report_memory("smp-after");
+        let line = alloc::format!("SMP MATRIX RESULT FAILED={}\n", smp_failed);
+        emit(line.as_str());
+        arch::irq_enable();
+        let mut ticks = 0u64;
+        let mut pet_countdown = 0u32;
+        loop {
+            if pet_countdown == 0 {
+                arch::watchdog_pet_force();
+                pet_countdown = 1_000_000;
+            } else {
+                pet_countdown -= 1;
+            }
+            core::hint::spin_loop();
+            ticks = ticks.wrapping_add(1);
+            if ticks % 100_000_000 == 0 {
+                kprintln!("[JSR-PERF-SMP] alive ticks={}", clock::ticks());
+            }
+        }
+    }
     report_memory("before");
     bench_demo::run();
     report_memory("after");
