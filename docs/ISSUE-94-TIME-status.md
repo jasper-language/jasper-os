@@ -68,9 +68,30 @@ Time sources will be layered without a new time authority:
 - Compatibility: preserves POSIX/Linux layouts and maps them to the same
   facts.
 
-The following are open: frozen external serialization, live kernel/provider
-wiring, TAI/UTC and leap-second policy, multi-source authentication and fault
-matrix, drift/uncertainty estimation, and physical accuracy tests. Required
+`kernel_core::clock_provider` now implements the service-layer selection
+contract for independently supplied provider evidence:
+
+- provider identity is `(source class, source ID, generation)`;
+- replacement requires a strictly newer generation, and revocation must match
+  the exact live generation so old evidence cannot resurrect;
+- scale and epoch must match the request before a source is considered;
+- TAI/UTC publication requires at least an authenticated provider;
+- synchronized, holdover and unverified states are explicit;
+- holdover requires a known age inside a known provider limit and explicit
+  permission from the selection request;
+- authenticated absolute-time selection can require a measured uncertainty;
+- candidates are ranked by trust, synchronization state, uncertainty,
+  resolution, sample age, stable provider priority and source identity;
+- a missing eligible source returns an explicit fail-closed error.
+
+The contract accepts provider facts only. It does not contain a simulated NTP,
+NTS, PTP, GNSS, cellular or RTC feed, and no live provider is registered by the
+kernel. Real protocol authentication, leap-second data, drift estimation,
+holdover prediction and physical accuracy evidence remain open.
+
+The following are open: frozen external serialization, live provider wiring,
+TAI/UTC and leap-second policy, multi-source authentication and fault-matrix
+execution, drift/uncertainty estimation, and physical accuracy tests. Required
 candidate classes are ≤1 ms general, ≤1 μs high precision and ≤10 ns
 professional, with the stated uncertainty and reference-clock evidence; none is
 claimed here.
