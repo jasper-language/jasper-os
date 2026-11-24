@@ -997,7 +997,7 @@ fn parallel_switch_measurer() {
         CS_RELEASE.store(true, Ordering::Release);
     }
     while !CS_RELEASE.load(Ordering::Acquire) {
-        sched::yield_now();
+        sched::yield_with_cause("yield");
     }
     if !ptr.is_null() {
         let samples = unsafe { core::slice::from_raw_parts_mut(ptr, CONTEXT_ITERS) };
@@ -1066,13 +1066,13 @@ fn parallel_switch_partner() {
         CS_RELEASE.store(true, Ordering::Release);
     }
     while !CS_RELEASE.load(Ordering::Acquire) {
-        sched::yield_now();
+        sched::yield_with_cause("yield");
     }
     while !CS_DONE
         .get(cpu)
         .is_some_and(|done| done.load(Ordering::Acquire))
     {
-        sched::yield_now();
+        sched::yield_with_cause("yield");
     }
 }
 
