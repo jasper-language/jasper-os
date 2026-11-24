@@ -31,6 +31,12 @@ pub fn init() {
     }
 }
 
+/// Mask the legacy 8259 timer when another per-CPU clock source owns ticks.
+pub fn mask_timer() {
+    // SAFETY: mask bits only change delivery eligibility of the legacy PIC.
+    unsafe { PICS.lock().write_masks(MASTER_MASK | 0x01, SLAVE_MASK) };
+}
+
 /// 向 PIC 发送中断结束（EOI）。
 ///
 /// # Safety

@@ -571,6 +571,11 @@ pub fn cpu_count() -> usize {
     }
 }
 
+/// Timer ticks observed by the current processor.
+pub fn local_ticks() -> u64 {
+    percpu::this().ticks()
+}
+
 pub fn discovered_cpu_count() -> usize {
     CPU_DISCOVERED_COUNT.load(Ordering::Acquire).max(1)
 }

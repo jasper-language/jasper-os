@@ -236,6 +236,13 @@ pub fn init_boot(boot: &BootSpec) -> CpuDiscovery {
         boot_id
     );
     apic::calibrate_timer();
+    #[cfg(feature = "smp-force-x2apic")]
+    {
+        super::pic::mask_timer();
+        if apic::start_periodic(crate::config::ACTIVE.clock.timer_hz) {
+            crate::early::mark("APIC BSP TIMER START");
+        }
+    }
     let (topology, inventory, source, inventory_complete) = match boot.acpi_rsdp {
         Some(rsdp) => match acpi::parse_madt(&PhysWindow(offset), rsdp, boot_id) {
             Ok(m) => {

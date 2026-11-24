@@ -26,34 +26,14 @@ fn finish(ctx: &mut BootCtx) {
     let smp_failed = if let Some(report) = ctx.smp.filter(|report| report.online > 1) {
         crate::smp::demo::run(report);
         #[cfg(feature = "bench-smp")]
-        crate::smp_performance::run();
+        {
+            crate::smp_performance::run();
+            crate::smp_performance::publish_results();
+        }
         crate::smp::demo::failed()
     } else {
         0
     };
-    #[cfg(feature = "smp-matrix-only")]
-    {
-        crate::smp_performance::publish_results();
-        report_memory("smp-after");
-        let line = alloc::format!("SMP MATRIX RESULT FAILED={}\n", smp_failed);
-        emit(line.as_str());
-        arch::irq_enable();
-        let mut ticks = 0u64;
-        let mut pet_countdown = 0u32;
-        loop {
-            if pet_countdown == 0 {
-                arch::watchdog_pet_force();
-                pet_countdown = 1_000_000;
-            } else {
-                pet_countdown -= 1;
-            }
-            core::hint::spin_loop();
-            ticks = ticks.wrapping_add(1);
-            if ticks % 100_000_000 == 0 {
-                kprintln!("[JSR-PERF-SMP] alive ticks={}", clock::ticks());
-            }
-        }
-    }
     report_memory("before");
     bench_demo::run();
     report_memory("after");

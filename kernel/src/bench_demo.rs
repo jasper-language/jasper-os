@@ -637,12 +637,12 @@ fn counter_read_overhead(cal: &Calibration) {
 
 /// 开中断等到下一个 tick 的边沿，返回边沿处的 tick 数。
 fn next_tick_edge() -> Option<u64> {
-    let t = sched::timer_ticks();
+    let t = crate::smp::local_ticks();
     let deadline = arch::measure_cycles().saturating_add(
         early::tsc_frequency_hz().unwrap_or(3_000_000_000).saturating_mul(2),
     );
     arch::irq_enable();
-    while sched::timer_ticks() == t {
+    while crate::smp::local_ticks() == t {
         if arch::measure_cycles() >= deadline {
             kprintln!(
                 "[JSR-BENCH] timeout stage=next_tick tick={} timer_hz={}",
@@ -654,7 +654,7 @@ fn next_tick_edge() -> Option<u64> {
         }
         core::hint::spin_loop();
     }
-    Some(sched::timer_ticks())
+    Some(crate::smp::local_ticks())
 }
 
 // ---------------------------------------------------------------------------
@@ -674,11 +674,11 @@ fn calibrate() -> Option<Calibration> {
             .saturating_mul(wait_seconds),
     );
     arch::irq_enable();
-    while sched::timer_ticks() < t0 + CALIBRATION_TICKS {
+    while crate::smp::local_ticks() < t0 + CALIBRATION_TICKS {
         if arch::measure_cycles() >= deadline {
             kprintln!(
                 "[JSR-BENCH] timeout stage=calibration tick={} target={}",
-                sched::timer_ticks(),
+                crate::smp::local_ticks(),
                 t0 + CALIBRATION_TICKS
             );
             arch::irq_disable();
@@ -729,7 +729,7 @@ fn timer_irq(cal: &Calibration) -> Option<Summary> {
     let t0 = next_tick_edge()?;
     arch::irq_disable();
     let end = t0 + TIMER_IRQ_SAMPLES as u64;
-    let mut last = sched::timer_ticks();
+    let mut last = crate::smp::local_ticks();
     let mut prev = arch::cycles();
     // 上一轮发现 tick 变化时记下的 a[i-1]；下一轮读到 a[i+1] 后结算
     let mut pending: Option<u64> = None;
@@ -745,7 +745,7 @@ fn timer_irq(cal: &Calibration) -> Option<Summary> {
                 break;
             }
         }
-        let t = sched::timer_ticks();
+        let t = crate::smp::local_ticks();
         if t != last {
             pending = Some(prev);
             last = t;
