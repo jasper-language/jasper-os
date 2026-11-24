@@ -237,16 +237,13 @@ fn run_mode(
     early::append_line(line.trim_end());
     kprintln!("{}", line.trim_end());
     REPORT.lock().push(alloc::format!(
-        "{} workers={}/{} total_ops={} elapsed_ns={} throughput_ops_s={} scaling_ppm={} worker_min_ns={} worker_max_ns={} failed={} reclaimed={}",
+        "{} workers={}/{} ops={} throughput={} scaling_ppm={} failed={} reclaimed={}",
         mode,
         completed,
         expected,
         total_operations,
-        elapsed_ns,
         throughput,
         scaling,
-        min_ns,
-        max_ns,
         failed,
         reclaimed
     ));
@@ -328,15 +325,12 @@ fn run_contention(kind: ContentionKind, cpus: &[usize]) -> Option<u64> {
     early::append_line(&line);
     kprintln!("{}", line);
     REPORT.lock().push(alloc::format!(
-        "{} workers={}/{} total_ops={} elapsed_ns={} throughput_ops_s={} worker_min_ns={} worker_max_ns={}",
+        "{} workers={}/{} ops={} throughput={}",
         kind.name(),
         worker_cycles.len(),
         cpus.len(),
         operations,
-        elapsed_ns,
-        throughput,
-        min_ns,
-        max_ns
+        throughput
     ));
     kprintln!(
         "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"parallel-operation\",\"operation\":\"{}\",\"workers_expected\":{},\"workers_completed\":{},\"operations_per_worker\":{},\"total_operations\":{},\"elapsed_ns\":{},\"throughput_ops_s\":{},\"worker_min_ns\":{},\"worker_max_ns\":{}}}",
@@ -422,12 +416,16 @@ pub fn run() {
 
 /// Render the SMP result records after discovery and all matrices have
 /// completed, so boot-stage output cannot scroll them off the screen.
-pub fn publish_results() {
+pub fn append_screen_records() {
     let report = REPORT.lock();
-    early::results_begin();
     early::append_line("SMP PERFORMANCE MATRIX");
     early::append_line("Scalar: single/all-physical/all-logical; then contention/memory paths");
     for line in report.iter() {
         early::append_line(line);
     }
+}
+
+pub fn publish_results() {
+    early::results_begin();
+    append_screen_records();
 }

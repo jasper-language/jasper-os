@@ -304,6 +304,8 @@ pub fn publish_checkpoint() {
                 early::append_line(text);
             }
         }
+        #[cfg(feature = "bench-smp")]
+        crate::smp_performance::append_screen_records();
     }
     kprintln!(
         "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"checkpoint\",\"metrics\":{},\"failed\":{},\"timing_failed\":{},\"checks\":{}}}",
@@ -329,6 +331,8 @@ pub fn publish_results(failed: u32, timing_failed: u32) {
                 early::append_line(text);
             }
         }
+        #[cfg(feature = "bench-smp")]
+        crate::smp_performance::append_screen_records();
         let mut status = ReportRow::empty();
         let mut writer = RowWriter {
             bytes: &mut status.bytes,
