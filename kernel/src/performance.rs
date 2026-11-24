@@ -23,22 +23,26 @@ fn finish(ctx: &mut BootCtx) {
     startup::skipped("ui_services", "headless_benchmark_profile");
     startup::skipped("desktop", "headless_benchmark_profile");
     startup::skipped("compat_assembly", "benchmark_excludes_compatibility_profiles");
-    let smp_failed = if let Some(report) = ctx.smp.filter(|report| report.online > 1) {
+    let mut smp_failed = 0;
+    if let Some(report) = ctx.smp.filter(|report| report.online > 1) {
         crate::smp::demo::run(report);
-        #[cfg(feature = "bench-smp")]
-        {
-            crate::smp_performance::run();
-            crate::smp_performance::publish_results();
-        }
-        crate::smp::demo::failed()
-    } else {
-        0
-    };
+        smp_failed = crate::smp::demo::failed();
+    }
+    #[cfg(feature = "bench-smp")]
+    if crate::smp::online_set().len() > 1 {
+        crate::smp_performance::run();
+        smp_failed = smp_failed.saturating_add(crate::smp_performance::failed());
+        crate::smp_performance::publish_results();
+    }
     #[cfg(feature = "smp-matrix-only")]
     {
         crate::smp_performance::publish_results();
         report_memory("smp-after");
-        let line = alloc::format!("SMP MATRIX RESULT FAILED={}\n", smp_failed);
+        let line = alloc::format!(
+            "SMP MATRIX RESULT RECORDS={} FAILED={}\n",
+            crate::smp_performance::records(),
+            smp_failed
+        );
         emit(line.as_str());
         arch::irq_enable();
         let mut ticks = 0u64;

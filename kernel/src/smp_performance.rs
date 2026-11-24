@@ -5,7 +5,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::hint::black_box;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::{arch, early, hardware, kprintln, mm, smp};
 
@@ -19,6 +19,7 @@ const OPERATIONS_PER_WORKER: u64 = 1_000_000;
 static SHARED_ATOMIC: AtomicU64 = AtomicU64::new(0);
 static CONTENDED_LOCK: kernel_core::sync::SpinLock<u64> =
     kernel_core::sync::SpinLock::new(0);
+static MATRIX_FAILED: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Clone, Copy)]
 enum ContentionKind {
@@ -370,6 +371,7 @@ fn memory() -> (usize, usize, usize, usize, usize, u64) {
 /// Run single-core, one-thread-per-physical-core, and all-logical-CPU modes.
 pub fn run() {
     REPORT.lock().clear();
+    MATRIX_FAILED.store(0, Ordering::Release);
     let physical = physical_cpus();
     let logical = logical_cpus();
     let online = smp::online_set().len();
@@ -388,17 +390,24 @@ pub fn run() {
         logical.len()
     );
     let Some(single) = run_mode("single", &[0], None) else {
+        MATRIX_FAILED.fetch_add(1, Ordering::AcqRel);
         kprintln!("[JSR-PERF-SMP] matrix=unavailable reason=single_mode_failed");
         return;
     };
     if physical.len() > 1 {
-        run_mode("all_physical_cores", &physical, Some(single));
+        if run_mode("all_physical_cores", &physical, Some(single)).is_none() {
+            MATRIX_FAILED.fetch_add(1, Ordering::AcqRel);
+        }
     } else {
+        MATRIX_FAILED.fetch_add(1, Ordering::AcqRel);
         kprintln!("[JSR-PERF-SMP] mode=all_physical_cores status=unavailable physical={}", physical.len());
     }
     if logical.len() > 1 {
-        run_mode("all_logical_threads", &logical, Some(single));
+        if run_mode("all_logical_threads", &logical, Some(single)).is_none() {
+            MATRIX_FAILED.fetch_add(1, Ordering::AcqRel);
+        }
     } else {
+        MATRIX_FAILED.fetch_add(1, Ordering::AcqRel);
         kprintln!("[JSR-PERF-SMP] mode=all_logical_threads status=unavailable logical={}", logical.len());
     }
     if logical.len() > 1 {
@@ -409,9 +418,19 @@ pub fn run() {
             ContentionKind::Heap,
             ContentionKind::Tlb,
         ] {
-            run_contention(kind, &logical);
+            if run_contention(kind, &logical).is_none() {
+                MATRIX_FAILED.fetch_add(1, Ordering::AcqRel);
+            }
         }
     }
+}
+
+pub fn failed() -> u32 {
+    MATRIX_FAILED.load(Ordering::Acquire)
+}
+
+pub fn records() -> usize {
+    REPORT.lock().len()
 }
 
 /// Render the SMP result records after discovery and all matrices have
