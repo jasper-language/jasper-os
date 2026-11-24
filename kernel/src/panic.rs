@@ -9,6 +9,7 @@ use crate::{arch, console};
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    crate::early::mark("PANIC");
     #[cfg(feature = "lifecycle-diagnostic-sources")]
     let recorded = crate::diagnostic_sources::record_kernel_exception();
     #[cfg(feature = "lifecycle-diagnostic-sources")]
@@ -22,5 +23,8 @@ fn panic(info: &PanicInfo) -> ! {
         }
         None => console::emergency_print(format_args!("[JSR-PANIC] (no location)\n")),
     }
+    #[cfg(feature = "panic-reboot")]
+    arch::panic_reset();
+    #[cfg(not(feature = "panic-reboot"))]
     arch::halt_forever()
 }

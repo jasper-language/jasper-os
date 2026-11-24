@@ -1078,7 +1078,7 @@ fn fill_surface(bytes: &mut [u8], color: (u8, u8, u8)) {
 /// Minimal 5x7 glyph set for the native text frontend.
 ///
 /// 原生文本前端使用的最小 5x7 字形集；未知字符绘制为问号。
-fn glyph(character: u8) -> [u8; 7] {
+pub(crate) fn glyph(character: u8) -> [u8; 7] {
     match character.to_ascii_uppercase() {
         b'A' => [0x0e, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11],
         b'B' => [0x1e, 0x11, 0x11, 0x1e, 0x11, 0x11, 0x1e],

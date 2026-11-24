@@ -47,6 +47,8 @@ const IDLE_STACK_SIZE: usize = 16 * 1024;
 static CPU_RUNTIME: Once<IrqSpinLock<CpuRuntimeRegistry>> = Once::new();
 /// Lock-free admitted logical-index bound for the CPU-identity fast path.
 static CPU_ADMITTED_COUNT: AtomicUsize = AtomicUsize::new(0);
+static CPU_DISCOVERED_COUNT: AtomicUsize = AtomicUsize::new(0);
+static CPU_DISABLED_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// 平台要求的低端启动帧（只预留一次，永久保留供以后再次启动处理器）。
 static START_FRAME: Once<Option<PhysFrame>> = Once::new();
 /// One board per initiating logical CPU. The vector is allocated after the
@@ -231,6 +233,7 @@ fn runtime_cpu_inventory(
 /// 每个处理器依次启动：发出启动命令后等它报到，超时则判失败、不再给它任何工作。
 /// Discover and start the other processors one by one.
 pub fn start_secondaries(timer_hz: u32) -> StartReport {
+    crate::early::mark("SMP DISCOVER");
     let Some(boot) = crate::boot::get() else {
         let _ = initialize_shootdown_boards(1);
         return StartReport {
@@ -243,6 +246,30 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
         };
     };
     let discovery = arch::cpu_init_boot(boot);
+    CPU_DISCOVERED_COUNT.store(
+        discovery
+            .topology
+            .count()
+            .saturating_add(discovery.topology.disabled),
+        Ordering::Release,
+    );
+    CPU_DISABLED_COUNT.store(discovery.topology.disabled, Ordering::Release);
+    #[cfg(feature = "smp-bsp-only")]
+    let discovery = {
+        let present = discovery.topology.count().saturating_add(discovery.topology.disabled);
+        let boot_hw_id = discovery.topology.iter().next().unwrap_or(0);
+        crate::early::mark("SMP BSP ONLY");
+        crate::kprintln!(
+            "[JSR-SMP] forced=bsp_only present={} online=1 source={}",
+            present,
+            discovery.source
+        );
+        arch::CpuDiscovery {
+            topology: Topology::boot_only(boot_hw_id),
+            source: "bsp_only",
+            inventory_complete: true,
+        }
+    };
     if !discovery.inventory_complete {
         crate::kprintln!(
             "[JSR-SMP] reject=topology_incomplete source={}",
@@ -251,6 +278,7 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
         arch::halt_forever();
     }
     let topo = discovery.topology;
+    crate::early::mark("SMP PREP");
     if topo.dropped > 0 {
         crate::kprintln!(
             "[JSR-SMP] reject=topology_inventory_incomplete discovered={} retained={} dropped={}",
@@ -413,8 +441,12 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
             space,
             timer_hz,
         };
+        let marker = alloc::format!("SMP START {cpu}");
+        crate::early::mark(&marker);
         // SAFETY：栈专属于该处理器；启动帧满足平台要求并已映射；处理器依次启动。
         let started = unsafe { arch::cpu_start(&req, frame) };
+        let marker = alloc::format!("SMP WAIT {cpu}");
+        crate::early::mark(&marker);
         let online = started.is_ok() && wait_until(|| pc.state.get() != CpuState::Starting);
         if !online || pc.state.get() != CpuState::Online {
             // 超时：判失败。迟到的报到会被状态机拒绝，该处理器随即停机。
@@ -428,6 +460,7 @@ pub fn start_secondaries(timer_hz: u32) -> StartReport {
             let _ = mm::map::unmap(p);
         }
     }
+    crate::early::mark("SMP DONE");
     StartReport {
         present: topo.count(),
         online: online_set().len(),
@@ -514,6 +547,18 @@ pub fn cpu_count() -> usize {
         Some(runtime) => runtime.lock().identities().len(),
         None => 1,
     }
+}
+
+pub fn discovered_cpu_count() -> usize {
+    CPU_DISCOVERED_COUNT.load(Ordering::Acquire).max(1)
+}
+
+pub fn admitted_cpu_count() -> usize {
+    CPU_ADMITTED_COUNT.load(Ordering::Acquire).max(1)
+}
+
+pub fn disabled_cpu_count() -> usize {
+    CPU_DISABLED_COUNT.load(Ordering::Acquire)
 }
 
 fn runtime_hw_id(cpu: usize) -> Option<u32> {

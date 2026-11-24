@@ -49,6 +49,8 @@ pub enum AcpiError {
     NoMcfg,
     /// 根表中没有 DMAR（平台不暴露 Intel DMA remapping）。
     NoDmar,
+    /// 根表中没有 WDAT（平台未声明 ACPI 硬件看门狗）。
+    NoWdat,
     /// 无法为完整发现结果分配审计内存。
     Capacity,
 }
@@ -65,8 +67,55 @@ impl AcpiError {
             AcpiError::NoMadt => "system.firmware.error.no_madt",
             AcpiError::NoMcfg => "system.firmware.error.no_mcfg",
             AcpiError::NoDmar => "system.firmware.error.no_dmar",
+            AcpiError::NoWdat => "system.firmware.error.no_wdat",
             AcpiError::Capacity => "system.firmware.error.capacity",
         }
+    }
+}
+
+/// Maximum bounded WDAT instruction records retained by the kernel.
+pub const MAX_WDAT_INSTRUCTIONS: usize = 64;
+
+/// ACPI Generic Address Structure used by a WDAT action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WdatRegister {
+    /// ACPI address-space identifier.
+    pub address_space: u8,
+    /// Register address in that address space.
+    pub address: u64,
+    /// Register width in bits.
+    pub bit_width: u8,
+    /// First significant bit in the register.
+    pub bit_offset: u8,
+    /// ACPI access width: 1 byte, 2 word, 3 dword.
+    pub access_width: u8,
+}
+
+/// One bounded ACPI WDAT action instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WdatInstruction {
+    pub action: u8,
+    pub instruction: u8,
+    pub register: WdatRegister,
+    pub value: u32,
+    pub mask: u32,
+}
+
+/// Parsed ACPI Watchdog Action Table.
+#[derive(Debug, Clone, Copy)]
+pub struct Wdat {
+    pub timer_period_ms: u32,
+    pub min_count: u32,
+    pub max_count: u32,
+    pub flags: u8,
+    instructions: [Option<WdatInstruction>; MAX_WDAT_INSTRUCTIONS],
+    count: usize,
+}
+
+impl Wdat {
+    /// Parsed actions in firmware table order.
+    pub fn instructions(&self) -> impl Iterator<Item = &WdatInstruction> {
+        self.instructions[..self.count].iter().filter_map(Option::as_ref)
     }
 }
 
@@ -395,6 +444,69 @@ pub fn parse_mcfg(m: &dyn PhysRead, rsdp: u64) -> Result<Mcfg, AcpiError> {
             out.windows.push(window);
         }
         off += MCFG_ENTRY_LEN;
+    }
+    Ok(out)
+}
+
+/// Parse the ACPI WDAT hardware-watchdog table.
+///
+/// The standard SDT header is 36 bytes. WDAT's own fixed header is 32 bytes, so
+/// `header_length` is relative to the end of the standard header. Every action
+/// record is copied into a fixed bound before the kernel touches a register.
+pub fn parse_wdat(m: &dyn PhysRead, rsdp: u64) -> Result<Wdat, AcpiError> {
+    const WDAT_HEADER_LEN: u32 = 32;
+    const WDAT_ENTRY_LEN: u32 = 24;
+
+    let (root, width) = root_table(m, rsdp)?;
+    let at = find_table(m, root, width, b"WDAT")?.ok_or(AcpiError::NoWdat)?;
+    let len = table(m, at, b"WDAT")?;
+    let data_offset = read_u32(m, at + 36)?;
+    if data_offset < WDAT_HEADER_LEN
+        || data_offset > len.saturating_sub(SDT_HEADER_LEN)
+    {
+        return Err(AcpiError::BadLength);
+    }
+    let timer_period_ms = read_u32(m, at + 48)?;
+    let max_count = read_u32(m, at + 52)?;
+    let min_count = read_u32(m, at + 56)?;
+    let flags = read_u8(m, at + 60)?;
+    let entries = read_u32(m, at + 64)?;
+    if timer_period_ms == 0 || min_count > max_count {
+        return Err(AcpiError::BadLength);
+    }
+    if entries as usize > MAX_WDAT_INSTRUCTIONS {
+        return Err(AcpiError::Capacity);
+    }
+    let entries_start = SDT_HEADER_LEN + data_offset;
+    let entries_bytes = entries.checked_mul(WDAT_ENTRY_LEN).ok_or(AcpiError::BadLength)?;
+    if entries_start.checked_add(entries_bytes).is_none_or(|end| end > len) {
+        return Err(AcpiError::BadLength);
+    }
+
+    let mut out = Wdat {
+        timer_period_ms,
+        min_count,
+        max_count,
+        flags,
+        instructions: [None; MAX_WDAT_INSTRUCTIONS],
+        count: entries as usize,
+    };
+    for index in 0..out.count {
+        let e = at + u64::from(entries_start + index as u32 * WDAT_ENTRY_LEN);
+        let register = WdatRegister {
+            address_space: read_u8(m, e + 4)?,
+            bit_width: read_u8(m, e + 5)?,
+            bit_offset: read_u8(m, e + 6)?,
+            access_width: read_u8(m, e + 7)?,
+            address: read_u64(m, e + 8)?,
+        };
+        out.instructions[index] = Some(WdatInstruction {
+            action: read_u8(m, e)?,
+            instruction: read_u8(m, e + 1)?,
+            register,
+            value: read_u32(m, e + 16)?,
+            mask: read_u32(m, e + 20)?,
+        });
     }
     Ok(out)
 }
@@ -1154,5 +1266,46 @@ mod tests {
         fix_checksum(&mut table, 9);
         malformed.0[0x1000..0x1000 + dmar_len].copy_from_slice(&table);
         assert_eq!(parse_dmar(&malformed, 0x100), Err(AcpiError::BadLength));
+    }
+
+    #[test]
+    fn wdat_parses_bounded_actions_and_rejects_missing_table() {
+        let mut body = vec![0u8; 32];
+        body[0..4].copy_from_slice(&32u32.to_le_bytes());
+        body[12..16].copy_from_slice(&10u32.to_le_bytes());
+        body[16..20].copy_from_slice(&100u32.to_le_bytes());
+        body[20..24].copy_from_slice(&1u32.to_le_bytes());
+        body[24] = 1;
+        body[28..32].copy_from_slice(&1u32.to_le_bytes());
+        let mut action = vec![0u8; 24];
+        action[0] = 6;
+        action[1] = 2;
+        action[4] = 1;
+        action[5] = 32;
+        action[6] = 0;
+        action[7] = 3;
+        action[8..16].copy_from_slice(&0x1234u64.to_le_bytes());
+        action[20..24].copy_from_slice(&0xffffu32.to_le_bytes());
+        body.extend(action);
+
+        let mut mem = image(2, &[lapic(0, 1)]);
+        let wdat = sdt(b"WDAT", &body);
+        mem.0[0x1000..0x1000 + wdat.len()].copy_from_slice(&wdat);
+        let root = sdt(b"XSDT", &0x1000u64.to_le_bytes());
+        mem.0[0x200..0x200 + root.len()].copy_from_slice(&root);
+
+        let parsed = parse_wdat(&mem, 0x100).unwrap();
+        assert_eq!(parsed.timer_period_ms, 10);
+        assert_eq!((parsed.min_count, parsed.max_count), (1, 100));
+        let actions: Vec<_> = parsed.instructions().copied().collect();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action, 6);
+        assert_eq!(actions[0].register.address_space, 1);
+        assert_eq!(actions[0].register.address, 0x1234);
+        assert_eq!(actions[0].mask, 0xffff);
+        assert!(matches!(
+            parse_wdat(&image(2, &[lapic(0, 1)]), 0x100),
+            Err(AcpiError::NoWdat)
+        ));
     }
 }

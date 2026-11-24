@@ -8,6 +8,9 @@
 //       Build an OVMF/UEFI GPT boot image; the default command remains BIOS.
 //   xtask uefi-esp <kernel-elf> <out-fat-image>
 //       Build the bootable UEFI FAT partition without an outer MBR/GPT.
+//   xtask uefi-tftp <kernel-elf> <out-directory> [bootloader-efi]
+//       Build the UEFI PXE/TFTP boot files without a local disk image. An
+//       optional bootloader replaces the upstream embedded UEFI loader.
 //   xtask uefi-managed-esp <kernel-a> <kernel-b> <boot-manager> <out-fat-image>
 //       Build a P0 A/B FAT partition managed by the Jasper UEFI selector.
 //   xtask bootcap <in-elf> <out-elf> [objects=N] [tasks=N] [rt=N] [record=corrupt]
@@ -48,6 +51,33 @@ fn main() {
             .map(|metadata| metadata.len())
             .unwrap_or(0);
         println!("wrote {out} ({size} bytes)");
+        return;
+    }
+    if args.first().map(String::as_str) == Some("uefi-tftp") {
+        let kernel = args.get(1).expect("kernel elf path");
+        let out = args.get(2).expect("out TFTP directory path");
+        // Read a replacement loader before creating the output directory. The
+        // loader may itself live in that directory, and opening the output
+        // alias first would otherwise truncate the source before it is copied.
+        let replacement_loader = args
+            .get(3)
+            .map(std::fs::read)
+            .transpose()
+            .expect("read UEFI TFTP bootloader");
+        bootloader::DiskImageBuilder::new(std::path::PathBuf::from(kernel))
+            .create_uefi_tftp_folder(std::path::Path::new(out))
+            .expect("UEFI TFTP files");
+        if let Some(loader) = replacement_loader {
+            if loader.is_empty() {
+                panic!("UEFI TFTP bootloader is empty");
+            }
+            let out = std::path::Path::new(out);
+            std::fs::write(out.join("bootloader"), &loader)
+                .expect("replace UEFI TFTP bootloader");
+            std::fs::write(out.join("bootloader.efi"), &loader)
+                .expect("write UEFI TFTP .efi alias");
+        }
+        println!("wrote UEFI TFTP files to {out}");
         return;
     }
     if args.first().map(String::as_str) == Some("uefi-managed-esp") {

@@ -7,3 +7,5 @@ profile-compact
 sched-rr
 lifecycle-ab-health
 terminal-session-verify
+panic-reboot
+boot-autorecovery

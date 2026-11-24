@@ -17,6 +17,8 @@
 //! [`Prefer`] 是策略：时钟频率越高定时越细，故取**预算内最大**的候选；时间片越短交互越及时，故取**预算内最小**的候选。
 //! 得到的是预算允许的边界，不是唯一答案：默认值只要在预算内即可保留，由调用者结合其它约束决定。
 
+use core::fmt;
+
 /// 单个缓冲最多保存的样本数。
 pub const MAX_SAMPLES: usize = 256; // JASPER-HARDCODE-REVIEW: issue=33 source=test-fixture reason=benchmark-sample-array-fixture
 
@@ -89,23 +91,45 @@ pub fn summarize(values: &mut [u64]) -> Option<Summary> {
     }
     values.sort_unstable();
     let s = &*values;
-        let sum: u128 = s.iter().map(|&v| v as u128).sum();
-        Some(Summary {
-            count: s.len() as u32,
-            min: s[0],
-            p50: rank(s, 500),
-            p99: rank(s, 990),
-            p999: rank(s, 999),
-            max: s[s.len() - 1],
-            mean: (sum / s.len() as u128) as u64,
+    let sum: u128 = s.iter().map(|&v| v as u128).sum();
+    let mean = (sum / s.len() as u128) as u64;
+    let variance_sum: u128 = s
+        .iter()
+        .map(|&value| {
+            let delta = value.abs_diff(mean) as u128;
+            delta * delta
         })
+        .sum();
+    Some(Summary {
+        count: s.len() as u32,
+        min: s[0],
+        p50: rank(s, 5000),
+        p90: rank(s, 9000),
+        p95: rank(s, 9500),
+        p99: rank(s, 9900),
+        p999: rank(s, 9990),
+        p9999: rank(s, 9999),
+        max: s[s.len() - 1],
+        mean,
+        stddev: integer_sqrt((variance_sum / s.len() as u128) as u64),
+    })
 }
 
-/// 最近秩法的千分位：第 `ceil(p × n / 1000)` 小的样本（`s` 已排序且非空）。
-fn rank(s: &[u64], permille: usize) -> u64 {
+/// 最近秩法的万分位：第 `ceil(p × n / 10000)` 小的样本（`s` 已排序且非空）。
+fn rank(s: &[u64], ten_thousandths: u64) -> u64 {
     let n = s.len();
-    let k = (permille * n).div_ceil(1000).clamp(1, n);
+    let k = ((ten_thousandths as u128 * n as u128).div_ceil(10_000) as usize).clamp(1, n);
     s[k - 1]
+}
+
+fn integer_sqrt(value: u64) -> u64 {
+    let mut x = value;
+    let mut y = x.div_ceil(2);
+    while y < x {
+        x = y;
+        y = (x + value / x) / 2;
+    }
+    x
 }
 
 /// 样本汇总（单位与样本相同）。
@@ -118,14 +142,75 @@ pub struct Summary {
     pub min: u64,
     /// 中位数（最近秩）。
     pub p50: u64,
+    /// 第 90 百分位（最近秩）。
+    pub p90: u64,
+    /// 第 95 百分位（最近秩）。
+    pub p95: u64,
     /// 第 99 百分位（最近秩）。
     pub p99: u64,
     /// 第 99.9 百分位（最近秩）。
     pub p999: u64,
+    /// 第 99.99 百分位（最近秩）。
+    pub p9999: u64,
     /// 最大值。
     pub max: u64,
     /// 算术平均（向下取整）。
     pub mean: u64,
+    /// 样本总体标准差（向下取整）。
+    pub stddev: u64,
+}
+
+/// Initial sample targets for the requested tail-confidence levels.
+pub const P50_RECOMMENDED_SAMPLES: usize = 1_000;
+pub const P99_RECOMMENDED_SAMPLES: usize = 10_000;
+pub const P999_RECOMMENDED_SAMPLES: usize = 100_000;
+pub const P9999_RECOMMENDED_SAMPLES: usize = 1_000_000;
+
+/// Convert a cycle count into an exact-nanosecond duration representation.
+pub struct HumanDuration {
+    pub cycles: u64,
+    pub nanoseconds: u64,
+}
+
+impl HumanDuration {
+    pub fn new(cycles: u64, cal: &Calibration) -> Self {
+        Self {
+            cycles,
+            nanoseconds: cal.to_ns(cycles),
+        }
+    }
+
+    /// True when the operation completed at the cycle counter's sampling
+    /// resolution: the measured interval is zero counter ticks.
+    pub const fn below_resolution(&self) -> bool {
+        self.cycles == 0
+    }
+}
+
+impl fmt::Display for HumanDuration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.below_resolution() {
+            return f.write_str("BELOW_RESOLUTION");
+        }
+        if self.nanoseconds == 0 {
+            return f.write_str("<1 ns");
+        }
+        let (unit, scale) = if self.nanoseconds >= 1_000_000_000 {
+            ("s", 1_000_000_000)
+        } else if self.nanoseconds >= 1_000_000 {
+            ("ms", 1_000_000)
+        } else if self.nanoseconds >= 1_000 {
+            ("us", 1_000)
+        } else {
+            ("ns", 1)
+        };
+        if scale == 1 {
+            return write!(f, "{} {unit}", self.nanoseconds);
+        }
+        let whole = self.nanoseconds / scale;
+        let fraction = (self.nanoseconds % scale) * 1000 / scale;
+        write!(f, "{whole}.{fraction:03} {unit}")
+    }
 }
 
 /// 周期计数器的校准结果：在 `ticks` 个定时器 tick 内走过了 `cycles` 个周期。
@@ -302,12 +387,36 @@ mod tests {
             assert!(s.push(v));
         }
         let sum = s.summary().unwrap();
-        assert_eq!(sum, Summary { count: 100, min: 1, p50: 50, p99: 99, p999: 100, max: 100, mean: 50 });
+        assert_eq!(sum, Summary {
+            count: 100,
+            min: 1,
+            p50: 50,
+            p90: 90,
+            p95: 95,
+            p99: 99,
+            p999: 100,
+            p9999: 100,
+            max: 100,
+            mean: 50,
+            stddev: 28,
+        });
         // 汇总不改变缓冲本身：再次汇总结果相同
         assert_eq!(s.summary().unwrap(), sum);
         let mut one = Samples::new();
         one.push(7);
-        assert_eq!(one.summary().unwrap(), Summary { count: 1, min: 7, p50: 7, p99: 7, p999: 7, max: 7, mean: 7 });
+        assert_eq!(one.summary().unwrap(), Summary {
+            count: 1,
+            min: 7,
+            p50: 7,
+            p90: 7,
+            p95: 7,
+            p99: 7,
+            p999: 7,
+            p9999: 7,
+            max: 7,
+            mean: 7,
+            stddev: 0,
+        });
     }
 
     #[test]
@@ -349,6 +458,20 @@ mod tests {
         assert!(Calibration::new(10, 0, 100).is_none());
         assert!(Calibration::new(10, 10, 0).is_none());
         assert!(Calibration::new(5, 10, 100).is_none(), "不足一周期每 tick 视为未校准");
+    }
+
+    #[test]
+    fn human_duration_preserves_sub_microsecond_precision() {
+        let cal = Calibration::per_second(1_000_000_000).unwrap();
+        assert_eq!(alloc::format!("{}", HumanDuration::new(83, &cal)), "83 ns");
+        assert_eq!(alloc::format!("{}", HumanDuration::new(12_345, &cal)), "12.345 us");
+        assert_eq!(alloc::format!("{}", HumanDuration::new(1, &cal)), "1 ns");
+        let slower = Calibration::per_second(100_000_000).unwrap();
+        assert_eq!(
+            alloc::format!("{}", HumanDuration::new(0, &slower)),
+            "BELOW_RESOLUTION"
+        );
+        assert_eq!(alloc::format!("{}", HumanDuration::new(1, &slower)), "10 ns");
     }
 
     #[test]

@@ -31,6 +31,9 @@ const PIT_CHANNEL2: u16 = 0x42;
 const PIT_GATE: u16 = 0x61;
 /// 单个完整 16 位计数周期对应的最长微秒数。
 const MAX_CHUNK_US: u32 = (PIT_MAX_COUNT as u64 * 1_000_000 / PIT_BASE_FREQ as u64) as u32; // JASPER-HARDCODE-REVIEW: issue=35 source=PIT-8254-HARDWARE reason=derived-from-sixteen-bit-counter-and-input-clock
+/// Bound the output-bit poll so a disconnected or disabled PIT channel cannot
+/// stall SMP bring-up forever.
+const OUTPUT_WAIT_SPINS: u32 = 10_000_000;
 
 /// 忙等至少 `us` 微秒（通道 2 单次计数、轮询输出位；不需要中断，可在关中断时使用）。
 ///
@@ -50,10 +53,21 @@ pub fn delay_us(us: u32) {
             outb(PIT_CHANNEL2, (count & 0xff) as u8);
             outb(PIT_CHANNEL2, (count >> 8) as u8);
             outb(PIT_GATE, gate | 0x01);
-            while super::port::inb(PIT_GATE) & 0x20 == 0 {
+            let mut completed = false;
+            for _ in 0..OUTPUT_WAIT_SPINS {
+                if super::port::inb(PIT_GATE) & 0x20 != 0 {
+                    completed = true;
+                    break;
+                }
                 core::hint::spin_loop();
             }
             outb(PIT_GATE, gate);
+            if !completed {
+                crate::console::emergency_print(format_args!(
+                    "[JSR-PIT] timeout channel2_output_not_observed\n"
+                ));
+                return;
+            }
         }
         left -= chunk;
     }

@@ -35,14 +35,26 @@ mod bios {
 
     bootloader_api::entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
+    const BOOT_TIMEOUT_SECONDS: u64 = 60;
+
     /// 引导器入口：转换交接信息后进入内核主流程。
     fn kernel_main(info: &'static mut BootInfo) -> ! {
+        jasper_kernel::early::serial_init();
+        let framebuffer_visible = jasper_kernel::early::entry(info.framebuffer.as_mut());
+        if !framebuffer_visible {
+            jasper_kernel::early::mark("K00 ENTRY NOFB");
+        }
+        #[cfg(feature = "boot-autorecovery")]
+        jasper_kernel::early::arm_boot_deadline(BOOT_TIMEOUT_SECONDS);
+        jasper_kernel::early::mark("K01 BOOTINFO");
+
         #[cfg(feature = "bm1-vm")]
         jasper_kernel::arch::bm1_init(info.framebuffer.take());
         #[cfg(not(feature = "bm1-vm"))]
         if let Some(framebuffer) = info.framebuffer.take() {
             let _ = jasper_kernel::display::prepare(framebuffer);
         }
+        jasper_kernel::early::mark("K02 MEMORY MAP");
         let mut spec = BootSpec::new();
         for r in info.memory_regions.iter() {
             // 只有 Usable 可自由使用；引导器自身的页表/数据、固件未知类型一律视为保留。
@@ -54,6 +66,7 @@ mod bios {
         }
         spec.phys_offset = info.physical_memory_offset.into_option();
         spec.acpi_rsdp = info.rsdp_addr.into_option();
+        jasper_kernel::early::mark("K03 KMAIN");
         jasper_kernel::kmain::start(boot::install(spec))
     }
 }

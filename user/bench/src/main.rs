@@ -26,14 +26,19 @@ use alloc::vec::Vec;
 use jasper_rt::channel;
 use jasper_rt::ring::{Cqe, Ring, Sqe};
 use jasper_rt::{entry, ids, println, time};
-use kernel_core::bench::{summarize, Calibration, Summary};
+use kernel_core::bench::{
+    summarize, Calibration, HumanDuration, Summary, P9999_RECOMMENDED_SAMPLES,
+    P999_RECOMMENDED_SAMPLES, P99_RECOMMENDED_SAMPLES,
+};
 
 entry!(main);
 
 /// 每项的预热次数（不计入样本）。
 const WARMUP: u32 = 16;
 /// 每项的样本数。
-const ITERS: u32 = 2048;
+const ITERS: usize = 1_000_000;
+/// Sleep-bound paths also retain one million one-operation samples.
+const WAIT_ITERS: usize = 1_000_000;
 /// 往返消息的长度。
 const MSG: usize = 16;
 /// 一个不存在的异步操作 ID（失败路径用）。
@@ -73,27 +78,30 @@ fn run(s: &mut Steps, cycles_per_second: u64) -> Result<(), u32> {
     let Some(cal) = cal else { return Err(s.0) };
 
     // ---- 系统调用往返 ----
-    let mut samples = Vec::with_capacity(ITERS as usize);
+    let mut samples = Vec::with_capacity(ITERS);
     let mut ok = true;
-    for i in 0..WARMUP + ITERS {
+    for i in 0..WARMUP as usize + ITERS {
         let t0 = time::cycles();
         let now = time::now();
         let dt = time::cycles().wrapping_sub(t0);
         ok &= now > 0;
-        if i >= WARMUP {
+        if i >= WARMUP as usize {
             samples.push(dt);
+        }
+        if (i + 1) % 100_000 == 0 {
+            println!("bench: progress name=syscall.roundtrip samples={}", i + 1);
         }
     }
     s.check(ok)?;
-    report(s, "syscall.roundtrip", &mut samples, &cal)?;
+    report(s, "syscall.roundtrip", &mut samples, &cal, ITERS)?;
 
     // ---- 异步环：提交 → 完成（一次 enter）----
     let ring = Ring::create(8);
     s.check(ring.is_ok())?;
     let Ok(ring) = ring else { return Err(s.0) };
-    let mut samples = Vec::with_capacity(ITERS as usize);
+    let mut samples = Vec::with_capacity(ITERS);
     let mut ok = true;
-    for i in 0..WARMUP + ITERS {
+    for i in 0..WARMUP as usize + ITERS {
         let tag = 0xB000 + i as u64;
         let sqe = Sqe { op: ids::SYSTEM_TIME_NOW as u32, flags: 0, user_tag: tag, arg0: 0, arg1: 0 };
         let mut id = [0u64; 1];
@@ -106,17 +114,20 @@ fn run(s: &mut Steps, cycles_per_second: u64) -> Result<(), u32> {
             && cq[0].user_tag == tag
             && cq[0].request_id == id[0]
             && cq[0].result > 0;
-        if i >= WARMUP {
+        if i >= WARMUP as usize {
             samples.push(dt);
+        }
+        if (i + 1) % 100_000 == 0 {
+            println!("bench: progress name=ring.submit_complete samples={}", i + 1);
         }
     }
     s.check(ok)?;
-    report(s, "ring.submit_complete", &mut samples, &cal)?;
+    report(s, "ring.submit_complete", &mut samples, &cal, ITERS)?;
 
     // ---- 异步环：Wait 自然完成与取消（issue #5 第四片同口径）----
-    let mut samples = Vec::with_capacity(ITERS as usize);
+    let mut samples = Vec::with_capacity(WAIT_ITERS);
     let mut ok = true;
-    for i in 0..WARMUP + ITERS {
+    for i in 0..WARMUP as usize + WAIT_ITERS {
         let tag = 0xB100 + i as u64;
         let sqe = Sqe {
             op: ids::SYSTEM_TIME_WAIT as u32,
@@ -135,16 +146,19 @@ fn run(s: &mut Steps, cycles_per_second: u64) -> Result<(), u32> {
             && cq[0].user_tag == tag
             && cq[0].request_id == id[0]
             && cq[0].result == 0;
-        if i >= WARMUP {
+        if i >= WARMUP as usize {
             samples.push(dt);
+        }
+        if (i + 1) % 100_000 == 0 {
+            println!("bench: progress name=ring.wait_complete samples={}", i + 1);
         }
     }
     s.check(ok)?;
-    report(s, "ring.wait_complete", &mut samples, &cal)?;
+    report(s, "ring.wait_complete", &mut samples, &cal, WAIT_ITERS)?;
 
-    let mut samples = Vec::with_capacity(ITERS as usize);
+    let mut samples = Vec::with_capacity(WAIT_ITERS);
     let mut ok = true;
-    for i in 0..WARMUP + ITERS {
+    for i in 0..WARMUP as usize + WAIT_ITERS {
         let tag = 0xB200 + i as u64;
         let sqe = Sqe {
             op: ids::SYSTEM_TIME_WAIT as u32,
@@ -168,12 +182,15 @@ fn run(s: &mut Steps, cycles_per_second: u64) -> Result<(), u32> {
             && cq[0].user_tag == tag
             && cq[0].request_id == id[0]
             && cq[0].result == -(ids::SYSTEM_ASYNC_ERROR_CANCELLED as i64);
-        if i >= WARMUP {
+        if i >= WARMUP as usize {
             samples.push(dt);
+        }
+        if (i + 1) % 100_000 == 0 {
+            println!("bench: progress name=ring.wait_cancel samples={}", i + 1);
         }
     }
     s.check(ok)?;
-    report(s, "ring.wait_cancel", &mut samples, &cal)?;
+    report(s, "ring.wait_cancel", &mut samples, &cal, WAIT_ITERS)?;
 
     // 失败路径：未登记的操作被拒，且不产生任何完成记录
     let bad = Sqe { op: BOGUS_OP, flags: 0, user_tag: 1, arg0: 0, arg1: 0 };
@@ -191,11 +208,11 @@ fn run(s: &mut Steps, cycles_per_second: u64) -> Result<(), u32> {
     let pair = channel::pair();
     s.check(pair.is_ok())?;
     let Ok((a, b)) = pair else { return Err(s.0) };
-    let mut samples = Vec::with_capacity(ITERS as usize);
+    let mut samples = Vec::with_capacity(ITERS);
     let mut ok = true;
     let mut buf = [0u8; MSG];
     let mut reported_recv = false;
-    for i in 0..WARMUP + ITERS {
+    for i in 0..WARMUP as usize + ITERS {
         let msg = [(i & 0xFF) as u8; MSG];
         let t0 = time::cycles();
         let sent = a.send(&msg);
@@ -254,12 +271,15 @@ fn run(s: &mut Steps, cycles_per_second: u64) -> Result<(), u32> {
         };
         let dt = time::cycles().wrapping_sub(t0);
         ok &= r && buf == msg;
-        if i >= WARMUP {
+        if i >= WARMUP as usize {
             samples.push(dt);
+        }
+        if (i + 1) % 100_000 == 0 {
+            println!("bench: progress name=ipc.roundtrip samples={}", i + 1);
         }
     }
     s.check(ok)?;
-    report(s, "ipc.roundtrip", &mut samples, &cal)?;
+    report(s, "ipc.roundtrip", &mut samples, &cal, ITERS)?;
     // 失败路径：缓冲区过小 ⇒ 被拒，消息留在队列；随后完整收到
     let msg = [0x5Au8; MSG];
     s.check(a.send(&msg).is_ok())?;
@@ -278,25 +298,79 @@ fn run(s: &mut Steps, cycles_per_second: u64) -> Result<(), u32> {
 }
 
 /// 输出一项基准的汇总（周期 + 纳秒），并检查样本完整。
-fn report(s: &mut Steps, name: &str, samples: &mut [u64], cal: &Calibration) -> Result<(), u32> {
-    s.check(samples.len() == ITERS as usize)?;
+fn report(
+    s: &mut Steps,
+    name: &str,
+    samples: &mut [u64],
+    cal: &Calibration,
+    expected: usize,
+) -> Result<(), u32> {
+    s.check(samples.len() == expected)?;
     let sum: Option<Summary> = summarize(samples);
     s.check(sum.is_some())?;
     if let Some(m) = sum {
         println!(
-            "bench: name={} iters={} min={} p50={} p99={} p999={} max={} mean={} unit=cycles p50_ns={} p99_ns={} p999_ns={}",
+            "bench: name={} iters={} min={} p50={} p90={} p95={} p99={} p999={} p9999={} max={} mean={} stddev={} unit=cycles p50_ns={} p99_ns={} p999_ns={}",
             name,
             m.count,
             m.min,
             m.p50,
+            m.p90,
+            m.p95,
             m.p99,
             m.p999,
+            m.p9999,
             m.max,
             m.mean,
+            m.stddev,
             cal.to_ns(m.p50),
             cal.to_ns(m.p99),
             cal.to_ns(m.p999)
         );
+        let resolution_ns = 1_000_000_000u64.div_ceil(cal.cycles_per_second().max(1));
+        let count = m.count as usize;
+        let p99_confidence = confidence(count, P99_RECOMMENDED_SAMPLES);
+        let p999_confidence = confidence(count, P999_RECOMMENDED_SAMPLES);
+        let p9999_confidence = confidence(count, P9999_RECOMMENDED_SAMPLES);
+        println!(
+            "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"metric\",\"source\":\"user\",\"name\":\"{}\",\"count\":{},\"min_ns\":{},\"mean_ns\":{},\"p50_ns\":{},\"p90_ns\":{},\"p95_ns\":{},\"p99_ns\":{},\"p999_ns\":{},\"p9999_ns\":{},\"max_ns\":{},\"stddev_ns\":{},\"resolution_ns\":{},\"p50_below_resolution\":{},\"p99_confidence\":\"{}\",\"p999_confidence\":\"{}\",\"p9999_confidence\":\"{}\"}}",
+            name,
+            m.count,
+            cal.to_ns(m.min),
+            cal.to_ns(m.mean),
+            cal.to_ns(m.p50),
+            cal.to_ns(m.p90),
+            cal.to_ns(m.p95),
+            cal.to_ns(m.p99),
+            cal.to_ns(m.p999),
+            cal.to_ns(m.p9999),
+            cal.to_ns(m.max),
+            cal.to_ns(m.stddev),
+            resolution_ns,
+            m.p50 == 0,
+            p99_confidence,
+            p999_confidence,
+            p9999_confidence
+        );
+        println!(
+            "bench: {} n={} p50={} p99={} p999={} max={}",
+            name,
+            m.count,
+            HumanDuration::new(m.p50, cal),
+            HumanDuration::new(m.p99, cal),
+            HumanDuration::new(m.p999, cal),
+            HumanDuration::new(m.max, cal)
+        );
     }
     Ok(())
+}
+
+fn confidence(count: usize, recommended: usize) -> &'static str {
+    if count >= recommended {
+        "recommended"
+    } else if count >= recommended / 10 {
+        "low_tail_count"
+    } else {
+        "insufficient"
+    }
 }

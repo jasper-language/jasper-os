@@ -31,7 +31,11 @@ use alloc::vec::Vec;
 use core::hint::black_box;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use kernel_core::bench::{quantum_overhead, select, summarize, timer_overhead, Calibration, Decision, Prefer, Samples, Summary};
+use kernel_core::bench::{
+    quantum_overhead, select, summarize, timer_overhead, Calibration, Decision, HumanDuration,
+    Prefer, Samples, Summary, P9999_RECOMMENDED_SAMPLES, P999_RECOMMENDED_SAMPLES,
+    P99_RECOMMENDED_SAMPLES,
+};
 use kernel_core::sync::SpinLock;
 use kernel_core::spawn_abi::SpawnDesc;
 use kernel_core::syscall_set::SyscallSet;
@@ -89,16 +93,20 @@ pub fn timing_failed() -> u32 {
 /// 用户态基准程序 `user/bench` 的 ELF 镜像（构建期由 `kernel/build.rs` 产出并嵌入）。
 static USER_BENCH: &[u8] = include_bytes!(env!("JSR_USER_BENCH"));
 
-/// 校准与中断成本测量各自持续的 tick 数。
-const WINDOW_TICKS: u64 = 20;
+/// TSC calibration window. This is setup, not a benchmark sample set.
+const CALIBRATION_TICKS: u64 = 1_000;
+/// One IRQ-latency observation is retained per timer tick.
+const TIMER_IRQ_SAMPLES: usize = 1_000_000;
 /// 每项的预热次数（不计入样本）。
 const WARMUP: u32 = 16;
-/// 既有基准的样本数。
-const ITERS: u32 = 200;
+/// Every formal metric retains one million one-operation samples.
+const TAIL_ITERS: usize = 1_000_000;
+/// Context switches use the same one-operation sample rule.
+const CONTEXT_ITERS: usize = 1_000_000;
+/// Empty serialized counter-read intervals used to report timer overhead.
+const TIMER_READ_ITERS: usize = 1_000_000;
 /// SyscallSet 追加微基准的预热次数。
 const SET_WARMUP: u32 = 64;
-/// SyscallSet 追加微基准的样本数；超过 1000，使 p99.9 不退化为最大值。
-const SET_ITERS: u32 = 2048;
 /// 测量循环本身耗时的读数次数（关中断）。
 const LOOP_PROBE: u32 = 4096;
 /// 周期性开销预算（百万分比）：1%。
@@ -118,21 +126,38 @@ pub fn run() {
     let prev_preemption = sched::set_preemption(false);
     let was_enabled = arch::irq_save_disable();
     let start = baseline();
+    let start_heap_mapped = heap::stats().3;
+    arch::watchdog_pet_force();
     let cal = calibrate();
     check(cal.is_some(), "周期计数器校准失败");
     if let Some(cal) = cal {
+        counter_read_overhead(&cal);
+        arch::watchdog_pet_force();
         let tick = timer_irq(&cal);
+        arch::watchdog_pet_force();
         let switch = context_switch(&cal);
+        arch::watchdog_pet_force();
         frames(&cal);
+        arch::watchdog_pet_force();
         heap_paths(&cal);
+        arch::watchdog_pet_force();
         syscall_set_paths(&cal);
+        arch::watchdog_pet_force();
         user_program(&cal);
+        arch::watchdog_pet_force();
         if let (Some(tick), Some(switch)) = (tick, switch) {
             tuning(&cal, tick.p50, switch.p50);
         }
     }
     let end = baseline();
-    check(end == start, "基准演练结束后资源未回到起点");
+    let end_heap_mapped = heap::stats().3;
+    let reclaimed = resources_reclaimed(
+        start,
+        end,
+        start_heap_mapped,
+        end_heap_mapped,
+    );
+    check(reclaimed, "基准演练结束后资源未回到起点");
     arch::irq_restore(was_enabled);
     sched::set_preemption(prev_preemption);
     kprintln!(
@@ -141,60 +166,136 @@ pub fn run() {
         start.free_frames,
         end.objects,
         start.objects,
-        end == start,
+        reclaimed,
         CHECKS.load(Ordering::Relaxed),
         failed(),
         timing_failed()
     );
 }
 
-/// 输出一项汇总：`[JSR-BENCH] name=<名> iters=… min=… p50=… p99=… max=… mean=… unit=cycles p50_ns=… p99_ns=…`。
-fn report(name: &str, samples: &Samples, cal: &Calibration) -> Option<Summary> {
-    let sum = samples.summary();
-    check(sum.is_some() && samples.rejected() == 0, "基准样本缺失或被拒收");
-    if let Some(m) = sum {
-        kprintln!(
-            "[JSR-BENCH] name={} iters={} min={} p50={} p99={} p999={} max={} mean={} unit=cycles p50_ns={} p99_ns={} p999_ns={}",
-            name,
-            m.count,
-            m.min,
-            m.p50,
-            m.p99,
-            m.p999,
-            m.max,
-            m.mean,
-            cal.to_ns(m.p50),
-            cal.to_ns(m.p99),
-            cal.to_ns(m.p999)
-        );
+fn resources_reclaimed(
+    start: crate::baseline::Baseline,
+    end: crate::baseline::Baseline,
+    start_heap_mapped: u64,
+    end_heap_mapped: u64,
+) -> bool {
+    if start.objects != end.objects || start.pending != end.pending || start.pins != end.pins {
+        return false;
     }
-    sum
+    #[cfg(feature = "bench-only")]
+    {
+        let retained_heap_pages = end_heap_mapped.saturating_sub(start_heap_mapped)
+            / kernel_core::frame::FRAME_SIZE;
+        end.free_frames.saturating_add(retained_heap_pages as usize) == start.free_frames
+    }
+    #[cfg(not(feature = "bench-only"))]
+    {
+        let _ = (start_heap_mapped, end_heap_mapped);
+        end.free_frames == start.free_frames
+    }
 }
 
 fn cycle_samples(mut op: impl FnMut()) -> Vec<u64> {
-    let mut samples = Vec::with_capacity(SET_ITERS as usize);
+    let mut samples = Vec::with_capacity(TAIL_ITERS);
     for _ in 0..SET_WARMUP {
         op();
     }
-    for _ in 0..SET_ITERS {
-        let start = arch::cycles();
+    for i in 0..TAIL_ITERS {
+        let start = arch::measure_cycles();
         op();
-        samples.push(arch::cycles().wrapping_sub(start));
+        samples.push(arch::measure_cycles().wrapping_sub(start));
+        if i % 4096 == 0 {
+            arch::watchdog_pet_force();
+        }
+        if (i + 1) % 100_000 == 0 {
+            report_progress(i + 1);
+        }
     }
     samples
 }
 
-fn report_values(name: &str, samples: &mut [u64], cal: &Calibration) -> Option<Summary> {
+fn report_progress(done: usize) {
+    let line = alloc::format!(
+        "[BENCH] stage=sample progress={}/{}\n",
+        done,
+        TAIL_ITERS
+    );
+    screen_line(&line);
+}
+
+fn report_values(
+    name: &str,
+    samples: &mut [u64],
+    cal: &Calibration,
+    expected: usize,
+) -> Option<Summary> {
+    crate::arch::watchdog_pet_force();
     let sum = summarize(samples);
-    check(sum.is_some() && samples.len() == SET_ITERS as usize, "追加基准样本缺失");
+    check(sum.is_some() && samples.len() == expected, "基准样本数不符合目标");
     if let Some(m) = sum {
         kprintln!(
-            "[JSR-BENCH] name={} iters={} min={} p50={} p99={} p999={} max={} mean={} unit=cycles p50_ns={} p99_ns={} p999_ns={}",
-            name, m.count, m.min, m.p50, m.p99, m.p999, m.max, m.mean,
-            cal.to_ns(m.p50), cal.to_ns(m.p99), cal.to_ns(m.p999)
+            "[JSR-BENCH] name={} iters={} min={} p50={} p90={} p95={} p99={} p999={} p9999={} max={} mean={} stddev={} unit=cycles p50_ns={} p99_ns={} p999_ns={}",
+            name, m.count, m.min, m.p50, m.p90, m.p95, m.p99, m.p999, m.p9999,
+            m.max, m.mean, m.stddev, cal.to_ns(m.p50), cal.to_ns(m.p99), cal.to_ns(m.p999)
         );
+        emit_json(name, &m, cal);
+        let line = alloc::format!(
+            "BENCH {} N={} P50={} P99={} P999={} MAX={}\n",
+            name,
+            m.count,
+            HumanDuration::new(m.p50, cal),
+            HumanDuration::new(m.p99, cal),
+            HumanDuration::new(m.p999, cal),
+            HumanDuration::new(m.max, cal)
+        );
+        screen_line(&line);
     }
     sum
+}
+
+fn emit_json(name: &str, summary: &Summary, cal: &Calibration) {
+    let resolution_ns = 1_000_000_000u64.div_ceil(cal.cycles_per_second().max(1));
+    let count = summary.count as usize;
+    let p99_confidence = confidence(count, P99_RECOMMENDED_SAMPLES);
+    let p999_confidence = confidence(count, P999_RECOMMENDED_SAMPLES);
+    let p9999_confidence = confidence(count, P9999_RECOMMENDED_SAMPLES);
+    kprintln!(
+        "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"metric\",\"name\":\"{}\",\"count\":{},\"min_ns\":{},\"mean_ns\":{},\"p50_ns\":{},\"p90_ns\":{},\"p95_ns\":{},\"p99_ns\":{},\"p999_ns\":{},\"p9999_ns\":{},\"max_ns\":{},\"stddev_ns\":{},\"resolution_ns\":{},\"p50_below_resolution\":{},\"p99_confidence\":\"{}\",\"p999_confidence\":\"{}\",\"p9999_confidence\":\"{}\"}}",
+        name,
+        summary.count,
+        cal.to_ns(summary.min),
+        cal.to_ns(summary.mean),
+        cal.to_ns(summary.p50),
+        cal.to_ns(summary.p90),
+        cal.to_ns(summary.p95),
+        cal.to_ns(summary.p99),
+        cal.to_ns(summary.p999),
+        cal.to_ns(summary.p9999),
+        cal.to_ns(summary.max),
+        cal.to_ns(summary.stddev),
+        resolution_ns,
+        summary.p50 == 0,
+        p99_confidence,
+        p999_confidence,
+        p9999_confidence
+    );
+}
+
+fn confidence(count: usize, recommended: usize) -> &'static str {
+    if count >= recommended {
+        "recommended"
+    } else if count >= recommended / 10 {
+        "low_tail_count"
+    } else {
+        "insufficient"
+    }
+}
+
+fn screen_line(line: &str) {
+    #[cfg(feature = "bench-only")]
+    crate::early::append_line(line);
+    #[cfg(not(feature = "bench-only"))]
+    crate::display::terminal_write(line.as_bytes());
 }
 
 /// issue #1 追加微基准：比较唯一生产 `SyscallSet` 与旧 `u64` 语义参考模型。
@@ -211,7 +312,7 @@ fn syscall_set_paths(cal: &Calibration) {
         cursor = cursor.wrapping_add(1);
         black_box(current.contains(ids[cursor as usize % ids.len()]));
     });
-    report_values("syscallset.contains.current", &mut current_contains, cal);
+    report_values("syscallset.contains.current", &mut current_contains, cal, TAIL_ITERS);
 
     let mut cursor = 0u64;
     let mut old_contains = cycle_samples(|| {
@@ -219,27 +320,27 @@ fn syscall_set_paths(cal: &Calibration) {
         let id = ids[cursor as usize % ids.len()];
         black_box(id < 64 && old & (1u64 << id) != 0);
     });
-    report_values("syscallset.contains.u64-reference", &mut old_contains, cal);
+    report_values("syscallset.contains.u64-reference", &mut old_contains, cal, TAIL_ITERS);
 
     let mut current_subset = cycle_samples(|| {
         black_box(other.is_subset_of(current));
     });
-    report_values("syscallset.subset.current", &mut current_subset, cal);
+    report_values("syscallset.subset.current", &mut current_subset, cal, TAIL_ITERS);
 
     let mut old_subset = cycle_samples(|| {
         black_box(old_other & !old == 0);
     });
-    report_values("syscallset.subset.u64-reference", &mut old_subset, cal);
+    report_values("syscallset.subset.u64-reference", &mut old_subset, cal, TAIL_ITERS);
 
     let mut current_copy = cycle_samples(|| {
         black_box(black_box(current));
     });
-    report_values("syscallset.copy.current", &mut current_copy, cal);
+    report_values("syscallset.copy.current", &mut current_copy, cal, TAIL_ITERS);
 
     let mut old_copy = cycle_samples(|| {
         black_box(black_box(old));
     });
-    report_values("syscallset.copy.u64-reference", &mut old_copy, cal);
+    report_values("syscallset.copy.u64-reference", &mut old_copy, cal, TAIL_ITERS);
 
     let mut raw = SpawnDesc::default();
     raw.image_len = 64;
@@ -249,21 +350,44 @@ fn syscall_set_paths(cal: &Calibration) {
     let mut current_decode = cycle_samples(|| {
         black_box(SpawnDesc::decode(black_box(&encoded)).expect("bench fixture decodes"));
     });
-    report_values("spawn.decode.current", &mut current_decode, cal);
+    report_values("spawn.decode.current", &mut current_decode, cal, TAIL_ITERS);
 
     let mut call_bytes = [0u8; kernel_core::syscall_set::BYTES];
     current.encode(&mut call_bytes);
     let mut current_calls_decode = cycle_samples(|| {
         black_box(SyscallSet::decode(black_box(&call_bytes)));
     });
-    report_values("spawn.calls.decode.current", &mut current_calls_decode, cal);
+    report_values(
+        "spawn.calls.decode.current",
+        &mut current_calls_decode,
+        cal,
+        TAIL_ITERS,
+    );
 
     let mut old_calls_decode = cycle_samples(|| {
         let mut word = [0u8; 8];
         word.copy_from_slice(&call_bytes[..8]);
         black_box(u64::from_le_bytes(word));
     });
-    report_values("spawn.calls.decode.u64-reference", &mut old_calls_decode, cal);
+    report_values(
+        "spawn.calls.decode.u64-reference",
+        &mut old_calls_decode,
+        cal,
+        TAIL_ITERS,
+    );
+}
+
+fn counter_read_overhead(cal: &Calibration) {
+    let mut samples = Vec::with_capacity(TIMER_READ_ITERS);
+    for i in 0..TIMER_READ_ITERS {
+        let start = arch::measure_cycles();
+        let end = arch::measure_cycles();
+        samples.push(end.wrapping_sub(start));
+        if i % 1024 == 0 {
+            arch::watchdog_pet_force();
+        }
+    }
+    report_values("timer.read_overhead", &mut samples, cal, TIMER_READ_ITERS);
 }
 
 /// 开中断等到下一个 tick 的边沿，返回边沿处的 tick 数。
@@ -279,20 +403,20 @@ fn next_tick_edge() -> u64 {
 // 校准
 // ---------------------------------------------------------------------------
 
-/// 在 [`WINDOW_TICKS`] 个 tick 内数周期计数器走了多少，得到每 tick 周期数。
+/// 在 [`CALIBRATION_TICKS`] 个 tick 内数周期计数器走了多少，得到每 tick 周期数。
 fn calibrate() -> Option<Calibration> {
     let hz = config::ACTIVE.clock.timer_hz;
     let t0 = next_tick_edge();
     let c0 = arch::cycles();
-    while sched::timer_ticks() < t0 + WINDOW_TICKS {
+    while sched::timer_ticks() < t0 + CALIBRATION_TICKS {
         arch::wait_for_interrupt();
     }
     let c1 = arch::cycles();
     arch::irq_disable();
-    let cal = Calibration::new(c1.wrapping_sub(c0), WINDOW_TICKS, hz)?;
+    let cal = Calibration::new(c1.wrapping_sub(c0), CALIBRATION_TICKS, hz)?;
     kprintln!(
         "[JSR-BENCH] calibrate ticks={} cycles={} cycles_per_tick={} cycles_per_second={} timer_hz={}",
-        WINDOW_TICKS,
+        CALIBRATION_TICKS,
         c1.wrapping_sub(c0),
         cal.cycles_per_tick(),
         cal.cycles_per_second(),
@@ -326,10 +450,10 @@ fn timer_irq(cal: &Calibration) -> Option<Summary> {
         check(false, "循环耗时探测没有样本");
         return None;
     };
-    let mut irqs = Samples::new();
+    let mut irqs = Vec::with_capacity(TIMER_IRQ_SAMPLES);
     let t0 = next_tick_edge();
     arch::irq_disable();
-    let end = t0 + WINDOW_TICKS;
+    let end = t0 + TIMER_IRQ_SAMPLES as u64;
     let mut last = sched::timer_ticks();
     let mut prev = arch::cycles();
     // 上一轮发现 tick 变化时记下的 a[i-1]；下一轮读到 a[i+1] 后结算
@@ -339,6 +463,9 @@ fn timer_irq(cal: &Calibration) -> Option<Summary> {
         let a = arch::cycles();
         if let Some(start) = pending.take() {
             irqs.push(a.wrapping_sub(start).saturating_sub(base.p50));
+            if irqs.len() % 100_000 == 0 {
+                report_progress(irqs.len());
+            }
             if last >= end {
                 break;
             }
@@ -351,41 +478,52 @@ fn timer_irq(cal: &Calibration) -> Option<Summary> {
         prev = a;
     }
     arch::irq_disable();
-    // 窗口内应恰好观察到 WINDOW_TICKS 次 tick 变化（每次变化只加 1：中断成本远小于一个 tick）
-    let matched = irqs.len() as u64 == WINDOW_TICKS && last == end;
+    // 窗口内应恰好观察到 TIMER_IRQ_SAMPLES 次 tick 变化（每次变化只加 1：中断成本远小于一个 tick）
+    let matched = irqs.len() == TIMER_IRQ_SAMPLES && last == end;
     check_timing_sample(matched, "时钟中断样本数与 tick 数不符");
     kprintln!(
         "[JSR-BENCH] probe span_p50={} span_max={} samples={} ticks={} matched={}",
         base.p50,
         base.max,
         irqs.len(),
-        WINDOW_TICKS,
+        TIMER_IRQ_SAMPLES,
         matched
     );
-    report("kernel.timer_irq", &irqs, cal)
+    report_values(
+        "kernel.timer_irq",
+        &mut irqs,
+        cal,
+        TIMER_IRQ_SAMPLES,
+    )
 }
 
 // ---------------------------------------------------------------------------
 // 上下文切换
 // ---------------------------------------------------------------------------
 
-static SWITCH_SAMPLES: SpinLock<Samples> = SpinLock::new(Samples::new());
+static SWITCH_SAMPLES: SpinLock<Vec<u64>> = SpinLock::new(Vec::new());
 static SWITCH_DONE: AtomicBool = AtomicBool::new(false);
 /// 一次让出没有发生任何切换的次数（应为 0：总有另一个任务可运行）。
 static SWITCH_NONE: AtomicU32 = AtomicU32::new(0);
 
 /// 测量任务：每次让出前后读计数器，按期间发生的切换次数平摊。
 fn switch_measurer() {
-    for i in 0..WARMUP + ITERS {
+    for i in 0..WARMUP as usize + CONTEXT_ITERS {
         let n0 = sched::switch_count();
-        let c0 = arch::cycles();
+        let c0 = arch::measure_cycles();
         sched::yield_now();
-        let dt = arch::cycles().wrapping_sub(c0);
+        let dt = arch::measure_cycles().wrapping_sub(c0);
         let n = sched::switch_count() - n0;
         if n == 0 {
             SWITCH_NONE.fetch_add(1, Ordering::Relaxed);
-        } else if i >= WARMUP {
+        } else if i >= WARMUP as usize {
             SWITCH_SAMPLES.lock().push(dt / n);
+        }
+        if i % 1024 == 0 {
+            arch::watchdog_pet_force();
+        }
+        if (i + 1) % 100_000 == 0 {
+            report_progress(i + 1);
         }
     }
     SWITCH_DONE.store(true, Ordering::Relaxed);
@@ -400,7 +538,12 @@ fn switch_partner() {
 
 fn context_switch(cal: &Calibration) -> Option<Summary> {
     let before = baseline();
-    *SWITCH_SAMPLES.lock() = Samples::new();
+    let before_heap_mapped = heap::stats().3;
+    {
+        let mut samples = SWITCH_SAMPLES.lock();
+        samples.clear();
+        samples.reserve(CONTEXT_ITERS);
+    }
     SWITCH_DONE.store(false, Ordering::Relaxed);
     SWITCH_NONE.store(0, Ordering::Relaxed);
     let a = sched::spawn(TaskId(TASK_ID_BASE + 1), "bench-switch-a", switch_measurer).is_ok();
@@ -408,11 +551,20 @@ fn context_switch(cal: &Calibration) -> Option<Summary> {
     check(a && b, "切换基准任务创建失败");
     sched::run();
     check(SWITCH_NONE.load(Ordering::Relaxed) == 0, "有可运行对手时让出却没有切换");
-    let samples = SWITCH_SAMPLES.lock().clone();
-    check(samples.len() == ITERS as usize, "切换样本数不足");
-    let sum = report("sched.context_switch", &samples, cal);
+    let mut samples = core::mem::take(&mut *SWITCH_SAMPLES.lock());
+    check(samples.len() == CONTEXT_ITERS, "切换样本数不足");
+    let sum = report_values("sched.context_switch", &mut samples, cal, CONTEXT_ITERS);
     let after = baseline();
-    check(after == before, "切换基准后资源未回到基线");
+    let retained_heap_pages =
+        heap::stats().3.saturating_sub(before_heap_mapped) / kernel_core::frame::FRAME_SIZE;
+    check(
+        after.objects == before.objects
+            && after.pending == before.pending
+            && after.pins == before.pins
+            && after.free_frames.saturating_add(retained_heap_pages as usize)
+                == before.free_frames,
+        "切换基准后资源未回到基线",
+    );
     sum
 }
 
@@ -422,28 +574,34 @@ fn context_switch(cal: &Calibration) -> Option<Summary> {
 
 fn frames(cal: &Calibration) {
     let before = baseline();
-    let mut alloc = Samples::new();
-    let mut free = Samples::new();
+    let mut alloc = Vec::with_capacity(TAIL_ITERS);
+    let mut free = Vec::with_capacity(TAIL_ITERS);
     let mut ok = true;
-    for i in 0..WARMUP + ITERS {
-        let c0 = arch::cycles();
+    for i in 0..WARMUP as usize + TAIL_ITERS {
+        let c0 = arch::measure_cycles();
         let f = frame::allocate();
-        let c1 = arch::cycles();
+        let c1 = arch::measure_cycles();
         let Ok(f) = f else {
             ok = false;
             break;
         };
         let r = frame::deallocate(f);
-        let c2 = arch::cycles();
+        let c2 = arch::measure_cycles();
         ok &= r.is_ok();
-        if i >= WARMUP {
+        if i >= WARMUP as usize {
             alloc.push(c1.wrapping_sub(c0));
             free.push(c2.wrapping_sub(c1));
         }
+        if i % 4096 == 0 {
+            arch::watchdog_pet_force();
+        }
+        if (i + 1) % 100_000 == 0 {
+            report_progress(i + 1);
+        }
     }
     check(ok, "页帧分配/释放失败");
-    report("frame.alloc", &alloc, cal);
-    report("frame.free", &free, cal);
+    report_values("frame.alloc", &mut alloc, cal, TAIL_ITERS);
+    report_values("frame.free", &mut free, cal, TAIL_ITERS);
     // 失败路径：重复释放被拒，空闲帧数不变
     let refused = match frame::allocate() {
         Ok(f) => {
@@ -466,21 +624,27 @@ fn frames(cal: &Calibration) {
 
 fn heap_paths(cal: &Calibration) {
     let before = baseline();
-    let mut small = Samples::new();
-    let mut page = Samples::new();
-    for i in 0..WARMUP + ITERS {
-        let c0 = arch::cycles();
+    let mut small = Vec::with_capacity(TAIL_ITERS);
+    let mut page = Vec::with_capacity(TAIL_ITERS);
+    for i in 0..WARMUP as usize + TAIL_ITERS {
+        let c0 = arch::measure_cycles();
         drop(black_box(Box::new([0u8; 64])));
-        let c1 = arch::cycles();
+        let c1 = arch::measure_cycles();
         drop(black_box(Vec::<u8>::with_capacity(4096)));
-        let c2 = arch::cycles();
-        if i >= WARMUP {
+        let c2 = arch::measure_cycles();
+        if i >= WARMUP as usize {
             small.push(c1.wrapping_sub(c0));
             page.push(c2.wrapping_sub(c1));
         }
+        if i % 4096 == 0 {
+            arch::watchdog_pet_force();
+        }
+        if (i + 1) % 100_000 == 0 {
+            report_progress(i + 1);
+        }
     }
-    report("heap.alloc_free_64", &small, cal);
-    report("heap.alloc_free_4096", &page, cal);
+    report_values("heap.alloc_free_64", &mut small, cal, TAIL_ITERS);
+    report_values("heap.alloc_free_4096", &mut page, cal, TAIL_ITERS);
     // 失败路径：超出运行时堆预算的申请被拒，堆的统计不变
     let stats_before = heap::stats();
     let mut v: Vec<u8> = Vec::new();
@@ -498,12 +662,22 @@ fn heap_paths(cal: &Calibration) {
 
 fn user_program(cal: &Calibration) {
     let before = baseline();
+    let before_heap_mapped = heap::stats().3;
+    let trace = crate::syscall::set_trace(false);
     let res = run_program_arg("bench", USER_BENCH, 0, cal.cycles_per_second(), rt_calls());
+    crate::syscall::set_trace(trace);
     let ok_exit = matches!(res, Some((Some(ProcState::Exited { code: 0 }), Some(0))));
     check(ok_exit, "user/bench 未以 0 退出");
     let after = baseline();
-    check(after == before, "用户基准后资源未回到基线");
-    kprintln!("[JSR-BENCH] case=user exit={:?} reclaimed={}", res.and_then(|r| r.1), after == before);
+    let after_heap_mapped = heap::stats().3;
+    let reclaimed = resources_reclaimed(
+        before,
+        after,
+        before_heap_mapped,
+        after_heap_mapped,
+    );
+    check(reclaimed, "用户基准后资源未回到基线");
+    kprintln!("[JSR-BENCH] case=user exit={:?} reclaimed={}", res.and_then(|r| r.1), reclaimed);
 }
 
 // ---------------------------------------------------------------------------

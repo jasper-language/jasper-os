@@ -27,11 +27,24 @@ mod imp {
         ret
     }
 
-    /// 读取周期计数器（x86_64：时间戳计数器，用户态可读）。单调递增，单位须由调用者自行校准。
+    /// 读取周期计数器（x86_64：时间戳计数器，用户态可读）。前后 LFENCE
+    /// 使短操作和两侧读数保持顺序；单位须由调用者使用内核校准值解释。
     #[inline]
     pub fn cycles() -> u64 {
-        // SAFETY：rdtsc 没有副作用；内核不禁止用户态读取它。
-        unsafe { core::arch::x86_64::_rdtsc() }
+        let lo: u32;
+        let hi: u32;
+        // SAFETY: RDTSC is readable in user mode and has no side effects.
+        unsafe {
+            asm!(
+                "lfence",
+                "rdtsc",
+                "lfence",
+                out("eax") lo,
+                out("edx") hi,
+                options(nostack, preserves_flags)
+            );
+        }
+        (u64::from(hi) << 32) | u64::from(lo)
     }
 
     /// 本进程私有窗口的起点（x86_64：顶级页表项 32 起，即 `0x1000_0000_0000`）。

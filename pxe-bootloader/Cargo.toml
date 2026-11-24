@@ -1,0 +1,19 @@
+[package]
+name = "jasper-pxe-bootloader"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "UEFI PXE loader with ProxyDHCP TFTP server selection"
+
+[[bin]]
+name = "jasper-pxe-bootloader"
+path = "src/main.rs"
+
+[dependencies]
+bootloader-boot-config = "=0.11.17"
+bootloader-x86_64-common = "=0.11.17"
+bootloader_api = "=0.11.17"
+log = "=0.4.29"
+serde-json-core = "=0.5.1"
+uefi = { version = "=0.38.0", features = ["alloc", "global_allocator"] }
+x86_64 = "=0.15.5"

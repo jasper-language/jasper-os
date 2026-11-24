@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use kernel_core::elf::ElfClass;
 
 fn main() {
+    emit_git_commit();
     println!("cargo:rustc-check-cfg=cfg(jasper_verification_platform)");
     #[cfg(feature = "pixel6a-smoke")] // JASPER-HARDCODE-REVIEW: issue=35 source=pixel-verification-platform reason=explicit-smoke-selector
     println!("cargo:rustc-cfg=jasper_verification_platform");
@@ -252,6 +253,20 @@ fn main() {
         let script = root.join(script);
         println!("cargo:rerun-if-changed={}", script.display());
         println!("cargo:rustc-link-arg-bins=-T{}", script.display());
+    }
+}
+
+fn emit_git_commit() {
+    println!("cargo:rerun-if-changed=../.git/HEAD");
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["rev-parse", "--short=12", "HEAD"])
+        .current_dir("../")
+        .output()
+    {
+        if output.status.success() {
+            let commit = String::from_utf8_lossy(&output.stdout);
+            println!("cargo:rustc-env=JASPER_BUILD_COMMIT={}", commit.trim());
+        }
     }
 }
 

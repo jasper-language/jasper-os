@@ -39,6 +39,31 @@ static PUBLICATIONS: Gate = Gate::new();
 static RUNTIME: IrqSpinLock<Option<Assembly>> =
     IrqSpinLock::ranked(crate::lockorder::ASSEMBLY, None);
 
+macro_rules! marked_activator {
+    ($wrapper:ident, $label:literal, $target:ident) => {
+        fn $wrapper() -> Result<(), &'static str> {
+            crate::early::mark(concat!("ASM ", $label));
+            let result = $target();
+            crate::early::mark(if result.is_ok() {
+                concat!("ASM OK ", $label)
+            } else {
+                concat!("ASM FAIL ", $label)
+            });
+            result
+        }
+    };
+}
+
+marked_activator!(activate_core, "CORE", core_activate);
+marked_activator!(activate_memory, "MEMORY", memory_ready);
+marked_activator!(activate_time, "TIME", time_ready);
+marked_activator!(activate_sched, "SCHED", sched_activate);
+marked_activator!(activate_channel, "CHANNEL", channel_ready);
+marked_activator!(activate_realtime, "REALTIME", realtime_activate);
+marked_activator!(activate_job, "JOB", job_activate);
+marked_activator!(activate_async, "ASYNC", async_ready);
+marked_activator!(activate_devices, "DEVICES", devices_activate);
+
 /// `assembly` 阶段开始前的启动期资源快照；只在单处理器启动期访问。
 /// Boot-resource snapshot taken immediately before the assembly stage starts.
 static BOOT_BASE: IrqSpinLock<Option<BootResources>> = IrqSpinLock::new(None);
@@ -91,63 +116,63 @@ static BINDINGS: [Binding; 9] = [
         module: "core",
         version: "1.0.0",
         conflicts: &[],
-        activate: core_activate,
+        activate: activate_core,
         deactivate: None,
     },
     Binding {
         module: "memory",
         version: "1.0.0",
         conflicts: &[],
-        activate: memory_ready,
+        activate: activate_memory,
         deactivate: None,
     },
     Binding {
         module: "time",
         version: "1.0.0",
         conflicts: &[],
-        activate: time_ready,
+        activate: activate_time,
         deactivate: None,
     },
     Binding {
         module: "sched",
         version: "1.0.0",
         conflicts: &[],
-        activate: sched_activate,
+        activate: activate_sched,
         deactivate: None,
     },
     Binding {
         module: "channel",
         version: "1.0.0",
         conflicts: &[],
-        activate: channel_ready,
+        activate: activate_channel,
         deactivate: None,
     },
     Binding {
         module: "realtime",
         version: "1.0.0",
         conflicts: &[],
-        activate: realtime_activate,
+        activate: activate_realtime,
         deactivate: None,
     },
     Binding {
         module: "job",
         version: "1.0.0",
         conflicts: &[],
-        activate: job_activate,
+        activate: activate_job,
         deactivate: None,
     },
     Binding {
         module: "async",
         version: "1.0.0",
         conflicts: &[],
-        activate: async_ready,
+        activate: activate_async,
         deactivate: None,
     },
     Binding {
         module: "devices",
         version: "1.0.0",
         conflicts: &[],
-        activate: devices_activate,
+        activate: activate_devices,
         deactivate: None,
     },
 ];
@@ -325,6 +350,7 @@ fn async_ready() -> Result<(), &'static str> {
 /// 调用方必须拒绝继续启动。每个模块输出一行 `[JSR-ASSEMBLY] module=…`。
 /// English: assemble, audit and publish; returns the number of failures.
 pub fn boot() -> u32 {
+    crate::early::mark("ASM PLAN");
     let base = boot_resources();
     *BOOT_BASE.lock() = Some(base);
     let Some(declared) = profile::resolved_ref() else {

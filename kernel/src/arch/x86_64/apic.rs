@@ -51,6 +51,7 @@ const LVT_EXTINT: u32 = 0b111 << 8;
 const LVT_NMI: u32 = 0b100 << 8;
 const ICR_PENDING: u32 = 1 << 12;
 const ICR_LEVEL_ASSERT: u32 = 1 << 14;
+const ICR_LEVEL_TRIGGER: u32 = 1 << 15;
 const ICR_INIT: u32 = 0b101 << 8;
 const ICR_STARTUP: u32 = 0b110 << 8;
 /// 定时器分频 16。
@@ -144,12 +145,18 @@ pub fn send_fixed(dest: u32, vector: u8) -> bool {
     send(dest, ICR_LEVEL_ASSERT | vector as u32)
 }
 
-/// INIT → 10 ms → 启动（两次，间隔 200 µs）：处理器从 `start_page × 4 KiB` 处以实模式开始执行。
+/// INIT assert → INIT deassert → STARTUP ×2. The deassert phase is required by
+/// the xAPIC protocol and is not tolerated consistently by all physical AMD
+/// chipsets, even though QEMU accepts the shorter sequence.
 pub fn send_init_startup(dest: u32, start_page: u8) -> bool {
     if !send(dest, ICR_INIT | ICR_LEVEL_ASSERT) {
         return false;
     }
     pit::delay_us(10_000);
+    if !send(dest, ICR_INIT | ICR_LEVEL_TRIGGER) {
+        return false;
+    }
+    pit::delay_us(200);
     for _ in 0..2 {
         if !send(dest, ICR_STARTUP | ICR_LEVEL_ASSERT | start_page as u32) {
             return false;

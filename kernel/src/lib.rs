@@ -21,6 +21,8 @@
 //! Core（除 `arch/` 外的一切）不得出现 ISA 专有代码，由 `verify-m1.4b.sh` 机械检查。
 #![no_std]
 #![feature(allocator_ext)]
+#![feature(const_index)]
+#![feature(const_trait_impl)]
 #![cfg_attr(target_arch = "x86_64", feature(abi_x86_interrupt))]
 
 extern crate alloc;
@@ -30,13 +32,41 @@ extern crate alloc;
 pub mod pixel6a_runtime;
 #[cfg(feature = "pixel6a-runtime-verify")] // JASPER-HARDCODE-REVIEW: issue=33 source=build-only-physical-runtime-plan reason=selects-pixel6a-physical-test-plan
 pub use pixel6a_runtime as plan;
-#[cfg(all(not(feature = "production"), not(feature = "pixel6a-runtime-verify")))] // JASPER-HARDCODE-REVIEW: issue=33 source=build-only-physical-runtime-plan reason=default-plan-excludes-pixel6a-test-plan
+#[cfg(all(
+    not(feature = "pixel6a-runtime-verify"),
+    feature = "bench-only",
+    target_arch = "x86_64"
+))]
+pub mod performance;
+#[cfg(all(
+    not(feature = "pixel6a-runtime-verify"),
+    feature = "bench-only",
+    target_arch = "x86_64"
+))]
+pub use performance as plan;
+#[cfg(all(
+    not(feature = "production"),
+    not(feature = "pixel6a-runtime-verify"),
+    not(feature = "bench-only")
+))]
 pub mod acceptance;
-#[cfg(all(not(feature = "production"), not(feature = "pixel6a-runtime-verify")))] // JASPER-HARDCODE-REVIEW: issue=33 source=build-only-physical-runtime-plan reason=default-plan-excludes-pixel6a-test-plan
+#[cfg(all(
+    not(feature = "production"),
+    not(feature = "pixel6a-runtime-verify"),
+    not(feature = "bench-only")
+))]
 pub use acceptance as plan;
-#[cfg(all(feature = "production", not(feature = "pixel6a-runtime-verify")))] // JASPER-HARDCODE-REVIEW: issue=33 source=build-only-physical-runtime-plan reason=production-plan-excludes-pixel6a-test-plan
+#[cfg(all(
+    feature = "production",
+    not(feature = "pixel6a-runtime-verify"),
+    not(feature = "bench-only")
+))]
 pub mod production;
-#[cfg(all(feature = "production", not(feature = "pixel6a-runtime-verify")))] // JASPER-HARDCODE-REVIEW: issue=33 source=build-only-physical-runtime-plan reason=production-plan-excludes-pixel6a-test-plan
+#[cfg(all(
+    feature = "production",
+    not(feature = "pixel6a-runtime-verify"),
+    not(feature = "bench-only")
+))]
 pub use production as plan;
 
 pub mod appid_demo;
@@ -64,6 +94,7 @@ pub mod drv3_demo;
 #[cfg(all(feature = "user-programs", target_arch = "x86_64"))]
 pub mod device_demo;
 pub mod display;
+pub mod early;
 pub mod interrupt;
 pub mod exit_state;
 pub mod fault;
@@ -240,6 +271,7 @@ pub mod net4_runtime_demo;
 pub mod sec6_demo;
 pub mod shard;
 pub mod smp;
+pub mod startup;
 pub mod sync;
 pub mod syscall;
 pub mod task;
@@ -315,3 +347,5 @@ pub mod vcpu;
 pub mod rt2_demo;
 
 pub mod hrtime;
+#[cfg(target_arch = "x86_64")]
+pub mod hardware;

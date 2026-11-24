@@ -770,6 +770,53 @@ pub fn wait_for_interrupt() {
 pub fn halt_forever() -> ! {
     Current::halt_forever()
 }
+/// Last-resort panic reset. x86_64 attempts chipset and keyboard-controller
+/// resets before forcing a triple fault; other targets retain their safe halt.
+pub fn panic_reset() -> ! {
+    #[cfg(target_arch = "x86_64")]
+    {
+        x86_64::panic_reset()
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        Current::halt_forever()
+    }
+}
+/// Initialize the platform-declared hardware watchdog after kernel mappings
+/// are available. False means the platform exposed no supported backend.
+pub fn watchdog_init(boot: &crate::boot::BootSpec) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        x86_64::watchdog_init(boot)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = boot;
+        false
+    }
+}
+/// Pet the hardware watchdog. This is a no-op when no backend is armed.
+pub fn watchdog_pet() {
+    #[cfg(target_arch = "x86_64")]
+    x86_64::watchdog_pet()
+}
+/// Pet immediately outside a measured interval.
+pub fn watchdog_pet_force() {
+    #[cfg(target_arch = "x86_64")]
+    x86_64::watchdog_pet_force()
+}
+/// Calibrate an architectural cycle counter when CPUID does not expose its
+/// frequency. Returns None when no reliable calibration source exists.
+pub fn calibrate_tsc_hz() -> Option<u64> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        x86_64::calibrate_tsc_hz()
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        None
+    }
+}
 /// 见 [`Platform::debug_breakpoint`]。
 pub fn debug_breakpoint() {
     Current::debug_breakpoint()
@@ -976,6 +1023,36 @@ pub fn user_probe(probe: UserProbe) -> &'static [u8] {
 #[inline(always)]
 pub fn cycles() -> u64 {
     Current::cycle_counter()
+}
+/// Serialized cycle-counter read for microbenchmarks.
+///
+/// The plain [`cycles`] accessor remains available for code that needs the
+/// counter's minimal read latency. Measurements use this accessor so stores and
+/// the measured operation cannot be reordered across the interval boundary.
+#[inline(always)]
+pub fn measure_cycles() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let lo: u32;
+        let hi: u32;
+        // SAFETY: LFENCE and RDTSC are available in kernel mode on x86_64 and
+        // have no memory side effects. The fences order the counter reads.
+        unsafe {
+            core::arch::asm!(
+                "lfence",
+                "rdtsc",
+                "lfence",
+                out("eax") lo,
+                out("edx") hi,
+                options(nostack, preserves_flags)
+            );
+        }
+        (u64::from(hi) << 32) | u64::from(lo)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        cycles()
+    }
 }
 /// 见 [`Platform::clock_counter`]。
 #[inline(always)]

@@ -29,14 +29,14 @@ pub fn write_str(mut s: &str) -> Result<()> {
 
 /// 栈上的输出缓冲。
 pub struct Console {
-    buf: [u8; 512],
+    buf: [u8; 2048],
     len: usize,
 }
 
 impl Console {
     /// 空缓冲。
     pub const fn new() -> Self {
-        Console { buf: [0; 512], len: 0 }
+        Console { buf: [0; 2048], len: 0 }
     }
 
     /// 写出缓冲中的内容（空缓冲不写）。

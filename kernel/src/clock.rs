@@ -21,6 +21,7 @@ pub fn ticks() -> u64 {
 /// coming here while it waits.
 pub fn on_tick() {
     let n = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+    crate::arch::watchdog_pet();
     if n <= crate::config::ACTIVE.clock.boot_ticks {
         kprintln!("[JSR-TICK] n={}", n);
     }

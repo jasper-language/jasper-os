@@ -23,6 +23,11 @@ struct TerminalRuntime {
 
 static TERMINAL: Once<IrqSpinLock<TerminalRuntime>> = Once::new();
 
+/// Whether the bounded terminal session was successfully initialized.
+pub fn ready() -> bool {
+    TERMINAL.get().is_some()
+}
+
 /// Allocate terminal rings from the runtime-admitted memory budget.
 pub fn init() -> bool {
     if TERMINAL.get().is_some() {

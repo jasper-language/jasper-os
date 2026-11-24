@@ -9,6 +9,9 @@ use super::port::{inb, outb};
 const COM1: u16 = 0x3F8;
 /// 线路状态寄存器中「发送保持寄存器空」位。
 const LSR_THR_EMPTY: u8 = 0x20;
+/// An absent or wedged UART must not prevent the kernel from reaching the
+/// framebuffer and timeout paths.
+const TX_READY_SPINS: u32 = 1_000_000;
 
 /// 初始化 COM1。
 pub fn init() {
@@ -28,8 +31,12 @@ pub fn init() {
 pub fn write_byte(byte: u8) {
     // SAFETY：只读线路状态、只写数据寄存器。
     unsafe {
-        while (inb(COM1 + 5) & LSR_THR_EMPTY) == 0 {}
-        outb(COM1, byte);
+        for _ in 0..TX_READY_SPINS {
+            if inb(COM1 + 5) & LSR_THR_EMPTY != 0 {
+                outb(COM1, byte);
+                return;
+            }
+        }
     }
 }
 

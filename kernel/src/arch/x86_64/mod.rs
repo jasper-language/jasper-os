@@ -59,8 +59,12 @@ mod smp;
 pub(crate) use smp::tlb_flush_all_local as flush_all_local_tlb;
 mod uart;
 mod user;
+mod watchdog;
 pub(crate) use user::enter_exec;
 pub(crate) use user::enter_syscall_return;
+pub(crate) use watchdog::{
+    init as watchdog_init, pet as watchdog_pet, pet_force as watchdog_pet_force,
+};
 pub mod vmx;
 
 /// Reads one hardware random word after verifying CPUID support.
@@ -88,6 +92,78 @@ pub fn hardware_random_u64() -> Option<u64> {
         }
     }
     None
+}
+
+/// Calibrate TSC against a 10 ms PIT channel-2 interval.
+///
+/// This runs before the kernel timer is initialized and leaves PIT channel 0
+/// untouched. It is the fallback when CPUID does not publish the TSC/core
+/// crystal ratio.
+pub(crate) fn calibrate_tsc_hz() -> Option<u64> {
+    const PIT_HZ: u64 = 1_193_182;
+    const CALIBRATE_MS: u64 = 10;
+    let divisor = (PIT_HZ * CALIBRATE_MS / 1000) as u16;
+    unsafe {
+        let original = port::inb(0x61);
+        port::outb(0x61, original & !0x03);
+        port::outb(0x43, 0xb0);
+        port::outb(0x42, divisor as u8);
+        port::outb(0x42, (divisor >> 8) as u8);
+        let start = core::arch::x86_64::_rdtsc();
+        port::outb(0x61, (original & !0x02) | 0x01);
+        let mut completed = false;
+        for _ in 0..10_000_000u32 {
+            if port::inb(0x61) & 0x20 != 0 {
+                completed = true;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        let end = core::arch::x86_64::_rdtsc();
+        port::outb(0x61, original);
+        if !completed || end <= start {
+            return None;
+        }
+        end.checked_sub(start)
+            .map(|cycles| cycles.saturating_mul(1000) / CALIBRATE_MS)
+    }
+}
+
+/// Last-resort reset used by panic and boot-timeout handling.
+///
+/// Try the common chipset reset control and keyboard-controller pulse before
+/// installing an empty IDT and forcing a triple fault. This deliberately does
+/// not depend on ACPI, the heap, task state, or interrupts.
+pub fn panic_reset() -> ! {
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+        port::outb(0xcf9, 0x02);
+        port::inb(0x80);
+        port::outb(0xcf9, 0x06);
+        for _ in 0..10_000 {
+            port::inb(0x80);
+        }
+
+        port::outb(0x64, 0xfe);
+        for _ in 0..10_000 {
+            if port::inb(0x64) & 0x02 == 0 {
+                break;
+            }
+        }
+
+        #[repr(C, packed)]
+        struct EmptyIdt {
+            limit: u16,
+            base: u64,
+        }
+        let idt = EmptyIdt { limit: 0, base: 0 };
+        core::arch::asm!(
+            "lidt [{}]",
+            "int3",
+            in(reg) &idt,
+            options(readonly, nostack, noreturn)
+        );
+    }
 }
 
 use super::{ExitStatus, PciAccess, Platform, UserProbe};

@@ -20,6 +20,26 @@ pub unsafe fn inb(port: u16) -> u8 {
     v
 }
 
+/// Write one 16-bit value.
+///
+/// # Safety
+/// Same contract as [`outb`].
+#[inline(always)]
+pub unsafe fn outw(port: u16, val: u16) {
+    core::arch::asm!("out dx, ax", in("dx") port, in("ax") val, options(nomem, nostack, preserves_flags));
+}
+
+/// Read one 16-bit value.
+///
+/// # Safety
+/// Same contract as [`inb`].
+#[inline(always)]
+pub unsafe fn inw(port: u16) -> u16 {
+    let value: u16;
+    core::arch::asm!("in ax, dx", in("dx") port, out("ax") value, options(nomem, nostack, preserves_flags));
+    value
+}
+
 /// 向端口写一个 32 位值。
 ///
 /// # Safety

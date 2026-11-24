@@ -80,6 +80,8 @@ pub const IRQ_QUOTA: LockClass = LockClass::new(21, "system.irq.quota");
 pub const TRACE: LockClass = LockClass::new(22, "system.trace");
 /// Bounded Sandbox launch-plan registry.
 pub const SANDBOX_LAUNCH: LockClass = LockClass::new(23, "system.sandbox.launch");
+/// ACPI WDAT hardware-watchdog action state.
+pub const WATCHDOG: LockClass = LockClass::new(24, "system.watchdog");
 /// Native package installation ABI backend.
 pub const NATIVE_INSTALL: LockClass = LockClass::new(15, "system.install");
 /// 系统服务的分片队列（每个分片一把，同级，彼此从不嵌套）。
@@ -120,6 +122,7 @@ pub const REGISTRY: &[LockClass] = &[
     IRQ_QUOTA,
     TRACE,
     SANDBOX_LAUNCH,
+    WATCHDOG,
     SERVICE_SHARD,
     DISPLAY,
     TERMINAL,

@@ -94,6 +94,9 @@ const fn stage_rollback(stage: Stage) -> Option<fn(&mut BootCtx) -> bool> {
 /// returns `None` on failure. A refused or failed stage is reported and boot stops, so no stage
 /// that depends on it ever starts.
 fn stage(ctx: &mut BootCtx, s: Stage, body: impl FnOnce(&mut BootCtx) -> Option<()>) {
+    let stage_start = crate::startup::stage_begin(s.name());
+    crate::early::check_boot_deadline(s.name());
+    arch::watchdog_pet();
     if let Err(e) = ctx.tracker.begin(s) {
         match e {
             StageError::Halted { failed } => kprintln!(
@@ -120,6 +123,9 @@ fn stage(ctx: &mut BootCtx, s: Stage, body: impl FnOnce(&mut BootCtx) -> Option<
     if body(ctx).is_some() {
         // begin 刚成功且阶段串行，complete 不会被拒。begin just succeeded; complete cannot be refused.
         let _ = ctx.tracker.complete(s);
+        crate::startup::stage_ok(s.name(), stage_start);
+        crate::early::check_boot_deadline(s.name());
+        arch::watchdog_pet();
         kprintln!(
             "[JSR-BOOT-STAGE] done stage={} done_mask={:#x}",
             s.name(),
@@ -128,6 +134,7 @@ fn stage(ctx: &mut BootCtx, s: Stage, body: impl FnOnce(&mut BootCtx) -> Option<
         return;
     }
     let _ = ctx.tracker.fail(s);
+    crate::startup::stage_fail(s.name(), stage_start, "stage_body_failed");
     kprint!("[JSR-BOOT-STAGE] failed stage={} blocked=", s.name());
     let blocked = ctx.tracker.blocked_mask();
     let mut first = true;
@@ -235,7 +242,11 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
             if !smp::reserve_start_frame() {
                 kprintln!("[JSR-SMP] start_frame unavailable");
             }
-            mm::map::init(ctx.boot).then_some(())
+            if !mm::map::init(ctx.boot) {
+                return None;
+            }
+            arch::watchdog_init(ctx.boot);
+            Some(())
         }),
         // 内核堆（Box/Vec/String 可用，按需增长）。首批映射失败时启动停止。
         Stage::Heap => stage(ctx, s, |_| {
@@ -243,8 +254,11 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
             if !crate::terminal::init() {
                 return None;
             }
-            if crate::display::start().is_err() {
-                kprintln!("[JSR-DISPLAY] runtime=unsupported");
+            #[cfg(not(feature = "bench-only"))]
+            {
+                if crate::display::start().is_err() {
+                    kprintln!("[JSR-DISPLAY] runtime=unsupported");
+                }
             }
             Some(())
         }),
@@ -291,9 +305,16 @@ fn run_stage(ctx: &mut BootCtx, s: Stage) {
         }),
         // DRV-1B：硬件顺序阶段只取得 PCI 配置空间访问者（ECAM 或传统端口）。总线枚举和
         // 只读设备表属于 `devices` 模块激活；平台没有 PCI 时激活出空表，不算失败。
-        Stage::Devices => stage(ctx, s, |ctx| {
-            pci::prepare(ctx.boot);
-            crate::display::report();
+        Stage::Devices => stage(ctx, s, |_ctx| {
+            #[cfg(feature = "bench-only")]
+            {
+                crate::early::mark("DEVICES SKIP PROFILE");
+            }
+            #[cfg(not(feature = "bench-only"))]
+            {
+                pci::prepare(ctx.boot);
+                crate::display::report();
+            }
             Some(())
         }),
         // POL-2：系统 Profile（模块面 + 参数档）在堆就绪后立刻校验；不合法就拒绝启动，

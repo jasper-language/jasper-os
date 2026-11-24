@@ -207,6 +207,17 @@ s4-soak = ["fault-inject", "krn2-observe"]
 # Explicit QEMU BM-1 profile: RTL8139 log link, IB700 watchdog and CF9 reset.
 bm1-vm = ["dep:noto-sans-mono-bitmap"]
 bm1-hang = ["bm1-vm"]
+# Physical/debug boot recovery: reset on panic and enforce a TSC-based overall
+# boot deadline at stage boundaries.
+panic-reboot = []
+boot-autorecovery = ["panic-reboot"]
+# Focused physical performance image: boot normally, run all kernel/user
+# microbenchmarks, display memory totals and latency/throughput results, then
+# remain alive for inspection.
+bench-only = ["user-programs", "smp-bsp-only"]
+# Diagnostic physical profile: discover firmware CPU topology but deliberately
+# do not start secondary processors.
+smp-bsp-only = []
 default = ["user-programs"]
 # 生产启动（issue #7）：只执行全局阶段和第一个用户程序，然后等待服务，不退出模拟器。不能和验收特性同开。
 production = []
