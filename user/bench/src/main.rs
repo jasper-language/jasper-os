@@ -58,9 +58,9 @@ impl Steps {
     }
 }
 
-fn main(_role: u64, cycles_per_second: u64) -> i32 {
+fn main(role: u64, cycles_per_second: u64) -> i32 {
     let mut s = Steps(0);
-    match run(&mut s, cycles_per_second) {
+    match run(&mut s, cycles_per_second, role & 1 != 0) {
         Ok(()) => {
             println!("bench: user ok checks={}", s.0);
             0
@@ -72,7 +72,7 @@ fn main(_role: u64, cycles_per_second: u64) -> i32 {
     }
 }
 
-fn run(s: &mut Steps, cycles_per_second: u64) -> Result<(), u32> {
+fn run(s: &mut Steps, cycles_per_second: u64, long_run: bool) -> Result<(), u32> {
     let cal = Calibration::per_second(cycles_per_second);
     s.check(cal.is_some())?;
     let Some(cal) = cal else { return Err(s.0) };
@@ -124,37 +124,43 @@ fn run(s: &mut Steps, cycles_per_second: u64) -> Result<(), u32> {
     s.check(ok)?;
     report(s, "ring.submit_complete", &mut samples, &cal, ITERS)?;
 
-    // ---- 异步环：Wait 自然完成与取消（issue #5 第四片同口径）----
-    let mut samples = Vec::with_capacity(WAIT_ITERS);
-    let mut ok = true;
-    for i in 0..WARMUP as usize + WAIT_ITERS {
-        let tag = 0xB100 + i as u64;
-        let sqe = Sqe {
-            op: ids::SYSTEM_TIME_WAIT as u32,
-            flags: 0,
-            user_tag: tag,
-            arg0: 1,
-            arg1: 0,
-        };
-        let mut id = [0u64; 1];
-        let mut cq = [Cqe::default(); 1];
-        let t0 = time::cycles();
-        // SAFETY：time.wait 不引用用户内存。
-        let e = unsafe { ring.enter_raw(core::slice::from_ref(&sqe), &mut id, &mut cq, 1) };
-        let dt = time::cycles().wrapping_sub(t0);
-        ok &= matches!(e, Ok(x) if x.submitted == 1 && x.reaped == 1)
-            && cq[0].user_tag == tag
-            && cq[0].request_id == id[0]
-            && cq[0].result == 0;
-        if i >= WARMUP as usize {
-            samples.push(dt);
+    // ---- 异步环：Wait 自然完成（专用长跑）与取消 ----
+    if long_run {
+        let mut samples = Vec::with_capacity(WAIT_ITERS);
+        let mut ok = true;
+        for i in 0..WARMUP as usize + WAIT_ITERS {
+            let tag = 0xB100 + i as u64;
+            let sqe = Sqe {
+                op: ids::SYSTEM_TIME_WAIT as u32,
+                flags: 0,
+                user_tag: tag,
+                arg0: 1,
+                arg1: 0,
+            };
+            let mut id = [0u64; 1];
+            let mut cq = [Cqe::default(); 1];
+            let t0 = time::cycles();
+            // SAFETY：time.wait 不引用用户内存。
+            let e = unsafe { ring.enter_raw(core::slice::from_ref(&sqe), &mut id, &mut cq, 1) };
+            let dt = time::cycles().wrapping_sub(t0);
+            ok &= matches!(e, Ok(x) if x.submitted == 1 && x.reaped == 1)
+                && cq[0].user_tag == tag
+                && cq[0].request_id == id[0]
+                && cq[0].result == 0;
+            if i >= WARMUP as usize {
+                samples.push(dt);
+            }
+            if (i + 1) % 100_000 == 0 {
+                println!("bench: progress name=ring.wait_complete samples={}", i + 1);
+            }
         }
-        if (i + 1) % 100_000 == 0 {
-            println!("bench: progress name=ring.wait_complete samples={}", i + 1);
-        }
+        s.check(ok)?;
+        report(s, "ring.wait_complete", &mut samples, &cal, WAIT_ITERS)?;
+    } else {
+        println!(
+            "bench: SKIP name=ring.wait_complete reason=long_run_profile_required"
+        );
     }
-    s.check(ok)?;
-    report(s, "ring.wait_complete", &mut samples, &cal, WAIT_ITERS)?;
 
     let mut samples = Vec::with_capacity(WAIT_ITERS);
     let mut ok = true;
