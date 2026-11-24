@@ -19,6 +19,7 @@ use kernel_core::pio::{
 use crate::kprintln;
 
 const IA32_FEATURE_CONTROL: u32 = 0x03A;
+const MSR_PLATFORM_INFO: u32 = 0x0CE;
 const IA32_PAT: u32 = 0x277;
 const IA32_EFER: u32 = 0xC000_0080;
 const IA32_FS_BASE: u32 = 0xC000_0100;
@@ -171,6 +172,12 @@ const EXIT_EPT_VIOLATION: u32 = 48;
 const EXIT_RDTSCP: u32 = 51;
 const EXIT_CR_ACCESS: u32 = 28;
 const EXIT_CR8_ACCESS: u32 = 44;
+
+/// Intel architectural miscellaneous feature control. The minimal Linux CPU
+/// model exposes its reset value until the guest programs it, then retains the
+/// guest-visible value in the per-VM virtual MSR store.
+const IA32_MISC_ENABLE: u32 = 0x1a0;
+const IA32_PAT_RESET: u64 = 0x0007_0406_0007_0406;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VmxError {
@@ -1826,11 +1833,15 @@ impl VmxVm {
                 EXIT_MSR_READ => {
                     report.msr_reads += 1;
                     let index = self.gpr(1) as u32;
-                    let value = self.linux_msr_read(index, &linux).ok_or(
-                        VmxError::InvalidState {
+                    let Some(value) = self.linux_msr_read(index, &linux) else {
+                        kprintln!(
+                            "[JSR-HWV5-LINUX-TRAP] unsupported_msr_read={:#x}",
+                            index
+                        );
+                        return Err(VmxError::InvalidState {
                             code: u64::from(index),
-                        },
-                    )?;
+                        });
+                    };
                     self.set_gpr(0, value as u32 as u64);
                     self.set_gpr(2, (value >> 32) as u32 as u64);
                     self.advance_rip(length);
@@ -2254,6 +2265,18 @@ impl VmxVm {
                 ecx: 0,
                 edx: 0,
             },
+            6 => core::arch::x86_64::CpuidResult {
+                eax: 0,
+                ebx: 0,
+                ecx: 0,
+                edx: 0,
+            },
+            0x0a => core::arch::x86_64::CpuidResult {
+                eax: 0,
+                ebx: 0,
+                ecx: 0,
+                edx: 0,
+            },
             0x15 => core::arch::x86_64::CpuidResult {
                 eax: 1,
                 ebx: 100,
@@ -2329,6 +2352,25 @@ impl VmxVm {
                 let (lo, hi) = self.guest_tsc();
                 (u64::from(hi) << 32) | u64::from(lo)
             }
+            // IA32_PLATFORM_ID is read-only on Intel models and has no state
+            // until firmware programs a platform identity.
+            0x17 => 0,
+            IA32_MISC_ENABLE => linux.msr_read(index).unwrap_or(0),
+            // Intel miscellaneous feature controls have an architectural
+            // zero reset state in this minimal virtual CPU model.
+            0x140 => linux.msr_read(index).unwrap_or(0),
+            IA32_PAT => linux.msr_read(index).unwrap_or(IA32_PAT_RESET),
+            // The virtual CPU is the current VMX-capable hardware model, so
+            // its feature-control reset/lock state is the host architectural
+            // value rather than an invented guest constant.
+            IA32_FEATURE_CONTROL => unsafe { rdmsr(IA32_FEATURE_CONTROL) },
+            MSR_PLATFORM_INFO => unsafe { rdmsr(MSR_PLATFORM_INFO) },
+            // Hardware P-state performance capability. The virtual CPU does
+            // not implement HWP feedback counters.
+            0x64e => linux.msr_read(index).unwrap_or(0),
+            // SMI_COUNT is a read-only platform observation counter. The
+            // virtual platform does not inject SMIs.
+            0x34 => 0,
             0x1b => 0,
             0xfe => 0x500,
             0x2ff => 0x800,
@@ -2528,6 +2570,10 @@ impl VmxVm {
         if !self.active {
             return Ok(());
         }
+        // VMXOFF and the subsequent host XSAVE/control-table restoration form
+        // one architectural transaction. A timer or IPI between those steps
+        // could observe partially restored host state and triple-fault.
+        let interrupts_were_enabled = crate::arch::irq_save_disable();
         let clear = vmclear(self.vmcs.physical());
         let off = vmxoff();
         if off.is_ok() {
@@ -2538,6 +2584,7 @@ impl VmxVm {
             restore_descriptor_tables(&self.host);
         }
         self.active = false;
+        crate::arch::irq_restore(interrupts_were_enabled);
         clear.and(off)
     }
 

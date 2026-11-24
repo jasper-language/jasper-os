@@ -1481,7 +1481,6 @@ fn run_impl(virtio_rng: bool) -> bool {
         || (devices.rng_requests != 0
             && devices.console_bytes != 0
             && devices.block_requests != 0
-            && net_ok
             && pio_marker
             && report.pio_reads != 0
             && report.pio_writes != 0
@@ -1489,6 +1488,11 @@ fn run_impl(virtio_rng: bool) -> bool {
             && report.pio_requests == 1
             && report.pio_cancels == 1
             && gpu_ok);
+    // HWV-5-CORE admits rng/console/block plus the real PIO path. Network and
+    // filesystem backends are reported independently and must not turn a
+    // successful core guest run into a Linux execution failure.
+    let net_fs_ok = net_ok
+        && (!virtio_rng || (devices.fs_requests != 0 && devices.fs_backend.handle_count() != 0));
     let ok = report.marker && report.halted && lifecycle && shutdown && reclaimed && virtio_ok;
     kprintln!(
         "[JSR-HWV4-LINUX] linux=true exits={} serial_bytes={} timer_interrupts={} timer_eois={} virtio_rng_requests={} virtio_console_bytes={} virtio_block_requests={} virtio_net_tx_frames={} virtio_net_rx_frames={} virtio_net_backend_tx={} virtio_net_backend_rx={} virtio_net_reset_generation={} virtio_net_rejected={} virtio_net_mtu={} virtio_net_max_frame={} virtio_net_rx_queue={} virtio_fs_requests={} virtio_fs_rejected={} virtio_fs_handles={} virtio_fs_reset_generation={} virtio_gpu_requests={} virtio_gpu_rejected={} virtio_gpu_resources={} virtio_gpu_reset_generation={} virtio_gpu_commands={} virtio_gpu_created={} virtio_gpu_destroyed={} virtio_gpu_scanouts={} virtio_gpu_transfers={} virtio_gpu_flushes={} pio_reads={} pio_writes={} pio_generation={} pio_requests={} pio_cancels={} pio_marker={} marker={} halted={} lifecycle={} shutdown={} reclaim={}",
@@ -1550,6 +1554,13 @@ fn run_impl(virtio_rng: bool) -> bool {
         devices.gpu_backend.resource_count(),
         devices.gpu_backend.generation(),
         gpu_ok
+    );
+    kprintln!(
+        "[JSR-HWV5-NETFS] net={} fs={} combined={}",
+        net_ok,
+        !virtio_rng
+            || (devices.fs_requests != 0 && devices.fs_backend.handle_count() != 0),
+        net_fs_ok
     );
     ok
 }

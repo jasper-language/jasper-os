@@ -372,9 +372,17 @@ fn run_dispatch(service: &ServiceProcess, generation: u32) -> bool {
             Ok(crate::arch::x86_64::vmx::VmxObserverAction::Continue)
         }
     };
+    // The current VMX host-state transaction is not safely interruptible while
+    // VMCS host state is installed. The guest's virtual interrupts are entered
+    // through VM-entry controls; host timer/IPI delivery is re-enabled only
+    // after VMCS teardown and host-state restoration.
+    let interrupts_were_enabled = arch::irq_save_disable();
+    let dispatch_preemption = sched::set_preemption(false);
     let report = match vm.run_with_observer(&mut observer) {
         Ok(report) => report,
         Err(error) => {
+            sched::set_preemption(dispatch_preemption);
+            arch::irq_restore(interrupts_were_enabled);
             vcpu::fail_run_for(service.pid, cpu);
             kprintln!(
                 "[JSR-HWV5-VMM-FAIL] stage=vmx-run error={:?} name={}",
@@ -389,6 +397,8 @@ fn run_dispatch(service: &ServiceProcess, generation: u32) -> bool {
     let lifecycle = vcpu::finish_run_for(service.pid, cpu, final_state).is_ok();
     let shutdown = vm.shutdown().is_ok();
     drop(vm);
+    sched::set_preemption(dispatch_preemption);
+    arch::irq_restore(interrupts_were_enabled);
     let _ = proc::close_handle_for(service.pid, cpu);
     let _ = proc::close_handle_for(service.pid, memory);
     kobj::run_cleanup(usize::MAX);
