@@ -60,11 +60,15 @@ fn main() -> Status {
 
     let mut kernel = load_kernel(boot_mode);
     if kernel.is_none() {
+        uefi::println!("Disk boot has no valid kernel-x86_64; trying PXE/TFTP");
         // Try TFTP boot
         boot_mode = BootMode::Tftp;
         kernel = load_kernel(boot_mode);
     }
-    let kernel = kernel.expect("Failed to load kernel");
+    let Some(kernel) = kernel else {
+        uefi::println!("Failed to load kernel-x86_64 from disk or PXE/TFTP");
+        return Status::LOAD_ERROR;
+    };
 
     let config_file = load_config_file(boot_mode);
     let mut error_loading_config: Option<serde_json_core::de::Error> = None;
@@ -227,62 +231,167 @@ fn load_file_from_tftp_boot_server(name: &CStr8) -> Option<&'static mut [u8]> {
     let mut base_code = open_pxe_base_code()?;
 
     let mode = base_code.mode();
-    // ProxyDHCP commonly leaves `siaddr` zero and carries the boot server in
-    // DHCP option 54. It must take precedence over a normal DHCP ACK whose
-    // `siaddr` may point at the LAN router rather than the PXE provider.
-    // ProxyDHCP 常用 option 54 携带启动服务器，必须优先于普通 DHCP ACK。
-    let mut server_ip = Ipv4Addr::UNSPECIFIED;
-    let mut server_source = "none";
+    // A normal DHCP ACK may identify the LAN router, while ProxyDHCP carries
+    // the actual boot server. Parse the boot-server-bearing packets first and
+    // validate candidates with a real TFTP size request. This avoids treating
+    // BOOTP `siaddr` as authoritative when option 66/54 name a different host.
+    // ProxyDHCP 的 option 66/54 优先于可能指向路由器的普通 DHCP ACK。
+    let mut candidates = [TftpCandidate {
+        ip: Ipv4Addr::UNSPECIFIED,
+        source: "",
+    }; 12];
+    let mut candidate_count = 0;
     if mode.pxe_reply_received() {
-        server_ip = packet_server_ip(mode.pxe_reply());
-        server_source = "pxe-reply";
+        append_packet_candidates(
+            &mut candidates,
+            &mut candidate_count,
+            mode.pxe_reply(),
+            "pxe-reply",
+        );
     }
-    if server_ip.is_unspecified() && mode.proxy_offer_received() {
-        server_ip = packet_server_ip(mode.proxy_offer());
-        server_source = "proxy-offer";
+    if mode.proxy_offer_received() {
+        append_packet_candidates(
+            &mut candidates,
+            &mut candidate_count,
+            mode.proxy_offer(),
+            "proxy-offer",
+        );
     }
-    if server_ip.is_unspecified() && mode.dhcp_ack_received() {
-        server_ip = packet_server_ip(mode.dhcp_ack());
-        server_source = "dhcp-ack";
+    if mode.dhcp_ack_received() {
+        append_packet_candidates(
+            &mut candidates,
+            &mut candidate_count,
+            mode.dhcp_ack(),
+            "dhcp-ack",
+        );
     }
-    if server_ip.is_unspecified() {
+    if candidate_count == 0 {
         uefi::println!(
             "PXE TFTP unavailable: DHCP ACK, proxy offer, and PXE reply have no server address"
         );
         return None;
     }
-    uefi::println!(
-        "PXE TFTP server {:?} selected from {server_source}",
-        server_ip
-    );
 
-    let file_size = match base_code.tftp_get_file_size(&server_ip.into(), name) {
-        Ok(size) => size,
-        Err(error) => {
-            uefi::println!("PXE TFTP file-size request for {name:?} failed: {error:?}");
-            return None;
+    for candidate in candidates.iter().take(candidate_count) {
+        uefi::println!(
+            "PXE TFTP candidate {:?} from {}",
+            candidate.ip,
+            candidate.source
+        );
+        let file_size = match base_code.tftp_get_file_size(&candidate.ip.into(), name) {
+            Ok(size) => size,
+            Err(error) => {
+                uefi::println!(
+                    "PXE TFTP file-size request for {:?} from {:?} failed: {error:?}",
+                    name,
+                    candidate.ip
+                );
+                continue;
+            }
+        };
+        let kernel_size = usize::try_from(file_size).expect("The file size should fit into usize");
+
+        let slice = allocate_loader_data(kernel_size);
+
+        if let Err(error) = base_code.tftp_read_file(&candidate.ip.into(), name, Some(slice)) {
+            uefi::println!(
+                "PXE TFTP read for {:?} from {:?} failed: {error:?}",
+                name,
+                candidate.ip
+            );
+            continue;
         }
-    };
-    let kernel_size = usize::try_from(file_size).expect("The file size should fit into usize");
 
-    let slice = allocate_loader_data(kernel_size);
-
-    if let Err(error) = base_code.tftp_read_file(&server_ip.into(), name, Some(slice)) {
-        uefi::println!("PXE TFTP read for {name:?} failed: {error:?}");
-        return None;
+        uefi::println!(
+            "PXE TFTP loaded {:?} from {:?} ({} bytes)",
+            name,
+            candidate.ip,
+            kernel_size
+        );
+        return Some(slice);
     }
 
-    Some(slice)
+    None
 }
 
-fn packet_server_ip(packet: &uefi::proto::network::pxe::Packet) -> Ipv4Addr {
-    let packet: &DhcpV4Packet = packet.as_ref();
-    let direct = Ipv4Addr::from_octets(packet.bootp_si_addr);
-    if !direct.is_unspecified() {
-        return direct;
+#[derive(Clone, Copy)]
+struct TftpCandidate {
+    ip: Ipv4Addr,
+    source: &'static str,
+}
+
+fn append_packet_candidates(
+    candidates: &mut [TftpCandidate],
+    candidate_count: &mut usize,
+    packet: &uefi::proto::network::pxe::Packet,
+    packet_source: &'static str,
+) {
+    append_candidate(
+        candidates,
+        candidate_count,
+        packet_option_ip(packet, 66),
+        match packet_source {
+            "pxe-reply" => "pxe-reply.option66",
+            "proxy-offer" => "proxy-offer.option66",
+            _ => "dhcp-ack.option66",
+        },
+    );
+    append_candidate(
+        candidates,
+        candidate_count,
+        packet_option_ip(packet, 54),
+        match packet_source {
+            "pxe-reply" => "pxe-reply.option54",
+            "proxy-offer" => "proxy-offer.option54",
+            _ => "dhcp-ack.option54",
+        },
+    );
+    let direct = Ipv4Addr::from_octets(packet_siaddr(packet));
+    append_candidate(
+        candidates,
+        candidate_count,
+        (!direct.is_unspecified()).then_some(direct),
+        match packet_source {
+            "pxe-reply" => "pxe-reply.siaddr",
+            "proxy-offer" => "proxy-offer.siaddr",
+            _ => "dhcp-ack.siaddr",
+        },
+    );
+}
+
+fn append_candidate(
+    candidates: &mut [TftpCandidate],
+    candidate_count: &mut usize,
+    ip: Option<Ipv4Addr>,
+    source: &'static str,
+) {
+    let Some(ip) = ip else {
+        return;
+    };
+    if ip.is_unspecified() || ip.is_broadcast() || ip.is_multicast() {
+        return;
     }
+    if candidates[..*candidate_count]
+        .iter()
+        .any(|candidate| candidate.ip == ip)
+    {
+        return;
+    }
+    if *candidate_count < candidates.len() {
+        candidates[*candidate_count] = TftpCandidate { ip, source };
+        *candidate_count += 1;
+    }
+}
+
+fn packet_siaddr(packet: &uefi::proto::network::pxe::Packet) -> [u8; 4] {
+    let packet: &DhcpV4Packet = packet.as_ref();
+    packet.bootp_si_addr
+}
+
+fn packet_option_ip(packet: &uefi::proto::network::pxe::Packet, wanted: u8) -> Option<Ipv4Addr> {
+    let packet: &DhcpV4Packet = packet.as_ref();
     if packet.dhcp_magik() != DhcpV4Packet::DHCP_MAGIK {
-        return direct;
+        return None;
     }
     let mut index = 0usize;
     while index < packet.dhcp_options.len() {
@@ -304,11 +413,11 @@ fn packet_server_ip(packet: &uefi::proto::network::pxe::Packet) -> Ipv4Addr {
             break;
         };
         index = index.saturating_add(length as usize);
-        if code == 54 && value.len() == 4 {
-            return Ipv4Addr::new(value[0], value[1], value[2], value[3]);
+        if code == wanted && value.len() == 4 {
+            return Some(Ipv4Addr::new(value[0], value[1], value[2], value[3]));
         }
     }
-    direct
+    None
 }
 
 fn allocate_loader_data(size: usize) -> &'static mut [u8] {
