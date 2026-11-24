@@ -100,8 +100,10 @@ pub fn on_hardware_irq(line: IrqLine, from_user: bool) {
             let diagnostic = crate::rt2_demo::timer_irq();
             #[cfg(not(feature = "rt2-verify"))]
             let diagnostic = false;
+            let entry = crate::arch::clock_counter();
+            crate::smp::on_local_tick();
+            device::on_cpu_tick();
             if !diagnostic && crate::hrtime::enabled() {
-                let entry = crate::arch::clock_counter();
                 #[cfg(feature = "krn2-observe")]
                 let interrupt_entry = Some(sched::wake_endpoint());
                 #[cfg(not(feature = "krn2-observe"))]
@@ -113,9 +115,6 @@ pub fn on_hardware_irq(line: IrqLine, from_user: bool) {
                 settle_user_timers();
                 sched::on_highres_timer(entry, interrupt_entry);
             } else if !diagnostic {
-                let entry = crate::arch::clock_counter();
-                crate::smp::on_local_tick();
-                device::on_cpu_tick();
                 if !sched::timer_admit(entry) {
                     sched::defer_local_tick();
                     return;
