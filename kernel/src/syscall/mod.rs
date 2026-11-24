@@ -423,7 +423,13 @@ pub(crate) fn console_write(ptr: u64, len: u64) -> i64 {
             #[cfg(feature = "bench-profile")]
             if let Ok(text) = core::str::from_utf8(&buf) {
                 crate::bench_demo::capture_console_line(text);
-                crate::early::append_line(text);
+                if text.starts_with("bench: progress") {
+                    crate::early::append_progress(
+                        text.trim_end_matches(|ch| ch == '\r' || ch == '\n'),
+                    );
+                } else {
+                    crate::early::append_line(text);
+                }
             }
             #[cfg(not(feature = "bench-profile"))]
             crate::display::terminal_write(&buf);

@@ -254,6 +254,7 @@ pub fn run() {
         arch::watchdog_pet_force();
         let switch = context_switch(&cal);
         arch::watchdog_pet_force();
+        publish_checkpoint();
         // Tick-driven sampling needs one interrupt per retained observation, so
         // it runs after every fast metric has published a usable result.
         let tick = timer_irq(&cal);
@@ -284,6 +285,31 @@ pub fn run() {
         CHECKS.load(Ordering::Relaxed),
         failed(),
         timing_failed()
+    );
+}
+
+/// Draw all completed fast metrics before the long tick-driven interrupt
+/// measurement starts. This checkpoint is not the final acceptance summary.
+pub fn publish_checkpoint() {
+    let report = REPORT.lock();
+    #[cfg(feature = "bench-profile")]
+    {
+        early::results_begin();
+        early::append_line("FAST RESULTS - KERNEL TIMER IRQ STILL RUNNING");
+        early::append_line("ROW 1: N/P50/P99/P99.9   ROW 2: P99.99/P99.999/MAX/THRESHOLDS");
+        for row in &report.rows[..report.len] {
+            let text = row.text();
+            if !text.is_empty() {
+                early::append_line(text);
+            }
+        }
+    }
+    kprintln!(
+        "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"checkpoint\",\"metrics\":{},\"failed\":{},\"timing_failed\":{},\"checks\":{}}}",
+        report.len,
+        failed(),
+        timing_failed(),
+        CHECKS.load(Ordering::Acquire)
     );
 }
 
@@ -388,11 +414,14 @@ fn cycle_samples(mut op: impl FnMut()) -> Vec<u64> {
 
 fn report_progress(done: usize) {
     let line = alloc::format!(
-        "[BENCH] stage=sample progress={}/{}\n",
+        "BENCH RUNNING {} / {} samples",
         done,
         TAIL_ITERS
     );
-    screen_line(&line);
+    #[cfg(feature = "bench-profile")]
+    early::append_progress(line.trim_end());
+    #[cfg(not(feature = "bench-profile"))]
+    crate::display::terminal_write(line.as_bytes());
 }
 
 fn report_values(

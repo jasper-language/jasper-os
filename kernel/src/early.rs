@@ -177,6 +177,23 @@ pub fn append_line(text: &str) {
     draw_text(12, y, 1, text.as_bytes());
 }
 
+/// Draw transient benchmark progress on a dedicated footer row without
+/// advancing the result log.
+#[cfg(target_arch = "x86_64")]
+pub fn append_progress(text: &str) {
+    if !DISPLAY_READY.load(Ordering::Acquire) {
+        return;
+    }
+    let height = FRAMEBUFFER_HEIGHT.load(Ordering::Relaxed) as u32;
+    let width = FRAMEBUFFER_WIDTH.load(Ordering::Relaxed) as u32;
+    let y = height.saturating_sub(10);
+    fill_rect(8, y.saturating_sub(1), width.saturating_sub(16), 9, 0x08, 0x11, 0x18);
+    draw_text(12, y, 1, text.as_bytes());
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn append_progress(_text: &str) {}
+
 /// Arm a cycle-based deadline for hardware debugging builds.
 #[cfg(feature = "boot-autorecovery")]
 pub fn arm_boot_deadline(seconds: u64) -> bool {
