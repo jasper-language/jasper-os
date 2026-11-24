@@ -1,8 +1,8 @@
 schema = 1
 stage = "TRUST-FRAMEWORK-SPEC-1"
 status = "spec-defined"
-updated = "2026-11-21"
-evidence = "docs/TRUST-FRAMEWORK-SPEC.md; trust/schema/v1/trust.cddl; docs/issue-46-trust-framework-spec-status.md"
+updated = "2026-11-24"
+evidence = "docs/TRUST-FRAMEWORK-SPEC.md; trust/schema/v1/trust.cddl; docs/issue-46-trust-framework-spec-status.md; docs/ISSUE-39-authorization-audit.md; docs/ISSUE-62-63-SECURITY-AUTHORITY-status.md"
 
 [[acceptance]]
 id = "roles-and-authority"
@@ -32,6 +32,16 @@ state = "passed"
 [[acceptance]]
 id = "kernel-abi-boundary"
 statement = "Protocol v1 adds no system ABI and requires a separate minimal-primitive review before protected measurement or hardware evidence can enter Core."
+state = "passed"
+
+[[acceptance]]
+id = "single-native-authority"
+statement = "Hardware and software security consume the same SEC subject/resource/operation/scope/revocation authority; Trust Results and external policy engines cannot grant resources directly."
+state = "passed"
+
+[[acceptance]]
+id = "standards-adoption-boundary"
+statement = "RATS/EAT, CBOR/COSE, TPM/DICE/SPDM, supply-chain formats and national/industry controls are versioned interoperability inputs, not parallel security architectures or certification claims."
 state = "passed"
 
 [[acceptance]]

@@ -1,6 +1,6 @@
 # Issue #46：Jasper Trust Framework 阶段 A 审计
 
-更新时间：2026-11-19。
+更新时间：2026-11-24。
 
 状态：**现状审计、威胁边界与实现矩阵草案。本文不新增 ABI、安全权威或 DAG
 节点，也不代表远程证明、TPM/TEE、游戏反作弊或任何行业 Profile 已实现。**
@@ -16,6 +16,23 @@ Jasper Trust 必须建立在现有 SEC 体系之上：
 - Attestation Broker、Verifier、Policy Evaluator、Provider Registry 和行业
   Profile 均属于隔离用户态服务，不能获得内核任意执行或跨进程扫描权限；
 - 缺少硬件证据、验证器、网络或策略时明确拒绝或降级，不产生默认成功。
+
+## 2026-11-24 标准复用裁决
+
+- Trust 是唯一原生证据与验证体系；不按国别、法规或行业建立平行 Trust。
+- RATS RFC 9334 的 Attester/Evidence/Verifier/Attestation Result/Relying Party
+  角色作为互操作基础；EAT RFC 9711、CBOR RFC 8949 和 COSE RFC 9052 可用于
+  外部证据编码与签名，但不改变内核对象或 ABI。
+- TPM 2.0、DICE 和 SPDM 只在设备真实支持且信任链、nonce、新鲜度、测量范围、
+  撤销和 Provider 更新均得到验证时提供硬件级证据。缺少硬件时只能返回真实的
+  软件观测或 coverage gap。
+- TUF 负责更新元数据，in-toto/SLSA 负责构建来源，SPDX/CycloneDX/CSAF 负责
+  成分和漏洞信息；这些结果不替代 Trust 验证，也不直接授予 SEC 权限。
+- X.509、FIDO2/WebAuthn 和 RFC 3161 时间戳分别解决证书、用户认证/签名和
+  可信时间问题，不能合并成泛化可信位。
+- 任何 Trust Result 必须绑定 SEC subject、BootId、对象/进程 generation、
+  audience、nonce、policy epoch、Provider generation 和撤销状态。#39 的
+  SEC/PEP 是唯一资源授权执行者。
 
 ## 现有能力矩阵
 

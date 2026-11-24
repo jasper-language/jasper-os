@@ -162,3 +162,25 @@ Handle/Rights、PEP/MAC、IFC、审计、LC-2 安装与撤销机制。
 符合性至少要求 Schema/版本协商、nonce/freshness/audience、世代与撤销、最小披露、
 有界输入、错误不升级和 Provider 失败关闭；生产硬件 Provider 仍需 Pixel 6a 或其他
 批准设备的独立验收。
+
+## 14. 标准复用与国家/行业中立性
+
+Jasper Trust 只有一套原生证据、验证和覆盖范围语义。国家、行业、企业或涉密
+场景只能通过同一套 SEC 策略消费证据，不产生并行的 Trust 内核或 Provider 权威。
+
+实现可以优先复用以下成熟技术：
+
+- RATS RFC 9334 与 EAT RFC 9711 的角色和 claims 语义；
+- CBOR RFC 8949、COSE RFC 9052 和 X.509/PKIX 的编码、签名与证书链；
+- TPM 2.0、DICE、SPDM/MCTP 的硬件信任与设备证明接口；
+- UEFI Secure Boot/measured boot 的启动证据；
+- in-toto、SLSA、Sigstore、TUF、SPDX、CycloneDX 和 CSAF 的供应链事实；
+- FIDO2/CTAP、WebAuthn L3 的用户认证事实，以及 RFC 3161 可信时间；
+- SM2/SM3/SM4 等经审查的密码 Provider，以及对 FIPS 140-3/ISO 19790 的测试对照。
+
+每项接入必须固定规范与实现版本，记录许可证、维护状态、安全公告、硬件/平台
+适用范围、信任根、撤销和更新责任。外部 Verifier/IdP/策略平台离线、失败或
+给出允许时，本地 SEC/PEP 仍可拒绝；外部允许不能成为绕过本地授权的第二通道。
+
+标准支持、密码算法可用、实现审计和产品认证是四个独立声明。未完成正式第三方
+认证时不得宣称合规、涉密资格或 FIPS/ISO 认证通过。
