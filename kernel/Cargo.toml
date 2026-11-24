@@ -206,7 +206,11 @@ krn1-soak = ["user-programs"]
 s4-soak = ["fault-inject", "krn2-observe"]
 # Explicit QEMU BM-1 profile: RTL8139 log link, IB700 watchdog and CF9 reset.
 bm1-vm = ["dep:noto-sans-mono-bitmap"]
-noto-terminal = ["dep:noto-sans-mono-bitmap"]
+# Allocation-free Headless First boot console text on the local framebuffer.
+# Serial-only profiles may omit this; a visible text console must not fall back
+# to the diagnostic 5x7 raster when the pinned Noto raster can be used.
+noto-console = ["dep:noto-sans-mono-bitmap"]
+noto-terminal = ["noto-console"]
 bm1-hang = ["bm1-vm"]
 # Physical/debug boot recovery: reset on panic and enforce a TSC-based overall
 # boot deadline at stage boundaries.
@@ -230,7 +234,7 @@ bench-only = ["user-programs", "smp-bsp-only", "bench-profile"]
 # online so single-core and multi-core runs use identical binaries.
 bench-smp = ["user-programs", "bench-profile"]
 # Stop after the SMP discovery, all-core/all-thread and contention matrices.
-smp-matrix-only = ["bench-smp"]
+smp-matrix-only = ["bench-smp", "noto-console"]
 # Diagnostic only: omit the INIT deassert write on hardware where firmware
 # resets on that write. Normal builds retain the architectural sequence.
 smp-skip-init-deassert = []
@@ -242,7 +246,7 @@ smp-force-x2apic = []
 # Diagnostic physical profile: discover firmware CPU topology but deliberately
 # do not start secondary processors.
 smp-bsp-only = []
-default = ["user-programs"]
+default = ["user-programs", "noto-console"]
 # 生产启动（issue #7）：只执行全局阶段和第一个用户程序，然后等待服务，不退出模拟器。不能和验收特性同开。
 production = []
 # P0 A/B 最小生产健康门：从 Jasper virtio-blk P0 控制分区恢复记录并持久确认当前槽。

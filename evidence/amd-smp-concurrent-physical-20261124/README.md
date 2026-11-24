@@ -2,10 +2,11 @@
 
 Date: 2026-11-24
 
-This directory preserves the final screen and boot artifacts from the
+This directory preserves the boot artifacts and text report from the
 development-stage 8-core and 16-thread physical test. The result is a
 measurement baseline, not a final-product performance claim or a completed
-performance-acceptance gate.
+performance-acceptance gate. Physical-screen photographs are intentionally not
+kept in the repository.
 
 ## Artifacts
 
@@ -15,9 +16,6 @@ kernel-x86_64
 
 bootloader.efi
 ca9efd24a143dc6e04a505f2d9c535869a8161c7cdd1811b69a303672827193d
-
-final-screen.jpeg
-c709e5a7dd9b0eafd5d3aab42db67a404e69aaf3ff0b1e824ed15c4d6c3ad27e
 ```
 
 ## Observed result
@@ -34,10 +32,10 @@ c709e5a7dd9b0eafd5d3aab42db67a404e69aaf3ff0b1e824ed15c4d6c3ad27e
 - The final status was `FAILED=3`, `TIMING_FAILED=0`, `CHECKS=31`,
   `RECLAIMED=false`.
 
-The final screen also contains a legacy diagnostic footer,
+The retired development image also contained a legacy diagnostic footer,
 `SMP PERFORMANCE MATRIX ONLINE=16 RECORDS=0 FAILED_RUNS=0`. It came from the
 older matrix reporter and is not a result row; the actual `SMP8P` and `SMP16T`
-measurements appear above it.
+measurements remain available in the serial and machine-readable evidence.
 
 The full measured tables, exclusions and known limitations are maintained in
 the repository root [`README.md`](../../README.md).

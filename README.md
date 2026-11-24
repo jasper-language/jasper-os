@@ -140,7 +140,7 @@ framework boundaries, Wine compatibility, or Metal2Vulkan requirements.
 
 ### Evidence and next phase
 
-The physical artifact set, checksums and final screen are archived in
+The physical artifact set and checksums are archived in
 [`evidence/amd-smp-concurrent-physical-20261124`](evidence/amd-smp-concurrent-physical-20261124).
 Detailed AMD topology and SMP bring-up findings remain in
 [`evidence/amd-cpu-topology-20261124/README.md`](evidence/amd-cpu-topology-20261124/README.md).

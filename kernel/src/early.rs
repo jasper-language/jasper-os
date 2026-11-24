@@ -10,6 +10,15 @@ use crate::arch;
 
 #[cfg(target_arch = "x86_64")]
 use bootloader_api::info::{FrameBuffer, PixelFormat};
+#[cfg(all(feature = "noto-console", target_arch = "x86_64"))]
+use noto_sans_mono_bitmap::{get_raster, FontWeight, RasterHeight};
+
+#[cfg(target_arch = "x86_64")]
+const TEXT_CELL_WIDTH: u32 = 12;
+#[cfg(target_arch = "x86_64")]
+const TEXT_CELL_HEIGHT: u32 = 20;
+#[cfg(target_arch = "x86_64")]
+const TEXT_TOP: u32 = 24;
 
 static SERIAL_READY: AtomicBool = AtomicBool::new(false);
 static BOOT_DEADLINE: AtomicU64 = AtomicU64::new(0);
@@ -91,7 +100,8 @@ pub fn install(framebuffer: &mut FrameBuffer) -> bool {
     else {
         return false;
     };
-    if info.width == 0 || info.height == 0 || info.stride < info.width || frame_len > info.byte_len {
+    if info.width == 0 || info.height == 0 || info.stride < info.width || frame_len > info.byte_len
+    {
         return false;
     }
     FRAMEBUFFER_BASE.store(
@@ -171,9 +181,17 @@ pub fn append_line(text: &str) {
         return;
     }
     let row = TEXT_ROW.fetch_add(1, Ordering::Relaxed);
-    let y = 24u32.saturating_add((row % 56) * 10);
+    let y = text_row_y(row);
     let width = FRAMEBUFFER_WIDTH.load(Ordering::Relaxed) as u32;
-    fill_rect(8, y.saturating_sub(1), width.saturating_sub(16), 9, 0x08, 0x11, 0x18);
+    fill_rect(
+        8,
+        y.saturating_sub(1),
+        width.saturating_sub(16),
+        TEXT_CELL_HEIGHT,
+        0x08,
+        0x11,
+        0x18,
+    );
     draw_text(12, y, 1, text.as_bytes());
 }
 
@@ -186,8 +204,16 @@ pub fn append_progress(text: &str) {
     }
     let height = FRAMEBUFFER_HEIGHT.load(Ordering::Relaxed) as u32;
     let width = FRAMEBUFFER_WIDTH.load(Ordering::Relaxed) as u32;
-    let y = height.saturating_sub(10);
-    fill_rect(8, y.saturating_sub(1), width.saturating_sub(16), 9, 0x08, 0x11, 0x18);
+    let y = height.saturating_sub(TEXT_CELL_HEIGHT);
+    fill_rect(
+        8,
+        y.saturating_sub(1),
+        width.saturating_sub(16),
+        TEXT_CELL_HEIGHT,
+        0x08,
+        0x11,
+        0x18,
+    );
     draw_text(12, y, 1, text.as_bytes());
 }
 
@@ -286,12 +312,20 @@ fn paint_stage(stage: &str) {
 #[cfg(target_arch = "x86_64")]
 fn append_kind(kind: &str, text: &str) {
     let row = TEXT_ROW.fetch_add(1, Ordering::Relaxed);
-    let y = 24u32.saturating_add((row % 56) * 10);
+    let y = text_row_y(row);
     let width = FRAMEBUFFER_WIDTH.load(Ordering::Relaxed) as u32;
-    fill_rect(8, y.saturating_sub(1), width.saturating_sub(16), 9, 0x08, 0x11, 0x18);
+    fill_rect(
+        8,
+        y.saturating_sub(1),
+        width.saturating_sub(16),
+        TEXT_CELL_HEIGHT,
+        0x08,
+        0x11,
+        0x18,
+    );
     draw_text(12, y, 1, kind.as_bytes());
     draw_text(
-        12 + kind.len() as u32 * 6,
+        12 + kind.len() as u32 * TEXT_CELL_WIDTH,
         y,
         1,
         text.as_bytes(),
@@ -299,10 +333,42 @@ fn append_kind(kind: &str, text: &str) {
 }
 
 #[cfg(target_arch = "x86_64")]
+fn text_row_y(row: u32) -> u32 {
+    let height = FRAMEBUFFER_HEIGHT.load(Ordering::Relaxed) as u32;
+    let rows = height
+        .saturating_sub(TEXT_TOP)
+        .checked_div(TEXT_CELL_HEIGHT)
+        .unwrap_or(1)
+        .max(1);
+    TEXT_TOP.saturating_add((row % rows) * TEXT_CELL_HEIGHT)
+}
+
+#[cfg(target_arch = "x86_64")]
 fn draw_text(mut x: u32, y: u32, scale: u32, text: &[u8]) {
     for byte in text.iter().copied().take(90) {
         if byte == b' ' {
-            x = x.saturating_add(6 * scale);
+            x = x.saturating_add(TEXT_CELL_WIDTH);
+            continue;
+        }
+        #[cfg(feature = "noto-console")]
+        if let Some(glyph) = get_raster(char::from(byte), FontWeight::Regular, RasterHeight::Size20)
+        {
+            for (row, pixels) in glyph.raster().iter().enumerate() {
+                for (column, value) in pixels.iter().copied().enumerate() {
+                    if value != 0 {
+                        fill_rect(
+                            x.saturating_add(column as u32),
+                            y.saturating_add(row as u32),
+                            1,
+                            1,
+                            0xd8,
+                            0xf3,
+                            0xea,
+                        );
+                    }
+                }
+            }
+            x = x.saturating_add(TEXT_CELL_WIDTH);
             continue;
         }
         let glyph = crate::display::glyph(byte);
@@ -321,7 +387,7 @@ fn draw_text(mut x: u32, y: u32, scale: u32, text: &[u8]) {
                 }
             }
         }
-        x = x.saturating_add(6 * scale);
+        x = x.saturating_add(TEXT_CELL_WIDTH);
     }
 }
 

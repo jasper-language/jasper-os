@@ -57,6 +57,9 @@ case "$CARGO_TARGET" in
 esac
 LIMIT="${ISSUE21_UEFI_TIMEOUT:-45}"
 MODE="${ISSUE21_UEFI_MODE:-normal}"
+if [ -z "${ISSUE21_UEFI_TIMEOUT:-}" ] && [ "$MODE" = bench-smp ]; then
+  LIMIT=300
+fi
 REUSE_ROOT="${ISSUE21_REUSE_ROOT:-0}"
 if [ -z "${ISSUE21_UEFI_TIMEOUT:-}" ] &&
   { [ "$MODE" = android-art ] || [ "$MODE" = android-apk ] ||
@@ -529,10 +532,14 @@ if [ "$MODE" = bench-smp ]; then
   grep -aq '^SMP CONCURRENT PERFORMANCE - SAME TESTS AS SINGLE CPU' "$OUT/serial.log"
   grep -aq '^\[JSR-TSC-SKEW\] mode=SMP_.* upper_bound_ns=[0-9][0-9]*' "$OUT/serial.log"
   grep -aqE 'SMP TOPOLOGY ONLINE=[2-9][0-9]* PROBED=[2-9][0-9]* PHYSICAL=[2-9][0-9]* LOGICAL=[2-9][0-9]*' "$OUT/serial.log"
-  grep -aqE '^SMP(_PHYSICAL|8P) RESULT COMPLETE=true' "$OUT/serial.log"
-  grep -aqE '^SMP(_LOGICAL|16T) RESULT COMPLETE=true' "$OUT/serial.log"
-  grep -aqE '^SMP CONCURRENT FINAL PHYSICAL=true LOGICAL=true PHYSICAL_CPUS=[2-9][0-9]* LOGICAL_CPUS=[2-9][0-9]* SMT=(true|false) RECLAIMED=true FAILED=0' "$OUT/serial.log"
-  grep -aq '"kind":"summary".*"failed":0.*"resources_reclaimed":true' "$OUT/serial.log"
+  grep -aq '^SMP_SINGLE RESULT COMPLETE=true' "$OUT/serial.log"
+  grep -aq '^SMP_PHYSICAL RESULT COMPLETE=true' "$OUT/serial.log"
+  grep -aq '^SMP_LOGICAL RESULT COMPLETE=true' "$OUT/serial.log"
+  grep -aqE '^SMP CONCURRENT FINAL SINGLE=true PHYSICAL=true LOGICAL=true SINGLE_CPUS=1 PHYSICAL_CPUS=[2-9][0-9]* LOGICAL_CPUS=[2-9][0-9]* SMT=(true|false) RECLAIMED=true FAILED=0' "$OUT/serial.log"
+  grep -aq '"kind":"summary".*"failed":0.*"resources_reclaimed":true.*"parallel_matrix_run":true.*"single_mode_run":true.*"physical_mode_run":true.*"logical_mode_run":true' "$OUT/serial.log"
+  grep -aq '^\[JSR-SMP-MEMORY\] mode=SMP_SINGLE phase=before ' "$OUT/serial.log"
+  grep -aq '^\[JSR-SMP-MEMORY\] mode=SMP_SINGLE phase=during_raw_retained ' "$OUT/serial.log"
+  grep -aq '^\[JSR-SMP-MEMORY\] mode=SMP_LOGICAL phase=after ' "$OUT/serial.log"
   ! grep -aqE '^\[JSR-(PANIC|BENCH-FAIL)\]|panicked at|KERNEL PANIC' "$OUT/serial.log"
   echo "issue21-uefi-boot: PASS mode=$MODE qemu_rc=$rc evidence=$OUT"
   exit 0

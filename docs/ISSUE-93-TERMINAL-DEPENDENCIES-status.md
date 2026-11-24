@@ -21,8 +21,11 @@ adapter and font dependency checks are actually integrated.
 
 The BM-1 early framebuffer path now pins `noto-sans-mono-bitmap =0.3.2` with
 the 20-pixel raster, regular/bold weights, basic Latin and Unicode specials.
-It remains an independent emergency renderer. Normal `os-terminal` + Swash
-and Ratatui are not yet integrated.
+The allocation-free Headless First Boot Console uses the same pinned raster
+through `noto-console`; the 5x7 table remains only as an emergency fallback.
+The default and `smp-matrix-only` builds include `noto-console`, while a pure
+serial/no-display profile can omit it without changing serial dependencies.
+Normal `os-terminal` + Swash and Ratatui are not yet integrated.
 
 The normal framebuffer text frontend now has a `noto-terminal` backend using
 the same pinned 20-pixel raster. The 5x7 built-in glyph table remains the
@@ -37,6 +40,9 @@ Native framebuffer verification passed with the pinned Noto backend:
 - two different framebuffer frames with recorded hashes;
 - first-program exit code zero and complete resource reclamation;
 - evidence: `evidence/issue93-noto-terminal-20261124-r9`.
+
+The separate Headless First boot-console framebuffer capture is retained at
+`evidence/issue93-headless-noto-console-20261124-r2`.
 
 This closes the bounded native framebuffer font/terminal integration gate. It
 does not claim that `os-terminal` + Swash or Ratatui are yet the production

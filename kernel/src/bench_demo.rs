@@ -34,16 +34,16 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use kernel_core::bench::{
     quantum_overhead, select, summarize, timer_overhead, Calibration, Decision, HumanDuration,
-    Prefer, Samples, Summary, P9999_RECOMMENDED_SAMPLES, P999_RECOMMENDED_SAMPLES,
-    P99999_RECOMMENDED_SAMPLES, P99_RECOMMENDED_SAMPLES,
+    Prefer, Samples, Summary, P99999_RECOMMENDED_SAMPLES, P9999_RECOMMENDED_SAMPLES,
+    P999_RECOMMENDED_SAMPLES, P99_RECOMMENDED_SAMPLES,
 };
-use kernel_core::sync::SpinLock;
 use kernel_core::spawn_abi::SpawnDesc;
+use kernel_core::sync::SpinLock;
 use kernel_core::syscall_set::SyscallSet;
 
+use crate::baseline::baseline;
 use crate::mm::{frame, heap};
 use crate::proc::ProcState;
-use crate::baseline::baseline;
 use crate::rt_demo::{rt_calls, run_program_arg};
 use crate::task::TaskId;
 use crate::{arch, config, early, kprintln, sched, smp};
@@ -53,6 +53,9 @@ static FAILED: AtomicU32 = AtomicU32::new(0);
 /// 计时类断言超界的次数：只记录，不计入功能失败（仿真器下计时不可信）。
 static TIMING_FAILED: AtomicU32 = AtomicU32::new(0);
 static LAST_RECLAIMED: AtomicBool = AtomicBool::new(false);
+static LAST_SINGLE_MODE: AtomicBool = AtomicBool::new(false);
+static LAST_PHYSICAL_MODE: AtomicBool = AtomicBool::new(false);
+static LAST_LOGICAL_MODE: AtomicBool = AtomicBool::new(false);
 
 /// Result-log slots are test-fixture metadata, not a hardware capacity.
 const REPORT_ROWS: usize = 64;
@@ -142,6 +145,9 @@ static REPORT: SpinLock<ReportLog> = SpinLock::new(ReportLog::new());
 fn reset_report() {
     REPORT.lock().clear();
     LAST_RECLAIMED.store(false, Ordering::Release);
+    LAST_SINGLE_MODE.store(false, Ordering::Release);
+    LAST_PHYSICAL_MODE.store(false, Ordering::Release);
+    LAST_LOGICAL_MODE.store(false, Ordering::Release);
 }
 
 fn record_result(args: fmt::Arguments) {
@@ -283,12 +289,7 @@ pub fn run() {
     }
     let end = baseline();
     let end_heap_mapped = heap::stats().3;
-    let reclaimed = resources_reclaimed(
-        start,
-        end,
-        start_heap_mapped,
-        end_heap_mapped,
-    );
+    let reclaimed = resources_reclaimed(start, end, start_heap_mapped, end_heap_mapped);
     check(reclaimed, "基准演练结束后资源未回到起点");
     LAST_RECLAIMED.store(reclaimed, Ordering::Release);
     arch::irq_restore(was_enabled);
@@ -415,16 +416,20 @@ fn measure_tsc_skew(mode: &str, cpus: &[usize]) -> Option<u64> {
     }
     TSC_SKEW_READY.store(0, Ordering::Release);
     TSC_SKEW_RELEASE.store(false, Ordering::Release);
+    let local_cpu = arch::cpu_index();
+    let local_selected = cpus.contains(&local_cpu);
     let mut posted = Vec::new();
     for &cpu in cpus {
-        if cpu != arch::cpu_index() {
+        if cpu != local_cpu {
             if smp::post_call(cpu, tsc_skew_worker, 0).is_err() {
                 return None;
             }
             posted.push(cpu);
         }
     }
-    TSC_SKEW_READY.fetch_add(1, Ordering::AcqRel);
+    if local_selected {
+        TSC_SKEW_READY.fetch_add(1, Ordering::AcqRel);
+    }
     let deadline = arch::measure_cycles().saturating_add(
         early::tsc_frequency_hz()
             .unwrap_or(3_000_000_000)
@@ -442,8 +447,10 @@ fn measure_tsc_skew(mode: &str, cpus: &[usize]) -> Option<u64> {
         core::hint::spin_loop();
     }
     TSC_SKEW_RELEASE.store(true, Ordering::Release);
-    let local = arch::measure_cycles() as usize;
-    TSC_SKEW_SAMPLES[arch::cpu_index()].store(local, Ordering::Release);
+    if local_selected {
+        let local = arch::measure_cycles() as usize;
+        TSC_SKEW_SAMPLES[local_cpu].store(local, Ordering::Release);
+    }
     for cpu in posted {
         if smp::collect_call(cpu) != Ok(1) {
             return None;
@@ -552,19 +559,17 @@ fn execute_parallel_metric(metric: ParallelMetric, samples: &mut [u64]) -> Metri
                 black_box(arch::measure_cycles());
                 Ok(())
             }
-            ParallelMetric::FrameAlloc => {
-                match frame::allocate() {
-                    Ok(frame) if frame_batch.len() < batch_capacity => {
-                        frame_batch.push(frame);
-                        Ok(())
-                    }
-                    Ok(frame) => {
-                        let released = frame::deallocate(frame).is_ok();
-                        Err(!released)
-                    }
-                    Err(_) => Err(true),
+            ParallelMetric::FrameAlloc => match frame::allocate() {
+                Ok(frame) if frame_batch.len() < batch_capacity => {
+                    frame_batch.push(frame);
+                    Ok(())
                 }
-            }
+                Ok(frame) => {
+                    let released = frame::deallocate(frame).is_ok();
+                    Err(!released)
+                }
+                Err(_) => Err(true),
+            },
             ParallelMetric::FrameFree => {
                 if let Some(frame) = frame_batch.pop() {
                     frame::deallocate(frame).map_err(|_| true)
@@ -624,7 +629,7 @@ fn execute_parallel_metric(metric: ParallelMetric, samples: &mut [u64]) -> Metri
             ParallelMetric::FrameAllocFreePair => match frame::allocate() {
                 Ok(frame) => frame::deallocate(frame).map_err(|_| true),
                 Err(_) => Err(true),
-            }
+            },
         };
         if outcome.is_ok() {
             execution.success = execution.success.saturating_add(1);
@@ -686,14 +691,19 @@ fn run_parallel_metric(
         let Some(slot) = PARALLEL_SAMPLE_PTRS.get(cpu) else {
             return false;
         };
-        slot.store(unsafe { samples.as_mut_ptr().add(index * TAIL_ITERS) } as usize, Ordering::Release);
+        slot.store(
+            unsafe { samples.as_mut_ptr().add(index * TAIL_ITERS) } as usize,
+            Ordering::Release,
+        );
     }
     PARALLEL_READY.store(0, Ordering::Release);
     PARALLEL_RELEASE.store(false, Ordering::Release);
     let expected = cpus.len() as u32;
+    let local_cpu = arch::cpu_index();
+    let local_selected = cpus.contains(&local_cpu);
     let mut posted = Vec::new();
     for &cpu in cpus {
-        if cpu != arch::cpu_index() {
+        if cpu != local_cpu {
             if smp::post_call(cpu, parallel_metric_worker, metric as u64).is_err() {
                 record_result(format_args!(
                     "{} {} BLOCKED reason=post_cpu{}",
@@ -713,20 +723,23 @@ fn run_parallel_metric(
         posted.len()
     );
 
-    let local_cpu = arch::cpu_index();
-    let local_ptr = PARALLEL_SAMPLE_PTRS
-        .get(local_cpu)
-        .map(|slot| slot.load(Ordering::Acquire) as *mut u64)
-        .unwrap_or(core::ptr::null_mut());
-    PARALLEL_READY.fetch_add(1, Ordering::AcqRel);
+    let local_ptr = if local_selected {
+        PARALLEL_SAMPLE_PTRS
+            .get(local_cpu)
+            .map(|slot| slot.load(Ordering::Acquire) as *mut u64)
+            .unwrap_or(core::ptr::null_mut())
+    } else {
+        core::ptr::null_mut()
+    };
+    if local_selected {
+        PARALLEL_READY.fetch_add(1, Ordering::AcqRel);
+    }
     let deadline = arch::measure_cycles().saturating_add(
         early::tsc_frequency_hz()
             .unwrap_or(3_000_000_000)
             .saturating_mul(10),
     );
-    while PARALLEL_READY.load(Ordering::Acquire) != expected
-        && arch::measure_cycles() < deadline
-    {
+    while PARALLEL_READY.load(Ordering::Acquire) != expected && arch::measure_cycles() < deadline {
         arch::watchdog_pet_force();
         core::hint::spin_loop();
     }
@@ -743,14 +756,14 @@ fn run_parallel_metric(
     // path. Otherwise a missing AP leaves every posted worker spinning in its
     // interrupt handler and the BSP can never collect the failed batch.
     PARALLEL_RELEASE.store(true, Ordering::Release);
-    let local_ok = all_ready && !local_ptr.is_null();
+    let local_ok = all_ready && (!local_selected || !local_ptr.is_null());
     let mut execution = MetricExecution::default();
     let mut per_cpu = Vec::new();
     if per_cpu.try_reserve_exact(cpus.len()).is_err() {
         return false;
     }
     per_cpu.resize(cpus.len(), MetricExecution::default());
-    if local_ok {
+    if local_ok && local_selected {
         let local = execute_parallel_metric(metric, unsafe {
             core::slice::from_raw_parts_mut(local_ptr, TAIL_ITERS)
         });
@@ -818,13 +831,15 @@ fn run_parallel_metric(
             return false;
         };
         kprintln!(
-            "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"parallel_cpu\",\"mode\":\"{}\",\"name\":\"{}\",\"cpu\":{},\"count\":{},\"success\":{},\"failed\":{},\"p50_ns\":{},\"p99_ns\":{},\"p999_ns\":{},\"p9999_ns\":{},\"p99999_ns\":{},\"max_ns\":{}}}",
+            "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"parallel_cpu\",\"mode\":\"{}\",\"name\":\"{}\",\"cpu\":{},\"planned\":{},\"observed\":{},\"valid\":{},\"failed_ops\":{},\"incomplete\":{},\"p50_ns\":{},\"p99_ns\":{},\"p999_ns\":{},\"p9999_ns\":{},\"p99999_ns\":{},\"max_ns\":{}}}",
             mode,
             metric.name(),
             cpu,
+            TAIL_ITERS,
             cpu_summary.count,
             per_cpu[index].success,
             per_cpu[index].failure,
+            TAIL_ITERS.saturating_sub(cpu_summary.count as usize),
             cal.to_ns(cpu_summary.p50),
             cal.to_ns(cpu_summary.p99),
             cal.to_ns(cpu_summary.p999),
@@ -840,8 +855,7 @@ fn run_parallel_metric(
         return false;
     };
     let counts = cal.threshold_counts(&samples);
-    let window_ns =
-        cycles_to_ns(work_end.wrapping_sub(work_start)).unwrap_or(0);
+    let window_ns = cycles_to_ns(work_end.wrapping_sub(work_start)).unwrap_or(0);
     emit_parallel_json(
         mode,
         metric.name(),
@@ -849,6 +863,7 @@ fn run_parallel_metric(
         &counts,
         cal,
         execution,
+        total,
         window_ns,
         summarize_ns,
     );
@@ -858,13 +873,15 @@ fn run_parallel_metric(
         .checked_div(window_ns.max(1))
         .unwrap_or(0);
     record_result(format_args!(
-        "{} {} N={} CPUS={} SUCCESS={} FAILED={} P50={} P99={} P99.9={} P99.99={} P99.999={} MAX={} >1US={} >10US={} >50US={} WINDOW_NS={} OPS/S={}",
+        "{} {} PLANNED={} N={} CPUS={} SUCCESS={} FAILED_OPS={} INCOMPLETE={} P50={} P99={} P99.9={} P99.99={} P99.999={} MAX={} >1US={} >10US={} >50US={} WINDOW_NS={} OPS/S={}",
         mode,
         metric.name(),
+        total,
         summary.count,
         cpus.len(),
         execution.success,
         execution.failure,
+        total.saturating_sub(summary.count as usize),
         HumanDuration::new(summary.p50, cal),
         HumanDuration::new(summary.p99, cal),
         HumanDuration::new(summary.p999, cal),
@@ -882,9 +899,31 @@ fn run_parallel_metric(
 
 fn cycles_to_ns(cycles: u64) -> Option<u64> {
     early::tsc_frequency_hz().map(|hz| {
-        (u128::from(cycles) * 1_000_000_000u128 / u128::from(hz.max(1)))
-            .min(u128::from(u64::MAX)) as u64
+        (u128::from(cycles) * 1_000_000_000u128 / u128::from(hz.max(1))).min(u128::from(u64::MAX))
+            as u64
     })
+}
+
+fn report_parallel_memory(mode: &str, phase: &str) {
+    let usable = crate::mm::frame::usable_frames();
+    let free = crate::mm::frame::free_frames();
+    let (heap_used, heap_free, heap_mapped) = {
+        let (total, free, _, mapped) = heap::stats();
+        (total.saturating_sub(free), free, mapped)
+    };
+    let heap_peak = heap::peak_used();
+    kprintln!(
+        "[JSR-SMP-MEMORY] mode={} phase={} usable_kib={} free_kib={} used_kib={} heap_used_kib={} heap_peak_kib={} heap_free_kib={} heap_mapped_kib={}",
+        mode,
+        phase,
+        usable.saturating_mul(4),
+        free.saturating_mul(4),
+        usable.saturating_sub(free).saturating_mul(4),
+        heap_used / 1024,
+        heap_peak / 1024,
+        heap_free / 1024,
+        heap_mapped / 1024
+    );
 }
 
 fn emit_parallel_json(
@@ -894,16 +933,19 @@ fn emit_parallel_json(
     counts: &kernel_core::bench::ThresholdCounts,
     cal: &Calibration,
     execution: MetricExecution,
+    planned_samples: usize,
     work_window_ns: u64,
     summarize_ns: u64,
 ) {
     kprintln!(
-        "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"parallel_metric\",\"mode\":\"{}\",\"name\":\"{}\",\"count\":{},\"success\":{},\"failed\":{},\"work_window_ns\":{},\"summarize_ns\":{},\"min_ns\":{},\"mean_ns\":{},\"p50_ns\":{},\"p90_ns\":{},\"p95_ns\":{},\"p99_ns\":{},\"p999_ns\":{},\"p9999_ns\":{},\"p99999_ns\":{},\"max_ns\":{},\"over_1us\":{},\"over_10us\":{},\"over_50us\":{}}}",
+        "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"parallel_metric\",\"mode\":\"{}\",\"name\":\"{}\",\"planned\":{},\"observed\":{},\"valid\":{},\"failed_ops\":{},\"incomplete\":{},\"work_window_ns\":{},\"summarize_ns\":{},\"min_ns\":{},\"mean_ns\":{},\"p50_ns\":{},\"p90_ns\":{},\"p95_ns\":{},\"p99_ns\":{},\"p999_ns\":{},\"p9999_ns\":{},\"p99999_ns\":{},\"max_ns\":{},\"over_1us\":{},\"over_10us\":{},\"over_50us\":{}}}",
         mode,
         name,
+        planned_samples,
         summary.count,
         execution.success,
         execution.failure,
+        planned_samples.saturating_sub(summary.count as usize),
         work_window_ns,
         summarize_ns,
         cal.to_ns(summary.min),
@@ -927,6 +969,8 @@ static CS_SAMPLE_PTRS: [AtomicUsize; kernel_core::smp::MAX_CPUS] =
 static CS_DONE: [AtomicBool; kernel_core::smp::MAX_CPUS] =
     [const { AtomicBool::new(false) }; kernel_core::smp::MAX_CPUS];
 static CS_NONE: [AtomicU32; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicU32::new(0) }; kernel_core::smp::MAX_CPUS];
+static CS_RETRIES: [AtomicU32; kernel_core::smp::MAX_CPUS] =
     [const { AtomicU32::new(0) }; kernel_core::smp::MAX_CPUS];
 static CS_VALID: [AtomicU32; kernel_core::smp::MAX_CPUS] =
     [const { AtomicU32::new(0) }; kernel_core::smp::MAX_CPUS];
@@ -958,14 +1002,19 @@ fn parallel_switch_measurer() {
     if !ptr.is_null() {
         let samples = unsafe { core::slice::from_raw_parts_mut(ptr, CONTEXT_ITERS) };
         for (index, sample) in samples.iter_mut().enumerate() {
-            let n0 = sched::completed_switch_count(cpu);
-            let c0 = arch::measure_cycles();
-            sched::yield_now();
-            let dt = arch::measure_cycles().wrapping_sub(c0);
-            let n = sched::completed_switch_count(cpu).wrapping_sub(n0);
-            if n == 0 {
-                CS_NONE[cpu].fetch_add(1, Ordering::Relaxed);
-            } else {
+            loop {
+                let n0 = sched::completed_switch_count(cpu);
+                let c0 = arch::measure_cycles();
+                sched::yield_now();
+                let dt = arch::measure_cycles().wrapping_sub(c0);
+                let n = sched::completed_switch_count(cpu).wrapping_sub(n0);
+                if n == 0 {
+                    // A voluntary yield may be suppressed by the normal yield
+                    // gate. An empty attempt is not a valid context-switch
+                    // sample, so retry instead of retaining zero-latency data.
+                    CS_RETRIES[cpu].fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
                 *sample = dt / u64::from(n);
                 CS_VALID[cpu].fetch_add(1, Ordering::Relaxed);
                 CS_SWITCHES[cpu].fetch_add(n as usize, Ordering::Relaxed);
@@ -973,20 +1022,32 @@ fn parallel_switch_measurer() {
                     CS_LAST_SLOT[cpu].store(slot, Ordering::Relaxed);
                     CS_LAST_GENERATION[cpu].store(generation as usize, Ordering::Relaxed);
                 }
+                break;
             }
             if index % 4096 == 0 {
                 arch::watchdog_pet_force();
             }
             if index % CONTEXT_PROGRESS_STEP == 0 {
                 kprintln!(
-                    "[JSR-SMP-SW] stage=progress cpu={} sample={}/{} valid={} missed={} switches={}",
+                    "[JSR-SMP-SW] stage=progress cpu={} sample={}/{} valid={} retries={} missed={} switches={}",
                     cpu,
                     index,
                     CONTEXT_ITERS,
                     CS_VALID[cpu].load(Ordering::Relaxed),
+                    CS_RETRIES[cpu].load(Ordering::Relaxed),
                     CS_NONE[cpu].load(Ordering::Relaxed),
                     CS_SWITCHES[cpu].load(Ordering::Relaxed)
                 );
+                if cpu == 0 {
+                    early::append_progress(&alloc::format!(
+                        "SCHED.CONTEXT_SWITCH CPU0 {}/{} VALID={} RETRIES={} MISSED={}",
+                        index,
+                        CONTEXT_ITERS,
+                        CS_VALID[cpu].load(Ordering::Relaxed),
+                        CS_RETRIES[cpu].load(Ordering::Relaxed),
+                        CS_NONE[cpu].load(Ordering::Relaxed)
+                    ));
+                }
             }
         }
     }
@@ -1003,16 +1064,15 @@ fn parallel_switch_partner() {
     while !CS_RELEASE.load(Ordering::Acquire) {
         sched::yield_now();
     }
-    while !CS_DONE.get(cpu).is_some_and(|done| done.load(Ordering::Acquire)) {
+    while !CS_DONE
+        .get(cpu)
+        .is_some_and(|done| done.load(Ordering::Acquire))
+    {
         sched::yield_now();
     }
 }
 
-fn run_parallel_context_switch(
-    mode: &str,
-    cpus: &[usize],
-    cal: &Calibration,
-) -> bool {
+fn run_parallel_context_switch(mode: &str, cpus: &[usize], cal: &Calibration) -> bool {
     let total = match CONTEXT_ITERS.checked_mul(cpus.len()) {
         Some(total) => total,
         None => return false,
@@ -1036,6 +1096,7 @@ fn run_parallel_context_switch(
         };
         done.store(false, Ordering::Release);
         CS_NONE[cpu].store(0, Ordering::Relaxed);
+        CS_RETRIES[cpu].store(0, Ordering::Relaxed);
         CS_VALID[cpu].store(0, Ordering::Relaxed);
         CS_SWITCHES[cpu].store(0, Ordering::Relaxed);
         CS_LAST_SLOT[cpu].store(usize::MAX, Ordering::Relaxed);
@@ -1043,9 +1104,14 @@ fn run_parallel_context_switch(
         let Some(slot) = CS_SAMPLE_PTRS.get(cpu) else {
             return false;
         };
-        slot.store(unsafe { samples.as_mut_ptr().add(
-            cpus.iter().position(|candidate| *candidate == cpu).unwrap() * CONTEXT_ITERS
-        ) } as usize, Ordering::Release);
+        slot.store(
+            unsafe {
+                samples.as_mut_ptr().add(
+                    cpus.iter().position(|candidate| *candidate == cpu).unwrap() * CONTEXT_ITERS,
+                )
+            } as usize,
+            Ordering::Release,
+        );
     }
     let mut spawned = true;
     for &cpu in cpus {
@@ -1114,14 +1180,19 @@ fn run_parallel_context_switch(
         arch::watchdog_pet_force();
         core::hint::spin_loop();
     };
+    if all_done {
+        report_parallel_memory(mode, "during_raw_retained");
+    }
     for &cpu in cpus {
         if let Some(slot) = CS_SAMPLE_PTRS.get(cpu) {
             slot.store(0, Ordering::Release);
         }
     }
-    let no_missed = cpus
-        .iter()
-        .all(|cpu| CS_NONE.get(*cpu).is_some_and(|value| value.load(Ordering::Relaxed) == 0));
+    let no_missed = cpus.iter().all(|cpu| {
+        CS_NONE
+            .get(*cpu)
+            .is_some_and(|value| value.load(Ordering::Relaxed) == 0)
+    });
     let valid_total = cpus
         .iter()
         .map(|cpu| {
@@ -1138,12 +1209,20 @@ fn run_parallel_context_switch(
                 .map_or(0, |value| value.load(Ordering::Relaxed) as u64)
         })
         .sum::<u64>();
+    let retry_total = cpus
+        .iter()
+        .map(|cpu| {
+            CS_RETRIES
+                .get(*cpu)
+                .map_or(0, |value| value.load(Ordering::Relaxed) as u64)
+        })
+        .sum::<u64>();
     let expected_samples = (cpus.len() as u64).saturating_mul(CONTEXT_ITERS as u64);
     let ok = spawned && all_ready && all_done && no_missed && valid_total == expected_samples;
     check(ok, "并发上下文切换参与者、完成计数或样本不完整");
     if !ok {
         record_result(format_args!(
-            "{} SCHED.CONTEXT_SWITCH BLOCKED spawned={} ready={}/{} done={} missed={} valid={}/{} switches={}",
+            "{} SCHED.CONTEXT_SWITCH BLOCKED spawned={} ready={}/{} done={} missed={} valid={}/{} switches={} retries={}",
             mode,
             spawned,
             CS_READY.load(Ordering::Acquire),
@@ -1152,7 +1231,8 @@ fn run_parallel_context_switch(
             !no_missed,
             valid_total,
             expected_samples,
-            switch_total
+            switch_total,
+            retry_total
         ));
         return false;
     }
@@ -1166,13 +1246,16 @@ fn run_parallel_context_switch(
             return false;
         };
         kprintln!(
-            "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"parallel_switch_cpu\",\"mode\":\"{}\",\"cpu\":{},\"count\":{},\"switches\":{},\"success\":{},\"failed\":{},\"last_slot\":{},\"last_generation\":{},\"p50_ns\":{},\"p99_ns\":{},\"p999_ns\":{},\"p9999_ns\":{},\"p99999_ns\":{},\"max_ns\":{}}}",
+            "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"parallel_switch_cpu\",\"mode\":\"{}\",\"cpu\":{},\"planned\":{},\"observed\":{},\"valid\":{},\"failed_ops\":{},\"incomplete\":{},\"retries\":{},\"switches\":{},\"last_slot\":{},\"last_generation\":{},\"p50_ns\":{},\"p99_ns\":{},\"p999_ns\":{},\"p9999_ns\":{},\"p99999_ns\":{},\"max_ns\":{}}}",
             mode,
             cpu,
+            CONTEXT_ITERS,
             cpu_summary.count,
-            CS_SWITCHES[cpu].load(Ordering::Relaxed),
             CS_VALID[cpu].load(Ordering::Relaxed),
             CONTEXT_ITERS.saturating_sub(CS_VALID[cpu].load(Ordering::Relaxed) as usize),
+            CONTEXT_ITERS.saturating_sub(cpu_summary.count as usize),
+            CS_RETRIES[cpu].load(Ordering::Relaxed),
+            CS_SWITCHES[cpu].load(Ordering::Relaxed),
             CS_LAST_SLOT[cpu].load(Ordering::Relaxed),
             CS_LAST_GENERATION[cpu].load(Ordering::Relaxed),
             cal.to_ns(cpu_summary.p50),
@@ -1209,17 +1292,21 @@ fn run_parallel_context_switch(
             success: valid_total,
             failure: expected_samples.saturating_sub(valid_total),
         },
+        expected_samples as usize,
         work_window_ns,
         summarize_ns,
     );
     record_result(format_args!(
-        "{} SCHED.CONTEXT_SWITCH N={} CPUS={} SWITCHES={} SUCCESS={} FAILED={} P50={} P99={} P99.9={} P99.99={} P99.999={} MAX={} >1US={} >10US={} >50US={} WINDOW_NS={} SWITCHES/S={}",
+        "{} SCHED.CONTEXT_SWITCH PLANNED={} N={} CPUS={} SWITCHES={} SUCCESS={} FAILED_OPS={} INCOMPLETE={} RETRIES={} P50={} P99={} P99.9={} P99.99={} P99.999={} MAX={} >1US={} >10US={} >50US={} WINDOW_NS={} SWITCHES/S={}",
         mode,
+        expected_samples,
         summary.count,
         cpus.len(),
         switch_total,
         valid_total,
         expected_samples.saturating_sub(valid_total),
+        expected_samples.saturating_sub(summary.count as u64),
+        retry_total,
         HumanDuration::new(summary.p50, cal),
         HumanDuration::new(summary.p99, cal),
         HumanDuration::new(summary.p999, cal),
@@ -1236,6 +1323,7 @@ fn run_parallel_context_switch(
 }
 
 fn run_parallel_mode(mode: &str, cpus: &[usize], cal: &Calibration) -> bool {
+    report_parallel_memory(mode, "before");
     let before = baseline();
     let before_heap_mapped = heap::stats().3;
     let skew = measure_tsc_skew(mode, cpus);
@@ -1260,12 +1348,7 @@ fn run_parallel_mode(mode: &str, cpus: &[usize], cal: &Calibration) -> bool {
     let metrics: &[ParallelMetric] = &ParallelMetric::ALL;
     let mut ok = true;
     for &metric in metrics {
-        let progress = alloc::format!(
-            "{} RUNNING {} CPUS={}",
-            mode,
-            metric.name(),
-            cpus.len()
-        );
+        let progress = alloc::format!("{} RUNNING {} CPUS={}", mode, metric.name(), cpus.len());
         early::append_progress(&progress);
         ok &= run_parallel_metric(mode, metric, cpus, cal);
     }
@@ -1274,14 +1357,17 @@ fn run_parallel_mode(mode: &str, cpus: &[usize], cal: &Calibration) -> bool {
     let usable = crate::mm::frame::usable_frames();
     let free = crate::mm::frame::free_frames();
     let (heap_total, heap_free, _, heap_mapped) = crate::mm::heap::stats();
+    let planned_samples = metrics
+        .len()
+        .saturating_mul(TAIL_ITERS)
+        .saturating_add(CONTEXT_ITERS)
+        .saturating_mul(cpus.len());
     let result = format_args!(
-        "{} RESULT COMPLETE={} TOTAL_METRICS={} RAW_SAMPLES={} MEM_USED_KIB={} HEAP_USED_KIB={} HEAP_MAPPED_KIB={}",
+        "{} RESULT COMPLETE={} TOTAL_METRICS={} PLANNED_SAMPLES={} MEM_USED_KIB={} HEAP_USED_KIB={} HEAP_MAPPED_KIB={}",
         mode,
         ok,
         metrics.len() + 1,
-        (metrics.len() + 1)
-            .saturating_mul(TAIL_ITERS)
-            .saturating_mul(cpus.len()),
+        planned_samples,
         usable.saturating_sub(free).saturating_mul(4),
         heap_total.saturating_sub(heap_free) / 1024,
         heap_mapped / 1024
@@ -1324,6 +1410,7 @@ fn run_parallel_mode(mode: &str, cpus: &[usize], cal: &Calibration) -> bool {
         retained_heap_pages,
         reclaimed
     ));
+    report_parallel_memory(mode, "after");
     ok && reclaimed
 }
 
@@ -1335,7 +1422,9 @@ pub fn run_smp_concurrent() {
     kprintln!("SMP CONCURRENT PERFORMANCE - SAME TESTS AS SINGLE CPU");
     let Some(cal) = calibrate() else {
         check(false, "周期计数器校准失败");
-        record_result(format_args!("SMP CONCURRENT BLOCKED reason=clock_calibration"));
+        record_result(format_args!(
+            "SMP CONCURRENT BLOCKED reason=clock_calibration"
+        ));
         return;
     };
     let online = crate::smp::online_set();
@@ -1370,16 +1459,12 @@ pub fn run_smp_concurrent() {
         ));
         return;
     }
-    let physical_mode = if physical.len() == 8 {
-        "SMP8P"
+    let local_cpu = arch::cpu_index();
+    let single = [if logical.contains(&local_cpu) {
+        local_cpu
     } else {
-        "SMP_PHYSICAL"
-    };
-    let logical_mode = if logical.len() == 16 {
-        "SMP16T"
-    } else {
-        "SMP_LOGICAL"
-    };
+        logical[0]
+    }];
     let sample_capacity = logical
         .len()
         .saturating_mul(TAIL_ITERS.max(CONTEXT_ITERS))
@@ -1395,20 +1480,21 @@ pub fn run_smp_concurrent() {
     }
     let before = baseline();
     let before_heap_mapped = heap::stats().3;
-    let physical_ok = run_parallel_mode(physical_mode, &physical, &cal);
-    let logical_ok = run_parallel_mode(logical_mode, &logical, &cal);
-    let reclaimed = resources_reclaimed(
-        before,
-        baseline(),
-        before_heap_mapped,
-        heap::stats().3,
-    );
+    let single_ok = run_parallel_mode("SMP_SINGLE", &single, &cal);
+    LAST_SINGLE_MODE.store(single_ok, Ordering::Release);
+    let physical_ok = run_parallel_mode("SMP_PHYSICAL", &physical, &cal);
+    LAST_PHYSICAL_MODE.store(physical_ok, Ordering::Release);
+    let logical_ok = run_parallel_mode("SMP_LOGICAL", &logical, &cal);
+    LAST_LOGICAL_MODE.store(logical_ok, Ordering::Release);
+    let reclaimed = resources_reclaimed(before, baseline(), before_heap_mapped, heap::stats().3);
     check(reclaimed, "并发基准结束后资源未回到起点");
     LAST_RECLAIMED.store(reclaimed, Ordering::Release);
     let final_result = format_args!(
-        "SMP CONCURRENT FINAL PHYSICAL={} LOGICAL={} PHYSICAL_CPUS={} LOGICAL_CPUS={} SMT={} RECLAIMED={} FAILED={} TIMING_FAILED={}",
+        "SMP CONCURRENT FINAL SINGLE={} PHYSICAL={} LOGICAL={} SINGLE_CPUS={} PHYSICAL_CPUS={} LOGICAL_CPUS={} SMT={} RECLAIMED={} FAILED={} TIMING_FAILED={}",
+        single_ok,
         physical_ok,
         logical_ok,
+        single.len(),
         physical.len(),
         logical.len(),
         logical.len() > physical.len(),
@@ -1486,15 +1572,25 @@ pub fn publish_results(failed: u32, timing_failed: u32) {
         };
         let _ = write!(
             writer,
-            "SMP DISCOVERED={} ONLINE={} PARALLEL_MATRIX={}",
+            "SMP DISCOVERED={} ONLINE={} PARALLEL_MATRIX={} SINGLE={} PHYSICAL={} LOGICAL={}",
             discovered,
             online,
-            if online > 1 { "measured" } else { "not_run" }
+            if LAST_SINGLE_MODE.load(Ordering::Acquire)
+                && LAST_PHYSICAL_MODE.load(Ordering::Acquire)
+                && LAST_LOGICAL_MODE.load(Ordering::Acquire)
+            {
+                "single+physical+logical"
+            } else {
+                "incomplete"
+            },
+            LAST_SINGLE_MODE.load(Ordering::Acquire),
+            LAST_PHYSICAL_MODE.load(Ordering::Acquire),
+            LAST_LOGICAL_MODE.load(Ordering::Acquire)
         );
         early::append_line(smp.text());
     }
     kprintln!(
-        "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"summary\",\"metrics\":{},\"failed\":{},\"timing_failed\":{},\"checks\":{},\"resources_reclaimed\":{},\"discovered_cpus\":{},\"online_cpus\":{},\"parallel_matrix_run\":{}}}",
+        "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"summary\",\"metrics\":{},\"failed\":{},\"timing_failed\":{},\"checks\":{},\"resources_reclaimed\":{},\"discovered_cpus\":{},\"online_cpus\":{},\"parallel_matrix_run\":{},\"single_mode_run\":{},\"physical_mode_run\":{},\"logical_mode_run\":{}}}",
         report.len,
         failed,
         timing_failed,
@@ -1502,7 +1598,12 @@ pub fn publish_results(failed: u32, timing_failed: u32) {
         LAST_RECLAIMED.load(Ordering::Acquire),
         crate::smp::unique_enabled_cpu_count().max(1),
         crate::smp::online_set().len(),
-        crate::smp::online_set().len() > 1
+        LAST_SINGLE_MODE.load(Ordering::Acquire)
+            && LAST_PHYSICAL_MODE.load(Ordering::Acquire)
+            && LAST_LOGICAL_MODE.load(Ordering::Acquire),
+        LAST_SINGLE_MODE.load(Ordering::Acquire),
+        LAST_PHYSICAL_MODE.load(Ordering::Acquire),
+        LAST_LOGICAL_MODE.load(Ordering::Acquire)
     );
 }
 
@@ -1517,8 +1618,8 @@ fn resources_reclaimed(
     }
     #[cfg(feature = "bench-profile")]
     {
-        let retained_heap_pages = end_heap_mapped.saturating_sub(start_heap_mapped)
-            / kernel_core::frame::FRAME_SIZE;
+        let retained_heap_pages =
+            end_heap_mapped.saturating_sub(start_heap_mapped) / kernel_core::frame::FRAME_SIZE;
         end.free_frames.saturating_add(retained_heap_pages as usize) == start.free_frames
     }
     #[cfg(not(feature = "bench-profile"))]
@@ -1548,11 +1649,7 @@ fn cycle_samples(mut op: impl FnMut()) -> Vec<u64> {
 }
 
 fn report_progress(done: usize) {
-    let line = alloc::format!(
-        "BENCH RUNNING {} / {} samples",
-        done,
-        TAIL_ITERS
-    );
+    let line = alloc::format!("BENCH RUNNING {} / {} samples", done, TAIL_ITERS);
     #[cfg(feature = "bench-profile")]
     early::append_progress(line.trim_end());
     #[cfg(not(feature = "bench-profile"))]
@@ -1567,7 +1664,10 @@ fn report_values(
 ) -> Option<Summary> {
     crate::arch::watchdog_pet_force();
     let sum = summarize(samples);
-    check(sum.is_some() && samples.len() == expected, "基准样本数不符合目标");
+    check(
+        sum.is_some() && samples.len() == expected,
+        "基准样本数不符合目标",
+    );
     if let Some(m) = sum {
         let counts = cal.threshold_counts(samples);
         kprintln!(
@@ -1684,14 +1784,21 @@ fn syscall_set_paths(cal: &Calibration) {
     let current = SyscallSet::of(&[0, 1, 4, 6, 15, 16, 19, 63]);
     let other = SyscallSet::of(&[1, 4, 6, 19, 63]);
     let old = ids.iter().fold(0u64, |word, &id| word | (1u64 << id));
-    let old_other = [1usize, 4, 6, 19, 63].iter().fold(0u64, |word, &id| word | (1u64 << id));
+    let old_other = [1usize, 4, 6, 19, 63]
+        .iter()
+        .fold(0u64, |word, &id| word | (1u64 << id));
 
     let mut cursor = 0u64;
     let mut current_contains = cycle_samples(|| {
         cursor = cursor.wrapping_add(1);
         black_box(current.contains(ids[cursor as usize % ids.len()]));
     });
-    report_values("syscallset.contains.current", &mut current_contains, cal, TAIL_ITERS);
+    report_values(
+        "syscallset.contains.current",
+        &mut current_contains,
+        cal,
+        TAIL_ITERS,
+    );
 
     let mut cursor = 0u64;
     let mut old_contains = cycle_samples(|| {
@@ -1699,27 +1806,52 @@ fn syscall_set_paths(cal: &Calibration) {
         let id = ids[cursor as usize % ids.len()];
         black_box(id < 64 && old & (1u64 << id) != 0);
     });
-    report_values("syscallset.contains.u64-reference", &mut old_contains, cal, TAIL_ITERS);
+    report_values(
+        "syscallset.contains.u64-reference",
+        &mut old_contains,
+        cal,
+        TAIL_ITERS,
+    );
 
     let mut current_subset = cycle_samples(|| {
         black_box(other.is_subset_of(current));
     });
-    report_values("syscallset.subset.current", &mut current_subset, cal, TAIL_ITERS);
+    report_values(
+        "syscallset.subset.current",
+        &mut current_subset,
+        cal,
+        TAIL_ITERS,
+    );
 
     let mut old_subset = cycle_samples(|| {
         black_box(old_other & !old == 0);
     });
-    report_values("syscallset.subset.u64-reference", &mut old_subset, cal, TAIL_ITERS);
+    report_values(
+        "syscallset.subset.u64-reference",
+        &mut old_subset,
+        cal,
+        TAIL_ITERS,
+    );
 
     let mut current_copy = cycle_samples(|| {
         black_box(black_box(current));
     });
-    report_values("syscallset.copy.current", &mut current_copy, cal, TAIL_ITERS);
+    report_values(
+        "syscallset.copy.current",
+        &mut current_copy,
+        cal,
+        TAIL_ITERS,
+    );
 
     let mut old_copy = cycle_samples(|| {
         black_box(black_box(old));
     });
-    report_values("syscallset.copy.u64-reference", &mut old_copy, cal, TAIL_ITERS);
+    report_values(
+        "syscallset.copy.u64-reference",
+        &mut old_copy,
+        cal,
+        TAIL_ITERS,
+    );
 
     let mut raw = SpawnDesc::default();
     raw.image_len = 64;
@@ -1773,7 +1905,9 @@ fn counter_read_overhead(cal: &Calibration) {
 fn next_tick_edge() -> Option<u64> {
     let t = crate::smp::local_ticks();
     let deadline = arch::measure_cycles().saturating_add(
-        early::tsc_frequency_hz().unwrap_or(3_000_000_000).saturating_mul(2),
+        early::tsc_frequency_hz()
+            .unwrap_or(3_000_000_000)
+            .saturating_mul(2),
     );
     arch::irq_enable();
     while crate::smp::local_ticks() == t {
@@ -1811,7 +1945,9 @@ fn calibrate() -> Option<Calibration> {
     let t0 = next_tick_edge()?;
     kprintln!("[JSR-BENCH] stage=calibration_tick_edge tick={}", t0);
     let c0 = arch::cycles();
-    let wait_seconds = CALIBRATION_TICKS.div_ceil(u64::from(hz.max(1))).saturating_add(2);
+    let wait_seconds = CALIBRATION_TICKS
+        .div_ceil(u64::from(hz.max(1)))
+        .saturating_add(2);
     let deadline = arch::measure_cycles().saturating_add(
         early::tsc_frequency_hz()
             .unwrap_or(3_000_000_000)
@@ -1908,12 +2044,7 @@ fn timer_irq(cal: &Calibration) -> Option<Summary> {
         TIMER_IRQ_SAMPLES,
         matched
     );
-    report_values(
-        "kernel.timer_irq",
-        &mut irqs,
-        cal,
-        TIMER_IRQ_SAMPLES,
-    )
+    report_values("kernel.timer_irq", &mut irqs, cal, TIMER_IRQ_SAMPLES)
 }
 
 // ---------------------------------------------------------------------------
@@ -1973,7 +2104,10 @@ fn context_switch(cal: &Calibration) -> Option<Summary> {
     let b = sched::spawn(TaskId(TASK_ID_BASE + 2), "bench-switch-b", switch_partner).is_ok();
     check(a && b, "切换基准任务创建失败");
     sched::run();
-    check(SWITCH_NONE.load(Ordering::Relaxed) == 0, "有可运行对手时让出却没有切换");
+    check(
+        SWITCH_NONE.load(Ordering::Relaxed) == 0,
+        "有可运行对手时让出却没有切换",
+    );
     let mut samples = core::mem::take(&mut *SWITCH_SAMPLES.lock());
     check(samples.len() == CONTEXT_ITERS, "切换样本数不足");
     check(
@@ -1987,7 +2121,9 @@ fn context_switch(cal: &Calibration) -> Option<Summary> {
         after.objects == before.objects
             && after.pending == before.pending
             && after.pins == before.pins
-            && after.free_frames.saturating_add(retained_heap_pages as usize)
+            && after
+                .free_frames
+                .saturating_add(retained_heap_pages as usize)
                 == before.free_frames,
         "切换基准后资源未回到基线",
     );
@@ -2039,20 +2175,22 @@ fn frames(cal: &Calibration) {
             let first = frame::deallocate(f).is_ok();
             let free_before = frame::free_frames();
             let second = frame::deallocate(f);
-            first && second == Err(kernel_core::frame::FrameError::DoubleFree) && frame::free_frames() == free_before
+            first
+                && second == Err(kernel_core::frame::FrameError::DoubleFree)
+                && frame::free_frames() == free_before
         }
         Err(_) => false,
     };
     check(refused, "重复释放页帧未被拒绝或改动了空闲帧数");
     let after = baseline();
-    let reclaimed = resources_reclaimed(
-        before,
-        after,
-        before_heap_mapped,
-        heap::stats().3,
-    );
+    let reclaimed = resources_reclaimed(before, after, before_heap_mapped, heap::stats().3);
     check(reclaimed, "页帧基准后资源未回到基线");
-    kprintln!("[JSR-BENCH] case=frame_refusal double_free_refused={} free_unchanged={} reclaimed={}", refused, refused, reclaimed);
+    kprintln!(
+        "[JSR-BENCH] case=frame_refusal double_free_refused={} free_unchanged={} reclaimed={}",
+        refused,
+        refused,
+        reclaimed
+    );
     report_values("frame.alloc", &mut alloc, cal, TAIL_ITERS);
     report_values("frame.free", &mut free, cal, TAIL_ITERS);
 }
@@ -2085,15 +2223,18 @@ fn heap_paths(cal: &Calibration) {
     // 失败路径：超出架构虚拟窗口的申请被拒，堆的统计不变
     let stats_before = heap::stats();
     let mut v: Vec<u8> = Vec::new();
-    let beyond_window = heap::virtual_capacity()
-        .saturating_add(kernel_core::frame::FRAME_SIZE);
-    let refused = usize::try_from(beyond_window)
-        .is_ok_and(|bytes| v.try_reserve(bytes).is_err());
+    let beyond_window = heap::virtual_capacity().saturating_add(kernel_core::frame::FRAME_SIZE);
+    let refused = usize::try_from(beyond_window).is_ok_and(|bytes| v.try_reserve(bytes).is_err());
     let unchanged = heap::stats() == stats_before && v.capacity() == 0;
     check(refused && unchanged, "超大堆申请未被拒绝或改动了堆");
     let after = baseline();
     check(after == before, "堆基准后资源未回到基线");
-    kprintln!("[JSR-BENCH] case=heap_refusal refused={} heap_unchanged={} reclaimed={}", refused, unchanged, after == before);
+    kprintln!(
+        "[JSR-BENCH] case=heap_refusal refused={} heap_unchanged={} reclaimed={}",
+        refused,
+        unchanged,
+        after == before
+    );
     report_values("heap.alloc_free_64", &mut small, cal, TAIL_ITERS);
     report_values("heap.alloc_free_4096", &mut page, cal, TAIL_ITERS);
 }
@@ -2112,14 +2253,13 @@ fn user_program(cal: &Calibration) {
     check(ok_exit, "user/bench 未以 0 退出");
     let after = baseline();
     let after_heap_mapped = heap::stats().3;
-    let reclaimed = resources_reclaimed(
-        before,
-        after,
-        before_heap_mapped,
-        after_heap_mapped,
-    );
+    let reclaimed = resources_reclaimed(before, after, before_heap_mapped, after_heap_mapped);
     check(reclaimed, "用户基准后资源未回到基线");
-    kprintln!("[JSR-BENCH] case=user exit={:?} reclaimed={}", res.and_then(|r| r.1), reclaimed);
+    kprintln!(
+        "[JSR-BENCH] case=user exit={:?} reclaimed={}",
+        res.and_then(|r| r.1),
+        reclaimed
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2132,7 +2272,8 @@ fn gated() -> bool {
     // 只有 x86_64 的 TSC 是真正的周期计数器；其他指令集（AArch64 虚拟计数器、RISC-V rdtime）
     // 是时间基准，用它算出的「每 tick 周期数」与宿主快慢强相关，因此那里的预算判定只作参考、
     // 不作为失败条件（真实硬件上的预算验证属于真机测量）。
-    cfg!(target_arch = "x86_64") && config::ACTIVE.name == kernel_core::config::KernelConfig::STANDARD.name
+    cfg!(target_arch = "x86_64")
+        && config::ACTIVE.name == kernel_core::config::KernelConfig::STANDARD.name
 }
 
 fn print_decision(d: &Decision, prefer: &str) {
@@ -2151,25 +2292,53 @@ fn print_decision(d: &Decision, prefer: &str) {
 }
 
 fn tuning(cal: &Calibration, tick_cost: u64, switch_cost: u64) {
-    let hz = select("timer_hz", config::ACTIVE.clock.timer_hz, &HZ_CANDIDATES, LIMIT_PPM, Prefer::Largest, |h| {
-        timer_overhead(tick_cost, cal, h)
-    });
+    let hz = select(
+        "timer_hz",
+        config::ACTIVE.clock.timer_hz,
+        &HZ_CANDIDATES,
+        LIMIT_PPM,
+        Prefer::Largest,
+        |h| timer_overhead(tick_cost, cal, h),
+    );
     check(hz.is_ok(), "时钟频率取值失败");
     if let Ok(d) = hz {
-        check_timing(!gated() || d.current_within_limit(), "默认配置档的时钟频率超出开销预算");
+        check_timing(
+            !gated() || d.current_within_limit(),
+            "默认配置档的时钟频率超出开销预算",
+        );
         print_decision(&d, "largest");
     }
     for (i, name) in QUANTUM_NAMES.iter().enumerate() {
         let q = config::ACTIVE.sched.qos.quantum[i];
-        let d = select(name, q, &QUANTUM_CANDIDATES, LIMIT_PPM, Prefer::Smallest, |q| quantum_overhead(switch_cost, cal, q));
+        let d = select(
+            name,
+            q,
+            &QUANTUM_CANDIDATES,
+            LIMIT_PPM,
+            Prefer::Smallest,
+            |q| quantum_overhead(switch_cost, cal, q),
+        );
         check(d.is_ok(), "时间片取值失败");
         if let Ok(d) = d {
-            check_timing(!gated() || d.current_within_limit(), "默认配置档的时间片超出开销预算");
+            check_timing(
+                !gated() || d.current_within_limit(),
+                "默认配置档的时间片超出开销预算",
+            );
             print_decision(&d, "smallest");
         }
     }
     // 失败路径：非法候选（0）被拒，不给出部分结论
-    let bad = select("timer_hz", config::ACTIVE.clock.timer_hz, &[100, 0], LIMIT_PPM, Prefer::Largest, |h| timer_overhead(tick_cost, cal, h));
+    let bad = select(
+        "timer_hz",
+        config::ACTIVE.clock.timer_hz,
+        &[100, 0],
+        LIMIT_PPM,
+        Prefer::Largest,
+        |h| timer_overhead(tick_cost, cal, h),
+    );
     check(bad.is_err(), "非法候选未被拒绝");
-    kprintln!("[JSR-BENCH] case=tune_refusal invalid_candidate_refused={}", bad.is_err());
+    kprintln!(
+        "[JSR-BENCH] case=tune_refusal invalid_candidate_refused={}",
+        bad.is_err()
+    );
 }
