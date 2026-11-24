@@ -6359,9 +6359,10 @@ impl Scheduler {
             leaf.switching_from = Some(prev);
             leaf.switching_immediate = cause == Cause::MIGRATE;
             #[cfg(feature = "bench-profile")]
-            leaf.switching_started_cycles = crate::arch::measure_cycles();
-            #[cfg(feature = "bench-profile")]
-            leaf.switching_cause = cause;
+            {
+                leaf.switching_started_cycles = crate::arch::measure_cycles();
+                leaf.switching_cause = cause;
+            }
         });
 
         let next_space = self.task(next).and_then(|t| t.space);
