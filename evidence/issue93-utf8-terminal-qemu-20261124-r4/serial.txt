@@ -1,0 +1,2057 @@
+[2J[001;001H[=3h[2J[001;001H[2J[001;001H[8;042;160t[2J[001;001H[2J[001;001H[8;056;240t[2J[001;001HBdsDxe: loading Boot0002 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x4,0x0)
+BdsDxe: starting Boot0002 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x4,0x0)
+Jasper-OS boot manager starting
+selecting slot=A reason=ConfirmedRelease attempt=1 release=1 kernel_bytes=3093096
+INFO : Framebuffer info: FrameBufferInfo { byte_len: 4096000, width: 1280, height: 800, pixel_format: Bgr, bytes_per_pixel: 4, stride: 1280 }
+INFO : Jasper-OS mature bootloader common starting
+TRACE: exiting boot services
+INFO : Elf file loaded at Pointer {
+    addr: 0x000000001d9f5000,
+    metadata: 3093096,
+}
+INFO : virtual_address_offset: 0x10000000000
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(4), offset: 0, virtual_addr: 0, physical_addr: 0, file_size: 512ac, mem_size: 512ac, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(5), offset: 512b0, virtual_addr: 522b0, physical_addr: 522b0, file_size: 11955f, mem_size: 11955f, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 16a810, virtual_addr: 16c810, physical_addr: 16c810, file_size: 16360, mem_size: 167f0, align: 1000 })
+INFO : Mapping bss section
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 180b80, virtual_addr: 183b80, physical_addr: 183b80, file_size: 108310, mem_size: 21c908, align: 1000 })
+INFO : Mapping bss section
+INFO : Entry point at: 0x10000052630
+INFO : Creating GDT at PhysAddr(0x26d000)
+INFO : Map framebuffer
+INFO : Map physical memory
+INFO : Allocate bootinfo
+INFO : Create Memory Map
+INFO : Create bootinfo
+INFO : Jumping to kernel entry point at VirtAddr(0x10000052630)
+[JSR-EARLY] stage=entry cpu=x86_64 framebuffer=probe
+[JSR-EARLY] stage=K01 BOOTINFO
+[JSR-EARLY] stage=K02 MEMORY MAP
+[JSR-EARLY] stage=K03 KMAIN
+[JSR-EARLY] stage=console
+[JSR-BOOT] jasper-os rust kernel 0.0.1 x86_64
+[JSR-CONFIG] profile=standard valid=ok params=28
+[JSR-CONFIG] timer_hz=100
+[JSR-CONFIG] boot_ticks=25
+[JSR-CONFIG] quantum.0=2
+[JSR-CONFIG] quantum.1=2
+[JSR-CONFIG] quantum.2=4
+[JSR-CONFIG] quantum.3=4
+[JSR-CONFIG] decay_period=8
+[JSR-CONFIG] max_tasks=64
+[JSR-CONFIG] max_rt=8
+[JSR-CONFIG] kernel_stack_bytes=131072
+[JSR-CONFIG] watchdog_ticks=50
+[JSR-CONFIG] watchdog_log=16
+[JSR-CONFIG] cpu_burst_ticks=4
+[JSR-CONFIG] heap_grow_step=65536
+[JSR-CONFIG] pressure_low_permille=125
+[JSR-CONFIG] pressure_critical_permille=50
+[JSR-CONFIG] pressure_reserve_frames=256
+[JSR-CONFIG] max_process_frames=0
+[JSR-CONFIG] max_vm_guest_frames=32768
+[JSR-CONFIG] max_map_pages=1024
+[JSR-CONFIG] max_objects=1024
+[JSR-CONFIG] handles_per_process=64
+[JSR-CONFIG] max_endpoints_per_process=64
+[JSR-CONFIG] ipc_max_queue_bytes=1048576
+[JSR-CONFIG] ipc_max_process_bytes=4194304
+[JSR-CONFIG] ipc_max_total_bytes=16777216
+[JSR-CONFIG] trace_capacity=32
+[JSR-CONFIG] irq_queue_len=64
+[JSR-CAP] cpu_bootstrap_slots=128 tasks=64 objects=1024 handles=64 frames=0 rings=0 endpoints=64
+[ OK ] console elapsed_ns=3163751 heap_used=0 heap_peak=0 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":5960416410,"component":"console","status":"ok","elapsed_ns":3163751,"heap_used":0,"heap_peak":0,"heap_mapped":0,"free_frames":0,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=console done_mask=0x1
+[JSR-EARLY] stage=platform
+[JSR-GDT] ok
+[JSR-XSAVE] enabled=true avx=true avx_size=256 capacity=832
+[JSR-IDT] ok
+[JSR-EXC] breakpoint handler verified
+[ OK ] platform elapsed_ns=1970346 heap_used=0 heap_peak=0 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":5960416410,"component":"platform","status":"ok","elapsed_ns":1970346,"heap_used":0,"heap_peak":0,"heap_mapped":0,"free_frames":0,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=platform done_mask=0x3
+[JSR-EARLY] stage=timer
+[JSR-TICK] n=1
+[JSR-TICK] n=2
+[JSR-TICK] n=3
+[JSR-TICK] n=4
+[JSR-TICK] n=5
+[JSR-TICK] n=6
+[JSR-TICK] n=7
+[JSR-TICK] n=8
+[JSR-TICK] n=9
+[JSR-TICK] n=10
+[JSR-TICK] n=11
+[JSR-TICK] n=12
+[JSR-TICK] n=13
+[JSR-TICK] n=14
+[JSR-TICK] n=15
+[JSR-TICK] n=16
+[JSR-TICK] n=17
+[JSR-TICK] n=18
+[JSR-TICK] n=19
+[JSR-TICK] n=20
+[JSR-TICK] n=21
+[JSR-TICK] n=22
+[JSR-TICK] n=23
+[JSR-TICK] n=24
+[JSR-TICK] n=25
+[ OK ] timer elapsed_ns=241106241 heap_used=0 heap_peak=0 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":5960416410,"component":"timer","status":"ok","elapsed_ns":241106241,"heap_used":0,"heap_peak":0,"heap_mapped":0,"free_frames":0,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=timer done_mask=0x7
+[JSR-PLAN] case name=sched-cooperative
+[JSR-SCHED] switch from=boot to=A n=1 cause=yield
+[JSR-TASK] name=A step=1 task_id=1
+[JSR-SCHED] switch from=A to=B n=2 cause=yield
+[JSR-TASK] name=B step=1 task_id=2
+[JSR-SCHED] switch from=B to=C n=3 cause=yield
+[JSR-TASK] name=C step=1 task_id=3
+[JSR-SCHED] switch from=C to=A n=4 cause=yield
+[JSR-TASK] name=A step=2 task_id=1
+[JSR-SCHED] switch from=A to=B n=5 cause=yield
+[JSR-TASK] name=B step=2 task_id=2
+[JSR-SCHED] switch from=B to=C n=6 cause=yield
+[JSR-TASK] name=C step=2 task_id=3
+[JSR-SCHED] switch from=C to=A n=7 cause=yield
+[JSR-TASK] name=A step=3 task_id=1
+[JSR-SCHED] switch from=A to=B n=8 cause=yield
+[JSR-TASK] name=B step=3 task_id=2
+[JSR-SCHED] switch from=B to=C n=9 cause=yield
+[JSR-TASK] name=C step=3 task_id=3
+[JSR-SCHED] switch from=C to=A n=10 cause=yield
+[JSR-SCHED] switch from=A to=B n=11 cause=exit
+[JSR-SCHED] switch from=B to=C n=12 cause=exit
+[JSR-SCHED] switch from=C to=boot n=13 cause=exit
+[JSR-SCHED] all tasks exited switches=13 policy=timeshare
+[JSR-PLAN] case name=sched-preemptive
+[JSR-SCHED] preemptive demo start
+[JSR-SCHED] switch from=boot to=P n=14 cause=yield
+[JSR-TASK] name=P step=1 task_id=11
+[JSR-SCHED] switch from=P to=Q n=15 cause=tick
+[JSR-TASK] name=Q step=1 task_id=12
+[JSR-SCHED] switch from=Q to=R n=16 cause=tick
+[JSR-TASK] name=R step=1 task_id=13
+[JSR-SCHED] switch from=R to=P n=17 cause=tick
+[JSR-TASK] name=P step=2 task_id=11
+[JSR-TASK] name=P step=3 task_id=11
+[JSR-SCHED] switch from=P to=Q n=18 cause=tick
+[JSR-TASK] name=Q step=2 task_id=12
+[JSR-TASK] name=Q step=3 task_id=12
+[JSR-SCHED] switch from=Q to=R n=19 cause=tick
+[JSR-TASK] name=R step=2 task_id=13
+[JSR-TASK] name=R step=3 task_id=13
+[JSR-SCHED] switch from=R to=P n=20 cause=tick
+[JSR-TASK] name=P step=4 task_id=11
+[JSR-TASK] name=P step=5 task_id=11
+[JSR-SCHED] switch from=P to=Q n=21 cause=tick
+[JSR-TASK] name=Q step=4 task_id=12
+[JSR-TASK] name=Q step=5 task_id=12
+[JSR-SCHED] switch from=Q to=R n=22 cause=tick
+[JSR-TASK] name=R step=4 task_id=13
+[JSR-TASK] name=R step=5 task_id=13
+[JSR-SCHED] switch from=R to=P n=23 cause=tick
+[JSR-TASK] name=P step=6 task_id=11
+[JSR-TASK] name=P step=7 task_id=11
+[JSR-SCHED] switch from=P to=Q n=24 cause=tick
+[JSR-TASK] name=Q step=6 task_id=12
+[JSR-TASK] name=Q step=7 task_id=12
+[JSR-SCHED] switch from=Q to=R n=25 cause=tick
+[JSR-TASK] name=R step=6 task_id=13
+[JSR-TASK] name=R step=7 task_id=13
+[JSR-SCHED] switch from=R to=P n=26 cause=tick
+[JSR-TASK] name=P step=8 task_id=11
+[JSR-SCHED] switch from=P to=Q n=27 cause=exit
+[JSR-TASK] name=Q step=8 task_id=12
+[JSR-SCHED] switch from=Q to=R n=28 cause=exit
+[JSR-TASK] name=R step=8 task_id=13
+[JSR-SCHED] switch from=R to=boot n=29 cause=exit
+[JSR-SCHED] preemptive demo done tick_switches=12 quantum_ticks=2 policy=timeshare
+[JSR-PLAN] case name=counter64
+[JSR-COUNTER64] case=wide impl=native crossed_2_32=true ok=9 failed=0
+[JSR-COUNTER64] case=isr_shared reads=5128070 ticks=10 ticks_monotonic=true cycles_monotonic=true completed=true
+[JSR-COUNTER64] summary impl=native checks=10 failed=0
+[JSR-EARLY] stage=frames
+[ OK ] frames elapsed_ns=1686292 heap_used=0 heap_peak=0 heap_delta=0 mapped_delta=0 frame_delta=-127319
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":5960416410,"component":"frames","status":"ok","elapsed_ns":1686292,"heap_used":0,"heap_peak":0,"heap_mapped":0,"free_frames":127319,"heap_delta":0,"mapped_delta":0,"frame_delta":-127319}
+[JSR-BOOT-STAGE] done stage=frames done_mask=0xf
+[JSR-PLAN] case name=mm-frames
+[JSR-FRAME] regions=20 discovered=134 admitted=134 merged=114 invalid=0 usable_frames=127319 usable_mib=497 ignored=0 dropped_regions=0 phys_offset=mapped
+[JSR-FRAME] alloc frames=3 addrs=0x1000,0x2000,0x3000
+[JSR-FRAME] rw ok=true bytes_per_frame=4096
+[JSR-FRAME] free+alloc reuse=true frame=0x2000
+[JSR-FRAME] double free rejected err=system.memory.error.double_free
+[JSR-FRAME] checks=13 failed=0 free_frames=127319
+[JSR-EARLY] stage=kernel_map
+[ OK ] kernel_map elapsed_ns=275282 heap_used=0 heap_peak=0 heap_delta=0 mapped_delta=0 frame_delta=1
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":5960416410,"component":"kernel_map","status":"ok","elapsed_ns":275282,"heap_used":0,"heap_peak":0,"heap_mapped":0,"free_frames":127318,"heap_delta":0,"mapped_delta":0,"frame_delta":1}
+[JSR-BOOT-STAGE] done stage=kernel_map done_mask=0x1f
+[JSR-PLAN] case name=mm-map
+[JSR-MAP] map va=0x400000000000 frame=0x2000 flags=write,nx translate_ok=true
+[JSR-MAP] write via va, read via phys same=true
+[JSR-MAP] protect read_only ok=true
+[JSR-MAP] errors double_map=system.memory.error.already_mapped invalid_addr=system.memory.error.invalid_address
+[JSR-MAP] unmap returned_frame=true translate_after=none again=system.memory.error.not_mapped
+[JSR-MAP] checks=25 failed=0
+[JSR-EARLY] stage=heap
+[JSR-TERM] capacity input=131072 output=131072 uart_pump=2048 available=521404416
+[JSR-DISPLAY-COMPOSITOR] layers=2 visible=2 primary=terminal overlays=bounded alpha=true full_frame=false damage=true overlay_damage=true text_full=true input_capacity=1000
+[ OK ] heap elapsed_ns=33368191 heap_used=279808 heap_peak=279808 heap_delta=279808 mapped_delta=335872 frame_delta=85
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":5960416410,"component":"heap","status":"ok","elapsed_ns":33368191,"heap_used":279808,"heap_peak":279808,"heap_mapped":335872,"free_frames":127230,"heap_delta":279808,"mapped_delta":335872,"frame_delta":85}
+[JSR-BOOT-STAGE] done stage=heap done_mask=0x3f
+[JSR-PLAN] case name=mm-heap
+[JSR-HEAP] init total=335872 free=56064 blocks=1 mapped=335872
+[JSR-HEAP] box ok vec_len=10000 vec_sum=149985000 string="内核堆可用：中文 UTF-8 ✓" chars=16 bytes=34
+[JSR-HEAP] grow big_bytes=524288 mapped_before=335872 mapped_after=1134592
+[JSR-HEAP] after free total=1134592 free=854784 blocks=1 mapped=1134592 baseline_ok=true
+[JSR-HEAP] checks=32 failed=0
+[JSR-PLAN] case name=mechanisms
+[JSR-SCHED] switch from=boot to=mech n=30 cause=yield
+[JSR-OBJ] handle=1 rights=WAIT|CONTROL type=Event id=1
+[JSR-OBJ] restrict handle=2 rights=WAIT control=system.handle.error.rights_denied
+[JSR-OBJ] stale handle=1 rejected err=system.handle.error.invalid new_handle=4294967297
+[JSR-WAIT] event signalled index=0
+[JSR-WAIT] timer fired index=1 waited_ticks=3
+[JSR-WAIT] timeout ok waited_ticks=2
+[JSR-IO] op=READ cancelled err=system.async.error.cancelled
+[JSR-IO] op=WRITE bytes=4 ok=true backend=mem
+[JSR-IO] ring completions=2 pending=0
+[JSR-VM] map anon size=64 base=0x10000000 aligned=4096 prot=rw-
+[JSR-VM] protect prot=r-- unmap ok regions=0
+[JSR-MOD] loaded module=syscall-core
+[JSR-MOD] loaded module=hello-syscall
+[JSR-MOD] loaded module=discard
+[JSR-MOD] withdraw module=discard bits=0x1
+[JSR-MOD] stopped module=discard
+[JSR-MOD] loaded module=broken-base
+[JSR-SYSCALL] enter name=x.demo.ping task=21
+[JSR-SYSCALL] exit name=x.demo.ping ret=OK value=42
+[JSR-SYSCALL] enter name=system.demo.missing task=21
+[JSR-SYSCALL] exit name=system.demo.missing ret=system.error.unsupported
+[JSR-SYNC] irq spinlock ok irq_off_inside=true irq_restored=true
+[JSR-TRACE] ring buffer count=8 total=8 last="seq=8 system.module.loaded module=broken-base"
+[JSR-SCHED] switch from=mech to=boot n=31 cause=exit
+[JSR-MECH] checks=36 failed=0
+[JSR-EARLY] stage=capacity
+[JSR-SPAWN] child_limit=8 tasks=64 source=boot_capacity
+[JSR-WORKLOAD] capacity workloads=64 members=256 tasks=64 budget=520335360 dynamic=true
+[JSR-SCHED] qos quantum=[1, 1, 1, 1] decay=8 owed_cap=2000 timer_hz=100 tasks=64 dynamic=true
+[JSR-RING] capacity rings=64 in_flight=1024 tasks=64 objects=1024 dynamic=true
+[JSR-IPC] capacity endpoints=8 queue_bytes=262144 process_bytes=1048576 total_bytes=16777216 tasks=64 objects=1024 budget=520335360 dynamic=true
+[JSR-SANDBOX] capacity sandboxes=64 workloads=64 budget=520335360 dynamic=true
+[JSR-SANDBOX-STORAGE] capacity images=128 layers=2048 volumes=512 sandboxes=64 budget=520335360 dynamic=true
+[ OK ] capacity elapsed_ns=5257936 heap_used=387328 heap_peak=935216 heap_delta=107520 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":5960416410,"component":"capacity","status":"ok","elapsed_ns":5257936,"heap_used":387328,"heap_peak":935216,"heap_mapped":1134592,"free_frames":127035,"heap_delta":107520,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=capacity done_mask=0x7f
+[JSR-EARLY] stage=devices
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=1 keys=0 input_capacity=1000 dropped=0 compositor_layers=2 pressed=0 released=0
+[ OK ] devices elapsed_ns=49352356 heap_used=387360 heap_peak=935216 heap_delta=32 mapped_delta=0 frame_delta=130
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":5960416410,"component":"devices","status":"ok","elapsed_ns":49352356,"heap_used":387360,"heap_peak":935216,"heap_mapped":1134592,"free_frames":126905,"heap_delta":32,"mapped_delta":0,"frame_delta":130}
+[JSR-BOOT-STAGE] done stage=devices done_mask=0xff
+[JSR-EARLY] stage=profile
+[JSR-PROFILE] table idx=0 name=headless valid=true modules=9 services=25 capabilities=10 min_tasks=32 min_objects=256 hot_load=0
+[JSR-PROFILE] table idx=1 name=headless-min valid=true modules=5 services=20 capabilities=5 min_tasks=32 min_objects=128 hot_load=0
+[JSR-PROFILE] active name=headless valid=true params=standard modules=9 services=25 capabilities=10 guarantees=2 dynamic=true
+[ OK ] profile elapsed_ns=1680727 heap_used=388128 heap_peak=935216 heap_delta=768 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":5960416410,"component":"profile","status":"ok","elapsed_ns":1680727,"heap_used":388128,"heap_peak":935216,"heap_mapped":1134592,"free_frames":126905,"heap_delta":768,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=profile done_mask=0x1ff
+[JSR-EARLY] stage=assembly
+[JSR-EARLY] stage=ASM PLAN
+[JSR-ASSEMBLY] capacity modules=9 capabilities=10 services=25 metadata=1870 budget=507620 dynamic=true
+[JSR-EARLY] stage=ASM CORE
+[JSR-LIFE] release_dispatch closing_locks=true outside_lock=5 none=11 none_empty=true destroyed_when_none=0 hooks_match_registry=true
+[JSR-ASSEMBLY] activate module=core objects=1024
+[JSR-EARLY] stage=ASM OK CORE
+[JSR-EARLY] stage=ASM MEMORY
+[JSR-EARLY] stage=ASM OK MEMORY
+[JSR-EARLY] stage=ASM TIME
+[JSR-EARLY] stage=ASM OK TIME
+[JSR-EARLY] stage=ASM SCHED
+[JSR-ASSEMBLY] activate module=sched tasks=64 stacks=64
+[JSR-EARLY] stage=ASM OK SCHED
+[JSR-EARLY] stage=ASM CHANNEL
+[JSR-EARLY] stage=ASM OK CHANNEL
+[JSR-EARLY] stage=ASM REALTIME
+[JSR-ASSEMBLY] activate module=realtime rt=8
+[JSR-EARLY] stage=ASM OK REALTIME
+[JSR-EARLY] stage=ASM JOB
+[JSR-ASSEMBLY] activate module=job queue=empty
+[JSR-EARLY] stage=ASM OK JOB
+[JSR-EARLY] stage=ASM ASYNC
+[JSR-EARLY] stage=ASM OK ASYNC
+[JSR-EARLY] stage=ASM DEVICES
+[JSR-PCI] inventory total=10498048 free=68800 mapped=10498048 budget=2624512
+[JSR-PCI] dev bdf=00:00.0 vendor=0x8086 device=0x29c0 class=0x060000 bars=0 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:01.0 vendor=0x1234 device=0x1111 class=0x030000 bars=2 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:02.0 vendor=0x8086 device=0x10d3 class=0x020000 bars=4 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:03.0 vendor=0x1af4 device=0x1005 class=0x00ff00 bars=3 caps_discovered=5 caps_admitted=5 caps_truncated=0
+[JSR-PCI] dev bdf=00:04.0 vendor=0x1af4 device=0x1001 class=0x010000 bars=3 caps_discovered=5 caps_admitted=5 caps_truncated=0
+[JSR-PCI] dev bdf=00:1f.0 vendor=0x8086 device=0x2918 class=0x060100 bars=0 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:1f.2 vendor=0x8086 device=0x2922 class=0x010601 bars=2 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-PCI] dev bdf=00:1f.3 vendor=0x8086 device=0x2930 class=0x0c0500 bars=1 caps_discovered=0 caps_admitted=0 caps_truncated=0
+[JSR-ASSEMBLY] activate module=devices pci=ecam functions=8
+[JSR-EARLY] stage=ASM OK DEVICES
+[JSR-ASSEMBLY] module=core order=0 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=memory order=1 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=time order=2 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=sched order=3 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=channel order=4 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=realtime order=5 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=job order=6 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=async order=7 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=devices order=8 state=ready reason= version=1.0.0
+[JSR-CAP] boot source=derived objects=1024 tasks=64 rt=8 task_stacks=64 mem_limit=476073984
+[JSR-K06] profile=headless ops=109 kernel_base=72 module_service=37 active_unavailable=0 unclaimed=0 gate_mismatch=0 ring=available time=available sync=available
+[JSR-ASSEMBLY] summary profile=headless modules=9 ready=9 failed=0 blocked=0 declared=10 published=10 pre_publish=0 audit=ok restart=system.module.error.already_started stop_core=system.module.error.in_use stop_devices=system.module.error.permanent generation=0 readers=0
+[ OK ] assembly elapsed_ns=72406746 heap_used=10431296 heap_peak=10432384 heap_delta=10043168 mapped_delta=10153984 frame_delta=2484
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":5960416410,"component":"assembly","status":"ok","elapsed_ns":72406746,"heap_used":10431296,"heap_peak":10432384,"heap_mapped":11288576,"free_frames":124421,"heap_delta":10043168,"mapped_delta":10153984,"frame_delta":2484}
+[JSR-BOOT-STAGE] done stage=assembly done_mask=0x3ff
+[JSR-PLAN] case name=pci-table
+[JSR-PCI] demo host_bridge=true isa_bridge=true virtio=2 invalid_bdf=true bars_restored=true
+[JSR-PCI] summary mechanism=ecam functions=8 bars=15 checks=10 failed=0
+[JSR-PLAN] case name=capacity-report
+[JSR-SCHED] capacity slots=64 static_stacks=4 max=64 policy=timeshare preemption=default_on
+[JSR-PLAN] case name=profile-checks
+[JSR-ASSEMBLY] health module=devices from=healthy to=unhealthy removed=0x2 published=0x3fd readers=0
+[JSR-ASSEMBLY] health module=devices from=unhealthy to=healthy removed=0x0 published=0x3ff readers=0
+[JSR-ASSEMBLY] runtime stop_dependent=in_use stop_permanent=permanent health=healthy->unhealthy->healthy published=0x3ff->withdrawn->0x3ff lease_enter=true reader_drain=true
+[JSR-PROFILE] effective name=headless params=standard services=25 capabilities=10 min_tasks=32 min_objects=256
+[JSR-PROFILE] service name=system.abi
+[JSR-PROFILE] service name=system.async
+[JSR-PROFILE] service name=system.channel
+[JSR-PROFILE] service name=system.console
+[JSR-PROFILE] service name=system.device
+[JSR-PROFILE] service name=system.diagnostic
+[JSR-PROFILE] service name=system.error
+[JSR-PROFILE] service name=system.event
+[JSR-PROFILE] service name=system.execution
+[JSR-PROFILE] service name=system.handle
+[JSR-PROFILE] service name=system.info
+[JSR-PROFILE] service name=system.install
+[JSR-PROFILE] service name=system.io
+[JSR-PROFILE] service name=system.job
+[JSR-PROFILE] service name=system.memory
+[JSR-PROFILE] service name=system.module
+[JSR-PROFILE] service name=system.process
+[JSR-PROFILE] service name=system.profile
+[JSR-PROFILE] service name=system.sandbox
+[JSR-PROFILE] service name=system.sync
+[JSR-PROFILE] service name=system.task
+[JSR-PROFILE] service name=system.terminal
+[JSR-PROFILE] service name=system.time
+[JSR-PROFILE] service name=system.update
+[JSR-PROFILE] service name=system.workload
+[JSR-PROFILE] gate profile=headless op=system.async.ring.create allowed=true
+[JSR-PROFILE] gate profile=headless-min op=system.async.ring.create allowed=false
+[JSR-PROFILE] gate profile=headless-min op=system.time.now allowed=true
+[JSR-PROFILE] quota-diff standard_tasks=64 compact_tasks=32 standard_objects=1024 compact_objects=512
+[JSR-PROFILE] tickless power=tickless idle_divisor=4
+[JSR-PROFILE] group-share standard=250 compact=500 current=250
+[JSR-PROFILE] hot_load enabled=false
+[JSR-PROFILE] reject case=missing-capability code=missing_capability subject=memory.virtual total=2
+[JSR-PROFILE] reason case=missing-capability code=invalid_name subject=missing-capability
+[JSR-PROFILE] reason case=missing-capability code=missing_capability subject=memory.virtual
+[JSR-PROFILE] reject case=capability-conflict code=capability_conflict subject=kernel.core total=2
+[JSR-PROFILE] reason case=capability-conflict code=invalid_name subject=capability-conflict
+[JSR-PROFILE] reason case=capability-conflict code=capability_conflict subject=kernel.core
+[JSR-PROFILE] reject case=params-too-small code=unsatisfiable_tasks subject=params-too-small total=2
+[JSR-PROFILE] reason case=params-too-small code=invalid_name subject=params-too-small
+[JSR-PROFILE] reason case=params-too-small code=unsatisfiable_tasks subject=params-too-small
+[JSR-PROFILE] reject case=hot-load-not-allowed code=hot_load_not_allowed subject=core total=2
+[JSR-PROFILE] reason case=hot-load-not-allowed code=invalid_name subject=hot-load-not-allowed
+[JSR-PROFILE] reason case=hot-load-not-allowed code=hot_load_not_allowed subject=core
+[JSR-PROFILE] render idx=0 bytes=1881 head=profile=headless
+[JSR-PROFILE] layers idx=0 modules=9 module_lines=9 four_layers=true
+[JSR-PROFILE] layers_sample idx=0 module=core feature=compiled config=declared runtime=available health=healthy authorization=granted
+[JSR-PROFILE] render idx=1 bytes=1226 head=profile=headless-min
+[JSR-PROFILE] layers idx=1 modules=5 module_lines=5 four_layers=true
+[JSR-PROFILE] layers_sample idx=1 module=core feature=compiled config=declared runtime=not_selected health=unknown authorization=granted
+[JSR-PROFILE] summary profiles=2 rejects=4 gates=3 renders=2 checks=30 failed=0
+[JSR-EARLY] stage=sched_mode
+[JSR-SCHED] mode=multi
+[JSR-CAPABILITY] domain=system.memory.boot-map state=verified inventory=complete discovered=134 supported=134 admitted=134 rejected=0 unsupported=0 enabled=134 exposed=134 verified=134 fault=none
+[JSR-CAPABILITY] domain=system.cpu.xstate state=exposed inventory=complete discovered=6 supported=6 admitted=3 rejected=0 unsupported=3 enabled=3 exposed=3 verified=0 fault=none
+[JSR-CAPABILITY] domain=system.device.pci-capabilities state=exposed inventory=complete discovered=10 supported=10 admitted=10 rejected=0 unsupported=0 enabled=10 exposed=10 verified=0 fault=none
+[JSR-CAPABILITY] domain=system.network state=discovered inventory=complete discovered=1 supported=0 admitted=0 rejected=0 unsupported=1 enabled=0 exposed=0 verified=0 fault=none
+[JSR-CAPABILITY] domain=system.device.gpu state=discovered inventory=complete discovered=1 supported=0 admitted=0 rejected=0 unsupported=1 enabled=0 exposed=0 verified=0 fault=none
+[ OK ] sched_mode elapsed_ns=1882010 heap_used=10431296 heap_peak=10433536 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":5960416410,"component":"sched_mode","status":"ok","elapsed_ns":1882010,"heap_used":10431296,"heap_peak":10433536,"heap_mapped":11288576,"free_frames":124421,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=sched_mode done_mask=0x7ff
+[JSR-PLAN] case name=hardware-virt
+[JSR-HWV0] vendor=Amd matrix=10 caps=0x10a selected=svm reject=iommu failed=0
+[JSR-EARLY] stage=space
+[ OK ] space elapsed_ns=675200 heap_used=10431296 heap_peak=10433536 heap_delta=0 mapped_delta=0 frame_delta=255
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":5960416410,"component":"space","status":"ok","elapsed_ns":675200,"heap_used":10431296,"heap_peak":10433536,"heap_mapped":11288576,"free_frames":124166,"heap_delta":0,"mapped_delta":0,"frame_delta":255}
+[JSR-BOOT-STAGE] done stage=space done_mask=0xfff
+[JSR-PLAN] case name=mm-space
+[JSR-AS] created a=SpaceRoot(20099072) b=SpaceRoot(20111360) va=0x100010000000 window=0x100000000000..0x200000000000 outside_window=system.memory.error.invalid_address
+[JSR-AS] switch read a=0xaaaa00000000000a b=0xbbbb00000000000b a_again=0xaaaa00000000000a isolated=true kernel_shared=true
+[JSR-AS] kernel space sees va=unmapped
+[JSR-AS] destroyed free_before=124166 free_after=124166 reclaimed=true
+[JSR-AS] checks=43 failed=0
+[JSR-EARLY] stage=smp
+[JSR-EARLY] stage=SMP DISCOVER
+[JSR-SMP] apic mode=xapic base=0xfee00000 bsp_id=0
+[JSR-IOAPIC] controllers=1 pins=24 exposed=2 unsupported=22 invalid=0 dropped=0
+[JSR-IOAPIC] line=0 name=serial vector=80 gsi_pin=4 controlled=true
+[JSR-IOAPIC] line=1 name=rtc vector=81 gsi_pin=8 controlled=true
+[JSR-SMP] firmware raw=1 enabled_records=1 disabled_records=0 duplicate_records=0 conflicting_duplicates=0 unique_enabled=1 unique_disabled=0 source=acpi.madt
+[JSR-EARLY] stage=SMP PREP
+[JSR-SMP] admit present=1 enabled=1 disabled=0 per_cpu_bytes=16384 required_bytes=16384 available_bytes=508583936 source=resource-budget
+[JSR-EARLY] stage=SMP DONE
+[JSR-SMP] start present=1 online=1 failed=0 source=acpi.madt dropped=0 disabled=0
+[JSR-IRQ] topology source=smp_ready discovered=2 admitted=2 rejected=0 capacity=2 budget=496664 dynamic=true complete=true
+[ OK ] smp elapsed_ns=30397955 heap_used=10437456 heap_peak=11025984 heap_delta=6160 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":5960416410,"component":"smp","status":"ok","elapsed_ns":30397955,"heap_used":10437456,"heap_peak":11025984,"heap_mapped":11288576,"free_frames":124166,"heap_delta":6160,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=smp done_mask=0x1fff
+[JSR-PLAN] case name=smp-checks
+[JSR-SMP] start present=1 online=1 failed=0 source=acpi.madt dropped=0 disabled=0
+[JSR-SMP] cpu index=0 hw=0 state=online
+[JSR-SMP] refuse no_such_cpu=system.cpu.error.no_such_cpu self=system.cpu.error.self_target call_no_such=system.cpu.error.no_such_cpu call_self=system.cpu.error.self_target bad_range=system.cpu.error.bad_range,system.cpu.error.bad_range,system.cpu.error.bad_range
+[JSR-SMP] single cpus=1 secondary=none
+[JSR-SMPC] registry locks=29 valid=true
+[JSR-SMPC] rank  0 system.compat.android.binder
+[JSR-SMPC] rank  1 system.sandbox.registry
+[JSR-SMPC] rank  2 system.process.registry
+[JSR-SMPC] rank  3 system.module.assembly
+[JSR-SMPC] rank  4 system.object.table
+[JSR-SMPC] rank  5 system.device.interrupt
+[JSR-SMPC] rank  6 system.memory.pins
+[JSR-SMPC] rank  7 system.device.hwv5_policy
+[JSR-SMPC] rank  8 system.sched
+[JSR-SMPC] rank  9 system.compat.linux
+[JSR-SMPC] rank 10 system.fault.last
+[JSR-SMPC] rank 11 system.syscall.last_exit
+[JSR-SMPC] rank 12 system.compat.linux.socket
+[JSR-SMPC] rank 13 system.compat.sysv_ipc
+[JSR-SMPC] rank 14 system.memory.pressure
+[JSR-SMPC] rank 15 system.install
+[JSR-SMPC] rank 16 system.cpu.runtime
+[JSR-SMPC] rank 17 system.memory.heap
+[JSR-SMPC] rank 18 system.sandbox.storage
+[JSR-SMPC] rank 19 system.memory.frame
+[JSR-SMPC] rank 20 system.irq.routing
+[JSR-SMPC] rank 21 system.irq.quota
+[JSR-SMPC] rank 22 system.trace
+[JSR-SMPC] rank 23 system.sandbox.launch
+[JSR-SMPC] rank 24 system.watchdog
+[JSR-SMPC] rank 25 system.service.shard
+[JSR-SMPC] rank 26 system.display.session
+[JSR-SMPC] rank 27 system.terminal.session
+[JSR-SMPC] rank 28 system.console
+[JSR-SMPC] order ascending=ok reverse=system.lock.error.out_of_order recursive=system.lock.error.out_of_order unchanged=true held_back=true
+[JSR-SMPC] single cpus=1 cross_cpu=skipped
+[JSR-SMP] final bsp_index=0 current=0 idle_slot=18446744073709551615
+[JSR-SMP] summary cpus=1 online=1 checks=13 failed=0
+[JSR-EARLY] stage=highres
+[JSR-RT2] high_resolution=true legacy_tick_abi=true
+[ OK ] highres elapsed_ns=914329 heap_used=10437456 heap_peak=11025984 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":5960416410,"component":"highres","status":"ok","elapsed_ns":914329,"heap_used":10437456,"heap_peak":11025984,"heap_mapped":11288576,"free_frames":124166,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=highres done_mask=0x3fff
+[JSR-EARLY] stage=idle_tick
+[JSR-NOHZ] configured power=tickless divisor=4 cpus=1
+[ OK ] idle_tick elapsed_ns=330795 heap_used=10437456 heap_peak=11025984 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":5960416410,"component":"idle_tick","status":"ok","elapsed_ns":330795,"heap_used":10437456,"heap_peak":11025984,"heap_mapped":11288576,"free_frames":124166,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=idle_tick done_mask=0x7fff
+[JSR-EARLY] stage=user_runtime
+[JSR-STAGE] user_runtime embedded_programs=true
+[ OK ] user_runtime elapsed_ns=133816 heap_used=10437456 heap_peak=11025984 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":5960416410,"component":"user_runtime","status":"ok","elapsed_ns":133816,"heap_used":10437456,"heap_peak":11025984,"heap_mapped":11288576,"free_frames":124166,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=user_runtime done_mask=0xffff
+[JSR-PLAN] finish plan=native-terminal stages=0xffff cases=13
+[JSR-SEC3] policy=installed epoch=2 audit_capacity=256
+[JSR-PROC] event=system.process.created id=0x2 name=blk1 memory_cap_capacity=4434 memory_cap_metadata_budget=15892480 memory_budget=508559360 process_slots=64 dynamic=true
+[JSR-UPDATE-BACKEND] frames_before=124166 frames_after=124152
+[JSR-PROC] event=system.process.created id=0x7 name=first-program memory_cap_capacity=4434 memory_cap_metadata_budget=15891456 memory_budget=508526592 process_slots=64 dynamic=true
+[JSR-SCHED] switch from=boot to=first-program n=32 cause=preempt
+[JSR-SYSCALL] enter name=system.memory.map id=19 task=first-program effects=write
+[JSR-SYSCALL] exit name=system.memory.map id=19 ret=0 status=OK
+[JSR-SYSCALL] enter name=system.terminal.write id=98 task=first-program effects=write
+Jasper-OS native CLI
+[JSR-SYSCALL] exit name=system.terminal.write id=98 ret=21 status=OK
+[JSR-SYSCALL] enter name=system.terminal.write id=98 task=first-program effects=write
+jasper> [JSR-SYSCALL] exit name=system.terminal.write id=98 ret=8 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=33 cause=sleep
+[JSR-PROC] event=system.task.spawned process=0x7 task=1001 task_obj=0x9 name=first-program
+[JSR-SCHED] switch from=boot to=first-program n=34 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=35 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=36 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=37 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=38 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=39 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=40 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=41 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=42 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=43 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=44 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=45 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=46 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=47 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=48 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=49 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=50 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=51 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=52 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=53 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=54 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=55 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=56 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=57 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=58 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=59 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=60 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=61 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=62 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=63 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=64 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=65 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=66 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=67 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=68 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=69 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=70 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=71 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=72 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=73 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=74 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=75 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=76 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=77 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=78 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=79 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=80 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=81 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=82 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=83 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=84 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=85 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=86 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=87 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=88 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=89 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=90 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=91 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=92 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=93 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=94 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=95 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=96 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=97 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=98 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=99 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=100 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=101 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=102 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=103 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=104 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=105 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=106 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=107 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=108 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=109 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=110 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=111 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=112 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=113 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=114 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=115 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=116 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=117 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=118 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=119 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=120 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=121 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=122 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=123 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=124 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=125 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=126 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=127 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=128 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=129 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=130 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=131 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=132 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=133 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=134 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=135 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=136 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=137 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=138 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=139 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=140 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=141 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=142 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=143 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=144 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=145 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=146 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=147 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=148 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=149 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=150 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=151 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=152 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=153 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=154 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=155 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=156 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=157 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=158 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=159 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=160 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=161 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=162 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=163 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=164 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=165 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=166 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=167 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=168 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=169 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=170 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=171 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=172 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=173 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=174 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=175 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=176 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=177 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=178 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=179 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=180 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=181 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=182 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=183 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=184 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=185 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=186 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=187 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=188 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=189 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=190 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=191 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=192 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=193 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=194 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=195 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=196 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=197 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=198 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=199 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=200 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=201 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=202 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=203 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=204 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=205 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=206 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=4 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=1 released=0
+h[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=207 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=208 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=6 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=1 released=1
+[JSR-SCHED] switch from=first-program to=boot n=209 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=210 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=211 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=212 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=213 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=214 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=7 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=2 released=1
+e[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=215 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=216 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=9 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=2 released=2
+[JSR-SCHED] switch from=first-program to=boot n=217 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=218 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=219 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=220 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=221 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=222 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=10 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=3 released=2
+l[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=223 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=224 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=12 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=3 released=3
+[JSR-SCHED] switch from=first-program to=boot n=225 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=226 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=227 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=228 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=229 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=230 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=13 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=4 released=3
+p[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=231 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=232 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=15 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=4 released=4
+[JSR-SCHED] switch from=first-program to=boot n=233 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=234 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=235 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=236 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=237 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=238 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=16 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=5 released=4
+
+[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.write id=98 task=first-program effects=write
+commands: help, echo <text>, system update status|recover|archive|list|audit [--json], exit
+[JSR-SYSCALL] exit name=system.terminal.write id=98 ret=92 status=OK
+[JSR-SYSCALL] enter name=system.terminal.write id=98 task=first-program effects=write
+native-help-ok
+[JSR-SYSCALL] exit name=system.terminal.write id=98 ret=15 status=OK
+[JSR-SYSCALL] enter name=system.terminal.write id=98 task=first-program effects=write
+jasper> [JSR-SYSCALL] exit name=system.terminal.write id=98 ret=8 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=21 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=5 released=5
+[JSR-SCHED] switch from=first-program to=boot n=239 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=240 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=241 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=242 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=243 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=244 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=245 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=246 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=247 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=248 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=249 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=250 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=251 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=252 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=253 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=254 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=255 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=256 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=257 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=258 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=259 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=260 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=261 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=262 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=263 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=264 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=265 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=266 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=267 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=268 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=269 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=270 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=271 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=272 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=273 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=274 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=275 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=276 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=277 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=278 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=279 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=280 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=281 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=282 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=283 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=284 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=285 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=286 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=287 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=288 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=289 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=290 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=291 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=292 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=293 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=294 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=295 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=296 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=297 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=298 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=299 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=300 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=301 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=302 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=303 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=304 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=305 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=306 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=307 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=308 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=309 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=310 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=311 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=312 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=313 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=314 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=315 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=316 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=317 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=318 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=319 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=320 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=321 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=322 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=323 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=324 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=325 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=326 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=327 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=328 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=329 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=330 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=331 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=332 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=333 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=334 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=335 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=336 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=337 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=338 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=339 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=340 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=341 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=342 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=343 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=344 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=345 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=346 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=347 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=348 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=349 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=350 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=351 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=352 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=353 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=354 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=355 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=356 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=357 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=358 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=359 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=360 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=361 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=362 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=363 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=364 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=365 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=366 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=367 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=368 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=369 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=370 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=371 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=372 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=373 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=374 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=22 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=6 released=5
+s[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=375 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=376 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=24 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=6 released=6
+[JSR-SCHED] switch from=first-program to=boot n=377 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=378 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=379 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=380 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=381 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=382 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=25 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=7 released=6
+y[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=383 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=384 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=27 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=7 released=7
+[JSR-SCHED] switch from=first-program to=boot n=385 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=386 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=387 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=388 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=389 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=390 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=28 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=8 released=7
+s[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=391 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=392 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=30 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=8 released=8
+[JSR-SCHED] switch from=first-program to=boot n=393 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=394 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=395 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=396 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=397 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=398 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=31 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=9 released=8
+t[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=399 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=400 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=33 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=9 released=9
+[JSR-SCHED] switch from=first-program to=boot n=401 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=402 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=403 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=404 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=405 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=406 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=34 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=10 released=9
+e[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=407 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=408 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=36 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=10 released=10
+[JSR-SCHED] switch from=first-program to=boot n=409 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=410 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=411 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=412 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=413 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=414 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=37 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=11 released=10
+m[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=415 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=416 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=39 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=11 released=11
+[JSR-SCHED] switch from=first-program to=boot n=417 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=418 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=419 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=420 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=421 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=422 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=40 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=12 released=11
+ [JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=423 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=424 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=42 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=12 released=12
+[JSR-SCHED] switch from=first-program to=boot n=425 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=426 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=427 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=428 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=429 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=430 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=43 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=13 released=12
+u[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=45 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=13 released=13
+[JSR-SCHED] switch from=first-program to=boot n=431 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=432 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=433 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=434 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=435 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=436 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=437 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=438 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=46 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=14 released=13
+p[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=439 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=440 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=48 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=14 released=14
+[JSR-SCHED] switch from=first-program to=boot n=441 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=442 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=443 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=444 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=445 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=446 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=49 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=15 released=14
+d[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=447 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=448 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=51 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=15 released=15
+[JSR-SCHED] switch from=first-program to=boot n=449 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=450 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=451 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=452 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=453 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=454 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=52 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=16 released=15
+a[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=455 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=456 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=54 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=16 released=16
+[JSR-SCHED] switch from=first-program to=boot n=457 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=458 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=459 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=460 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=461 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=462 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=55 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=17 released=16
+t[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=463 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=464 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=57 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=17 released=17
+[JSR-SCHED] switch from=first-program to=boot n=465 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=466 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=467 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=468 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=469 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=470 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=58 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=18 released=17
+e[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=60 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=18 released=18
+[JSR-SCHED] switch from=first-program to=boot n=471 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=472 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=473 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=474 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=475 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=476 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=477 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=478 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=61 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=19 released=18
+ [JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=479 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=480 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=63 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=19 released=19
+[JSR-SCHED] switch from=first-program to=boot n=481 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=482 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=483 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=484 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=485 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=486 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=64 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=20 released=19
+s[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=487 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=488 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=66 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=20 released=20
+[JSR-SCHED] switch from=first-program to=boot n=489 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=490 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=491 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=492 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=493 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=494 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=67 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=21 released=20
+t[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=495 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=496 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=69 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=21 released=21
+[JSR-SCHED] switch from=first-program to=boot n=497 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=498 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=499 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=500 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=501 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=502 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=70 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=22 released=21
+a[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=503 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=504 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=72 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=22 released=22
+[JSR-SCHED] switch from=first-program to=boot n=505 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=506 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=507 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=508 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=509 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=510 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=73 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=23 released=22
+t[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=511 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=512 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=75 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=23 released=23
+[JSR-SCHED] switch from=first-program to=boot n=513 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=514 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=515 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=516 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=517 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=518 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=76 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=24 released=23
+u[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=519 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=520 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=78 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=24 released=24
+[JSR-SCHED] switch from=first-program to=boot n=521 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=522 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=523 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=524 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=525 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=526 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=79 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=25 released=24
+s[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=527 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=528 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=81 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=25 released=25
+[JSR-SCHED] switch from=first-program to=boot n=529 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=530 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=531 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=532 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=533 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=534 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=82 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=26 released=25
+
+[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.update.status.query id=111 task=first-program effects=read
+[JSR-AUTHZ] version=1 issuer=1 subject=7 executor_generation=0 tenant=2 domain=1 operation=system.update.status scope=platform effect=read policy=2 revocation=None decision=true reason=allowed
+[JSR-UPDATE-STATUS-V1] caller=7 tenant=2 domain=1 request=1 generation=2 scope=1 bytes=192 result=ok
+[JSR-SYSCALL] exit name=system.update.status.query id=111 ret=192 status=OK
+[JSR-SYSCALL] enter name=system.terminal.write id=98 task=first-program effects=write
+system-update status=ok command=system.update.status generation=2 transaction=1 terminal=complete active=A state=confirmed release=1 attempts=1 candidate=none candidate_release=0 rollback_floor=1 security_epoch=1 schema=1..1 caller=7 domain=1 tenant=2 request=1
+system-update-ok
+[JSR-SYSCALL] exit name=system.terminal.write id=98 ret=279 status=OK
+[JSR-SYSCALL] enter name=system.terminal.write id=98 task=first-program effects=write
+jasper> [JSR-SYSCALL] exit name=system.terminal.write id=98 ret=8 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=86 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=26 released=26
+[JSR-SCHED] switch from=first-program to=boot n=535 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=536 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=537 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=538 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=539 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=540 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=541 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=542 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=543 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=544 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=545 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=546 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=547 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=548 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=549 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=550 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=551 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=552 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=553 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=554 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=555 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=556 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=557 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=558 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=559 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=560 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=561 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=562 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=563 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=564 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=565 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=566 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=567 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=568 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=569 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=570 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=571 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=572 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=573 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=574 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=575 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=576 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=577 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=578 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=579 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=580 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=581 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=582 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=583 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=584 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=585 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=586 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=587 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=588 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=589 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=590 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=591 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=592 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=593 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=594 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=595 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=596 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=597 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=598 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=599 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=600 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=601 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=602 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=603 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=604 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=605 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=606 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=607 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=608 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=609 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=610 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=611 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=612 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=613 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=614 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=615 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=616 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=617 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=618 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=619 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=620 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=621 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=622 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=623 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=624 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=625 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=626 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=627 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=628 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=629 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=630 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=631 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=632 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=633 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=634 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=635 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=636 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=637 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=638 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=639 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=640 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=641 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=642 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=643 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=644 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=645 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=646 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=647 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=648 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=649 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=650 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=651 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=652 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=653 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=654 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=655 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=656 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=657 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=658 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=659 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=660 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=661 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=662 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=663 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=664 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=665 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=666 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=667 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=668 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=669 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=670 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=671 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=672 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=673 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=674 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=675 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=676 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=87 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=27 released=26
+e[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=677 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=678 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=89 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=27 released=27
+[JSR-SCHED] switch from=first-program to=boot n=679 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=680 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=681 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=682 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=683 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=684 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=90 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=28 released=27
+c[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=92 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=28 released=28
+[JSR-SCHED] switch from=first-program to=boot n=685 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=686 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=687 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=688 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=689 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=690 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=691 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=692 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=93 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=29 released=28
+h[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=95 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=29 released=29
+[JSR-SCHED] switch from=first-program to=boot n=693 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=694 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=695 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=696 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=697 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=698 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=699 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=700 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=96 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=30 released=29
+o[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=98 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=30 released=30
+[JSR-SCHED] switch from=first-program to=boot n=701 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=702 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=703 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=704 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=705 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=706 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=707 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=708 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=99 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=31 released=30
+ [JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=101 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=31 released=31
+[JSR-SCHED] switch from=first-program to=boot n=709 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=710 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=711 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=712 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=713 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=714 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=715 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=716 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=102 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=32 released=31
+h[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=104 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=32 released=32
+[JSR-SCHED] switch from=first-program to=boot n=717 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=718 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=719 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=720 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=721 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=722 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=723 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=724 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=105 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=33 released=32
+i[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=107 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=33 released=33
+[JSR-SCHED] switch from=first-program to=boot n=725 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=726 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=727 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=728 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=729 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=730 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=731 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=732 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=108 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=34 released=33
+s[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=110 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=34 released=34
+[JSR-SCHED] switch from=first-program to=boot n=733 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=734 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=735 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=736 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=737 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=738 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=739 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=740 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=111 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=35 released=34
+t[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=113 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=35 released=35
+[JSR-SCHED] switch from=first-program to=boot n=741 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=742 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=743 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=744 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=745 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=746 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=747 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=748 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=114 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=36 released=35
+o[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=116 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=36 released=36
+[JSR-SCHED] switch from=first-program to=boot n=749 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=750 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=751 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=752 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=753 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=754 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=755 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=756 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=117 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=37 released=36
+r[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=119 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=37 released=37
+[JSR-SCHED] switch from=first-program to=boot n=757 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=758 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=759 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=760 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=761 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=762 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=763 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=764 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=120 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=38 released=37
+y[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=122 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=38 released=38
+[JSR-SCHED] switch from=first-program to=boot n=765 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=766 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=767 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=768 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=769 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=770 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=771 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=772 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=123 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=39 released=38
+
+[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.write id=98 task=first-program effects=write
+native-echo=history
+native-echo-ok
+[JSR-SYSCALL] exit name=system.terminal.write id=98 ret=35 status=OK
+[JSR-SYSCALL] enter name=system.terminal.write id=98 task=first-program effects=write
+jasper> [JSR-SYSCALL] exit name=system.terminal.write id=98 ret=8 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=127 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=39 released=39
+[JSR-SCHED] switch from=first-program to=boot n=773 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=774 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=775 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=776 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=777 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=778 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=779 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=780 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=781 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=782 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=783 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=784 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=785 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=786 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=787 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=788 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=789 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=790 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=791 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=792 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=793 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=794 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=795 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=796 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=797 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=798 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=799 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=800 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=801 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=802 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=803 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=804 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=805 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=806 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=807 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=808 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=809 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=810 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=811 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=812 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=813 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=814 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=815 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=816 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=817 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=818 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=819 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=820 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=128 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=40 released=39
+[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.write id=98 task=first-program effects=write
+[JSR-SYSCALL] exit name=system.terminal.write id=98 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.write id=98 task=first-program effects=write
+jasper> [JSR-SYSCALL] exit name=system.terminal.write id=98 ret=8 status=OK
+[JSR-SYSCALL] enter name=system.terminal.write id=98 task=first-program effects=write
+echo history[JSR-SYSCALL] exit name=system.terminal.write id=98 ret=12 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=135 keys=3 input_capacity=1000 dropped=0 compositor_layers=2 pressed=41 released=41
+
+[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.write id=98 task=first-program effects=write
+native-echo=history
+native-echo-ok
+[JSR-SYSCALL] exit name=system.terminal.write id=98 ret=35 status=OK
+[JSR-SYSCALL] enter name=system.terminal.write id=98 task=first-program effects=write
+jasper> [JSR-SYSCALL] exit name=system.terminal.write id=98 ret=8 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=821 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=822 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=823 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=824 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=825 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=826 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=827 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=828 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=829 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=830 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=831 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=832 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=833 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=834 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=835 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=836 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=837 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=838 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=839 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=840 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=841 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=842 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=843 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=844 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=845 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=846 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=847 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=848 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=849 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=850 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=851 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=852 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=853 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=854 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=855 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=856 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=857 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=858 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=859 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=860 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=861 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=862 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=863 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=864 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=865 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=866 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=867 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=868 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=869 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=870 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=871 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=872 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=873 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=874 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=875 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=876 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=877 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=878 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=879 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=880 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=881 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=882 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=883 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=884 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=885 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=886 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=887 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=888 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=889 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=890 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=891 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=892 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=893 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=894 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=895 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=896 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=897 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=898 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=899 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=900 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=901 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=902 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=903 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=904 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=905 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=906 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=907 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=908 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=909 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=910 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=911 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=912 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=913 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=914 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=915 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=916 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=917 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=918 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=919 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=920 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=921 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=922 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=923 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=924 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=925 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=926 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=927 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=928 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=929 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=930 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=931 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=932 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=933 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=934 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=935 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=936 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=937 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=938 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=939 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=940 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=941 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=942 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=943 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=944 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=945 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=946 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=947 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=948 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=949 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=950 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=951 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=952 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=953 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=954 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=955 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=956 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=957 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=958 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=959 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=960 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=961 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=962 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=963 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=964 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=965 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=966 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=967 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=968 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=969 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=970 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=971 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=972 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=973 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=974 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=975 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=976 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=977 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=978 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=979 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=980 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=981 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=982 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=983 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=984 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=985 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=986 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=987 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=988 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=139 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=42 released=41
+e[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=141 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=42 released=42
+[JSR-SCHED] switch from=first-program to=boot n=989 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=990 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=991 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=992 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=993 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=994 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=995 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=996 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=142 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=43 released=42
+c[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=144 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=43 released=43
+[JSR-SCHED] switch from=first-program to=boot n=997 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=998 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=999 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1000 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1001 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1002 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1003 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1004 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=145 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=44 released=43
+h[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=147 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=44 released=44
+[JSR-SCHED] switch from=first-program to=boot n=1005 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1006 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1007 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1008 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1009 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1010 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1011 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1012 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=148 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=45 released=44
+o[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=150 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=45 released=45
+[JSR-SCHED] switch from=first-program to=boot n=1013 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1014 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1015 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1016 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1017 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1018 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1019 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1020 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=151 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=46 released=45
+ [JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=153 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=46 released=46
+[JSR-SCHED] switch from=first-program to=boot n=1021 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1022 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1023 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1024 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1025 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1026 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1027 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1028 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=154 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=47 released=46
+h[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=156 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=47 released=47
+[JSR-SCHED] switch from=first-program to=boot n=1029 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1030 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1031 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1032 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1033 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1034 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1035 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1036 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=157 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=48 released=47
+e[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=159 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=48 released=48
+[JSR-SCHED] switch from=first-program to=boot n=1037 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1038 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1039 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1040 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1041 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1042 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1043 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1044 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=160 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=49 released=48
+l[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=162 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=49 released=49
+[JSR-SCHED] switch from=first-program to=boot n=1045 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1046 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1047 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1048 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1049 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1050 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1051 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1052 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=163 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=50 released=49
+l[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=165 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=50 released=50
+[JSR-SCHED] switch from=first-program to=boot n=1053 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1054 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1055 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1056 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1057 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1058 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1059 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1060 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=166 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=51 released=50
+p[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=168 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=51 released=51
+[JSR-SCHED] switch from=first-program to=boot n=1061 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1062 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1063 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1064 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1065 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1066 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1067 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1068 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=169 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=52 released=51
+[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=171 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=52 released=52
+[JSR-SCHED] switch from=first-program to=boot n=1069 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1070 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1071 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1072 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1073 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1074 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1075 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1076 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=172 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=53 released=52
+o[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=174 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=53 released=53
+[JSR-SCHED] switch from=first-program to=boot n=1077 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1078 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1079 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1080 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1081 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1082 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1083 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1084 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=175 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=54 released=53
+
+[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.write id=98 task=first-program effects=write
+native-echo=hello
+native-echo-ok
+[JSR-SYSCALL] exit name=system.terminal.write id=98 ret=33 status=OK
+[JSR-SYSCALL] enter name=system.terminal.write id=98 task=first-program effects=write
+jasper> [JSR-SYSCALL] exit name=system.terminal.write id=98 ret=8 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=179 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=54 released=54
+[JSR-SCHED] switch from=first-program to=boot n=1085 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1086 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1087 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1088 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1089 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1090 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1091 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1092 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1093 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1094 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1095 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1096 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1097 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1098 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1099 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1100 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1101 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1102 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1103 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1104 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1105 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1106 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1107 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1108 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1109 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1110 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1111 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1112 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1113 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1114 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1115 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1116 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1117 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1118 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1119 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1120 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1121 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1122 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1123 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1124 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1125 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1126 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1127 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1128 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=180 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=55 released=54
+b[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=1129 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1130 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=182 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=55 released=55
+[JSR-SCHED] switch from=first-program to=boot n=1131 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1132 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1133 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1134 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1135 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1136 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=183 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=56 released=55
+a[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=1137 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1138 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=185 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=56 released=56
+[JSR-SCHED] switch from=first-program to=boot n=1139 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1140 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1141 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1142 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1143 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1144 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=186 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=57 released=56
+d[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-SCHED] switch from=first-program to=boot n=1145 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1146 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=188 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=57 released=57
+[JSR-SCHED] switch from=first-program to=boot n=1147 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1148 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1149 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1150 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1151 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1152 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=189 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=58 released=57
+[JSR-SCHED] switch from=first-program to=boot n=1153 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1154 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1155 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1156 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1157 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1158 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=190 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=59 released=57
+[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.write id=98 task=first-program effects=write
+^C
+[JSR-SYSCALL] exit name=system.terminal.write id=98 ret=3 status=OK
+[JSR-SYSCALL] enter name=system.terminal.write id=98 task=first-program effects=write
+jasper> [JSR-SYSCALL] exit name=system.terminal.write id=98 ret=8 status=OK
+[JSR-SYSCALL] enter name=system.terminal.read id=97 task=first-program effects=read
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=195 keys=2 input_capacity=1000 dropped=0 compositor_layers=2 pressed=59 released=59
+[JSR-SCHED] switch from=first-program to=boot n=1159 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1160 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1161 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1162 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1163 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1164 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1165 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1166 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1167 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1168 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1169 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1170 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1171 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1172 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1173 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1174 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1175 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1176 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1177 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1178 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1179 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1180 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1181 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1182 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1183 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1184 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1185 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1186 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1187 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1188 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1189 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1190 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1191 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1192 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1193 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1194 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1195 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1196 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1197 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1198 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1199 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1200 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1201 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1202 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1203 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1204 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1205 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1206 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1207 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1208 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1209 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1210 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1211 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1212 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1213 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1214 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1215 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1216 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1217 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1218 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1219 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1220 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1221 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1222 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1223 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1224 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1225 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1226 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1227 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1228 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1229 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1230 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1231 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1232 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1233 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1234 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1235 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1236 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1237 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1238 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1239 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1240 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1241 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1242 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1243 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1244 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1245 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1246 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1247 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1248 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1249 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1250 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1251 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1252 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1253 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1254 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1255 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1256 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1257 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1258 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1259 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1260 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1261 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1262 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1263 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1264 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1265 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1266 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1267 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1268 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1269 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1270 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1271 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1272 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1273 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1274 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1275 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1276 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1277 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1278 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1279 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1280 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1281 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1282 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1283 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1284 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1285 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1286 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1287 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1288 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1289 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1290 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1291 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1292 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1293 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1294 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1295 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1296 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1297 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1298 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1299 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1300 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1301 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1302 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1303 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1304 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1305 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1306 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1307 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1308 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=196 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=60 released=59
+[JSR-SCHED] switch from=first-program to=boot n=1309 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1310 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1311 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1312 cause=wake
+[JSR-SCHED] switch from=first-program to=boot n=1313 cause=sleep
+[JSR-SCHED] switch from=boot to=first-program n=1314 cause=wake
+[JSR-DISPLAY] backend=framebuffer keyboard=true width=1280 height=800 stride=1280 bpp=4 frames=197 keys=1 input_capacity=1000 dropped=0 compositor_layers=2 pressed=61 released=59
+[JSR-SYSCALL] exit name=system.terminal.read id=97 ret=1 status=OK
+[JSR-SYSCALL] enter name=system.terminal.write id=98 task=first-program effects=write
+native-bye
+[JSR-SYSCALL] exit name=system.terminal.write id=98 ret=11 status=OK
+[JSR-SYSCALL] enter name=system.process.exit id=16 task=first-program effects=irreversible
+[JSR-PROC] event=system.process.exiting id=0x7 code=0 handles_closed=0
+[JSR-PROC] event=system.process.exited id=0x7 name=first-program code=0 threads=1 handles_closed=0
+[JSR-PROC] event=system.task.exit_switch task=1001 cause=process.exit
+[JSR-SCHED] switch from=first-program to=boot n=1315 cause=process.exit
+[JSR-PROC] event=system.process.reaped id=0x7 frames=83 quarantined=0 threads=1 code=0
+[JSR-LIFE] cleanup destroy type=Task id=0x9
+[JSR-LIFE] cleanup destroy type=Process id=0x7
+[JSR-LIFE] cleanup destroy type=ExitState id=0x8
+[JSR-LIFE] cleanup destroy type=ExitState id=0x6
+[JSR-PROD] first_program state=Some(Exited { code: 0 }) reclaimed=true

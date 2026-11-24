@@ -63,6 +63,25 @@ early console slice. It is not EDID/display-mode evidence, physical DPI
 qualification, CJK font coverage, normal `os-terminal + Swash` integration or
 #84 complete Chinese acceptance.
 
+The normal framebuffer terminal has also moved from byte cells to a UTF-8
+streaming decoder and a dynamic `Vec<char>` grid:
+
+- incomplete UTF-8 sequences are retained across `terminal_write` calls;
+- malformed sequences produce a visible replacement character;
+- case is preserved instead of forcibly uppercased;
+- half-width, full-width and combining-cell policy is shared with the early
+  renderer through `kernel_core::text_grid`;
+- columns and rows are derived from the active framebuffer dimensions;
+- Noto coverage is alpha-blended against the current destination pixel;
+- the text store no longer allocates while the DISPLAY lock is held.
+
+Interactive QEMU evidence is retained at
+`evidence/issue93-utf8-terminal-qemu-20261124-r4`. Prompt/help/update/history/
+edit/Ctrl-C/EOF markers and first-program reclamation passed, but the harness
+observed an unexpected QEMU process status instead of its usual debug-exit
+success value, so that evidence does not close the exit-code gate. Physical
+mode/DPI, full CJK coverage and `os-terminal + Swash` remain open.
+
 This closes the bounded native framebuffer font/terminal integration gate. It
 does not claim that `os-terminal` + Swash or Ratatui are yet the production
 userspace terminal stack.

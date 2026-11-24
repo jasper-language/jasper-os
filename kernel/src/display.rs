@@ -26,9 +26,11 @@ use crate::{kprintln, mm};
 #[cfg(all(feature = "noto-terminal", target_arch = "x86_64"))]
 use noto_sans_mono_bitmap::{get_raster, FontWeight, RasterHeight};
 
-const TEXT_COLUMNS: usize = 96;
-const TEXT_ROWS: usize = 32;
-const TEXT_CELLS: usize = TEXT_COLUMNS * TEXT_ROWS;
+const TEXT_CELL_WIDTH: u32 = 12;
+const TEXT_LINE_HEIGHT: u32 = 24;
+const TEXT_GLYPH_HEIGHT: u32 = 20;
+const TEXT_MARGIN: u32 = 16;
+const TEXT_WIDE_CONTINUATION: char = '\0';
 const OVERLAY_WIDTH: u32 = 16;
 const OVERLAY_HEIGHT: u32 = 8;
 const OVERLAY_BYTES: usize = OVERLAY_WIDTH as usize * OVERLAY_HEIGHT as usize * 4;
@@ -73,8 +75,12 @@ struct Runtime {
     ui2_pixels: Vec<u8>,
     pressed: u32,
     released: u32,
-    text: [u8; TEXT_CELLS],
+    text: Vec<char>,
+    text_columns: usize,
+    text_rows: usize,
     cursor: usize,
+    utf8_pending: [u8; 4],
+    utf8_len: usize,
     prompt_reported: bool,
     echo_reported: bool,
     ui_input_capture: bool,
@@ -201,6 +207,18 @@ pub fn start() -> Result<(), DisplayInputError> {
     if prepared.len < frame_len {
         return Err(DisplayInputError::InvalidSurface);
     }
+    let text_columns =
+        (surface.width.saturating_sub(TEXT_MARGIN * 2) / TEXT_CELL_WIDTH).max(1) as usize;
+    let text_rows = (surface
+        .height
+        .saturating_sub(TEXT_MARGIN * 2)
+        .saturating_sub(TEXT_GLYPH_HEIGHT)
+        / TEXT_LINE_HEIGHT)
+        .max(1) as usize;
+    let mut text = Vec::new();
+    text.try_reserve_exact(text_columns.saturating_mul(text_rows))
+        .map_err(|_| DisplayInputError::Failed)?;
+    text.resize(text_columns.saturating_mul(text_rows), ' ');
     let mut runtime = Runtime {
         base: prepared.base,
         len: frame_len,
@@ -224,8 +242,12 @@ pub fn start() -> Result<(), DisplayInputError> {
         ui2_pixels: Vec::new(),
         pressed: 0,
         released: 0,
-        text: [b' '; TEXT_CELLS],
+        text,
+        text_columns,
+        text_rows,
         cursor: 0,
+        utf8_pending: [0; 4],
+        utf8_len: 0,
         prompt_reported: false,
         echo_reported: false,
         ui_input_capture: false,
@@ -822,6 +844,27 @@ impl Runtime {
         }
     }
 
+    fn blend_pixel(&mut self, x: u32, y: u32, red: u8, green: u8, blue: u8, coverage: u8) {
+        if coverage == 0 {
+            return;
+        }
+        if coverage == 255 {
+            self.pixel(x, y, red, green, blue);
+            return;
+        }
+        let Some((background_red, background_green, background_blue)) = self.read_pixel(x, y)
+        else {
+            return;
+        };
+        self.pixel(
+            x,
+            y,
+            kernel_core::raster::blend_coverage(red, background_red, coverage),
+            kernel_core::raster::blend_coverage(green, background_green, coverage),
+            kernel_core::raster::blend_coverage(blue, background_blue, coverage),
+        );
+    }
+
     fn paint_boot_frame(&mut self) -> Result<(), DisplayInputError> {
         let required = usize::try_from(self.required_bytes()?)
             .map_err(|_| DisplayInputError::InvalidSurface)?;
@@ -875,88 +918,176 @@ impl Runtime {
 
     fn append_text(&mut self, bytes: &[u8]) {
         for byte in bytes.iter().copied() {
-            match byte {
-                b'\r' => self.cursor -= self.cursor % TEXT_COLUMNS,
-                b'\n' => self.newline(),
-                0x08 => {
-                    if self.cursor % TEXT_COLUMNS != 0 {
-                        self.cursor -= 1;
-                        self.text[self.cursor] = b' ';
-                    }
+            if byte < 0x80 {
+                self.flush_incomplete_utf8();
+                match byte {
+                    b'\r' => self.cursor -= self.cursor % self.text_columns,
+                    b'\n' => self.newline(),
+                    0x08 => self.backspace(),
+                    0x20..=0x7e => self.put_character(byte as char),
+                    _ => self.put_character('?'),
                 }
-                0x20..=0x7e => {
-                    if self.cursor >= TEXT_CELLS {
-                        self.newline();
-                    }
-                    self.text[self.cursor] = byte.to_ascii_uppercase();
-                    self.cursor += 1;
-                    if self.cursor % TEXT_COLUMNS == 0 {
-                        self.newline();
-                    }
-                }
-                _ => {}
+            } else {
+                self.push_utf8_byte(byte);
             }
         }
-        if !self.prompt_reported && self.contains_text(b"JASPER> ") {
+        if !self.prompt_reported && self.contains_text("JASPER> ") {
             self.prompt_reported = true;
             kprintln!("[JSR-GTERM] prompt=visible");
         }
-        if !self.echo_reported && self.contains_text(b"NATIVE-ECHO-OK") {
+        if !self.echo_reported && self.contains_text("NATIVE-ECHO-OK") {
             self.echo_reported = true;
             kprintln!("[JSR-GTERM] output=echo-ok visible=true");
         }
     }
 
-    fn newline(&mut self) {
-        let row = self.cursor / TEXT_COLUMNS;
-        if self.cursor >= TEXT_CELLS || row + 1 >= TEXT_ROWS {
-            self.text.copy_within(TEXT_COLUMNS.., 0);
-            self.text[TEXT_CELLS - TEXT_COLUMNS..].fill(b' ');
-            self.cursor = TEXT_CELLS - TEXT_COLUMNS;
-        } else {
-            self.cursor = (row + 1) * TEXT_COLUMNS;
+    fn push_utf8_byte(&mut self, byte: u8) {
+        if self.utf8_len == 0 {
+            let expected = match byte {
+                0xc2..=0xdf => 2,
+                0xe0..=0xef => 3,
+                0xf0..=0xf4 => 4,
+                _ => {
+                    self.put_character('?');
+                    return;
+                }
+            };
+            self.utf8_pending[0] = byte;
+            self.utf8_len = 1;
+            if expected == 1 {
+                self.flush_incomplete_utf8();
+            }
+            return;
+        }
+        if byte & 0xc0 != 0x80 {
+            self.flush_incomplete_utf8();
+            self.push_utf8_byte(byte);
+            return;
+        }
+        let expected = match self.utf8_pending[0] {
+            0xc2..=0xdf => 2,
+            0xe0..=0xef => 3,
+            0xf0..=0xf4 => 4,
+            _ => {
+                self.utf8_len = 0;
+                self.put_character('?');
+                return;
+            }
+        };
+        if self.utf8_len >= self.utf8_pending.len() {
+            self.flush_incomplete_utf8();
+            return;
+        }
+        self.utf8_pending[self.utf8_len] = byte;
+        self.utf8_len += 1;
+        if self.utf8_len == expected {
+            match core::str::from_utf8(&self.utf8_pending[..expected])
+                .ok()
+                .and_then(|text| text.chars().next())
+            {
+                Some(character) => self.put_character(character),
+                None => self.put_character('?'),
+            }
+            self.utf8_len = 0;
         }
     }
 
-    fn contains_text(&self, needle: &[u8]) -> bool {
-        if needle.is_empty() || needle.len() > TEXT_CELLS {
+    fn flush_incomplete_utf8(&mut self) {
+        if self.utf8_len != 0 {
+            self.utf8_len = 0;
+            self.put_character('?');
+        }
+    }
+
+    fn put_character(&mut self, character: char) {
+        let width = usize::from(kernel_core::text_grid::cell_width(character));
+        if width == 0 {
+            return;
+        }
+        if self.cursor >= self.text.len()
+            || self.cursor % self.text_columns + width > self.text_columns
+        {
+            self.newline();
+        }
+        self.text[self.cursor] = character;
+        if width == 2 {
+            self.text[self.cursor + 1] = TEXT_WIDE_CONTINUATION;
+        }
+        self.cursor += width;
+        if self.cursor % self.text_columns == 0 {
+            self.newline();
+        }
+    }
+
+    fn backspace(&mut self) {
+        let row_start = self.cursor - self.cursor % self.text_columns;
+        if self.cursor == row_start {
+            return;
+        }
+        self.cursor -= 1;
+        if self.text[self.cursor] == TEXT_WIDE_CONTINUATION {
+            self.text[self.cursor] = ' ';
+            self.cursor -= 1;
+        }
+        self.text[self.cursor] = ' ';
+    }
+
+    fn newline(&mut self) {
+        let row = self.cursor / self.text_columns;
+        if self.cursor >= self.text.len() || row + 1 >= self.text_rows {
+            self.text.copy_within(self.text_columns.., 0);
+            let last_row = self.text.len() - self.text_columns;
+            self.text[last_row..].fill(' ');
+            self.cursor = last_row;
+        } else {
+            self.cursor = (row + 1) * self.text_columns;
+        }
+    }
+
+    fn contains_text(&self, needle: &str) -> bool {
+        let needle = needle.as_bytes();
+        if needle.is_empty() || needle.len() > self.text.len() || !needle.iter().all(u8::is_ascii) {
             return false;
         }
-        self.text
-            .windows(needle.len())
-            .any(|window| window == needle)
+        for start in 0..=self.text.len() - needle.len() {
+            let matches = self.text[start..start + needle.len()]
+                .iter()
+                .zip(needle.iter())
+                .all(|(cell, expected)| cell.is_ascii() && *cell as u8 == *expected);
+            if matches {
+                return true;
+            }
+        }
+        false
     }
 
     fn paint_text(&mut self) {
-        let origin_x = 16u32;
-        let origin_y = 16u32;
-        let cell_width = 12u32;
-        let cell_height = 20u32;
-        for row in 0..TEXT_ROWS {
-            for column in 0..TEXT_COLUMNS {
-                let character = self.text[row * TEXT_COLUMNS + column];
-                if character == b' ' || character == 0 {
+        let origin_x = TEXT_MARGIN;
+        let origin_y = TEXT_MARGIN;
+        for row in 0..self.text_rows {
+            for column in 0..self.text_columns {
+                let character = self.text[row * self.text_columns + column];
+                if character == ' ' || character == TEXT_WIDE_CONTINUATION {
                     continue;
                 }
                 #[cfg(all(feature = "noto-terminal", target_arch = "x86_64"))]
                 {
-                    if let Some(glyph) = get_raster(
-                        char::from(character),
-                        FontWeight::Regular,
-                        RasterHeight::Size20,
-                    ) {
+                    if let Some(glyph) =
+                        get_raster(character, FontWeight::Regular, RasterHeight::Size20)
+                    {
                         for (glyph_row, row_pixels) in glyph.raster().iter().enumerate() {
                             for (glyph_column, value) in row_pixels.iter().copied().enumerate() {
                                 if value == 0 {
                                     continue;
                                 }
-                                self.rect(
-                                    origin_x + column as u32 * cell_width + glyph_column as u32,
-                                    origin_y + row as u32 * cell_height + glyph_row as u32,
-                                    1,
-                                    1,
-                                    value,
-                                    value,
+                                self.blend_pixel(
+                                    origin_x
+                                        + column as u32 * TEXT_CELL_WIDTH
+                                        + glyph_column as u32,
+                                    origin_y + row as u32 * TEXT_LINE_HEIGHT + glyph_row as u32,
+                                    0xd8,
+                                    0xf3,
+                                    0xea,
                                     value,
                                 );
                             }
@@ -964,14 +1095,19 @@ impl Runtime {
                         continue;
                     }
                 }
-                let glyph = glyph(character);
+                let fallback = if character.is_ascii() {
+                    character as u8
+                } else {
+                    b'?'
+                };
+                let glyph = glyph(fallback);
                 for (glyph_row, bits) in glyph.iter().copied().enumerate() {
                     for glyph_column in 0..5u32 {
                         if bits & (1u8 << (4 - glyph_column as u8)) == 0 {
                             continue;
                         }
-                        let x = origin_x + column as u32 * cell_width + glyph_column * 2;
-                        let y = origin_y + row as u32 * cell_height + glyph_row as u32 * 2;
+                        let x = origin_x + column as u32 * TEXT_CELL_WIDTH + glyph_column * 2;
+                        let y = origin_y + row as u32 * TEXT_LINE_HEIGHT + glyph_row as u32 * 2 + 3;
                         self.rect(x, y, 2, 2, 0xd8, 0xf3, 0xea);
                     }
                 }
