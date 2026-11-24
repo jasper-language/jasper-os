@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import tomllib
 from collections import Counter
 from pathlib import Path
@@ -17,6 +18,37 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY = ROOT / "abi/system-ids.txt"
 POLICY = ROOT / "verification/native-abi-domain-policy.toml"
+MATRIX = ROOT / "verification/native-abi-operation-matrix.tsv"
+SOURCE_ROOTS = (
+    "kernel",
+    "kernel-core",
+    "user",
+    "compat-core",
+    "compat-loader",
+    "netd",
+    "trust-service",
+    "modules",
+    "scripts",
+)
+SOURCE_SUFFIXES = {".c", ".h", ".md", ".py", ".rs", ".sh", ".toml"}
+MATRIX_FIELDS = (
+    "id",
+    "legacy_name",
+    "version",
+    "side_effect",
+    "decision",
+    "proposed_domain",
+    "target_name",
+    "dispatch_symbol",
+    "consumer_count",
+    "consumer_paths",
+    "error_candidates",
+    "wire_review",
+    "authorization_review",
+    "evidence",
+    "migration_status",
+    "remaining_gate",
+)
 
 
 def starts(name: str, prefixes: list[str]) -> bool:
@@ -81,6 +113,133 @@ def load_rows() -> list[dict[str, object]]:
     return rows
 
 
+def load_errors() -> list[str]:
+    errors: list[str] = []
+    for line in REGISTRY.read_text(encoding="utf-8").splitlines():
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) >= 6 and fields[1] == "error":
+            errors.append(fields[2])
+    return errors
+
+
+def registry_symbol(name: str) -> str:
+    return name.upper().replace(".", "_")
+
+
+def source_texts() -> list[tuple[str, str]]:
+    texts: list[tuple[str, str]] = []
+    for root_name in SOURCE_ROOTS:
+        root = ROOT / root_name
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file() or path.suffix not in SOURCE_SUFFIXES:
+                continue
+            if path.name == "ids.rs" or path == MATRIX:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            texts.append((path.relative_to(ROOT).as_posix(), text))
+    return texts
+
+
+def operation_matrix(
+    policy: dict[str, object],
+    rows: list[dict[str, object]],
+    errors: list[str],
+) -> list[dict[str, str]]:
+    texts = source_texts()
+    dispatch_path = "kernel/src/syscall/mod.rs"
+    dispatch_text = next((text for path, text in texts if path == dispatch_path), "")
+    matrix: list[dict[str, str]] = []
+    for row in rows:
+        classified = classify(row, policy)
+        name = str(row["old_name"])
+        symbol = registry_symbol(name)
+        pattern = re.compile(rf"\b{re.escape(symbol)}\b")
+        consumers = [path for path, text in texts if pattern.search(text)]
+        family = ".".join(name.split(".")[:2])
+        candidates = sorted(
+            {
+                error
+                for error in errors
+                if error.startswith(family + ".") or error.startswith("system.error.")
+            }
+        )
+        decision = str(classified["decision"])
+        if name == "system.info.get":
+            migration_status = "service-runtime-deployed;legacy-retained"
+            evidence = (
+                "kernel-core/src/service_info.rs;user/infod/src/main.rs;"
+                "user/infoprobe/src/main.rs;evidence/issue60-service-info-20261124-r8"
+            )
+        else:
+            migration_status = "classification-only"
+            evidence = ";".join(consumers)
+        remaining = {
+            "migrate-service": (
+                "deployed service replacement, every caller migration, wire snapshot, "
+                "authorization and failure/recovery evidence"
+            ),
+            "split-review": (
+                "explicit kernel enforcement versus service-management split, caller "
+                "migration, wire snapshot and security-boundary evidence"
+            ),
+            "reserved-review": (
+                "retain the reservation until a concrete consumer and enforcing "
+                "primitive exist"
+            ),
+            "retain-kernel": (
+                "confirm every consumer uses the kernel enforcement boundary and record "
+                "authorization/error/wire evidence"
+            ),
+        }[decision]
+        matrix.append(
+            {
+                "id": str(row["id"]),
+                "legacy_name": name,
+                "version": str(row["version"]),
+                "side_effect": str(row["side_effect"]),
+                "decision": decision,
+                "proposed_domain": str(classified["proposed_domain"]),
+                "target_name": str(classified["target_name"]),
+                "dispatch_symbol": "yes" if pattern.search(dispatch_text) else "no",
+                "consumer_count": str(len(consumers)),
+                "consumer_paths": ";".join(consumers),
+                "error_candidates": ";".join(candidates),
+                "wire_review": "legacy-register-layout;op-specific-review-required",
+                "authorization_review": "PEP-and-consumer-authorization-review-required",
+                "evidence": evidence,
+                "migration_status": migration_status,
+                "remaining_gate": remaining,
+            }
+        )
+    return matrix
+
+
+def render_matrix(matrix: list[dict[str, str]]) -> str:
+    lines = ["\t".join(MATRIX_FIELDS)]
+    for row in matrix:
+        lines.append("\t".join(row[field] for field in MATRIX_FIELDS))
+    return "\n".join(lines) + "\n"
+
+
+def check_matrix(expected: str) -> None:
+    try:
+        actual = MATRIX.read_text(encoding="utf-8")
+    except FileNotFoundError as error:
+        raise ValueError(f"operation matrix is missing: {error}") from error
+    if actual != expected:
+        raise ValueError(
+            "operation matrix is stale; run "
+            "`python3 scripts/check-native-abi-domains.py --write-matrix`"
+        )
+
+
 def audit(
     policy: dict[str, object], rows: list[dict[str, object]], *, quiet: bool = False
 ) -> None:
@@ -112,10 +271,26 @@ def audit(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--json", action="store_true", help="print the audit rows")
+    parser.add_argument(
+        "--write-matrix",
+        action="store_true",
+        help="regenerate the per-operation audit matrix",
+    )
+    parser.add_argument(
+        "--check-matrix",
+        action="store_true",
+        help="verify the checked-in per-operation matrix is current",
+    )
     args = parser.parse_args()
     try:
         policy = tomllib.loads(POLICY.read_text(encoding="utf-8"))
         rows = load_rows()
+        matrix = operation_matrix(policy, rows, load_errors())
+        rendered = render_matrix(matrix)
+        if args.write_matrix:
+            MATRIX.write_text(rendered, encoding="utf-8")
+        elif not args.json:
+            check_matrix(rendered)
         audit(policy, rows, quiet=args.json)
         if args.json:
             print(json.dumps([classify(row, policy) for row in rows], indent=2))

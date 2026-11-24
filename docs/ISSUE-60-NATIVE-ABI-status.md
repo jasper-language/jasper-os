@@ -43,6 +43,23 @@ any operation can be removed or migrated. A migration still requires a real
 consumer matrix, replacement service/gate, security boundary, wire and ABI
 snapshot decisions, failure/cancel/recovery tests, and public runtime changes.
 
+`verification/native-abi-operation-matrix.tsv` now records every one of the
+109 operations independently:
+
+- registry ID, legacy name, version and side effect;
+- retained/split/service/reserved decision and proposed target name;
+- whether the operation is present in the kernel dispatch table;
+- every current source consumer found by its generated registry symbol;
+- candidate errors from the same operation family plus generic ABI errors;
+- explicit wire-layout and PEP/consumer-authorization review gates;
+- current evidence and migration status;
+- the concrete condition still required before migration or retirement.
+
+The default checker verifies the matrix is byte-for-byte current rather than
+trusting a hand-written status file. Only `service.info` records a deployed
+service runtime in this matrix; the legacy operation remains registered and
+pending caller migration. All other operations remain classification-only.
+
 USI v1 metadata now exposes canonical service names (`service.info.get`,
 `service.process.list`, `service.module.*` and `service.time.now`) while the
 existing syscall entries and numeric IDs retain their legacy registry names
@@ -97,7 +114,9 @@ Run:
 
 ```text
 python3 scripts/check-native-abi-domains.py
+python3 scripts/check-native-abi-domains.py --check-matrix
 python3 scripts/check-native-abi-domains.py --json
+python3 scripts/check-native-abi-domains.py --write-matrix
 ```
 
 ## Important split boundaries
