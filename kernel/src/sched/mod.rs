@@ -638,7 +638,6 @@ pub fn local_tick_bypasses() -> u32 {
 pub fn leaf_finish_count() -> u32 { scheduler::leaf_finish_count() }
 #[cfg(feature = "krn3-fast-tick-verify")]
 pub fn leaf_worker_finish_count() -> u32 { scheduler::leaf_worker_finish_count() }
-#[cfg(feature = "krn3-fast-tick-verify")]
 pub fn leaf_local_switch_count() -> u32 { scheduler::leaf_local_switch_count() }
 #[cfg(feature = "krn3-fast-tick-verify")]
 pub fn local_tick_batch_peak(cpu: usize) -> u8 {

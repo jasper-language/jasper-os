@@ -2,15 +2,53 @@
 //! scheduler admitted.
 
 use alloc::boxed::Box;
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::hint::black_box;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::{arch, early, hardware, kprintln, mm, smp};
 
-static REPORT: kernel_core::sync::SpinLock<Vec<String>> =
-    kernel_core::sync::SpinLock::new(Vec::new());
+const MATRIX_RECORDS: usize = 8;
+
+#[derive(Clone, Copy)]
+struct MatrixRecord {
+    label: &'static str,
+    workers: usize,
+    expected: usize,
+    operations: u64,
+    throughput: u64,
+    scaling_ppm: u64,
+    failed: usize,
+    reclaimed: bool,
+}
+
+struct MatrixReport {
+    rows: [Option<MatrixRecord>; MATRIX_RECORDS],
+    len: usize,
+}
+
+impl MatrixReport {
+    const fn new() -> Self {
+        Self {
+            rows: [None; MATRIX_RECORDS],
+            len: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    fn push(&mut self, row: MatrixRecord) {
+        if self.len < self.rows.len() {
+            self.rows[self.len] = Some(row);
+            self.len += 1;
+        }
+    }
+}
+
+static REPORT: kernel_core::sync::SpinLock<MatrixReport> =
+    kernel_core::sync::SpinLock::new(MatrixReport::new());
 
 /// Each worker performs this many individually executed, compiler-visible
 /// workload operations.
@@ -237,17 +275,16 @@ fn run_mode(
     );
     early::append_line(line.trim_end());
     kprintln!("{}", line.trim_end());
-    REPORT.lock().push(alloc::format!(
-        "{} workers={}/{} ops={} throughput={} scaling_ppm={} failed={} reclaimed={}",
-        mode,
-        completed,
+    REPORT.lock().push(MatrixRecord {
+        label: mode,
+        workers: completed,
         expected,
-        total_operations,
+        operations: total_operations,
         throughput,
-        scaling,
+        scaling_ppm: scaling,
         failed,
-        reclaimed
-    ));
+        reclaimed,
+    });
     kprintln!(
         "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"parallel-mode\",\"mode\":\"{}\",\"workers_expected\":{},\"workers_completed\":{},\"operations_per_worker\":{},\"total_operations\":{},\"elapsed_ns\":{},\"throughput_ops_s\":{},\"scaling_permille\":{},\"worker_mean_ns\":{},\"worker_min_ns\":{},\"worker_max_ns\":{},\"failed_workers\":{},\"resources_reclaimed\":{},\"usable_kib_before\":{},\"free_kib_before\":{},\"heap_used_kib_before\":{},\"heap_mapped_kib_before\":{}}}",
         mode,
@@ -325,14 +362,16 @@ fn run_contention(kind: ContentionKind, cpus: &[usize]) -> Option<u64> {
     );
     early::append_line(&line);
     kprintln!("{}", line);
-    REPORT.lock().push(alloc::format!(
-        "{} workers={}/{} ops={} throughput={}",
-        kind.name(),
-        worker_cycles.len(),
-        cpus.len(),
+    REPORT.lock().push(MatrixRecord {
+        label: kind.name(),
+        workers: worker_cycles.len(),
+        expected: cpus.len(),
         operations,
-        throughput
-    ));
+        throughput,
+        scaling_ppm: 0,
+        failed: 0,
+        reclaimed: false,
+    });
     kprintln!(
         "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"parallel-operation\",\"operation\":\"{}\",\"workers_expected\":{},\"workers_completed\":{},\"operations_per_worker\":{},\"total_operations\":{},\"elapsed_ns\":{},\"throughput_ops_s\":{},\"worker_min_ns\":{},\"worker_max_ns\":{}}}",
         kind.name(),
@@ -430,17 +469,33 @@ pub fn failed() -> u32 {
 }
 
 pub fn records() -> usize {
-    REPORT.lock().len()
+    REPORT.lock().len
 }
 
 /// Render the SMP result records after discovery and all matrices have
 /// completed, so boot-stage output cannot scroll them off the screen.
 pub fn append_screen_records() {
     let report = REPORT.lock();
-    early::append_line("SMP PERFORMANCE MATRIX");
-    early::append_line("Scalar: single/all-physical/all-logical; then contention/memory paths");
-    for line in report.iter() {
-        early::append_line(line);
+    let header = alloc::format!(
+        "SMP PERFORMANCE MATRIX online={} records={} failed_runs={}",
+        smp::online_set().len(),
+        report.len,
+        failed()
+    );
+    early::append_line(&header);
+    for row in report.rows[..report.len].iter().flatten() {
+        let line = alloc::format!(
+            "{} workers={}/{} ops={} throughput={} scaling_ppm={} failed={} reclaimed={}",
+            row.label,
+            row.workers,
+            row.expected,
+            row.operations,
+            row.throughput,
+            row.scaling_ppm,
+            row.failed,
+            row.reclaimed
+        );
+        early::append_line(&line);
     }
 }
 

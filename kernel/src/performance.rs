@@ -23,27 +23,19 @@ fn finish(ctx: &mut BootCtx) {
     startup::skipped("ui_services", "headless_benchmark_profile");
     startup::skipped("desktop", "headless_benchmark_profile");
     startup::skipped("compat_assembly", "benchmark_excludes_compatibility_profiles");
-    let mut smp_failed = 0;
-    if let Some(report) = ctx.smp.filter(|report| report.online > 1) {
-        crate::smp::demo::run(report);
-        smp_failed = crate::smp::demo::failed();
-    }
     #[cfg(feature = "bench-smp")]
-    if crate::smp::online_set().len() > 1 {
-        crate::smp_performance::run();
-        smp_failed = smp_failed.saturating_add(crate::smp_performance::failed());
-        crate::smp_performance::publish_results();
-    }
-    #[cfg(feature = "smp-matrix-only")]
     {
-        crate::smp_performance::publish_results();
+        bench_demo::run_smp_concurrent();
+        let failed = bench_demo::failed();
+        let timing_failed = bench_demo::timing_failed();
         report_memory("smp-after");
         let line = alloc::format!(
-            "SMP MATRIX RESULT RECORDS={} FAILED={}\n",
-            crate::smp_performance::records(),
-            smp_failed
+            "SMP BENCH RESULT FAILED={} TIMING_FAILED={}\n",
+            failed,
+            timing_failed
         );
         emit(line.as_str());
+        bench_demo::publish_results(failed, timing_failed);
         arch::irq_enable();
         let mut ticks = 0u64;
         let mut pet_countdown = 0u32;
@@ -61,32 +53,47 @@ fn finish(ctx: &mut BootCtx) {
             }
         }
     }
-    report_memory("before");
-    bench_demo::run();
-    report_memory("after");
-    let failed = bench_demo::failed().saturating_add(smp_failed);
-    let timing_failed = bench_demo::timing_failed();
-    let line = alloc::format!(
-        "BENCH RESULT FAILED={} TIMING_FAILED={}\n",
-        failed,
-        timing_failed
-    );
-    emit(line.as_str());
-    bench_demo::publish_results(failed, timing_failed);
-    arch::irq_enable();
-    let mut ticks = 0u64;
-    let mut pet_countdown = 0u32;
-    loop {
-        if pet_countdown == 0 {
-            arch::watchdog_pet_force();
-            pet_countdown = 1_000_000;
+    #[cfg(not(feature = "bench-smp"))]
+    {
+        let smp_failed = if let Some(report) = ctx.smp.filter(|report| report.online > 1) {
+            crate::smp::demo::run(report);
+            crate::smp::demo::failed()
         } else {
-            pet_countdown -= 1;
-        }
-        core::hint::spin_loop();
-        ticks = ticks.wrapping_add(1);
-        if ticks % 100_000_000 == 0 {
-            kprintln!("[JSR-PERF] alive ticks={}", clock::ticks());
+            0
+        };
+        report_memory("smp-after");
+        let line = alloc::format!(
+            "SMP DEMO RESULT FAILED={}\n",
+            smp_failed
+        );
+        emit(line.as_str());
+        report_memory("before");
+        bench_demo::run();
+        report_memory("after");
+        let failed = bench_demo::failed().saturating_add(smp_failed);
+        let timing_failed = bench_demo::timing_failed();
+        let line = alloc::format!(
+            "BENCH RESULT FAILED={} TIMING_FAILED={}\n",
+            failed,
+            timing_failed
+        );
+        emit(line.as_str());
+        bench_demo::publish_results(failed, timing_failed);
+        arch::irq_enable();
+        let mut ticks = 0u64;
+        let mut pet_countdown = 0u32;
+        loop {
+            if pet_countdown == 0 {
+                arch::watchdog_pet_force();
+                pet_countdown = 1_000_000;
+            } else {
+                pet_countdown -= 1;
+            }
+            core::hint::spin_loop();
+            ticks = ticks.wrapping_add(1);
+            if ticks % 100_000_000 == 0 {
+                kprintln!("[JSR-PERF] alive ticks={}", clock::ticks());
+            }
         }
     }
 }

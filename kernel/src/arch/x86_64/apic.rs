@@ -73,8 +73,6 @@ const ICR_IDLE_SPINS: u32 = 100_000;
 const DIVIDE_BY_16: u32 = 0b0011;
 /// 校准窗口（毫秒）。
 const CALIBRATE_MS: u32 = 10;
-/// The architectural INIT assert hold time before deassert and the first SIPI.
-const INIT_ASSERT_HOLD_US: u32 = 10_000;
 
 /// 寄存器窗口的虚拟地址（0 = 尚未初始化）。
 static BASE: AtomicU64 = AtomicU64::new(0);
@@ -237,17 +235,6 @@ fn send(dest: u32, low: u32) -> bool {
     wait_icr_idle()
 }
 
-/// Issue an xAPIC ICR command without waiting for the delivery-status bit to
-/// clear afterwards. Used only for the INIT deassert diagnostic path.
-fn send_no_wait(dest: u32, low: u32) -> bool {
-    if !wait_icr_idle() || is_x2apic() {
-        return false;
-    }
-    write(REG_ICR_HIGH, (dest & 0xff) << 24);
-    write(REG_ICR_LOW, low);
-    true
-}
-
 fn wait_icr_idle() -> bool {
     for _ in 0..ICR_IDLE_SPINS {
         if read(REG_ICR_LOW) & ICR_PENDING == 0 {
@@ -294,14 +281,12 @@ pub fn send_init_startup(dest: u32, start_page: u8) -> bool {
             crate::early::mark(&marker);
             return false;
         }
-        // x86 INIT delivery is a stateful hardware handshake. Keep the
-        // architectural 10 ms assert interval before deassert; shortening this
-        // makes the Ryzen 5700X reset before the first SIPI.
-        pit::delay_us(INIT_ASSERT_HOLD_US);
+        // Linux uses no INIT assert delay on modern Intel and AMD CPUs
+        // (x86 family >= 0xF). Holding INIT here resets this Ryzen 7 5700X.
         #[cfg(not(feature = "smp-skip-init-deassert"))]
         {
             crate::early::mark("AP INIT DEASSERT");
-            if !send_no_wait(dest, ICR_INIT | ICR_LEVEL_TRIGGER) {
+            if !send(dest, ICR_INIT | ICR_LEVEL_TRIGGER) {
                 return false;
             }
             crate::early::mark("AP INIT DEASSERT WRITE DONE");
@@ -320,7 +305,7 @@ pub fn send_init_startup(dest: u32, start_page: u8) -> bool {
         }
         let marker = alloc::format!("AP SIPI {sipi} OK");
         crate::early::mark(&marker);
-        pit::delay_us(200);
+        pit::delay_us(300);
     }
     true
 }

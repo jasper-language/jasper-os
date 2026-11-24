@@ -42,6 +42,9 @@ static TOPOLOGY_READY: AtomicBool = AtomicBool::new(false);
 static AP_TIMER_HZ: AtomicU32 = AtomicU32::new(0);
 
 const MSR_EFER: u32 = 0xC000_0080;
+/// EFER.LMA becomes read-only once long mode is active. Writing it back to an
+/// AP during the transition raises #GP(0) on AMD and resets the machine.
+const EFER_LMA: u64 = 1 << 10;
 /// CR4.PCIDE：只能在长模式下置位，启动代码在进入长模式之前写 CR4，必须去掉。
 const CR4_PCIDE: u64 = 1 << 17;
 
@@ -326,7 +329,7 @@ pub unsafe fn start(req: &CpuStart<space::SpaceRoot>, frame: Option<PhysFrame>) 
     data.write(StartData {
         cr3: req.space.0,
         cr4: Cr4::read_raw() & !CR4_PCIDE,
-        efer: Msr::new(MSR_EFER).read(),
+        efer: Msr::new(MSR_EFER).read() & !EFER_LMA,
         cr0: Cr0::read_raw(),
         stack: req.stack_top,
         entry: ap_entry as *const () as u64,

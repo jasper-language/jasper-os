@@ -30,7 +30,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt::{self, Write as _};
 use core::hint::black_box;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use kernel_core::bench::{
     quantum_overhead, select, summarize, timer_overhead, Calibration, Decision, HumanDuration,
@@ -46,7 +46,7 @@ use crate::proc::ProcState;
 use crate::baseline::baseline;
 use crate::rt_demo::{rt_calls, run_program_arg};
 use crate::task::TaskId;
-use crate::{arch, config, early, kprintln, sched};
+use crate::{arch, config, early, kprintln, sched, smp};
 
 static CHECKS: AtomicU32 = AtomicU32::new(0);
 static FAILED: AtomicU32 = AtomicU32::new(0);
@@ -57,7 +57,7 @@ static LAST_RECLAIMED: AtomicBool = AtomicBool::new(false);
 /// Result-log slots are test-fixture metadata, not a hardware capacity.
 const REPORT_ROWS: usize = 64;
 /// One framebuffer result row, retaining slightly more text than the display width.
-const REPORT_ROW_BYTES: usize = 140;
+const REPORT_ROW_BYTES: usize = 240;
 
 #[derive(Clone, Copy)]
 struct ReportRow {
@@ -289,6 +289,676 @@ pub fn run() {
     );
 }
 
+#[derive(Clone, Copy)]
+enum ParallelMetric {
+    TimerRead,
+    FrameAlloc,
+    FrameFree,
+    Heap64,
+    Heap4096,
+    SyscallContainsCurrent,
+    SyscallContainsReference,
+    SyscallSubsetCurrent,
+    SyscallSubsetReference,
+    SyscallCopyCurrent,
+    SyscallCopyReference,
+    SpawnDecodeCurrent,
+    SpawnCallsDecodeCurrent,
+    SpawnCallsDecodeReference,
+}
+
+impl ParallelMetric {
+    const ALL: [Self; 14] = [
+        Self::TimerRead,
+        Self::FrameAlloc,
+        Self::FrameFree,
+        Self::Heap64,
+        Self::Heap4096,
+        Self::SyscallContainsCurrent,
+        Self::SyscallContainsReference,
+        Self::SyscallSubsetCurrent,
+        Self::SyscallSubsetReference,
+        Self::SyscallCopyCurrent,
+        Self::SyscallCopyReference,
+        Self::SpawnDecodeCurrent,
+        Self::SpawnCallsDecodeCurrent,
+        Self::SpawnCallsDecodeReference,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::TimerRead => "TIMER.READ_OVERHEAD",
+            Self::FrameAlloc => "FRAME.ALLOC",
+            Self::FrameFree => "FRAME.FREE",
+            Self::Heap64 => "HEAP.ALLOC_FREE_64",
+            Self::Heap4096 => "HEAP.ALLOC_FREE_4096",
+            Self::SyscallContainsCurrent => "SYSCALLSET.CONTAINS.CURRENT",
+            Self::SyscallContainsReference => "SYSCALLSET.CONTAINS.U64-REFERENCE",
+            Self::SyscallSubsetCurrent => "SYSCALLSET.SUBSET.CURRENT",
+            Self::SyscallSubsetReference => "SYSCALLSET.SUBSET.U64-REFERENCE",
+            Self::SyscallCopyCurrent => "SYSCALLSET.COPY.CURRENT",
+            Self::SyscallCopyReference => "SYSCALLSET.COPY.U64-REFERENCE",
+            Self::SpawnDecodeCurrent => "SPAWN.DECODE.CURRENT",
+            Self::SpawnCallsDecodeCurrent => "SPAWN.CALLS.DECODE.CURRENT",
+            Self::SpawnCallsDecodeReference => "SPAWN.CALLS.DECODE.U64-REFERENCE",
+        }
+    }
+}
+
+static PARALLEL_SAMPLE_PTRS: [AtomicUsize; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicUsize::new(0) }; kernel_core::smp::MAX_CPUS];
+static PARALLEL_READY: AtomicU32 = AtomicU32::new(0);
+static PARALLEL_RELEASE: AtomicBool = AtomicBool::new(false);
+
+fn parallel_metric_worker(arg: u64) -> u64 {
+    let metric = match arg {
+        0 => ParallelMetric::TimerRead,
+        1 => ParallelMetric::FrameAlloc,
+        2 => ParallelMetric::FrameFree,
+        3 => ParallelMetric::Heap64,
+        4 => ParallelMetric::Heap4096,
+        5 => ParallelMetric::SyscallContainsCurrent,
+        6 => ParallelMetric::SyscallContainsReference,
+        7 => ParallelMetric::SyscallSubsetCurrent,
+        8 => ParallelMetric::SyscallSubsetReference,
+        9 => ParallelMetric::SyscallCopyCurrent,
+        10 => ParallelMetric::SyscallCopyReference,
+        11 => ParallelMetric::SpawnDecodeCurrent,
+        12 => ParallelMetric::SpawnCallsDecodeCurrent,
+        13 => ParallelMetric::SpawnCallsDecodeReference,
+        _ => return 0,
+    };
+    let cpu = arch::cpu_index();
+    let Some(slot) = PARALLEL_SAMPLE_PTRS.get(cpu) else {
+        return 0;
+    };
+    let ptr = slot.load(Ordering::Acquire) as *mut u64;
+    if ptr.is_null() {
+        return 0;
+    }
+    PARALLEL_READY.fetch_add(1, Ordering::AcqRel);
+    while !PARALLEL_RELEASE.load(Ordering::Acquire) {
+        arch::watchdog_pet_force();
+        core::hint::spin_loop();
+    }
+    execute_parallel_metric(metric, unsafe {
+        core::slice::from_raw_parts_mut(ptr, TAIL_ITERS)
+    });
+    1
+}
+
+fn execute_parallel_metric(metric: ParallelMetric, samples: &mut [u64]) {
+    let ids = [0u64, 1, 4, 6, 15, 16, 19, 63];
+    let current = SyscallSet::of(&[0, 1, 4, 6, 15, 16, 19, 63]);
+    let other = SyscallSet::of(&[1, 4, 6, 19, 63]);
+    let old = ids.iter().fold(0u64, |word, &id| word | (1u64 << id));
+    let old_other = [1usize, 4, 6, 19, 63]
+        .iter()
+        .fold(0u64, |word, &id| word | (1u64 << id));
+    let mut raw = SpawnDesc::default();
+    raw.image_len = 64;
+    raw.cpu_limit_permille = kernel_core::spawn_abi::CPU_UNLIMITED;
+    raw.calls = current;
+    let encoded = raw.encode();
+    let mut call_bytes = [0u8; kernel_core::syscall_set::BYTES];
+    current.encode(&mut call_bytes);
+    let mut cursor = 0u64;
+
+    for (index, sample) in samples.iter_mut().enumerate() {
+        let start = arch::measure_cycles();
+        match metric {
+            ParallelMetric::TimerRead => {
+                black_box(arch::measure_cycles());
+            }
+            ParallelMetric::FrameAlloc => {
+                if let Ok(frame) = frame::allocate() {
+                    let _ = frame::deallocate(frame);
+                }
+            }
+            ParallelMetric::FrameFree => {
+                if let Ok(frame) = frame::allocate() {
+                    let _ = frame::deallocate(frame);
+                }
+            }
+            ParallelMetric::Heap64 => {
+                drop(black_box(Box::new([0u8; 64])));
+            }
+            ParallelMetric::Heap4096 => {
+                drop(black_box(Vec::<u8>::with_capacity(4096)));
+            }
+            ParallelMetric::SyscallContainsCurrent => {
+                cursor = cursor.wrapping_add(1);
+                black_box(current.contains(ids[cursor as usize % ids.len()]));
+            }
+            ParallelMetric::SyscallContainsReference => {
+                cursor = cursor.wrapping_add(1);
+                let id = ids[cursor as usize % ids.len()];
+                black_box(id < 64 && old & (1u64 << id) != 0);
+            }
+            ParallelMetric::SyscallSubsetCurrent => {
+                black_box(other.is_subset_of(current));
+            }
+            ParallelMetric::SyscallSubsetReference => {
+                black_box(old_other & !old == 0);
+            }
+            ParallelMetric::SyscallCopyCurrent => {
+                black_box(black_box(current));
+            }
+            ParallelMetric::SyscallCopyReference => {
+                black_box(black_box(old));
+            }
+            ParallelMetric::SpawnDecodeCurrent => {
+                black_box(SpawnDesc::decode(black_box(&encoded)).expect("bench fixture decodes"));
+            }
+            ParallelMetric::SpawnCallsDecodeCurrent => {
+                black_box(SyscallSet::decode(black_box(&call_bytes)));
+            }
+            ParallelMetric::SpawnCallsDecodeReference => {
+                let mut word = [0u8; 8];
+                word.copy_from_slice(&call_bytes[..8]);
+                black_box(u64::from_le_bytes(word));
+            }
+        }
+        *sample = arch::measure_cycles().wrapping_sub(start);
+        if index % 4096 == 0 {
+            arch::watchdog_pet_force();
+        }
+    }
+    black_box(cursor);
+}
+
+fn run_parallel_metric(
+    mode: &str,
+    metric: ParallelMetric,
+    cpus: &[usize],
+    cal: &Calibration,
+) -> bool {
+    kprintln!(
+        "[JSR-SMP-BENCH] stage=start mode={} metric={} cpus={}",
+        mode,
+        metric.name(),
+        cpus.len()
+    );
+    let total = match TAIL_ITERS.checked_mul(cpus.len()) {
+        Some(total) => total,
+        None => return false,
+    };
+    let mut samples = Vec::new();
+    if samples.try_reserve_exact(total).is_err() {
+        record_result(format_args!(
+            "{} {} BLOCKED reason=sample_allocation",
+            mode,
+            metric.name()
+        ));
+        return false;
+    }
+    samples.resize(total, 0);
+    for (index, &cpu) in cpus.iter().enumerate() {
+        let Some(slot) = PARALLEL_SAMPLE_PTRS.get(cpu) else {
+            return false;
+        };
+        slot.store(unsafe { samples.as_mut_ptr().add(index * TAIL_ITERS) } as usize, Ordering::Release);
+    }
+    PARALLEL_READY.store(0, Ordering::Release);
+    PARALLEL_RELEASE.store(false, Ordering::Release);
+    let expected = cpus.len() as u32;
+    let mut posted = Vec::new();
+    for &cpu in cpus {
+        if cpu != arch::cpu_index() {
+            if smp::post_call(cpu, parallel_metric_worker, metric as u64).is_err() {
+                record_result(format_args!(
+                    "{} {} BLOCKED reason=post_cpu{}",
+                    mode,
+                    metric.name(),
+                    cpu
+                ));
+                return false;
+            }
+            posted.push(cpu);
+        }
+    }
+    kprintln!(
+        "[JSR-SMP-BENCH] stage=posted mode={} metric={} posted={}",
+        mode,
+        metric.name(),
+        posted.len()
+    );
+
+    let local_cpu = arch::cpu_index();
+    let local_ptr = PARALLEL_SAMPLE_PTRS
+        .get(local_cpu)
+        .map(|slot| slot.load(Ordering::Acquire) as *mut u64)
+        .unwrap_or(core::ptr::null_mut());
+    PARALLEL_READY.fetch_add(1, Ordering::AcqRel);
+    let deadline = arch::measure_cycles().saturating_add(
+        early::tsc_frequency_hz()
+            .unwrap_or(3_000_000_000)
+            .saturating_mul(10),
+    );
+    while PARALLEL_READY.load(Ordering::Acquire) != expected
+        && arch::measure_cycles() < deadline
+    {
+        arch::watchdog_pet_force();
+        core::hint::spin_loop();
+    }
+    let all_ready = PARALLEL_READY.load(Ordering::Acquire) == expected;
+    kprintln!(
+        "[JSR-SMP-BENCH] stage=ready mode={} metric={} ready={}/{}",
+        mode,
+        metric.name(),
+        PARALLEL_READY.load(Ordering::Acquire),
+        expected
+    );
+    // Always release workers, including the partial-participation failure
+    // path. Otherwise a missing AP leaves every posted worker spinning in its
+    // interrupt handler and the BSP can never collect the failed batch.
+    PARALLEL_RELEASE.store(true, Ordering::Release);
+    let local_ok = all_ready && !local_ptr.is_null();
+    if local_ok {
+        execute_parallel_metric(metric, unsafe {
+            core::slice::from_raw_parts_mut(local_ptr, TAIL_ITERS)
+        });
+    }
+    let mut remote_ok = true;
+    for cpu in posted {
+        if smp::collect_call(cpu) != Ok(1) {
+            remote_ok = false;
+        }
+    }
+    kprintln!(
+        "[JSR-SMP-BENCH] stage=collected mode={} metric={} ok={}",
+        mode,
+        metric.name(),
+        all_ready && local_ok && remote_ok
+    );
+    for &cpu in cpus {
+        if let Some(slot) = PARALLEL_SAMPLE_PTRS.get(cpu) {
+            slot.store(0, Ordering::Release);
+        }
+    }
+    let ok = all_ready && local_ok && remote_ok && samples.len() == total;
+    check(ok, "并发基准参与 CPU 或样本数不符合要求");
+    if !ok {
+        record_result(format_args!(
+            "{} {} BLOCKED ready={}/{} local={} remote={} cpu={}",
+            mode,
+            metric.name(),
+            PARALLEL_READY.load(Ordering::Acquire),
+            expected,
+            local_ok,
+            remote_ok,
+            local_cpu
+        ));
+        return false;
+    }
+    let started = arch::measure_cycles();
+    let summary = summarize(&mut samples);
+    let elapsed = cycles_to_ns(arch::measure_cycles().wrapping_sub(started));
+    let Some(summary) = summary else {
+        return false;
+    };
+    let counts = cal.threshold_counts(&samples);
+    emit_parallel_json(mode, metric.name(), &summary, &counts, cal);
+    let throughput = elapsed
+        .and_then(|ns| {
+            (total as u64)
+                .saturating_mul(1_000_000_000)
+                .checked_div(ns)
+        })
+        .unwrap_or(0);
+    record_result(format_args!(
+        "{} {} N={} CPUS={} P50={} P99={} P99.9={} P99.99={} P99.999={} MAX={} >1US={} >10US={} >50US={} OPS/S={}",
+        mode,
+        metric.name(),
+        summary.count,
+        cpus.len(),
+        HumanDuration::new(summary.p50, cal),
+        HumanDuration::new(summary.p99, cal),
+        HumanDuration::new(summary.p999, cal),
+        HumanDuration::new(summary.p9999, cal),
+        HumanDuration::new(summary.p99999, cal),
+        HumanDuration::new(summary.max, cal),
+        counts.over_1us,
+        counts.over_10us,
+        counts.over_50us,
+        throughput
+    ));
+    true
+}
+
+fn cycles_to_ns(cycles: u64) -> Option<u64> {
+    early::tsc_frequency_hz().map(|hz| {
+        (u128::from(cycles) * 1_000_000_000u128 / u128::from(hz.max(1)))
+            .min(u128::from(u64::MAX)) as u64
+    })
+}
+
+fn emit_parallel_json(
+    mode: &str,
+    name: &str,
+    summary: &Summary,
+    counts: &kernel_core::bench::ThresholdCounts,
+    cal: &Calibration,
+) {
+    kprintln!(
+        "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"parallel_metric\",\"mode\":\"{}\",\"name\":\"{}\",\"count\":{},\"min_ns\":{},\"mean_ns\":{},\"p50_ns\":{},\"p90_ns\":{},\"p95_ns\":{},\"p99_ns\":{},\"p999_ns\":{},\"p9999_ns\":{},\"p99999_ns\":{},\"max_ns\":{},\"over_1us\":{},\"over_10us\":{},\"over_50us\":{}}}",
+        mode,
+        name,
+        summary.count,
+        cal.to_ns(summary.min),
+        cal.to_ns(summary.mean),
+        cal.to_ns(summary.p50),
+        cal.to_ns(summary.p90),
+        cal.to_ns(summary.p95),
+        cal.to_ns(summary.p99),
+        cal.to_ns(summary.p999),
+        cal.to_ns(summary.p9999),
+        cal.to_ns(summary.p99999),
+        cal.to_ns(summary.max),
+        counts.over_1us,
+        counts.over_10us,
+        counts.over_50us
+    );
+}
+
+static CS_SAMPLE_PTRS: [AtomicUsize; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicUsize::new(0) }; kernel_core::smp::MAX_CPUS];
+static CS_DONE: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; kernel_core::smp::MAX_CPUS];
+static CS_NONE: [AtomicU32; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicU32::new(0) }; kernel_core::smp::MAX_CPUS];
+static CS_READY: AtomicU32 = AtomicU32::new(0);
+static CS_RELEASE: AtomicBool = AtomicBool::new(false);
+static CS_EXPECTED: AtomicU32 = AtomicU32::new(0);
+
+fn parallel_switch_measurer() {
+    let cpu = arch::cpu_index();
+    let Some(slot) = CS_SAMPLE_PTRS.get(cpu) else {
+        return;
+    };
+    let ptr = slot.load(Ordering::Acquire) as *mut u64;
+    let ready = CS_READY.fetch_add(1, Ordering::AcqRel) + 1;
+    if ready == CS_EXPECTED.load(Ordering::Acquire) {
+        CS_RELEASE.store(true, Ordering::Release);
+    }
+    while !CS_RELEASE.load(Ordering::Acquire) {
+        sched::yield_now();
+    }
+    if !ptr.is_null() {
+        let samples = unsafe { core::slice::from_raw_parts_mut(ptr, CONTEXT_ITERS) };
+        for (index, sample) in samples.iter_mut().enumerate() {
+            let n0 = sched::leaf_local_switch_count();
+            let c0 = arch::measure_cycles();
+            sched::yield_now();
+            let dt = arch::measure_cycles().wrapping_sub(c0);
+            let n = sched::leaf_local_switch_count().wrapping_sub(n0);
+            if n == 0 {
+                CS_NONE[cpu].fetch_add(1, Ordering::Relaxed);
+            } else {
+                *sample = dt / u64::from(n);
+            }
+            if index % 4096 == 0 {
+                arch::watchdog_pet_force();
+            }
+        }
+    }
+    CS_DONE[cpu].store(true, Ordering::Release);
+}
+
+fn parallel_switch_partner() {
+    let cpu = arch::cpu_index();
+    let ready = CS_READY.fetch_add(1, Ordering::AcqRel) + 1;
+    if ready == CS_EXPECTED.load(Ordering::Acquire) {
+        CS_RELEASE.store(true, Ordering::Release);
+    }
+    while !CS_RELEASE.load(Ordering::Acquire) {
+        sched::yield_now();
+    }
+    while !CS_DONE.get(cpu).is_some_and(|done| done.load(Ordering::Acquire)) {
+        sched::yield_now();
+    }
+}
+
+fn run_parallel_context_switch(
+    mode: &str,
+    cpus: &[usize],
+    cal: &Calibration,
+) -> bool {
+    let total = match CONTEXT_ITERS.checked_mul(cpus.len()) {
+        Some(total) => total,
+        None => return false,
+    };
+    let mut samples = Vec::new();
+    if samples.try_reserve_exact(total).is_err() {
+        record_result(format_args!(
+            "{} SCHED.CONTEXT_SWITCH BLOCKED reason=sample_allocation",
+            mode
+        ));
+        return false;
+    }
+    samples.resize(total, 0);
+    CS_READY.store(0, Ordering::Release);
+    CS_RELEASE.store(false, Ordering::Release);
+    CS_EXPECTED.store(cpus.len().saturating_mul(2) as u32, Ordering::Release);
+    for &cpu in cpus {
+        let Some(done) = CS_DONE.get(cpu) else {
+            return false;
+        };
+        done.store(false, Ordering::Release);
+        CS_NONE[cpu].store(0, Ordering::Relaxed);
+        let Some(slot) = CS_SAMPLE_PTRS.get(cpu) else {
+            return false;
+        };
+        slot.store(unsafe { samples.as_mut_ptr().add(
+            cpus.iter().position(|candidate| *candidate == cpu).unwrap() * CONTEXT_ITERS
+        ) } as usize, Ordering::Release);
+    }
+    let mut spawned = true;
+    for &cpu in cpus {
+        let base = 12_000 + cpu as u64 * 2;
+        let mut affinity = kernel_core::smp::CpuSet::EMPTY;
+        if !affinity.insert(cpu) {
+            spawned = false;
+            continue;
+        }
+        if sched::spawn_on(
+            TaskId(base),
+            "smp-bench-switch",
+            parallel_switch_measurer,
+            None,
+            affinity.clone(),
+        )
+        .is_err()
+            || sched::spawn_on(
+                TaskId(base + 1),
+                "smp-bench-partner",
+                parallel_switch_partner,
+                None,
+                affinity,
+            )
+            .is_err()
+        {
+            spawned = false;
+        }
+    }
+    let expected_ready = CS_EXPECTED.load(Ordering::Acquire);
+    if spawned {
+        sched::run();
+    }
+    let all_ready = CS_READY.load(Ordering::Acquire) == expected_ready;
+    if !all_ready {
+        CS_RELEASE.store(true, Ordering::Release);
+    }
+    let deadline = arch::measure_cycles().saturating_add(
+        early::tsc_frequency_hz()
+            .unwrap_or(3_000_000_000)
+            .saturating_mul(30),
+    );
+    let all_done = loop {
+        let done = cpus.iter().all(|cpu| {
+            CS_DONE
+                .get(*cpu)
+                .is_some_and(|done| done.load(Ordering::Acquire))
+        });
+        if done {
+            break true;
+        }
+        if arch::measure_cycles() >= deadline {
+            break false;
+        }
+        arch::watchdog_pet_force();
+        core::hint::spin_loop();
+    };
+    for &cpu in cpus {
+        if let Some(slot) = CS_SAMPLE_PTRS.get(cpu) {
+            slot.store(0, Ordering::Release);
+        }
+    }
+    let no_missed = cpus.iter().all(|cpu| CS_NONE.get(*cpu).is_some_and(|value| value.load(Ordering::Relaxed) == 0));
+    let ok = spawned && all_ready && all_done && no_missed;
+    check(ok, "并发上下文切换参与者或样本不完整");
+    if !ok {
+        record_result(format_args!(
+            "{} SCHED.CONTEXT_SWITCH BLOCKED spawned={} ready={}/{} done={} missed={}",
+            mode,
+            spawned,
+            CS_READY.load(Ordering::Acquire),
+            expected_ready,
+            all_done,
+            !no_missed
+        ));
+        return false;
+    }
+    let summary = summarize(&mut samples);
+    let counts = cal.threshold_counts(&samples);
+    let Some(summary) = summary else {
+        return false;
+    };
+    emit_parallel_json(
+        mode,
+        "SCHED.CONTEXT_SWITCH",
+        &summary,
+        &counts,
+        cal,
+    );
+    record_result(format_args!(
+        "{} SCHED.CONTEXT_SWITCH N={} CPUS={} P50={} P99={} P99.9={} P99.99={} P99.999={} MAX={} >1US={} >10US={} >50US={}",
+        mode,
+        summary.count,
+        cpus.len(),
+        HumanDuration::new(summary.p50, cal),
+        HumanDuration::new(summary.p99, cal),
+        HumanDuration::new(summary.p999, cal),
+        HumanDuration::new(summary.p9999, cal),
+        HumanDuration::new(summary.p99999, cal),
+        HumanDuration::new(summary.max, cal),
+        counts.over_1us,
+        counts.over_10us,
+        counts.over_50us
+    ));
+    true
+}
+
+fn run_parallel_mode(mode: &str, cpus: &[usize], cal: &Calibration) -> bool {
+    record_result(format_args!(
+        "{} CONCURRENT TABLE CPUS={} OPS_PER_METRIC_PER_CPU={} SAMPLE_SOURCE=ALL_RAW_CPU_SAMPLES",
+        mode,
+        cpus.len(),
+        TAIL_ITERS
+    ));
+    let mut ok = true;
+    for metric in ParallelMetric::ALL {
+        let progress = alloc::format!(
+            "{} RUNNING {} CPUS={}",
+            mode,
+            metric.name(),
+            cpus.len()
+        );
+        early::append_progress(&progress);
+        ok &= run_parallel_metric(mode, metric, cpus, cal);
+    }
+    early::append_progress(&alloc::format!("{} RUNNING SCHED.CONTEXT_SWITCH", mode));
+    ok &= run_parallel_context_switch(mode, cpus, cal);
+    let usable = crate::mm::frame::usable_frames();
+    let free = crate::mm::frame::free_frames();
+    let (heap_total, heap_free, _, heap_mapped) = crate::mm::heap::stats();
+    record_result(format_args!(
+        "{} RESULT COMPLETE={} TOTAL_METRICS={} RAW_SAMPLES={} MEM_USED_KIB={} HEAP_USED_KIB={} HEAP_MAPPED_KIB={}",
+        mode,
+        ok,
+        ParallelMetric::ALL.len() + 1,
+        (ParallelMetric::ALL.len() + 1)
+            .saturating_mul(TAIL_ITERS)
+            .saturating_mul(cpus.len()),
+        usable.saturating_sub(free).saturating_mul(4),
+        heap_total.saturating_sub(heap_free) / 1024,
+        heap_mapped / 1024
+    ));
+    ok
+}
+
+/// Run the existing single-CPU measurements concurrently on the exact
+/// physical-core and logical-CPU sets discovered from firmware.
+pub fn run_smp_concurrent() {
+    reset_report();
+    screen_line("SMP CONCURRENT PERFORMANCE - SAME TESTS AS SINGLE CPU\n");
+    let Some(cal) = calibrate() else {
+        check(false, "周期计数器校准失败");
+        record_result(format_args!("SMP CONCURRENT BLOCKED reason=clock_calibration"));
+        return;
+    };
+    let online = crate::smp::online_set();
+    let topology = crate::hardware::online_cpu_topology();
+    let mut physical = Vec::new();
+    for cpu in &topology {
+        if !physical
+            .iter()
+            .any(|existing: &crate::hardware::ApCpuTopology| existing.core_key == cpu.core_key)
+        {
+            physical.push(*cpu);
+        }
+    }
+    let physical: Vec<usize> = physical.into_iter().map(|cpu| cpu.logical).collect();
+    let logical: Vec<usize> = topology.iter().map(|cpu| cpu.logical).collect();
+    record_result(format_args!(
+        "SMP TOPOLOGY ONLINE={} PROBED={} PHYSICAL={} LOGICAL={}",
+        online.len(),
+        topology.len(),
+        physical.len(),
+        logical.len()
+    ));
+    if physical.len() != 8 || logical.len() != 16 {
+        check(false, "物理核心数或逻辑 CPU 数不符合 Ryzen 7 5700X 目标");
+        record_result(format_args!(
+            "SMP CONCURRENT BLOCKED expected=8p/16t actual={}p/{}t online={}",
+            physical.len(),
+            logical.len(),
+            online.len()
+        ));
+        return;
+    }
+    let before = baseline();
+    let before_heap_mapped = heap::stats().3;
+    let physical_ok = run_parallel_mode("SMP8P", &physical, &cal);
+    let logical_ok = run_parallel_mode("SMP16T", &logical, &cal);
+    let reclaimed = resources_reclaimed(
+        before,
+        baseline(),
+        before_heap_mapped,
+        heap::stats().3,
+    );
+    check(reclaimed, "并发基准结束后资源未回到起点");
+    LAST_RECLAIMED.store(reclaimed, Ordering::Release);
+    record_result(format_args!(
+        "SMP CONCURRENT FINAL PHYSICAL_8P={} LOGICAL_16T={} RECLAIMED={} FAILED={} TIMING_FAILED={}",
+        physical_ok,
+        logical_ok,
+        reclaimed,
+        failed(),
+        timing_failed()
+    ));
+}
+
 /// Draw all completed fast metrics before the long tick-driven interrupt
 /// measurement starts. This checkpoint is not the final acceptance summary.
 pub fn publish_checkpoint() {
@@ -304,8 +974,6 @@ pub fn publish_checkpoint() {
                 early::append_line(text);
             }
         }
-        #[cfg(feature = "bench-smp")]
-        crate::smp_performance::append_screen_records();
     }
     kprintln!(
         "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"checkpoint\",\"metrics\":{},\"failed\":{},\"timing_failed\":{},\"checks\":{}}}",
@@ -331,8 +999,6 @@ pub fn publish_results(failed: u32, timing_failed: u32) {
                 early::append_line(text);
             }
         }
-        #[cfg(feature = "bench-smp")]
-        crate::smp_performance::append_screen_records();
         let mut status = ReportRow::empty();
         let mut writer = RowWriter {
             bytes: &mut status.bytes,

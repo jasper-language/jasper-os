@@ -255,7 +255,6 @@ pub(super) fn reserve_cpu_leaves(cpus: usize) -> Result<(), LeafReserveError> {
 static LEAF_FINISHES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 #[cfg(feature = "krn3-fast-tick-verify")]
 static WORKER_LEAF_FINISHES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-#[cfg(feature = "krn3-fast-tick-verify")]
 static LEAF_LOCAL_SWITCHES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Complete the owner-local half of a context switch without taking the
@@ -411,7 +410,6 @@ pub(super) fn fast_leaf_competing_tick(
         leaf.switching_from = Some(prev);
         leaf.switching_immediate = false;
         leaf.local_transition = Some(LeafTransition { cpu, prev, next, cause });
-        #[cfg(feature = "krn3-fast-tick-verify")]
         LEAF_LOCAL_SWITCHES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         FastLeafTick::Switch(SwitchPlan {
             old,
@@ -431,7 +429,6 @@ pub(super) fn leaf_finish_count() -> u32 {
 pub(super) fn leaf_worker_finish_count() -> u32 {
     WORKER_LEAF_FINISHES.load(core::sync::atomic::Ordering::Relaxed)
 }
-#[cfg(feature = "krn3-fast-tick-verify")]
 pub(super) fn leaf_local_switch_count() -> u32 {
     LEAF_LOCAL_SWITCHES.load(core::sync::atomic::Ordering::Relaxed)
 }
