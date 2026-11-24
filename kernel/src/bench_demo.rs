@@ -35,7 +35,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use kernel_core::bench::{
     quantum_overhead, select, summarize, timer_overhead, Calibration, Decision, HumanDuration,
     Prefer, Samples, Summary, P9999_RECOMMENDED_SAMPLES, P999_RECOMMENDED_SAMPLES,
-    P99_RECOMMENDED_SAMPLES,
+    P99999_RECOMMENDED_SAMPLES, P99_RECOMMENDED_SAMPLES,
 };
 use kernel_core::sync::SpinLock;
 use kernel_core::spawn_abi::SpawnDesc;
@@ -55,9 +55,9 @@ static TIMING_FAILED: AtomicU32 = AtomicU32::new(0);
 static LAST_RECLAIMED: AtomicBool = AtomicBool::new(false);
 
 /// Result-log slots are test-fixture metadata, not a hardware capacity.
-const REPORT_ROWS: usize = 32;
+const REPORT_ROWS: usize = 64;
 /// One framebuffer result row, retaining slightly more text than the display width.
-const REPORT_ROW_BYTES: usize = 120;
+const REPORT_ROW_BYTES: usize = 140;
 
 #[derive(Clone, Copy)]
 struct ReportRow {
@@ -152,10 +152,7 @@ fn record_result(args: fmt::Arguments) {
 /// are intentionally excluded; the final panel only contains measurements.
 pub(crate) fn capture_console_line(text: &str) {
     let line = text.trim_end_matches(|ch| ch == '\r' || ch == '\n');
-    if line.starts_with("bench: ")
-        && line.contains(" n=")
-        && !line.contains("progress")
-    {
+    if line.starts_with("bench-result:") {
         REPORT.lock().push_text(line);
     }
 }
@@ -298,7 +295,7 @@ pub fn publish_results(failed: u32, timing_failed: u32) {
     {
         early::results_begin();
         early::append_line("FINAL RESULTS - ALL MILLION-SAMPLE BATCHES");
-        early::append_line("METRIC                         N       P50       P99      P999       MAX");
+        early::append_line("ROW 1: N/P50/P99/P99.9   ROW 2: P99.99/P99.999/MAX/THRESHOLDS");
         for row in &report.rows[..report.len] {
             let text = row.text();
             if !text.is_empty() {
@@ -319,14 +316,32 @@ pub fn publish_results(failed: u32, timing_failed: u32) {
             LAST_RECLAIMED.load(Ordering::Acquire)
         );
         early::append_line(status.text());
+        let discovered = crate::smp::unique_enabled_cpu_count().max(1);
+        let online = crate::smp::online_set().len();
+        let mut smp = ReportRow::empty();
+        let mut writer = RowWriter {
+            bytes: &mut smp.bytes,
+            len: &mut smp.len,
+        };
+        let _ = write!(
+            writer,
+            "SMP DISCOVERED={} ONLINE={} PARALLEL_MATRIX={}",
+            discovered,
+            online,
+            if online > 1 { "measured" } else { "not_run" }
+        );
+        early::append_line(smp.text());
     }
     kprintln!(
-        "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"summary\",\"metrics\":{},\"failed\":{},\"timing_failed\":{},\"checks\":{},\"resources_reclaimed\":{}}}",
+        "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"summary\",\"metrics\":{},\"failed\":{},\"timing_failed\":{},\"checks\":{},\"resources_reclaimed\":{},\"discovered_cpus\":{},\"online_cpus\":{},\"parallel_matrix_run\":{}}}",
         report.len,
         failed,
         timing_failed,
         CHECKS.load(Ordering::Acquire),
-        LAST_RECLAIMED.load(Ordering::Acquire)
+        LAST_RECLAIMED.load(Ordering::Acquire),
+        crate::smp::unique_enabled_cpu_count().max(1),
+        crate::smp::online_set().len(),
+        crate::smp::online_set().len() > 1
     );
 }
 
@@ -390,12 +405,15 @@ fn report_values(
     let sum = summarize(samples);
     check(sum.is_some() && samples.len() == expected, "基准样本数不符合目标");
     if let Some(m) = sum {
+        let counts = cal.threshold_counts(samples);
         kprintln!(
-            "[JSR-BENCH] name={} iters={} min={} p50={} p90={} p95={} p99={} p999={} p9999={} max={} mean={} stddev={} unit=cycles p50_ns={} p99_ns={} p999_ns={}",
+            "[JSR-BENCH] name={} iters={} min={} p50={} p90={} p95={} p99={} p999={} p9999={} p99999={} max={} mean={} stddev={} unit=cycles p50_ns={} p99_ns={} p999_ns={} p9999_ns={} p99999_ns={} over_1us={} over_10us={} over_50us={} spike=unattributed",
             name, m.count, m.min, m.p50, m.p90, m.p95, m.p99, m.p999, m.p9999,
-            m.max, m.mean, m.stddev, cal.to_ns(m.p50), cal.to_ns(m.p99), cal.to_ns(m.p999)
+            m.p99999, m.max, m.mean, m.stddev, cal.to_ns(m.p50), cal.to_ns(m.p99),
+            cal.to_ns(m.p999), cal.to_ns(m.p9999), cal.to_ns(m.p99999),
+            counts.over_1us, counts.over_10us, counts.over_50us
         );
-        emit_json(name, &m, cal);
+        emit_json(name, &m, &counts, cal);
         let line = alloc::format!(
             "BENCH {} N={} P50={} P99={} P999={} MAX={}\n",
             name,
@@ -415,18 +433,39 @@ fn report_values(
             HumanDuration::new(m.p999, cal),
             HumanDuration::new(m.max, cal)
         ));
+        record_result(format_args!(
+            "  {} P99.99={} P99.999={} MAX={} >1us={} >10us={} >50us={} SPIKE={}",
+            name,
+            HumanDuration::new(m.p9999, cal),
+            HumanDuration::new(m.p99999, cal),
+            HumanDuration::new(m.max, cal),
+            counts.over_1us,
+            counts.over_10us,
+            counts.over_50us,
+            if counts.over_50us == 0 {
+                "none"
+            } else {
+                "unattributed"
+            }
+        ));
     }
     sum
 }
 
-fn emit_json(name: &str, summary: &Summary, cal: &Calibration) {
+fn emit_json(
+    name: &str,
+    summary: &Summary,
+    counts: &kernel_core::bench::ThresholdCounts,
+    cal: &Calibration,
+) {
     let resolution_ns = 1_000_000_000u64.div_ceil(cal.cycles_per_second().max(1));
     let count = summary.count as usize;
     let p99_confidence = confidence(count, P99_RECOMMENDED_SAMPLES);
     let p999_confidence = confidence(count, P999_RECOMMENDED_SAMPLES);
     let p9999_confidence = confidence(count, P9999_RECOMMENDED_SAMPLES);
+    let p99999_confidence = confidence(count, P99999_RECOMMENDED_SAMPLES);
     kprintln!(
-        "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"metric\",\"name\":\"{}\",\"count\":{},\"min_ns\":{},\"mean_ns\":{},\"p50_ns\":{},\"p90_ns\":{},\"p95_ns\":{},\"p99_ns\":{},\"p999_ns\":{},\"p9999_ns\":{},\"max_ns\":{},\"stddev_ns\":{},\"resolution_ns\":{},\"p50_below_resolution\":{},\"p99_confidence\":\"{}\",\"p999_confidence\":\"{}\",\"p9999_confidence\":\"{}\"}}",
+        "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"metric\",\"name\":\"{}\",\"count\":{},\"min_ns\":{},\"mean_ns\":{},\"p50_ns\":{},\"p90_ns\":{},\"p95_ns\":{},\"p99_ns\":{},\"p999_ns\":{},\"p9999_ns\":{},\"p99999_ns\":{},\"max_ns\":{},\"stddev_ns\":{},\"over_1us\":{},\"over_10us\":{},\"over_50us\":{},\"spike_cause\":\"{}\",\"resolution_ns\":{},\"p50_below_resolution\":{},\"p99_confidence\":\"{}\",\"p999_confidence\":\"{}\",\"p9999_confidence\":\"{}\",\"p99999_confidence\":\"{}\"}}",
         name,
         summary.count,
         cal.to_ns(summary.min),
@@ -437,13 +476,23 @@ fn emit_json(name: &str, summary: &Summary, cal: &Calibration) {
         cal.to_ns(summary.p99),
         cal.to_ns(summary.p999),
         cal.to_ns(summary.p9999),
+        cal.to_ns(summary.p99999),
         cal.to_ns(summary.max),
         cal.to_ns(summary.stddev),
+        counts.over_1us,
+        counts.over_10us,
+        counts.over_50us,
+        if counts.over_50us == 0 {
+            "none"
+        } else {
+            "unattributed"
+        },
         resolution_ns,
         summary.p50 == 0,
         p99_confidence,
         p999_confidence,
-        p9999_confidence
+        p9999_confidence,
+        p99999_confidence
     );
 }
 

@@ -103,22 +103,24 @@ pub fn summarize(values: &mut [u64]) -> Option<Summary> {
     Some(Summary {
         count: s.len() as u32,
         min: s[0],
-        p50: rank(s, 5000),
-        p90: rank(s, 9000),
-        p95: rank(s, 9500),
-        p99: rank(s, 9900),
-        p999: rank(s, 9990),
-        p9999: rank(s, 9999),
+        p50: rank(s, 50_000),
+        p90: rank(s, 90_000),
+        p95: rank(s, 95_000),
+        p99: rank(s, 99_000),
+        p999: rank(s, 99_900),
+        p9999: rank(s, 99_990),
+        p99999: rank(s, 99_999),
         max: s[s.len() - 1],
         mean,
         stddev: integer_sqrt((variance_sum / s.len() as u128) as u64),
     })
 }
 
-/// 最近秩法的万分位：第 `ceil(p × n / 10000)` 小的样本（`s` 已排序且非空）。
-fn rank(s: &[u64], ten_thousandths: u64) -> u64 {
+/// 最近秩法的十万分位：第 `ceil(p × n / 100000)` 小的样本（`s` 已排序且非空）。
+fn rank(s: &[u64], hundred_thousandths: u64) -> u64 {
     let n = s.len();
-    let k = ((ten_thousandths as u128 * n as u128).div_ceil(10_000) as usize).clamp(1, n);
+    let k = ((hundred_thousandths as u128 * n as u128).div_ceil(100_000) as usize)
+        .clamp(1, n);
     s[k - 1]
 }
 
@@ -152,6 +154,8 @@ pub struct Summary {
     pub p999: u64,
     /// 第 99.99 百分位（最近秩）。
     pub p9999: u64,
+    /// 第 99.999 百分位（最近秩）。
+    pub p99999: u64,
     /// 最大值。
     pub max: u64,
     /// 算术平均（向下取整）。
@@ -165,6 +169,15 @@ pub const P50_RECOMMENDED_SAMPLES: usize = 1_000;
 pub const P99_RECOMMENDED_SAMPLES: usize = 10_000;
 pub const P999_RECOMMENDED_SAMPLES: usize = 100_000;
 pub const P9999_RECOMMENDED_SAMPLES: usize = 1_000_000;
+pub const P99999_RECOMMENDED_SAMPLES: usize = 10_000_000;
+
+/// Number of observations that exceeded the standard latency thresholds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThresholdCounts {
+    pub over_1us: u32,
+    pub over_10us: u32,
+    pub over_50us: u32,
+}
 
 /// Convert a cycle count into an exact-nanosecond duration representation.
 pub struct HumanDuration {
@@ -264,6 +277,29 @@ impl Calibration {
     pub fn to_ns(&self, cycles: u64) -> u64 {
         let ns = cycles as u128 * 1_000_000_000 / self.cycles_per_second() as u128;
         ns.min(u64::MAX as u128) as u64
+    }
+
+    /// Count samples whose calibrated duration is strictly above each standard
+    /// 1 us, 10 us, and 50 us latency threshold.
+    pub fn threshold_counts(&self, values: &[u64]) -> ThresholdCounts {
+        let mut counts = ThresholdCounts {
+            over_1us: 0,
+            over_10us: 0,
+            over_50us: 0,
+        };
+        for &cycles in values {
+            let ns = self.to_ns(cycles);
+            if ns > 1_000 {
+                counts.over_1us = counts.over_1us.saturating_add(1);
+            }
+            if ns > 10_000 {
+                counts.over_10us = counts.over_10us.saturating_add(1);
+            }
+            if ns > 50_000 {
+                counts.over_50us = counts.over_50us.saturating_add(1);
+            }
+        }
+        counts
     }
 }
 
@@ -396,6 +432,7 @@ mod tests {
             p99: 99,
             p999: 100,
             p9999: 100,
+            p99999: 100,
             max: 100,
             mean: 50,
             stddev: 28,
@@ -413,6 +450,7 @@ mod tests {
             p99: 7,
             p999: 7,
             p9999: 7,
+            p99999: 7,
             max: 7,
             mean: 7,
             stddev: 0,
@@ -440,7 +478,19 @@ mod tests {
         assert_eq!(sum.count, 2000);
         assert_eq!(sum.p99, 1980);
         assert_eq!(sum.p999, 1998);
+        assert_eq!(sum.p9999, 2000);
+        assert_eq!(sum.p99999, 2000);
         assert_eq!(sum.max, 2000);
+    }
+
+    #[test]
+    fn threshold_counts_use_calibrated_nanoseconds() {
+        let cal = Calibration::per_second(1_000_000_000).unwrap();
+        let values = [999, 1_000, 1_001, 10_000, 10_001, 50_000, 50_001];
+        let counts = cal.threshold_counts(&values);
+        assert_eq!(counts.over_1us, 5);
+        assert_eq!(counts.over_10us, 3);
+        assert_eq!(counts.over_50us, 1);
     }
 
     #[test]

@@ -28,7 +28,7 @@ use jasper_rt::ring::{Cqe, Ring, Sqe};
 use jasper_rt::{entry, ids, println, time};
 use kernel_core::bench::{
     summarize, Calibration, HumanDuration, Summary, P9999_RECOMMENDED_SAMPLES,
-    P999_RECOMMENDED_SAMPLES, P99_RECOMMENDED_SAMPLES,
+    P99999_RECOMMENDED_SAMPLES, P999_RECOMMENDED_SAMPLES, P99_RECOMMENDED_SAMPLES,
 };
 
 entry!(main);
@@ -309,8 +309,9 @@ fn report(
     let sum: Option<Summary> = summarize(samples);
     s.check(sum.is_some())?;
     if let Some(m) = sum {
+        let counts = cal.threshold_counts(samples);
         println!(
-            "bench: name={} iters={} min={} p50={} p90={} p95={} p99={} p999={} p9999={} max={} mean={} stddev={} unit=cycles p50_ns={} p99_ns={} p999_ns={}",
+            "bench: name={} iters={} min={} p50={} p90={} p95={} p99={} p999={} p9999={} p99999={} max={} mean={} stddev={} unit=cycles p50_ns={} p99_ns={} p999_ns={} p9999_ns={} p99999_ns={} over_1us={} over_10us={} over_50us={} spike=unattributed",
             name,
             m.count,
             m.min,
@@ -320,20 +321,27 @@ fn report(
             m.p99,
             m.p999,
             m.p9999,
+            m.p99999,
             m.max,
             m.mean,
             m.stddev,
             cal.to_ns(m.p50),
             cal.to_ns(m.p99),
-            cal.to_ns(m.p999)
+            cal.to_ns(m.p999),
+            cal.to_ns(m.p9999),
+            cal.to_ns(m.p99999),
+            counts.over_1us,
+            counts.over_10us,
+            counts.over_50us
         );
         let resolution_ns = 1_000_000_000u64.div_ceil(cal.cycles_per_second().max(1));
         let count = m.count as usize;
         let p99_confidence = confidence(count, P99_RECOMMENDED_SAMPLES);
         let p999_confidence = confidence(count, P999_RECOMMENDED_SAMPLES);
         let p9999_confidence = confidence(count, P9999_RECOMMENDED_SAMPLES);
+        let p99999_confidence = confidence(count, P99999_RECOMMENDED_SAMPLES);
         println!(
-            "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"metric\",\"source\":\"user\",\"name\":\"{}\",\"count\":{},\"min_ns\":{},\"mean_ns\":{},\"p50_ns\":{},\"p90_ns\":{},\"p95_ns\":{},\"p99_ns\":{},\"p999_ns\":{},\"p9999_ns\":{},\"max_ns\":{},\"stddev_ns\":{},\"resolution_ns\":{},\"p50_below_resolution\":{},\"p99_confidence\":\"{}\",\"p999_confidence\":\"{}\",\"p9999_confidence\":\"{}\"}}",
+            "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"metric\",\"source\":\"user\",\"name\":\"{}\",\"count\":{},\"min_ns\":{},\"mean_ns\":{},\"p50_ns\":{},\"p90_ns\":{},\"p95_ns\":{},\"p99_ns\":{},\"p999_ns\":{},\"p9999_ns\":{},\"p99999_ns\":{},\"max_ns\":{},\"stddev_ns\":{},\"over_1us\":{},\"over_10us\":{},\"over_50us\":{},\"spike_cause\":\"{}\",\"resolution_ns\":{},\"p50_below_resolution\":{},\"p99_confidence\":\"{}\",\"p999_confidence\":\"{}\",\"p9999_confidence\":\"{}\",\"p99999_confidence\":\"{}\"}}",
             name,
             m.count,
             cal.to_ns(m.min),
@@ -344,13 +352,23 @@ fn report(
             cal.to_ns(m.p99),
             cal.to_ns(m.p999),
             cal.to_ns(m.p9999),
+            cal.to_ns(m.p99999),
             cal.to_ns(m.max),
             cal.to_ns(m.stddev),
+            counts.over_1us,
+            counts.over_10us,
+            counts.over_50us,
+            if counts.over_50us == 0 {
+                "none"
+            } else {
+                "unattributed"
+            },
             resolution_ns,
             m.p50 == 0,
             p99_confidence,
             p999_confidence,
-            p9999_confidence
+            p9999_confidence,
+            p99999_confidence
         );
         println!(
             "bench: {} n={} p50={} p99={} p999={} max={}",
@@ -360,6 +378,29 @@ fn report(
             HumanDuration::new(m.p99, cal),
             HumanDuration::new(m.p999, cal),
             HumanDuration::new(m.max, cal)
+        );
+        println!(
+            "bench-result: {} N={} P50={} P99={} P999={}",
+            name,
+            m.count,
+            HumanDuration::new(m.p50, cal),
+            HumanDuration::new(m.p99, cal),
+            HumanDuration::new(m.p999, cal)
+        );
+        println!(
+            "bench-result: {} P99.99={} P99.999={} MAX={} >1us={} >10us={} >50us={} SPIKE={}",
+            name,
+            HumanDuration::new(m.p9999, cal),
+            HumanDuration::new(m.p99999, cal),
+            HumanDuration::new(m.max, cal),
+            counts.over_1us,
+            counts.over_10us,
+            counts.over_50us,
+            if counts.over_50us == 0 {
+                "none"
+            } else {
+                "unattributed"
+            }
         );
     }
     Ok(())
