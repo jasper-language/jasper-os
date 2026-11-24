@@ -30,7 +30,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt::{self, Write as _};
 use core::hint::black_box;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use kernel_core::bench::{
     quantum_overhead, select, summarize, timer_overhead, Calibration, Decision, HumanDuration,
@@ -999,6 +999,38 @@ static CS_EXPECTED: AtomicU32 = AtomicU32::new(0);
 static CS_RELEASE_CYCLES: AtomicUsize = AtomicUsize::new(0);
 static CS_SWITCH_DEADLINE: AtomicUsize = AtomicUsize::new(0);
 static CS_ITERATIONS: AtomicUsize = AtomicUsize::new(0);
+static CS_REQUEST: [AtomicU64; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; kernel_core::smp::MAX_CPUS];
+static CS_PARTNER_ACK: [AtomicU64; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; kernel_core::smp::MAX_CPUS];
+static CS_PARTNER_RUNS: [AtomicU64; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; kernel_core::smp::MAX_CPUS];
+static CS_LOGGED_MEASURER_START: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; kernel_core::smp::MAX_CPUS];
+static CS_LOGGED_PARTNER_START: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; kernel_core::smp::MAX_CPUS];
+static CS_LOGGED_PARTNER_WAIT: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; kernel_core::smp::MAX_CPUS];
+static CS_LOGGED_FIRST_RESUME: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; kernel_core::smp::MAX_CPUS];
+static CS_LOGGED_FIRST_MISS: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; kernel_core::smp::MAX_CPUS];
+static CS_LOGGED_FIRST_UNEXPECTED: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; kernel_core::smp::MAX_CPUS];
+static CS_LOGGED_FIRST_PARTNER_RUN: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; kernel_core::smp::MAX_CPUS];
+
+const SWITCH_RETRY_BUDGET: u32 = 64;
+const SWITCH_WORKERS_PER_CPU: usize = 2;
+static SWITCH_BASELINES: [AtomicU64; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; kernel_core::smp::MAX_CPUS];
+static SWITCH_TARGETS: [AtomicU64; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; kernel_core::smp::MAX_CPUS];
+static SWITCH_BASELINE_SET: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; kernel_core::smp::MAX_CPUS];
+static SWITCH_WORKERS_DONE: AtomicU32 = AtomicU32::new(0);
+static SWITCH_LAST_REPORTED: [AtomicU64; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; kernel_core::smp::MAX_CPUS];
 
 fn switch_deadline_reached() -> bool {
     let deadline = CS_SWITCH_DEADLINE.load(Ordering::Acquire);
@@ -1010,6 +1042,17 @@ fn parallel_switch_measurer() {
     let Some(slot) = CS_SAMPLE_PTRS.get(cpu) else {
         return;
     };
+    if CS_LOGGED_MEASURER_START
+        .get(cpu)
+        .is_some_and(|logged| !logged.swap(true, Ordering::AcqRel))
+    {
+        kprintln!(
+            "[JSR-SMP-SW] stage=worker_start cpu={} role=measurer self_slot={} expected={}",
+            cpu,
+            crate::smp::percpu::this().current(),
+            CS_EXPECTED.load(Ordering::Acquire)
+        );
+    }
     let ptr = slot.load(Ordering::Acquire) as *mut u64;
     let ready = CS_READY.fetch_add(1, Ordering::AcqRel) + 1;
     if ready == CS_EXPECTED.load(Ordering::Acquire) {
@@ -1023,44 +1066,73 @@ fn parallel_switch_measurer() {
         sched::yield_with_cause("yield");
     }
     if !ptr.is_null() && !CS_ABORT.load(Ordering::Acquire) && !switch_deadline_reached() {
+        kprintln!(
+            "[JSR-SMP-SW] stage=measure_begin cpu={} first_slot={}",
+            cpu,
+            crate::smp::percpu::this().current()
+        );
         let iterations = CS_ITERATIONS.load(Ordering::Acquire);
         let samples = unsafe { core::slice::from_raw_parts_mut(ptr, iterations) };
-        for (index, sample) in samples.iter_mut().enumerate() {
+        let self_slot = crate::smp::percpu::this().current();
+        let mut index = 0usize;
+        let mut retry_budget = 0u32;
+        while index < iterations {
             if CS_ABORT.load(Ordering::Acquire) || switch_deadline_reached() {
                 CS_ABORT.store(true, Ordering::Release);
                 break;
             }
-            loop {
-                let n0 = sched::runtime_switch_count(cpu);
-                let c0 = arch::measure_cycles();
-                // Enter the complete existing scheduler transaction directly.
-                // `yield_now` is allowed to return immediately through the
-                // normal yield gate; that is correct for general scheduling,
-                // but cannot prove that a context-switch sample occurred.
-                sched::yield_with_cause("yield");
-                let dt = arch::measure_cycles().wrapping_sub(c0);
-                let n = sched::runtime_switch_count(cpu).wrapping_sub(n0);
-                if n == 0 {
-                    // A voluntary yield may be suppressed by the normal yield
-                    // gate. An empty attempt is not a valid context-switch
-                    // sample, so retry instead of retaining zero-latency data.
-                    CS_NONE[cpu].fetch_add(1, Ordering::Relaxed);
-                    CS_RETRIES[cpu].fetch_add(1, Ordering::Relaxed);
-                    if switch_deadline_reached() {
-                        CS_ABORT.store(true, Ordering::Release);
-                        break;
-                    }
-                    continue;
+            let partner_before = CS_PARTNER_RUNS[cpu].load(Ordering::Acquire);
+            let n0 = sched::runtime_switch_count(cpu);
+            let request = CS_REQUEST[cpu].fetch_add(1, Ordering::AcqRel) + 1;
+            let c0 = arch::measure_cycles();
+            // Enter the complete existing scheduler transaction directly.
+            // The partner acknowledgement below proves that B actually ran;
+            // returning to this exact slot proves the A -> B -> A round trip.
+            sched::yield_with_cause("yield");
+            let dt = arch::measure_cycles().wrapping_sub(c0);
+            let n = sched::runtime_switch_count(cpu).wrapping_sub(n0);
+            let partner_runs =
+                CS_PARTNER_RUNS[cpu].load(Ordering::Acquire).wrapping_sub(partner_before);
+            let returned = crate::smp::percpu::this().current() == self_slot
+                && CS_PARTNER_ACK[cpu].load(Ordering::Acquire) >= request;
+            if partner_runs != 1 {
+                CS_NONE[cpu].fetch_add(1, Ordering::Relaxed);
+                CS_RETRIES[cpu].fetch_add(1, Ordering::Relaxed);
+                if CS_LOGGED_FIRST_MISS
+                    .get(cpu)
+                    .is_some_and(|logged| !logged.swap(true, Ordering::AcqRel))
+                {
+                    kprintln!(
+                        "[JSR-SMP-SW] stage=first_partner_miss cpu={} partner_runs={} elapsed_cycles={} last={:?}",
+                        cpu,
+                        partner_runs,
+                        dt,
+                        sched::runtime_switch_last(cpu)
+                    );
                 }
-                if n != 2 {
-                    CS_UNEXPECTED[cpu].fetch_add(1, Ordering::Relaxed);
-                    if switch_deadline_reached() {
-                        CS_ABORT.store(true, Ordering::Release);
-                        break;
-                    }
-                    continue;
+            } else if !returned || n < 2 {
+                CS_UNEXPECTED[cpu].fetch_add(1, Ordering::Relaxed);
+                CS_RETRIES[cpu].fetch_add(1, Ordering::Relaxed);
+                if CS_LOGGED_FIRST_UNEXPECTED
+                    .get(cpu)
+                    .is_some_and(|logged| !logged.swap(true, Ordering::AcqRel))
+                {
+                    kprintln!(
+                        "[JSR-SMP-SW] stage=first_unexpected_window cpu={} switches={} returned={} elapsed_cycles={} last={:?}",
+                        cpu,
+                        n,
+                        returned,
+                        dt,
+                        sched::runtime_switch_last(cpu)
+                    );
                 }
-                *sample = dt;
+            } else {
+                samples[index] = dt;
+                index += 1;
+                retry_budget = 0;
+                if index % 4096 == 0 {
+                    arch::watchdog_pet_force();
+                }
                 CS_VALID[cpu].fetch_add(1, Ordering::Relaxed);
                 CS_SWITCHES[cpu].fetch_add(n as usize, Ordering::Relaxed);
                 if let Some((from_slot, from_generation, to_slot, to_generation)) =
@@ -1071,35 +1143,50 @@ fn parallel_switch_measurer() {
                     CS_LAST_TO_SLOT[cpu].store(to_slot, Ordering::Relaxed);
                     CS_LAST_TO_GENERATION[cpu].store(to_generation as usize, Ordering::Relaxed);
                 }
-                break;
-            }
-            if CS_ABORT.load(Ordering::Acquire) {
-                break;
-            }
-            if index % 4096 == 0 {
-                arch::watchdog_pet_force();
-            }
-            if index % CONTEXT_PROGRESS_STEP == 0 {
-                kprintln!(
-                    "[JSR-SMP-SW] stage=progress cpu={} sample={}/{} valid={} retries={} missed={} switches={}",
-                    cpu,
-                    index,
-                    iterations,
-                    CS_VALID[cpu].load(Ordering::Relaxed),
-                    CS_RETRIES[cpu].load(Ordering::Relaxed),
-                    CS_NONE[cpu].load(Ordering::Relaxed),
-                    CS_SWITCHES[cpu].load(Ordering::Relaxed)
-                );
-                if cpu == 0 {
-                    early::append_progress(&alloc::format!(
-                        "SCHED.CONTEXT_SWITCH CPU0 {}/{} VALID={} RETRIES={} MISSED={}",
+                if CS_LOGGED_FIRST_RESUME
+                    .get(cpu)
+                    .is_some_and(|logged| !logged.swap(true, Ordering::AcqRel))
+                {
+                    kprintln!(
+                        "[JSR-SMP-SW] stage=first_resume cpu={} switches={} partner_runs={} elapsed_cycles={} last={:?}",
+                        cpu,
+                        n,
+                        partner_runs,
+                        dt,
+                        sched::runtime_switch_last(cpu)
+                    );
+                }
+                if index % CONTEXT_PROGRESS_STEP == 0 {
+                    kprintln!(
+                        "[JSR-SMP-SW] stage=progress cpu={} sample={}/{} valid={} retries={} missed={} switches={}",
+                        cpu,
                         index,
                         iterations,
                         CS_VALID[cpu].load(Ordering::Relaxed),
                         CS_RETRIES[cpu].load(Ordering::Relaxed),
-                        CS_NONE[cpu].load(Ordering::Relaxed)
-                    ));
+                        CS_NONE[cpu].load(Ordering::Relaxed),
+                        CS_SWITCHES[cpu].load(Ordering::Relaxed)
+                    );
+                    if cpu == 0 {
+                        early::append_progress(&alloc::format!(
+                            "SCHED.CONTEXT_SWITCH CPU0 {}/{} VALID={} RETRIES={} MISSED={}",
+                            index,
+                            iterations,
+                            CS_VALID[cpu].load(Ordering::Relaxed),
+                            CS_RETRIES[cpu].load(Ordering::Relaxed),
+                            CS_NONE[cpu].load(Ordering::Relaxed)
+                        ));
+                    }
                 }
+                continue;
+            }
+            retry_budget = retry_budget.saturating_add(1);
+            if retry_budget >= SWITCH_RETRY_BUDGET || switch_deadline_reached() {
+                CS_ABORT.store(true, Ordering::Release);
+                break;
+            }
+            if index % 4096 == 0 {
+                arch::watchdog_pet_force();
             }
         }
     }
@@ -1107,6 +1194,68 @@ fn parallel_switch_measurer() {
 }
 
 fn parallel_switch_partner() {
+    let cpu = arch::cpu_index();
+    if CS_LOGGED_PARTNER_START
+        .get(cpu)
+        .is_some_and(|logged| !logged.swap(true, Ordering::AcqRel))
+    {
+        kprintln!(
+            "[JSR-SMP-SW] stage=worker_start cpu={} role=partner self_slot={} expected={}",
+            cpu,
+            crate::smp::percpu::this().current(),
+            CS_EXPECTED.load(Ordering::Acquire)
+        );
+    }
+    let ready = CS_READY.fetch_add(1, Ordering::AcqRel) + 1;
+    if ready == CS_EXPECTED.load(Ordering::Acquire) {
+        CS_RELEASE_CYCLES.store(arch::measure_cycles() as usize, Ordering::Release);
+        CS_RELEASE.store(true, Ordering::Release);
+    }
+    while !CS_RELEASE.load(Ordering::Acquire)
+        && !CS_ABORT.load(Ordering::Acquire)
+        && !switch_deadline_reached()
+    {
+        sched::yield_with_cause("yield");
+    }
+    if CS_LOGGED_PARTNER_WAIT
+        .get(cpu)
+        .is_some_and(|logged| !logged.swap(true, Ordering::AcqRel))
+    {
+        kprintln!(
+            "[JSR-SMP-SW] stage=partner_wait cpu={} done={}",
+            cpu,
+            CS_DONE
+                .get(cpu)
+                .is_none_or(|done| done.load(Ordering::Acquire))
+        );
+    }
+    while !CS_DONE
+        .get(cpu)
+        .is_some_and(|done| done.load(Ordering::Acquire))
+        && !CS_ABORT.load(Ordering::Acquire)
+        && !switch_deadline_reached()
+    {
+        let request = CS_REQUEST[cpu].load(Ordering::Acquire);
+        if request > CS_PARTNER_ACK[cpu].load(Ordering::Acquire) {
+            CS_PARTNER_ACK[cpu].store(request, Ordering::Release);
+            let runs = CS_PARTNER_RUNS[cpu].fetch_add(1, Ordering::AcqRel) + 1;
+            if CS_LOGGED_FIRST_PARTNER_RUN
+                .get(cpu)
+                .is_some_and(|logged| !logged.swap(true, Ordering::AcqRel))
+            {
+                kprintln!(
+                    "[JSR-SMP-SW] stage=first_partner_run cpu={} request={} runs={}",
+                    cpu,
+                    request,
+                    runs
+                );
+            }
+        }
+        sched::yield_with_cause("yield");
+    }
+}
+
+fn general_switch_worker() {
     let cpu = arch::cpu_index();
     let ready = CS_READY.fetch_add(1, Ordering::AcqRel) + 1;
     if ready == CS_EXPECTED.load(Ordering::Acquire) {
@@ -1119,14 +1268,327 @@ fn parallel_switch_partner() {
     {
         sched::yield_with_cause("yield");
     }
-    while !CS_DONE
-        .get(cpu)
-        .is_some_and(|done| done.load(Ordering::Acquire))
+
+    if SWITCH_BASELINE_SET[cpu]
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        SWITCH_BASELINES[cpu].store(sched::runtime_switch_count(cpu), Ordering::Release);
+        sched::reset_switch_sample_count(cpu);
+    }
+    let baseline = SWITCH_BASELINES[cpu].load(Ordering::Acquire);
+    let target = SWITCH_TARGETS[cpu].load(Ordering::Acquire);
+    let mut observed = sched::runtime_switch_count(cpu).saturating_sub(baseline);
+    let mut no_progress = 0u32;
+    SWITCH_LAST_REPORTED[cpu].store(0, Ordering::Release);
+    while observed < target
         && !CS_ABORT.load(Ordering::Acquire)
         && !switch_deadline_reached()
     {
         sched::yield_with_cause("yield");
+        let next = sched::runtime_switch_count(cpu).saturating_sub(baseline);
+        if next == observed {
+            no_progress = no_progress.saturating_add(1);
+            if no_progress >= SWITCH_RETRY_BUDGET {
+                CS_ABORT.store(true, Ordering::Release);
+                break;
+            }
+        } else {
+            no_progress = 0;
+            observed = next;
+            arch::watchdog_pet_force();
+            let milestone = observed / 100 * 100;
+            if milestone != 0
+                && milestone
+                    > SWITCH_LAST_REPORTED[cpu].swap(milestone, Ordering::AcqRel)
+            {
+                kprintln!(
+                    "[JSR-SMP-SW] stage=general_progress cpu={} switches={}/{} task_slot={}",
+                    cpu,
+                    observed,
+                    target,
+                    crate::smp::percpu::this().current()
+                );
+            }
+        }
     }
+    SWITCH_WORKERS_DONE.fetch_add(1, Ordering::AcqRel);
+}
+
+/// Measure every real scheduler handoff completed while a small task workload
+/// runs. Scheduler policy decides the task order; this fixture supplies runnable
+/// tasks and a stop target but never requires a particular A/B sequence.
+fn run_general_switch_workload(
+    mode: &str,
+    cpus: &[usize],
+    cal: &Calibration,
+    target_per_cpu: usize,
+) -> bool {
+    let expected_workers = match cpus.len().checked_mul(SWITCH_WORKERS_PER_CPU) {
+        Some(value) => value,
+        None => return false,
+    };
+    let per_cpu_capacity = match target_per_cpu.checked_add(1_024) {
+        Some(value) if value != 0 => value,
+        _ => return false,
+    };
+    let record_capacity = match per_cpu_capacity.checked_mul(cpus.len()) {
+        Some(value) => value,
+        None => return false,
+    };
+    let mut records = Vec::new();
+    if records.try_reserve_exact(record_capacity).is_err() {
+        record_result(format_args!(
+            "{} SCHED.CONTEXT_SWITCH BLOCKED reason=sample_allocation",
+            mode
+        ));
+        return false;
+    }
+    records.resize(record_capacity, sched::SwitchRecord::default());
+
+    CS_READY.store(0, Ordering::Release);
+    CS_RELEASE.store(false, Ordering::Release);
+    CS_ABORT.store(false, Ordering::Release);
+    CS_RELEASE_CYCLES.store(0, Ordering::Release);
+    CS_EXPECTED.store(expected_workers as u32, Ordering::Release);
+    SWITCH_WORKERS_DONE.store(0, Ordering::Release);
+    let switch_seconds = if target_per_cpu <= 1_000 { 20 } else { 120 };
+    CS_SWITCH_DEADLINE.store(
+        arch::measure_cycles().saturating_add(
+            early::tsc_frequency_hz()
+                .unwrap_or(3_000_000_000)
+                .saturating_mul(switch_seconds),
+        ) as usize,
+        Ordering::Release,
+    );
+
+    for (index, &cpu) in cpus.iter().enumerate() {
+        SWITCH_BASELINES[cpu].store(0, Ordering::Release);
+        SWITCH_TARGETS[cpu].store(target_per_cpu as u64, Ordering::Release);
+        SWITCH_BASELINE_SET[cpu].store(false, Ordering::Release);
+        let start = index.saturating_mul(per_cpu_capacity);
+        let pointer = unsafe { records.as_mut_ptr().add(start) };
+        if !sched::configure_switch_sample_sink(cpu, pointer, per_cpu_capacity) {
+            for &configured in &cpus[..index] {
+                let _ = sched::clear_switch_sample_sink(configured);
+            }
+            record_result(format_args!(
+                "{} SCHED.CONTEXT_SWITCH BLOCKED reason=sample_sink cpu={}",
+                mode, cpu
+            ));
+            return false;
+        }
+    }
+
+    let mut spawned = 0usize;
+    for &cpu in cpus {
+        let mut affinity = kernel_core::smp::CpuSet::EMPTY;
+        if !affinity.insert(cpu) {
+            continue;
+        }
+        for worker in 0..SWITCH_WORKERS_PER_CPU {
+            let id = TaskId(12_000 + (cpu as u64 * SWITCH_WORKERS_PER_CPU as u64) + worker as u64);
+            if sched::spawn_on(
+                id,
+                "smp-switch-workload",
+                general_switch_worker,
+                None,
+                affinity.clone(),
+            )
+            .is_ok()
+            {
+                spawned += 1;
+            }
+        }
+    }
+    kprintln!(
+        "[JSR-SMP-SW] stage=general_spawned cpu_count={} tasks={}/{} target_per_cpu={}",
+        cpus.len(),
+        spawned,
+        expected_workers,
+        target_per_cpu
+    );
+    let started = CS_RELEASE_CYCLES.load(Ordering::Acquire) as u64;
+    if spawned != expected_workers {
+        CS_ABORT.store(true, Ordering::Release);
+        CS_RELEASE.store(true, Ordering::Release);
+    }
+    let tick_deadline = crate::sched::timer_ticks()
+        .saturating_add(u64::from(config::ACTIVE.clock.timer_hz).saturating_mul(switch_seconds));
+    let settled = sched::run_until(tick_deadline);
+    let finished = arch::measure_cycles();
+    if !settled {
+        CS_ABORT.store(true, Ordering::Release);
+        CS_RELEASE.store(true, Ordering::Release);
+    }
+    kprintln!(
+        "[JSR-SMP-SW] stage=general_run_returned cpu_count={} settled={} abort={} workers_done={}/{} target_per_cpu={}",
+        cpus.len(),
+        settled,
+        CS_ABORT.load(Ordering::Acquire),
+        SWITCH_WORKERS_DONE.load(Ordering::Acquire),
+        expected_workers,
+        target_per_cpu
+    );
+
+    let mut accepted = Vec::new();
+    let mut overflow = Vec::new();
+    if accepted.try_reserve_exact(cpus.len()).is_err()
+        || overflow.try_reserve_exact(cpus.len()).is_err()
+    {
+        core::mem::forget(records);
+        return false;
+    }
+    for &cpu in cpus {
+        let (count, over) = sched::clear_switch_sample_sink(cpu);
+        accepted.push(count);
+        overflow.push(over);
+    }
+    let workers_done = SWITCH_WORKERS_DONE.load(Ordering::Acquire) as usize;
+    let complete = settled
+        && spawned == expected_workers
+        && workers_done == expected_workers
+        && overflow.iter().all(|&count| count == 0)
+        && accepted
+            .iter()
+            .all(|&count| count >= target_per_cpu as u64);
+    if !complete {
+        core::mem::forget(records);
+        check(false, "通用上下文切换工作负载未完整收敛");
+        record_result(format_args!(
+            "{} SCHED.CONTEXT_SWITCH BLOCKED settled={} tasks={}/{} done={}/{} overflow={:?} accepted={:?} target={}",
+            mode,
+            settled,
+            spawned,
+            expected_workers,
+            workers_done,
+            expected_workers,
+            overflow,
+            accepted,
+            target_per_cpu
+        ));
+        return false;
+    }
+
+    let mut durations = Vec::new();
+    if durations.try_reserve_exact(cpus.len().saturating_mul(target_per_cpu)).is_err() {
+        core::mem::forget(records);
+        return false;
+    }
+    let mut identities_valid = true;
+    for (cpu_index, &cpu) in cpus.iter().enumerate() {
+        let start = cpu_index.saturating_mul(per_cpu_capacity);
+        let count = usize::try_from(accepted[cpu_index]).unwrap_or(per_cpu_capacity);
+        let end = start.saturating_add(count.min(per_cpu_capacity));
+        let mut previous_sequence = 0u64;
+        let mut worker_handoffs = 0usize;
+        for record in &records[start..end] {
+            if record.sequence <= previous_sequence
+                || record.duration_cycles == 0
+                || record.from_slot == usize::MAX as u64 && record.from_task_id != 0
+                || record.to_slot == usize::MAX as u64 && record.to_task_id != 0
+            {
+                identities_valid = false;
+            }
+            previous_sequence = record.sequence;
+            if record.from_task_id != 0 && record.to_task_id != 0 {
+                worker_handoffs += 1;
+            }
+        }
+        if worker_handoffs == 0 {
+            identities_valid = false;
+        }
+        let sample_end = (start + target_per_cpu).min(end);
+        durations.extend(
+            records[start..sample_end]
+                .iter()
+                .map(|record| record.duration_cycles),
+        );
+        let mut cpu_durations = records[start..sample_end]
+            .iter()
+            .map(|record| record.duration_cycles)
+            .collect::<Vec<_>>();
+        let Some(cpu_summary) = summarize(&mut cpu_durations) else {
+            identities_valid = false;
+            continue;
+        };
+        kprintln!(
+            "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"parallel_switch_cpu\",\"mode\":\"{}\",\"cpu\":{},\"measurement\":\"completed_execution_handoff\",\"planned\":{},\"observed\":{},\"worker_handoffs\":{},\"overflow\":{},\"p50_ns\":{},\"p99_ns\":{},\"p999_ns\":{},\"p9999_ns\":{},\"p99999_ns\":{},\"max_ns\":{}}}",
+            mode,
+            cpu,
+            target_per_cpu,
+            count,
+            worker_handoffs,
+            overflow[cpu_index],
+            cal.to_ns(cpu_summary.p50),
+            cal.to_ns(cpu_summary.p99),
+            cal.to_ns(cpu_summary.p999),
+            cal.to_ns(cpu_summary.p9999),
+            cal.to_ns(cpu_summary.p99999),
+            cal.to_ns(cpu_summary.max)
+        );
+    }
+    if !identities_valid {
+        core::mem::forget(records);
+        check(false, "真实切换事件缺少任务身份或序号不单调");
+        return false;
+    }
+    let Some(summary) = summarize(&mut durations) else {
+        core::mem::forget(records);
+        return false;
+    };
+    let counts = cal.threshold_counts(&durations);
+    let switch_total = accepted.iter().copied().sum::<u64>();
+    let window_cycles = finished.saturating_sub(started);
+    let work_window_ns = cycles_to_ns(window_cycles).unwrap_or(0);
+    let switches_per_second = switch_total
+        .saturating_mul(1_000_000_000)
+        .checked_div(work_window_ns.max(1))
+        .unwrap_or(0);
+    emit_parallel_json(
+        mode,
+        "SCHED.CONTEXT_SWITCH",
+        &summary,
+        &counts,
+        cal,
+        MetricExecution {
+            success: switch_total,
+            failure: 0,
+        },
+        target_per_cpu.saturating_mul(cpus.len()),
+        work_window_ns,
+        0,
+    );
+    kprintln!(
+        "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"parallel_throughput\",\"mode\":\"{}\",\"name\":\"SCHED.CONTEXT_SWITCH\",\"observed_switches\":{},\"work_window_ns\":{},\"switches_per_second\":{},\"workers\":{},\"target_per_cpu\":{},\"overflow\":0}}",
+        mode,
+        switch_total,
+        work_window_ns,
+        switches_per_second,
+        expected_workers,
+        target_per_cpu
+    );
+    record_result(format_args!(
+        "{} SCHED.CONTEXT_SWITCH PLANNED={} N={} CPUS={} SWITCHES={} WORKERS={} P50={} P99={} P99.9={} P99.99={} P99.999={} MAX={} >1US={} >10US={} >50US={} WINDOW_NS={} SWITCHES/S={}",
+        mode,
+        target_per_cpu.saturating_mul(cpus.len()),
+        summary.count,
+        cpus.len(),
+        switch_total,
+        expected_workers,
+        cal.to_ns(summary.p50),
+        cal.to_ns(summary.p99),
+        cal.to_ns(summary.p999),
+        cal.to_ns(summary.p9999),
+        cal.to_ns(summary.p99999),
+        cal.to_ns(summary.max),
+        counts.over_1us,
+        counts.over_10us,
+        counts.over_50us,
+        work_window_ns,
+        switches_per_second
+    ));
+    true
 }
 
 fn run_parallel_context_switch(
@@ -1154,7 +1616,7 @@ fn run_parallel_context_switch(
     CS_RELEASE_CYCLES.store(0, Ordering::Release);
     CS_EXPECTED.store(cpus.len().saturating_mul(2) as u32, Ordering::Release);
     CS_ITERATIONS.store(iterations, Ordering::Release);
-    let switch_seconds = 120u64;
+    let switch_seconds = if iterations <= 1_000 { 20 } else { 120 };
     CS_SWITCH_DEADLINE.store(
         arch::measure_cycles().saturating_add(
             early::tsc_frequency_hz()
@@ -1185,6 +1647,30 @@ fn run_parallel_context_switch(
         CS_LAST_GENERATION[cpu].store(0, Ordering::Relaxed);
         CS_LAST_TO_SLOT[cpu].store(usize::MAX, Ordering::Relaxed);
         CS_LAST_TO_GENERATION[cpu].store(0, Ordering::Relaxed);
+        CS_REQUEST[cpu].store(0, Ordering::Release);
+        CS_PARTNER_ACK[cpu].store(0, Ordering::Release);
+        CS_PARTNER_RUNS[cpu].store(0, Ordering::Release);
+        if let Some(logged) = CS_LOGGED_MEASURER_START.get(cpu) {
+            logged.store(false, Ordering::Release);
+        }
+        if let Some(logged) = CS_LOGGED_PARTNER_START.get(cpu) {
+            logged.store(false, Ordering::Release);
+        }
+        if let Some(logged) = CS_LOGGED_PARTNER_WAIT.get(cpu) {
+            logged.store(false, Ordering::Release);
+        }
+        if let Some(logged) = CS_LOGGED_FIRST_RESUME.get(cpu) {
+            logged.store(false, Ordering::Release);
+        }
+        if let Some(logged) = CS_LOGGED_FIRST_MISS.get(cpu) {
+            logged.store(false, Ordering::Release);
+        }
+        if let Some(logged) = CS_LOGGED_FIRST_UNEXPECTED.get(cpu) {
+            logged.store(false, Ordering::Release);
+        }
+        if let Some(logged) = CS_LOGGED_FIRST_PARTNER_RUN.get(cpu) {
+            logged.store(false, Ordering::Release);
+        }
         let Some(slot) = CS_SAMPLE_PTRS.get(cpu) else {
             return false;
         };
@@ -1231,6 +1717,12 @@ fn run_parallel_context_switch(
         cpus.len(),
         expected_ready,
         spawned
+    );
+    kprintln!(
+        "[JSR-SMP-SW] stage=controller_wait cpu={} expected={} deadline_s={}",
+        arch::cpu_index(),
+        expected_ready,
+        switch_seconds
     );
     let tick_deadline = crate::sched::timer_ticks()
         .saturating_add(u64::from(config::ACTIVE.clock.timer_hz).saturating_mul(switch_seconds));
@@ -1478,21 +1970,34 @@ fn run_parallel_mode(mode: &str, cpus: &[usize], cal: &Calibration) -> bool {
                 cpus.len()
             ));
             kprintln!(
-                "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"parallel_switch_stage\",\"mode\":\"{}\",\"cpus\":{},\"iterations_per_cpu\":{},\"measurement\":\"roundtrip_a_b_a\"}}",
+                "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"parallel_switch_stage\",\"mode\":\"{}\",\"cpus\":{},\"iterations_per_cpu\":{},\"measurement\":\"completed_execution_handoff\"}}",
                 mode,
                 cpus.len(),
                 iterations
             );
-            ok &= run_parallel_context_switch(mode, cpus, cal, iterations);
+            ok &= run_general_switch_workload(mode, cpus, cal, iterations);
             switch_planned_samples =
                 switch_planned_samples.saturating_add(iterations.saturating_mul(cpus.len()));
         }
+        early::append_progress(&alloc::format!(
+            "{} RUNNING CONTROLLED ROUND_TRIP",
+            mode
+        ));
+        ok &= run_parallel_context_switch(mode, cpus, cal, 1_000);
+        switch_planned_samples = switch_planned_samples.saturating_add(1_000 * cpus.len());
     }
     #[cfg(not(feature = "bench-switch-diagnostic"))]
     {
         early::append_progress(&alloc::format!("{} RUNNING SCHED.CONTEXT_SWITCH", mode));
+        ok &= run_general_switch_workload(mode, cpus, cal, CONTEXT_ITERS);
+        early::append_progress(&alloc::format!(
+            "{} RUNNING CONTROLLED ROUND_TRIP",
+            mode
+        ));
         ok &= run_parallel_context_switch(mode, cpus, cal, CONTEXT_ITERS);
-        switch_planned_samples = CONTEXT_ITERS.saturating_mul(cpus.len());
+        switch_planned_samples = CONTEXT_ITERS
+            .saturating_mul(cpus.len())
+            .saturating_mul(2);
     }
     let usable = crate::mm::frame::usable_frames();
     let free = crate::mm::frame::free_frames();
@@ -1506,7 +2011,7 @@ fn run_parallel_mode(mode: &str, cpus: &[usize], cal: &Calibration) -> bool {
         "{} RESULT COMPLETE={} TOTAL_METRICS={} PLANNED_SAMPLES={} MEM_USED_KIB={} HEAP_USED_KIB={} HEAP_MAPPED_KIB={}",
         mode,
         ok,
-        metrics.len() + 1,
+        metrics.len() + 2,
         planned_samples,
         usable.saturating_sub(free).saturating_mul(4),
         heap_total.saturating_sub(heap_free) / 1024,

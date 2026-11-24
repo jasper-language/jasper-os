@@ -57,6 +57,8 @@ pub use scheduler::GrowError;
 pub use scheduler::{
     AffinityError, CpuStats, NohzStats, ScanStats, SetCallsError, TimerIdentityAudit, WaitDeadline,
 };
+#[cfg(feature = "bench-profile")]
+pub use scheduler::SwitchRecord;
 use scheduler::{
     BlockError, Cause, CpuGroupId, GroupError, IdleStep, QosError, Scheduler, SpawnError,
     SwitchObserver, WATCHDOG_LOG,
@@ -739,6 +741,25 @@ pub fn runtime_switch_count(cpu: usize) -> u64 {
 }
 pub fn runtime_switch_last(cpu: usize) -> Option<(usize, u64, usize, u64)> {
     scheduler::runtime_switch_last(cpu)
+}
+
+#[cfg(feature = "bench-profile")]
+pub fn configure_switch_sample_sink(
+    cpu: usize,
+    pointer: *mut SwitchRecord,
+    capacity: usize,
+) -> bool {
+    scheduler::configure_switch_sample_sink(cpu, pointer, capacity)
+}
+
+#[cfg(feature = "bench-profile")]
+pub fn clear_switch_sample_sink(cpu: usize) -> (u64, u64) {
+    scheduler::clear_switch_sample_sink(cpu)
+}
+
+#[cfg(feature = "bench-profile")]
+pub fn reset_switch_sample_count(cpu: usize) {
+    scheduler::reset_switch_sample_count(cpu)
 }
 #[cfg(feature = "krn3-fast-tick-verify")]
 pub fn local_tick_batch_peak(cpu: usize) -> u8 {

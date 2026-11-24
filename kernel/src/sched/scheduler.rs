@@ -105,6 +105,7 @@ pub enum WaitDeadline {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LeafTaskHot {
+    task_id: u64,
     state: TaskState,
     on_cpu: Option<usize>,
     sched: super::policy::SchedEntity,
@@ -137,6 +138,8 @@ struct RunLeaf {
     slice_quantum: u32,
     switching_from: Option<usize>,
     switching_immediate: bool,
+    switching_started_cycles: u64,
+    switching_cause: &'static str,
     local_transition: Option<LeafTransition>,
     /// Context-save completion published by the resumed execution flow.  The
     /// owner CPU releases the hot execution claim immediately; the next cold
@@ -172,6 +175,7 @@ impl RunLeaf {
                 BOOT_SLOT,
                 1,
                 LeafTaskHot {
+                    task_id: 0,
                     state: TaskState::Running,
                     on_cpu: None,
                     sched: new_entity(Qos::UserInitiated),
@@ -196,6 +200,8 @@ impl RunLeaf {
             slice_quantum: 1,
             switching_from: None,
             switching_immediate: false,
+            switching_started_cycles: 0,
+            switching_cause: "",
             local_transition: None,
             completed: None,
         }
@@ -282,6 +288,66 @@ static RUNTIME_LAST_FROM_GENERATION: [Atomic64; MAX_CPUS] = [const { Atomic64::n
 static RUNTIME_LAST_TO_SLOT: [Atomic64; MAX_CPUS] = [const { Atomic64::new(u64::MAX) }; MAX_CPUS];
 #[cfg(feature = "bench-profile")]
 static RUNTIME_LAST_TO_GENERATION: [Atomic64; MAX_CPUS] = [const { Atomic64::new(0) }; MAX_CPUS];
+#[cfg(feature = "bench-profile")]
+static RUNTIME_LAST_DURATION_CYCLES: [Atomic64; MAX_CPUS] =
+    [const { Atomic64::new(0) }; MAX_CPUS];
+#[cfg(feature = "bench-profile")]
+static RUNTIME_LAST_CAUSE: [Atomic64; MAX_CPUS] = [const { Atomic64::new(0) }; MAX_CPUS];
+#[cfg(feature = "bench-profile")]
+static RUNTIME_SAMPLE_PTRS: [core::sync::atomic::AtomicUsize; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; MAX_CPUS];
+#[cfg(feature = "bench-profile")]
+static RUNTIME_SAMPLE_CAPACITIES: [core::sync::atomic::AtomicUsize; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; MAX_CPUS];
+#[cfg(feature = "bench-profile")]
+static RUNTIME_SAMPLE_COUNTS: [Atomic64; MAX_CPUS] = [const { Atomic64::new(0) }; MAX_CPUS];
+#[cfg(feature = "bench-profile")]
+static RUNTIME_SAMPLE_OVERFLOWS: [Atomic64; MAX_CPUS] = [const { Atomic64::new(0) }; MAX_CPUS];
+
+/// One completed scheduler execution-ownership handoff.
+///
+/// The record is emitted only after the target execution flow owns the CPU.
+/// Slots and generations are runtime identities; `task_id` preserves the
+/// stable task label for tooling. `duration_cycles` starts after the scheduler
+/// selected the target and ends at completed handoff publication.
+#[cfg(feature = "bench-profile")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SwitchRecord {
+    pub sequence: u64,
+    pub duration_cycles: u64,
+    pub from_task_id: u64,
+    pub from_slot: u64,
+    pub from_generation: u64,
+    pub to_task_id: u64,
+    pub to_slot: u64,
+    pub to_generation: u64,
+    pub cause: u64,
+}
+
+#[cfg(feature = "bench-profile")]
+fn switch_cause_code(cause: &'static str) -> u64 {
+    match cause {
+        Cause::YIELD => 1,
+        Cause::TICK => 2,
+        Cause::PREEMPT => 3,
+        Cause::SHARE => 4,
+        Cause::SLEEP => 5,
+        Cause::BLOCK => 6,
+        Cause::EXIT => 7,
+        Cause::MIGRATE => 8,
+        Cause::THROTTLE => 9,
+        Cause::STEAL => 10,
+        other => {
+            let mut hash = 0xcbf29ce484222325u64;
+            for byte in other.as_bytes() {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+            hash
+        }
+    }
+}
 
 #[cfg(feature = "bench-profile")]
 fn record_completed_switch(
@@ -310,10 +376,15 @@ fn record_runtime_switch(
     from_token: Option<kernel_core::task_index::Token>,
     to: usize,
     to_token: Option<kernel_core::task_index::Token>,
+    from_task_id: u64,
+    to_task_id: u64,
+    duration_cycles: u64,
+    cause: &'static str,
 ) {
-    if let Some(counter) = RUNTIME_SWITCHES.get(cpu) {
-        counter.fetch_add(1, core::sync::atomic::Ordering::Release);
-    }
+    let sequence = RUNTIME_SWITCHES
+        .get(cpu)
+        .map_or(0, |counter| counter.fetch_add(1, core::sync::atomic::Ordering::AcqRel) + 1);
+    let cause_code = switch_cause_code(cause);
     if let Some(slot) = RUNTIME_LAST_FROM_SLOT.get(cpu) {
         slot.store(from as u64, core::sync::atomic::Ordering::Relaxed);
     }
@@ -331,6 +402,40 @@ fn record_runtime_switch(
             to_token.map_or(0, |token| token.generation),
             core::sync::atomic::Ordering::Relaxed,
         );
+    }
+    if let Some(duration) = RUNTIME_LAST_DURATION_CYCLES.get(cpu) {
+        duration.store(duration_cycles, core::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(slot) = RUNTIME_LAST_CAUSE.get(cpu) {
+        slot.store(cause_code, core::sync::atomic::Ordering::Relaxed);
+    }
+    let pointer = RUNTIME_SAMPLE_PTRS[cpu].load(core::sync::atomic::Ordering::Acquire) as *mut SwitchRecord;
+    let capacity = RUNTIME_SAMPLE_CAPACITIES[cpu].load(core::sync::atomic::Ordering::Acquire);
+    if !pointer.is_null() && capacity != 0 {
+        let index = RUNTIME_SAMPLE_COUNTS[cpu]
+            .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        if let Ok(index) = usize::try_from(index) {
+            if index < capacity {
+                let record = SwitchRecord {
+                    sequence,
+                    duration_cycles,
+                    from_task_id,
+                    from_slot: from as u64,
+                    from_generation: from_token.map_or(0, |token| token.generation),
+                    to_task_id,
+                    to_slot: to as u64,
+                    to_generation: to_token.map_or(0, |token| token.generation),
+                    cause: cause_code,
+                };
+                // SAFETY: the benchmark registers an aligned writable slice for
+                // this CPU before starting workers and keeps it live until all
+                // workers have settled. The index is checked against capacity.
+                unsafe { pointer.add(index).write_volatile(record) };
+            } else {
+                RUNTIME_SAMPLE_OVERFLOWS[cpu]
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
     }
 }
 
@@ -413,6 +518,49 @@ pub(super) fn runtime_switch_last(cpu: usize) -> Option<(usize, u64, usize, u64)
     }
 }
 
+#[cfg(feature = "bench-profile")]
+pub(super) fn configure_switch_sample_sink(
+    cpu: usize,
+    pointer: *mut SwitchRecord,
+    capacity: usize,
+) -> bool {
+    if cpu >= MAX_CPUS || pointer.is_null() || capacity == 0 {
+        return false;
+    }
+    let Some(leaf) = leaf(cpu) else {
+        return false;
+    };
+    if leaf.lock().switching_from.is_some() {
+        return false;
+    }
+    RUNTIME_SAMPLE_COUNTS[cpu].store(0, core::sync::atomic::Ordering::Release);
+    RUNTIME_SAMPLE_OVERFLOWS[cpu].store(0, core::sync::atomic::Ordering::Release);
+    RUNTIME_SAMPLE_CAPACITIES[cpu].store(capacity, core::sync::atomic::Ordering::Release);
+    RUNTIME_SAMPLE_PTRS[cpu].store(pointer as usize, core::sync::atomic::Ordering::Release);
+    true
+}
+
+#[cfg(feature = "bench-profile")]
+pub(super) fn clear_switch_sample_sink(cpu: usize) -> (u64, u64) {
+    if cpu >= MAX_CPUS {
+        return (0, 0);
+    }
+    RUNTIME_SAMPLE_PTRS[cpu].store(0, core::sync::atomic::Ordering::Release);
+    RUNTIME_SAMPLE_CAPACITIES[cpu].store(0, core::sync::atomic::Ordering::Release);
+    (
+        RUNTIME_SAMPLE_COUNTS[cpu].load(core::sync::atomic::Ordering::Acquire),
+        RUNTIME_SAMPLE_OVERFLOWS[cpu].load(core::sync::atomic::Ordering::Acquire),
+    )
+}
+
+#[cfg(feature = "bench-profile")]
+pub(super) fn reset_switch_sample_count(cpu: usize) {
+    if cpu < MAX_CPUS {
+        RUNTIME_SAMPLE_COUNTS[cpu].store(0, core::sync::atomic::Ordering::Release);
+        RUNTIME_SAMPLE_OVERFLOWS[cpu].store(0, core::sync::atomic::Ordering::Release);
+    }
+}
+
 /// Complete the owner-local half of a context switch without taking the
 /// global scheduler lock.  IRQs are disabled by the caller, and the saved
 /// context is already durable when this function runs.  Cold lifecycle and
@@ -421,10 +569,16 @@ pub(super) fn finish_leaf_switch(
     cpu: usize,
     _resume: Option<kernel_core::raw_timing::Endpoint>,
 ) -> bool {
+    #[cfg(feature = "bench-profile")]
+    let finished_cycles = crate::arch::measure_cycles();
     with_leaf(cpu, |leaf| {
         let Some(prev) = leaf.switching_from.take() else {
             return false;
         };
+        #[cfg(feature = "bench-profile")]
+        let started_cycles = leaf.switching_started_cycles;
+        #[cfg(feature = "bench-profile")]
+        let cause = core::mem::replace(&mut leaf.switching_cause, "");
         let force_immediate = core::mem::replace(&mut leaf.switching_immediate, false);
         assert!(
             leaf.completed.is_none(),
@@ -449,6 +603,14 @@ pub(super) fn finish_leaf_switch(
                 slot: current,
                 generation,
             });
+        #[cfg(feature = "bench-profile")]
+        let from_task_id = token
+            .and_then(|token| leaf.hot.get(prev)?.get(token).ok())
+            .map_or(0, |hot| hot.task_id);
+        #[cfg(feature = "bench-profile")]
+        let to_task_id = current_token
+            .and_then(|token| leaf.hot.get(current)?.get(token).ok())
+            .map_or(0, |hot| hot.task_id);
         if let Some(token) = token {
             let owner = leaf.hot[prev]
                 .get_mut(token)
@@ -458,7 +620,17 @@ pub(super) fn finish_leaf_switch(
             }
         }
         #[cfg(feature = "bench-profile")]
-        record_runtime_switch(cpu, prev, token, current, current_token);
+        record_runtime_switch(
+            cpu,
+            prev,
+            token,
+            current,
+            current_token,
+            from_task_id,
+            to_task_id,
+            finished_cycles.saturating_sub(started_cycles),
+            cause,
+        );
         #[cfg(feature = "krn3-fast-tick-verify")]
         {
             LEAF_FINISHES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -484,7 +656,7 @@ pub(super) fn finish_leaf_switch(
         // Its cold completion must run now to publish the destination kick;
         // waiting for an idle/nohz CPU's next scheduler transaction can leave
         // the task stranded indefinitely.
-        force_immediate || token.is_none()
+        force_immediate || token.is_none() || !is_worker(leaf.current)
     })
 }
 
@@ -1861,6 +2033,7 @@ impl Scheduler {
 
     fn publish_hot(&self, home: usize, token: kernel_core::task_index::Token, task: &Task) {
         let value = LeafTaskHot {
+            task_id: task.id.0,
             state: task.state,
             on_cpu: task.on_cpu,
             sched: task.sched,
@@ -3536,6 +3709,7 @@ impl Scheduler {
                     task.home,
                     token,
                     LeafTaskHot {
+                        task_id: task.id.0,
                         state: task.state,
                         on_cpu: task.on_cpu,
                         sched: task.sched,
@@ -6184,6 +6358,10 @@ impl Scheduler {
             leaf.current = next;
             leaf.switching_from = Some(prev);
             leaf.switching_immediate = cause == Cause::MIGRATE;
+            #[cfg(feature = "bench-profile")]
+            leaf.switching_started_cycles = crate::arch::measure_cycles();
+            #[cfg(feature = "bench-profile")]
+            leaf.switching_cause = cause;
         });
 
         let next_space = self.task(next).and_then(|t| t.space);

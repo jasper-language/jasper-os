@@ -2,7 +2,8 @@
 
 更新时间：2026-11-24。
 
-状态：**统一三组矩阵实现中；旧 AMD 裸机结果因缺少同镜像单核组且上下文切换未完整，不进入正式基线。**
+状态：**通用切换观测与可终止的双任务工作负载已实现并通过同构建 QEMU 的
+1/10/1000 次三组验收；AMD 裸机复核待执行。旧裸机结果不进入正式基线。**
 本文件不把软件构建、QEMU 或历史单核数字当作 Issue #95 完成证据。
 
 ## 正式矩阵组织
@@ -19,23 +20,41 @@
 
 每个并行指标现在分别输出 `planned / observed / valid / failed_ops /
 incomplete`。多核百分位仍由全部保留原始样本计算，不平均各 CPU 百分位。
-`SCHED.CONTEXT_SWITCH` 的测量任务直接进入原有完整调度事务，而不是调用允许
-立即返回的通用 `yield_now` 快路；否则单核实机可能被正常 yield gate 无限抑制。
-若仍未发生真实切换，该次尝试不进入样本，重试后只有真实完成的切换才计入
-百分位；重试数单独记录。
+`SCHED.CONTEXT_SWITCH` 由两个普通可运行任务的持续让出产生。任务顺序由生产
+调度器按运行队列、优先级、亲和性和预算决定；测试只等待该 CPU 完成目标数量
+的真实切换，不要求固定的 A→B→A 顺序，也不使用 `n == 2` 或任何固定切换次数
+作为成功条件。
 
 每个模式输出 `before / during_raw_retained / after` 三个阶段的内存事实，
 包含可用/空闲/已用内存、堆使用、堆峰值、堆空闲与映射量。
 
-## PERF-R01：真实切换完成计数
+## PERF-R01：真实切换完成事实
 
-- `bench-profile` 构建在 `Scheduler::finish_switch` 的真实完成点记录每 CPU
-  完成计数、最后换下任务槽位与代次。该路径覆盖普通切换、定时器快速路径、
-  阻塞、退出及进入空闲落脚点。
-- 计划创建、继续同一上下文、`yield` 无对手和失败切换不增加完成计数。
-- 单核并发基准改为读取当前 CPU 的完成计数；原先共享的
-  `leaf_local_switch_count` 不再作为切换性能样本依据。
-- 每 CPU 输出完成切换数、有效样本、未切换数及最后任务身份/代次。
+- `bench-profile` 构建在 `finish_leaf_switch` 的真实交接完成点发布每 CPU
+  `SwitchRecord`：切换序号、执行权交接耗时、切出/切入 task ID、slot、
+  generation 和切换原因。计划创建、继续同一上下文及失败切换不产生记录。
+- 机制记录覆盖主动让出、定时器/优先级切换、阻塞、退出、迁移和进入 boot/idle
+  落脚点。普通生产构建不输出逐次文本日志；测试可注册有界样本 sink 消费事件。
+- 切换到 boot/idle 时立即完成 cold settlement，避免 tickless AP 在最后任务
+  退出后缺少下一次全局事务而无法满足 `workers_settled`。
+- 通用工作负载只提供两个同核任务并持续让出；实际完成多少次、切换给哪个任务
+  完全由生产调度器决定。每个样本是真实完成的一次执行权交接。
+- 独立受控 A→B→A 工作负载只用于 `SCHED.CONTEXT_SWITCH_ROUND_TRIP` 指标，
+  不作为调度器正确性或通用切换样本的唯一判据。
+- 吞吐量使用真实成功切换数和 release→settle 工作窗口计算；单次切换延迟、
+  受控往返延迟与吞吐量分别输出，不以往返的一半或 `dt / n` 冒充单次延迟。
+
+QEMU/OVMF 同构建控制组 `evidence/issue95-general-switch-qemu-20261124-r5`
+依次完成 `SMP_SINGLE`、`SMP_PHYSICAL`、`SMP_LOGICAL` 的 1、10、1000 个
+真实切换及独立 1000 次受控往返，全部任务身份/序号校验通过，任务退出后
+`workers_done`、资源账本和内存均回到预期基线。最终：
+
+```text
+SMP CONCURRENT FINAL SINGLE=true PHYSICAL=true LOGICAL=true
+FAILED=0 TIMING_FAILED=0 RECLAIMED=true
+```
+
+该结果只证明 QEMU 功能与测量链正确；正式物理结论仍必须来自 AMD 裸机。
 
 ## PERF-R02：页帧、失败与吞吐口径
 

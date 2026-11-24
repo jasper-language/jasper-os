@@ -1,0 +1,510 @@
+[2J[001;001H[=3h[2J[001;001H[2J[001;001H[8;042;160t[2J[001;001H[2J[001;001H[8;056;240t[2J[001;001HBdsDxe: loading Boot0002 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x4,0x0)
+BdsDxe: starting Boot0002 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x4,0x0)
+Jasper-OS boot manager starting
+selecting slot=A reason=ConfirmedRelease attempt=1 release=1 kernel_bytes=2890872
+INFO : Framebuffer info: FrameBufferInfo { byte_len: 4096000, width: 1280, height: 800, pixel_format: Bgr, bytes_per_pixel: 4, stride: 1280 }
+INFO : Jasper-OS mature bootloader common starting
+TRACE: exiting boot services
+INFO : Elf file loaded at Pointer {
+    addr: 0x000000001da54000,
+    metadata: 2890872,
+}
+INFO : virtual_address_offset: 0x10000000000
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(4), offset: 0, virtual_addr: 0, physical_addr: 0, file_size: 36414, mem_size: 36414, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(5), offset: 36420, virtual_addr: 37420, physical_addr: 37420, file_size: 10968f, mem_size: 10968f, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 13fab0, virtual_addr: 141ab0, physical_addr: 141ab0, file_size: 14d98, mem_size: 15550, align: 1000 })
+INFO : Mapping bss section
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 154880, virtual_addr: 157880, physical_addr: 157880, file_size: 1092a0, mem_size: 22722c, align: 1000 })
+INFO : Mapping bss section
+INFO : Entry point at: 0x100000377a0
+INFO : Creating GDT at PhysAddr(0x275000)
+INFO : Map framebuffer
+INFO : Map physical memory
+INFO : Allocate bootinfo
+INFO : Create Memory Map
+INFO : Create bootinfo
+INFO : Jumping to kernel entry point at VirtAddr(0x100000377a0)
+[JSR-EARLY] stage=entry cpu=x86_64 framebuffer=probe
+[JSR-EARLY] stage=K01 BOOTINFO
+[JSR-EARLY] stage=K02 MEMORY MAP
+[JSR-EARLY] stage=K03 KMAIN
+[JSR-EARLY] stage=console
+[JSR-BOOT] jasper-os rust kernel 0.0.1 x86_64
+[JSR-CONFIG] profile=standard valid=ok params=28
+[JSR-CONFIG] timer_hz=100
+[JSR-CONFIG] boot_ticks=25
+[JSR-CONFIG] quantum.0=2
+[JSR-CONFIG] quantum.1=2
+[JSR-CONFIG] quantum.2=4
+[JSR-CONFIG] quantum.3=4
+[JSR-CONFIG] decay_period=8
+[JSR-CONFIG] max_tasks=64
+[JSR-CONFIG] max_rt=8
+[JSR-CONFIG] kernel_stack_bytes=131072
+[JSR-CONFIG] watchdog_ticks=50
+[JSR-CONFIG] watchdog_log=16
+[JSR-CONFIG] cpu_burst_ticks=4
+[JSR-CONFIG] heap_grow_step=65536
+[JSR-CONFIG] pressure_low_permille=125
+[JSR-CONFIG] pressure_critical_permille=50
+[JSR-CONFIG] pressure_reserve_frames=256
+[JSR-CONFIG] max_process_frames=0
+[JSR-CONFIG] max_vm_guest_frames=32768
+[JSR-CONFIG] max_map_pages=1024
+[JSR-CONFIG] max_objects=1024
+[JSR-CONFIG] handles_per_process=64
+[JSR-CONFIG] max_endpoints_per_process=64
+[JSR-CONFIG] ipc_max_queue_bytes=1048576
+[JSR-CONFIG] ipc_max_process_bytes=4194304
+[JSR-CONFIG] ipc_max_total_bytes=16777216
+[JSR-CONFIG] trace_capacity=32
+[JSR-CONFIG] irq_queue_len=64
+[JSR-CAP] cpu_bootstrap_slots=128 tasks=64 objects=1024 handles=64 frames=0 rings=0 endpoints=64
+[ OK ] console elapsed_ns=4260540 heap_used=0 heap_peak=0 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6392712692,"component":"console","status":"ok","elapsed_ns":4260540,"heap_used":0,"heap_peak":0,"heap_mapped":0,"free_frames":0,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=console done_mask=0x1
+[JSR-EARLY] stage=platform
+[JSR-GDT] ok
+[JSR-XSAVE] enabled=true avx=true avx_size=256 capacity=832
+[JSR-IDT] ok
+[JSR-EXC] breakpoint handler verified
+[ OK ] platform elapsed_ns=2101010 heap_used=0 heap_peak=0 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6392712692,"component":"platform","status":"ok","elapsed_ns":2101010,"heap_used":0,"heap_peak":0,"heap_mapped":0,"free_frames":0,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=platform done_mask=0x3
+[JSR-EARLY] stage=timer
+[JSR-TICK] n=1
+[JSR-TICK] n=2
+[JSR-TICK] n=3
+[JSR-TICK] n=4
+[JSR-TICK] n=5
+[JSR-TICK] n=6
+[JSR-TICK] n=7
+[JSR-TICK] n=8
+[JSR-TICK] n=9
+[JSR-TICK] n=10
+[JSR-TICK] n=11
+[JSR-TICK] n=12
+[JSR-TICK] n=13
+[JSR-TICK] n=14
+[JSR-TICK] n=15
+[JSR-TICK] n=16
+[JSR-TICK] n=17
+[JSR-TICK] n=18
+[JSR-TICK] n=19
+[JSR-TICK] n=20
+[JSR-TICK] n=21
+[JSR-TICK] n=22
+[JSR-TICK] n=23
+[JSR-TICK] n=24
+[JSR-TICK] n=25
+[ OK ] timer elapsed_ns=240369132 heap_used=0 heap_peak=0 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6392712692,"component":"timer","status":"ok","elapsed_ns":240369132,"heap_used":0,"heap_peak":0,"heap_mapped":0,"free_frames":0,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=timer done_mask=0x7
+[JSR-EARLY] stage=frames
+[ OK ] frames elapsed_ns=5983467 heap_used=0 heap_peak=0 heap_delta=0 mapped_delta=0 frame_delta=-127353
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6392712692,"component":"frames","status":"ok","elapsed_ns":5983467,"heap_used":0,"heap_peak":0,"heap_mapped":0,"free_frames":127353,"heap_delta":0,"mapped_delta":0,"frame_delta":-127353}
+[JSR-BOOT-STAGE] done stage=frames done_mask=0xf
+[JSR-EARLY] stage=kernel_map
+[ OK ] kernel_map elapsed_ns=309892 heap_used=0 heap_peak=0 heap_delta=0 mapped_delta=0 frame_delta=1
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6392712692,"component":"kernel_map","status":"ok","elapsed_ns":309892,"heap_used":0,"heap_peak":0,"heap_mapped":0,"free_frames":127352,"heap_delta":0,"mapped_delta":0,"frame_delta":1}
+[JSR-BOOT-STAGE] done stage=kernel_map done_mask=0x1f
+[JSR-EARLY] stage=heap
+[JSR-TERM] capacity input=131072 output=131072 uart_pump=2048 available=521555968
+[ OK ] heap elapsed_ns=1928119 heap_used=262144 heap_peak=262144 heap_delta=262144 mapped_delta=335872 frame_delta=85
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6392712692,"component":"heap","status":"ok","elapsed_ns":1928119,"heap_used":262144,"heap_peak":262144,"heap_mapped":335872,"free_frames":127267,"heap_delta":262144,"mapped_delta":335872,"frame_delta":85}
+[JSR-BOOT-STAGE] done stage=heap done_mask=0x3f
+[JSR-EARLY] stage=capacity
+[JSR-SPAWN] child_limit=8 tasks=64 source=boot_capacity
+[JSR-WORKLOAD] capacity workloads=64 members=256 tasks=64 budget=521285632 dynamic=true
+[JSR-SCHED] qos quantum=[1, 1, 1, 1] decay=8 owed_cap=2000 timer_hz=100 tasks=64 dynamic=true
+[JSR-RING] capacity rings=64 in_flight=1024 tasks=64 objects=1024 dynamic=true
+[JSR-IPC] capacity endpoints=8 queue_bytes=262144 process_bytes=1048576 total_bytes=16777216 tasks=64 objects=1024 budget=521220096 dynamic=true
+[JSR-SANDBOX] capacity sandboxes=64 workloads=64 budget=521220096 dynamic=true
+[JSR-SANDBOX-STORAGE] capacity images=128 layers=2048 volumes=512 sandboxes=64 budget=521220096 dynamic=true
+[ OK ] capacity elapsed_ns=5560916 heap_used=369664 heap_peak=369664 heap_delta=107520 mapped_delta=65536 frame_delta=16
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6392712692,"component":"capacity","status":"ok","elapsed_ns":5560916,"heap_used":369664,"heap_peak":369664,"heap_mapped":401408,"free_frames":127251,"heap_delta":107520,"mapped_delta":65536,"frame_delta":16}
+[JSR-BOOT-STAGE] done stage=capacity done_mask=0x7f
+[JSR-EARLY] stage=devices
+[JSR-EARLY] stage=DEVICES SKIP PROFILE
+[ OK ] devices elapsed_ns=938703 heap_used=369664 heap_peak=369664 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6392712692,"component":"devices","status":"ok","elapsed_ns":938703,"heap_used":369664,"heap_peak":369664,"heap_mapped":401408,"free_frames":127251,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=devices done_mask=0xff
+[JSR-EARLY] stage=profile
+[JSR-PROFILE] table idx=0 name=headless valid=true modules=9 services=25 capabilities=10 min_tasks=32 min_objects=256 hot_load=0
+[JSR-PROFILE] table idx=1 name=headless-min valid=true modules=5 services=20 capabilities=5 min_tasks=32 min_objects=128 hot_load=0
+[JSR-PROFILE] active name=bench-head valid=true params=standard modules=8 services=24 capabilities=9 guarantees=2 dynamic=true
+[ OK ] profile elapsed_ns=3919066 heap_used=370432 heap_peak=370704 heap_delta=768 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6392712692,"component":"profile","status":"ok","elapsed_ns":3919066,"heap_used":370432,"heap_peak":370704,"heap_mapped":401408,"free_frames":127251,"heap_delta":768,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=profile done_mask=0x1ff
+[JSR-EARLY] stage=assembly
+[JSR-EARLY] stage=ASM PLAN
+[JSR-ASSEMBLY] capacity modules=8 capabilities=9 services=24 metadata=1688 budget=509004 dynamic=true
+[JSR-EARLY] stage=ASM CORE
+[JSR-LIFE] release_dispatch closing_locks=true outside_lock=5 none=11 none_empty=true destroyed_when_none=0 hooks_match_registry=true
+[JSR-ASSEMBLY] activate module=core objects=1024
+[JSR-EARLY] stage=ASM OK CORE
+[JSR-EARLY] stage=ASM MEMORY
+[JSR-EARLY] stage=ASM OK MEMORY
+[JSR-EARLY] stage=ASM TIME
+[JSR-EARLY] stage=ASM OK TIME
+[JSR-EARLY] stage=ASM SCHED
+[JSR-ASSEMBLY] activate module=sched tasks=64 stacks=64
+[JSR-EARLY] stage=ASM OK SCHED
+[JSR-EARLY] stage=ASM CHANNEL
+[JSR-EARLY] stage=ASM OK CHANNEL
+[JSR-EARLY] stage=ASM REALTIME
+[JSR-ASSEMBLY] activate module=realtime rt=8
+[JSR-EARLY] stage=ASM OK REALTIME
+[JSR-EARLY] stage=ASM JOB
+[JSR-ASSEMBLY] activate module=job queue=empty
+[JSR-EARLY] stage=ASM OK JOB
+[JSR-EARLY] stage=ASM ASYNC
+[JSR-EARLY] stage=ASM OK ASYNC
+[JSR-ASSEMBLY] module=core order=0 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=memory order=1 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=time order=2 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=sched order=3 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=channel order=4 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=realtime order=5 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=job order=6 state=ready reason= version=1.0.0
+[JSR-ASSEMBLY] module=async order=7 state=ready reason= version=1.0.0
+[JSR-CAP] boot source=derived objects=1024 tasks=64 rt=8 task_stacks=64 mem_limit=477491200
+[JSR-K06] profile=bench-head ops=109 kernel_base=72 module_service=37 active_unavailable=8 unclaimed=0 gate_mismatch=0 ring=available time=available sync=available
+[JSR-ASSEMBLY] summary profile=bench-head modules=8 ready=8 failed=0 blocked=0 declared=9 published=9 pre_publish=0 audit=ok restart=system.module.error.already_started stop_core=system.module.error.in_use stop_devices=system.module.error.not_loaded generation=0 readers=0
+[ OK ] assembly elapsed_ns=58304326 heap_used=10476896 heap_peak=10476896 heap_delta=10106464 mapped_delta=10153984 frame_delta=2484
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6392712692,"component":"assembly","status":"ok","elapsed_ns":58304326,"heap_used":10476896,"heap_peak":10476896,"heap_mapped":10555392,"free_frames":124767,"heap_delta":10106464,"mapped_delta":10153984,"frame_delta":2484}
+[JSR-BOOT-STAGE] done stage=assembly done_mask=0x3ff
+[JSR-EARLY] stage=sched_mode
+[JSR-SCHED] mode=multi
+[JSR-CAPABILITY] domain=system.memory.boot-map state=verified inventory=complete discovered=142 supported=142 admitted=142 rejected=0 unsupported=0 enabled=142 exposed=142 verified=142 fault=none
+[JSR-CAPABILITY] domain=system.cpu.xstate state=exposed inventory=complete discovered=6 supported=6 admitted=3 rejected=0 unsupported=3 enabled=3 exposed=3 verified=0 fault=none
+[JSR-CAPABILITY] domain=system.device.pci-capabilities state=unsupported inventory=complete discovered=0 supported=0 admitted=0 rejected=0 unsupported=0 enabled=0 exposed=0 verified=0 fault=none
+[JSR-CAPABILITY] domain=system.network state=discovery-failed inventory=failed discovered=0 supported=0 admitted=0 rejected=0 unsupported=0 enabled=0 exposed=0 verified=0 fault=none
+[JSR-CAPABILITY] domain=system.device.gpu state=discovery-failed inventory=failed discovered=0 supported=0 admitted=0 rejected=0 unsupported=0 enabled=0 exposed=0 verified=0 fault=none
+[ OK ] sched_mode elapsed_ns=3058381 heap_used=10476896 heap_peak=10476896 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6392712692,"component":"sched_mode","status":"ok","elapsed_ns":3058381,"heap_used":10476896,"heap_peak":10476896,"heap_mapped":10555392,"free_frames":124767,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=sched_mode done_mask=0x7ff
+[JSR-EARLY] stage=space
+[ OK ] space elapsed_ns=683721 heap_used=10476896 heap_peak=10476896 heap_delta=0 mapped_delta=0 frame_delta=256
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6392712692,"component":"space","status":"ok","elapsed_ns":683721,"heap_used":10476896,"heap_peak":10476896,"heap_mapped":10555392,"free_frames":124511,"heap_delta":0,"mapped_delta":0,"frame_delta":256}
+[JSR-BOOT-STAGE] done stage=space done_mask=0xfff
+[JSR-EARLY] stage=smp
+[JSR-EARLY] stage=SMP DISCOVER
+[JSR-SMP] apic mode=x2apic base=0xfee00000 bsp_id=0
+[JSR-EARLY] stage=APIC BSP TIMER START
+[JSR-IOAPIC] controllers=1 pins=24 exposed=2 unsupported=22 invalid=0 dropped=0
+[JSR-IOAPIC] line=0 name=serial vector=80 gsi_pin=4 controlled=true
+[JSR-IOAPIC] line=1 name=rtc vector=81 gsi_pin=8 controlled=true
+[JSR-SMP] firmware raw=2 enabled_records=2 disabled_records=0 duplicate_records=0 conflicting_duplicates=0 unique_enabled=2 unique_disabled=0 source=acpi.madt
+[JSR-EARLY] stage=SMP PREP
+[JSR-SMP] admit present=2 enabled=2 disabled=0 per_cpu_bytes=16384 required_bytes=32768 available_bytes=509997056 source=resource-budget
+[JSR-EARLY] stage=SMP START 1
+[JSR-EARLY] stage=AP SEND 1 apic=1 vector=0x1000
+[JSR-EARLY] stage=AP INIT ASSERT
+[JSR-EARLY] stage=AP INIT ASSERT OK
+[JSR-EARLY] stage=AP INIT DEASSERT
+[JSR-EARLY] stage=AP INIT DEASSERT WRITE DONE
+[JSR-EARLY] stage=AP INIT DEASSERT OK
+[JSR-EARLY] stage=AP SIPI 1
+[JSR-EARLY] stage=AP SIPI 1 OK
+[JSR-EARLY] stage=AP SIPI 2
+[JSR-EARLY] stage=AP SIPI 2 OK
+[JSR-EARLY] stage=AP 1 RUST ENTRY apic=0x1
+[JSR-EARLY] stage=SMP WAIT 1
+[JSR-EARLY] stage=AP 1 GDT apic=0x1
+[JSR-EARLY] stage=AP 1 IDT apic=0x1
+[JSR-XSAVE] enabled=true avx=true avx_size=256 capacity=832
+[JSR-EARLY] stage=AP 1 XSAVE apic=0x1
+[JSR-EARLY] stage=AP 1 SYSCALL apic=0x1
+[JSR-EARLY] stage=AP 1 APIC apic=0x1
+[JSR-EARLY] stage=AP 1 TIMER apic=0x1
+[JSR-EARLY] stage=SMP DONE
+[JSR-SMP] start present=2 online=2 failed=0 source=acpi.madt dropped=0 disabled=0
+[JSR-IRQ] topology source=smp_ready discovered=2 admitted=2 rejected=0 capacity=2 budget=497452 dynamic=true complete=true
+[ OK ] smp elapsed_ns=42944580 heap_used=10540704 heap_peak=11112752 heap_delta=63808 mapped_delta=602112 frame_delta=148
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6392712692,"component":"smp","status":"ok","elapsed_ns":42944580,"heap_used":10540704,"heap_peak":11112752,"heap_mapped":11157504,"free_frames":124363,"heap_delta":63808,"mapped_delta":602112,"frame_delta":148}
+[JSR-BOOT-STAGE] done stage=smp done_mask=0x1fff
+[JSR-EARLY] stage=highres
+[JSR-RT2] high_resolution=true legacy_tick_abi=true
+[ OK ] highres elapsed_ns=917945 heap_used=10540704 heap_peak=11112752 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6392712692,"component":"highres","status":"ok","elapsed_ns":917945,"heap_used":10540704,"heap_peak":11112752,"heap_mapped":11157504,"free_frames":124363,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=highres done_mask=0x3fff
+[JSR-EARLY] stage=idle_tick
+[JSR-NOHZ] configured power=tickless divisor=4 cpus=2
+[ OK ] idle_tick elapsed_ns=647286 heap_used=10540704 heap_peak=11112752 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6392712692,"component":"idle_tick","status":"ok","elapsed_ns":647286,"heap_used":10540704,"heap_peak":11112752,"heap_mapped":11157504,"free_frames":124363,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=idle_tick done_mask=0x7fff
+[JSR-EARLY] stage=user_runtime
+[JSR-STAGE] user_runtime embedded_programs=true
+[ OK ] user_runtime elapsed_ns=137830 heap_used=10540704 heap_peak=11112752 heap_delta=0 mapped_delta=0 frame_delta=0
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6392712692,"component":"user_runtime","status":"ok","elapsed_ns":137830,"heap_used":10540704,"heap_peak":11112752,"heap_mapped":11157504,"free_frames":124363,"heap_delta":0,"mapped_delta":0,"frame_delta":0}
+[JSR-BOOT-STAGE] done stage=user_runtime done_mask=0xffff
+[JSR-PLAN] finish plan=physical-bench stages=0xffff cases=0
+HW CPU VENDOR=AuthenticAMD FAMILY=6 MODEL=6 STEPPING=3 BRAND=QEMU TCG CPU version 2.5+
+HW CPU RAW_RECORDS=2 ENABLED_RECORDS=2 DISABLED_RECORDS=0 DUPLICATES=0 CONFLICTING_DUPLICATES=0 UNIQUE_ENABLED=2 UNIQUE_DISABLED=0 ADMITTED=2 ONLINE=2 PARTICIPATING=2
+HW CPU TOPOLOGY LOGICAL_PER_PACKAGE=2 CORES_PER_PACKAGE=2 THREADS_PER_CORE=1 NODES_PER_PROCESSOR=1 DIES_PER_PACKAGE=1 SMT=false SOURCE=cpuid.amd.8000001e+80000008
+HW TOPOLOGY PACKAGES=1 SOURCE=cpuid+firmware-inventory
+HW ISA EXTENSIONS=x86_64,sse2,ssse3,sse4_1,sse4_2,aes,xsave,osxsave,avx,f16c,rdrand,hypervisor,bmi1,avx2,bmi2,rdseed,smap,clflushopt,sha,svm,lzcnt,nx,rdtscp
+HW VIRTUALIZATION HYPERVISOR=none VMX=false SVM=true
+HW TIME BACKEND=tsc frequency_hz=3601110400 source=pit.channel2 nominal_frequency_hz=unknown bus_frequency_hz=unknown invariant=false rdtscp=true resolution_ns=1
+HW MEMORY USABLE_KIB=509412 FREE_KIB=497452 HEAP_TOTAL_KIB=10896 HEAP_USED_KIB=10293 HEAP_PEAK_KIB=10852 HEAP_FREE_KIB=602 HEAP_MAPPED_KIB=10896
+HW NUMA NODES=unavailable source=system.firmware.error.no_srat
+HW FIRMWARE VENDOR=unavailable VERSION=unavailable DATE=unavailable ACPI_OEM_ID=BOCHS ACPI_OEM_TABLE_ID=BXPC ACPI_OEM_REVISION=1 ACPI_CREATOR_ID=BXPC ACPI_CREATOR_REVISION=1 SMBIOS=unavailable
+HW BOARD VENDOR=unavailable PRODUCT=unavailable VERSION=unavailable SYSTEM_VENDOR=unavailable SYSTEM_PRODUCT=unavailable
+HW PLATFORM PROFILE=bench-head KERNEL=0.0.1 COMMIT=ff39f91c7cca
+HW CACHE level=1 type=data size_kib=64 shared_threads=1
+{"schema":"jasper.hardware.v1","kind":"cache","level":1,"cache_type":"data","size_bytes":65536,"shared_threads":1}
+HW CACHE level=1 type=instruction size_kib=64 shared_threads=1
+{"schema":"jasper.hardware.v1","kind":"cache","level":1,"cache_type":"instruction","size_bytes":65536,"shared_threads":1}
+HW CACHE level=2 type=unified size_kib=512 shared_threads=1
+{"schema":"jasper.hardware.v1","kind":"cache","level":2,"cache_type":"unified","size_bytes":524288,"shared_threads":1}
+HW CACHE level=3 type=unified size_kib=16384 shared_threads=2
+{"schema":"jasper.hardware.v1","kind":"cache","level":3,"cache_type":"unified","size_bytes":16777216,"shared_threads":2}
+{"schema":"jasper.hardware.v1","kind":"system","cpu_vendor":"AuthenticAMD","cpu_brand":"QEMU TCG CPU version 2.5+","family":6,"model":6,"stepping":3,"topology_source":"cpuid.amd.8000001e+80000008","packages":1,"packages_source":"cpuid+firmware-inventory","raw_cpu_records":2,"enabled_cpu_records":2,"disabled_cpu_records":0,"duplicate_cpu_records":0,"conflicting_duplicate_records":0,"unique_enabled_cpus":2,"unique_disabled_cpus":0,"admitted_cpus":2,"online_cpus":2,"participating_cpus":2,"logical_per_package":2,"cores_per_package":2,"threads_per_core":1,"nodes_per_processor":1,"dies_per_package":1,"isa_extensions":"x86_64,sse2,ssse3,sse4_1,sse4_2,aes,xsave,osxsave,avx,f16c,rdrand,hypervisor,bmi1,avx2,bmi2,rdseed,smap,clflushopt,sha,svm,lzcnt,nx,rdtscp","hypervisor":"none","vmx":false,"svm":true,"invariant_tsc":false,"rdtscp":true,"timer_backend":"tsc","tsc_hz":3601110400,"tsc_source":"pit.channel2","nominal_frequency_hz":null,"bus_frequency_hz":null,"timer_resolution_ns":1,"usable_kib":509412,"free_kib":497452,"heap_total_kib":10896,"heap_used_kib":10293,"heap_peak_kib":10852,"heap_free_kib":602,"heap_mapped_kib":10896,"numa_nodes":null,"numa_localities":null,"acpi_oem_id":"BOCHS","acpi_oem_table_id":"BXPC","acpi_oem_revision":1,"acpi_creator_id":"BXPC","acpi_creator_revision":1,"firmware_vendor":null,"firmware_version":null,"firmware_date":null,"board_vendor":null,"board_product":null,"board_version":null,"system_vendor":null,"system_product":null,"smbios_major":null,"smbios_minor":null,"profile":"bench-head","kernel":"0.0.1","commit":"ff39f91c7cca"}
+[JSR-CLOCK-FACT] scale=monotonic epoch=boot:6392712692 generation=6392712692 domain=1 source=architecture-timer trust=untrusted synchronized=false time64_ns=108244819 time128_sec=0 time128_fraction=1996764473398013073 resolution_ns=Nanoseconds(1) uncertainty=unknown
+[READY] HEADLESS bsp=0 raw_records=2 enabled_records=2 unique_enabled=2 unique_disabled=0 admitted=2 online=2 participating=2 usable_frames=127353 free_frames=124363 heap_mapped=11157504 ticks=25 capabilities=0x1ff
+[READY] CONSOLE / TERMINAL
+[SKIP] shell READY reason=authorized_jucs_command_not_run
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6392712692,"component":"shell","status":"skipped","reason":"authorized_jucs_command_not_run"}
+[SKIP] remote READY reason=network_service_profile_not_assembled
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6392712692,"component":"remote","status":"skipped","reason":"network_service_profile_not_assembled"}
+[SKIP] ui_services READY reason=headless_benchmark_profile
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6392712692,"component":"ui_services","status":"skipped","reason":"headless_benchmark_profile"}
+[SKIP] desktop READY reason=headless_benchmark_profile
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6392712692,"component":"desktop","status":"skipped","reason":"headless_benchmark_profile"}
+[SKIP] compat_assembly READY reason=benchmark_excludes_compatibility_profiles
+{"schema":"jasper.boot.v1","kind":"stage","boot_id":6392712692,"component":"compat_assembly","status":"skipped","reason":"benchmark_excludes_compatibility_profiles"}
+SMP CONCURRENT PERFORMANCE - SAME TESTS AS SINGLE CPU
+[JSR-BENCH] calibrate source=pit.channel2 cycles_per_second=3601110400 timer_hz=100
+SMP TOPOLOGY ONLINE=2 PROBED=2 PHYSICAL=2 LOGICAL=2
+[JSR-SMP-MEMORY] mode=SMP_SINGLE phase=before usable_kib=509412 free_kib=497012 used_kib=12400 heap_used_kib=10293 heap_peak_kib=10852 heap_free_kib=1042 heap_mapped_kib=11336
+[JSR-TSC-SKEW] mode=SMP_SINGLE cpus=1 upper_bound_ns=0 semantics=same_barrier_including_release_latency
+{"schema":"jasper.perf.v1","kind":"parallel_switch_stage","mode":"SMP_SINGLE","cpus":1,"iterations_per_cpu":1,"measurement":"completed_execution_handoff"}
+[JSR-SMP-SW] stage=general_spawned cpu_count=1 tasks=2/2 target_per_cpu=1
+[JSR-SMP-SW] stage=general_run_returned cpu_count=1 settled=true abort=false workers_done=2/2 target_per_cpu=1
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_SINGLE","cpu":0,"measurement":"completed_execution_handoff","planned":1,"observed":3,"worker_handoffs":2,"overflow":0,"p50_ns":31058,"p99_ns":31058,"p999_ns":31058,"p9999_ns":31058,"p99999_ns":31058,"max_ns":31058}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_SINGLE","name":"SCHED.CONTEXT_SWITCH","planned":1,"observed":1,"valid":3,"failed_ops":0,"incomplete":0,"work_window_ns":2361510436,"summarize_ns":0,"min_ns":31058,"mean_ns":31058,"p50_ns":31058,"p90_ns":31058,"p95_ns":31058,"p99_ns":31058,"p999_ns":31058,"p9999_ns":31058,"p99999_ns":31058,"max_ns":31058,"over_1us":1,"over_10us":1,"over_50us":0}
+{"schema":"jasper.perf.v1","kind":"parallel_throughput","mode":"SMP_SINGLE","name":"SCHED.CONTEXT_SWITCH","observed_switches":3,"work_window_ns":2361510436,"switches_per_second":1,"workers":2,"target_per_cpu":1,"overflow":0}
+{"schema":"jasper.perf.v1","kind":"parallel_switch_stage","mode":"SMP_SINGLE","cpus":1,"iterations_per_cpu":10,"measurement":"completed_execution_handoff"}
+[JSR-SMP-SW] stage=general_spawned cpu_count=1 tasks=2/2 target_per_cpu=10
+[JSR-SMP-SW] stage=general_run_returned cpu_count=1 settled=true abort=false workers_done=2/2 target_per_cpu=10
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_SINGLE","cpu":0,"measurement":"completed_execution_handoff","planned":10,"observed":12,"worker_handoffs":11,"overflow":0,"p50_ns":16617,"p99_ns":21795,"p999_ns":21795,"p9999_ns":21795,"p99999_ns":21795,"max_ns":21795}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_SINGLE","name":"SCHED.CONTEXT_SWITCH","planned":10,"observed":10,"valid":12,"failed_ops":0,"incomplete":0,"work_window_ns":2366925789,"summarize_ns":0,"min_ns":16468,"mean_ns":17283,"p50_ns":16617,"p90_ns":17965,"p95_ns":21795,"p99_ns":21795,"p999_ns":21795,"p9999_ns":21795,"p99999_ns":21795,"max_ns":21795,"over_1us":10,"over_10us":10,"over_50us":0}
+{"schema":"jasper.perf.v1","kind":"parallel_throughput","mode":"SMP_SINGLE","name":"SCHED.CONTEXT_SWITCH","observed_switches":12,"work_window_ns":2366925789,"switches_per_second":5,"workers":2,"target_per_cpu":10,"overflow":0}
+{"schema":"jasper.perf.v1","kind":"parallel_switch_stage","mode":"SMP_SINGLE","cpus":1,"iterations_per_cpu":1000,"measurement":"completed_execution_handoff"}
+[JSR-SMP-SW] stage=general_spawned cpu_count=1 tasks=2/2 target_per_cpu=1000
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=100/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=200/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=300/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=400/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=500/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=600/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=700/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=800/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=900/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=1000/1000 task_slot=2
+[JSR-SMP-SW] stage=general_run_returned cpu_count=1 settled=true abort=false workers_done=2/2 target_per_cpu=1000
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_SINGLE","cpu":0,"measurement":"completed_execution_handoff","planned":1000,"observed":1002,"worker_handoffs":1001,"overflow":0,"p50_ns":16455,"p99_ns":28754,"p999_ns":41444,"p9999_ns":47168,"p99999_ns":47168,"max_ns":47168}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_SINGLE","name":"SCHED.CONTEXT_SWITCH","planned":1000,"observed":1000,"valid":1002,"failed_ops":0,"incomplete":0,"work_window_ns":2406886249,"summarize_ns":0,"min_ns":16154,"mean_ns":17121,"p50_ns":16455,"p90_ns":17341,"p95_ns":21782,"p99_ns":28754,"p999_ns":41444,"p9999_ns":47168,"p99999_ns":47168,"max_ns":47168,"over_1us":1000,"over_10us":1000,"over_50us":0}
+{"schema":"jasper.perf.v1","kind":"parallel_throughput","mode":"SMP_SINGLE","name":"SCHED.CONTEXT_SWITCH","observed_switches":1002,"work_window_ns":2406886249,"switches_per_second":416,"workers":2,"target_per_cpu":1000,"overflow":0}
+[JSR-SMP-SW] stage=spawned cpus=1 expected_tasks=2 spawned=true
+[JSR-SMP-SW] stage=controller_wait cpu=0 expected=2 deadline_s=20
+[JSR-SMP-SW] stage=worker_start cpu=0 role=measurer self_slot=1 expected=2
+[JSR-SMP-SW] stage=measure_begin cpu=0 first_slot=1
+[JSR-SMP-SW] stage=worker_start cpu=0 role=partner self_slot=2 expected=2
+[JSR-SMP-SW] stage=partner_wait cpu=0 done=false
+[JSR-SMP-SW] stage=first_partner_run cpu=0 request=1 runs=1
+[JSR-SMP-SW] stage=first_resume cpu=0 switches=2 partner_runs=1 elapsed_cycles=2172666 last=Some((2, 4, 1, 4))
+[JSR-SMP-SW] stage=progress cpu=0 sample=100/1000 valid=100 retries=0 missed=0 switches=200
+[JSR-SMP-SW] stage=progress cpu=0 sample=200/1000 valid=200 retries=0 missed=0 switches=400
+[JSR-SMP-SW] stage=progress cpu=0 sample=300/1000 valid=300 retries=0 missed=0 switches=600
+[JSR-SMP-SW] stage=progress cpu=0 sample=400/1000 valid=400 retries=0 missed=0 switches=800
+[JSR-SMP-SW] stage=progress cpu=0 sample=500/1000 valid=500 retries=0 missed=0 switches=1000
+[JSR-SMP-SW] stage=progress cpu=0 sample=600/1000 valid=600 retries=0 missed=0 switches=1200
+[JSR-SMP-SW] stage=progress cpu=0 sample=700/1000 valid=700 retries=0 missed=0 switches=1400
+[JSR-SMP-SW] stage=progress cpu=0 sample=800/1000 valid=800 retries=0 missed=0 switches=1600
+[JSR-SMP-SW] stage=progress cpu=0 sample=900/1000 valid=900 retries=0 missed=0 switches=1800
+[JSR-SMP-SW] stage=progress cpu=0 sample=1000/1000 valid=1000 retries=0 missed=0 switches=2000
+[JSR-SMP-SW] stage=run_returned ready=2/2 settled=true abort=false deadline_s=20
+[JSR-SMP-MEMORY] mode=SMP_SINGLE phase=during_raw_retained usable_kib=509412 free_kib=497012 used_kib=12400 heap_used_kib=10301 heap_peak_kib=10852 heap_free_kib=1034 heap_mapped_kib=11336
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_SINGLE","cpu":0,"measurement":"roundtrip_a_b_a","planned":1000,"observed":1000,"valid":1000,"failed_ops":0,"incomplete":0,"retries":0,"unexpected_windows":0,"switches":2000,"last_from_slot":2,"last_from_generation":4,"last_to_slot":1,"last_to_generation":4,"p50_ns":64370,"p99_ns":118806,"p999_ns":239070,"p9999_ns":603332,"p99999_ns":603332,"max_ns":603332}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_SINGLE","name":"SCHED.CONTEXT_SWITCH_ROUND_TRIP","planned":1000,"observed":1000,"valid":1000,"failed_ops":0,"incomplete":0,"work_window_ns":80849941,"summarize_ns":875317,"min_ns":62614,"mean_ns":67255,"p50_ns":64370,"p90_ns":69726,"p95_ns":75007,"p99_ns":118806,"p999_ns":239070,"p9999_ns":603332,"p99999_ns":603332,"max_ns":603332,"over_1us":1000,"over_10us":1000,"over_50us":1000}
+SMP_SINGLE RESULT COMPLETE=true TOTAL_METRICS=2 PLANNED_SAMPLES=2011 MEM_USED_KIB=12400 HEAP_USED_KIB=10293 HEAP_MAPPED_KIB=11336
+[JSR-SMP-RESOURCE] mode=SMP_SINGLE frames=124253/124253 objects=0/0 pending=0/0 pins=0,0 retained_heap_pages=0 reclaimed=true
+[JSR-SMP-MEMORY] mode=SMP_SINGLE phase=after usable_kib=509412 free_kib=497012 used_kib=12400 heap_used_kib=10293 heap_peak_kib=10852 heap_free_kib=1042 heap_mapped_kib=11336
+[JSR-SMP-MEMORY] mode=SMP_PHYSICAL phase=before usable_kib=509412 free_kib=497012 used_kib=12400 heap_used_kib=10293 heap_peak_kib=10852 heap_free_kib=1042 heap_mapped_kib=11336
+[JSR-TSC-SKEW] mode=SMP_PHYSICAL cpus=2 upper_bound_ns=30796 semantics=same_barrier_including_release_latency
+{"schema":"jasper.perf.v1","kind":"parallel_switch_stage","mode":"SMP_PHYSICAL","cpus":2,"iterations_per_cpu":1,"measurement":"completed_execution_handoff"}
+[JSR-SMP-SW] stage=general_spawned cpu_count=2 tasks=4/4 target_per_cpu=1
+[JSR-SMP-SW] stage=general_run_returned cpu_count=2 settled=true abort=false workers_done=4/4 target_per_cpu=1
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_PHYSICAL","cpu":0,"measurement":"completed_execution_handoff","planned":1,"observed":3,"worker_handoffs":2,"overflow":0,"p50_ns":20417,"p99_ns":20417,"p999_ns":20417,"p9999_ns":20417,"p99999_ns":20417,"max_ns":20417}
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_PHYSICAL","cpu":1,"measurement":"completed_execution_handoff","planned":1,"observed":3,"worker_handoffs":2,"overflow":0,"p50_ns":27874,"p99_ns":27874,"p999_ns":27874,"p9999_ns":27874,"p99999_ns":27874,"max_ns":27874}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_PHYSICAL","name":"SCHED.CONTEXT_SWITCH","planned":2,"observed":2,"valid":6,"failed_ops":0,"incomplete":0,"work_window_ns":2498493054,"summarize_ns":0,"min_ns":20417,"mean_ns":24145,"p50_ns":20417,"p90_ns":27874,"p95_ns":27874,"p99_ns":27874,"p999_ns":27874,"p9999_ns":27874,"p99999_ns":27874,"max_ns":27874,"over_1us":2,"over_10us":2,"over_50us":0}
+{"schema":"jasper.perf.v1","kind":"parallel_throughput","mode":"SMP_PHYSICAL","name":"SCHED.CONTEXT_SWITCH","observed_switches":6,"work_window_ns":2498493054,"switches_per_second":2,"workers":4,"target_per_cpu":1,"overflow":0}
+{"schema":"jasper.perf.v1","kind":"parallel_switch_stage","mode":"SMP_PHYSICAL","cpus":2,"iterations_per_cpu":10,"measurement":"completed_execution_handoff"}
+[JSR-SMP-SW] stage=general_spawned cpu_count=2 tasks=4/4 target_per_cpu=10
+[JSR-SMP-SW] stage=general_run_returned cpu_count=2 settled=true abort=false workers_done=4/4 target_per_cpu=10
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_PHYSICAL","cpu":0,"measurement":"completed_execution_handoff","planned":10,"observed":12,"worker_handoffs":11,"overflow":0,"p50_ns":20922,"p99_ns":85033,"p999_ns":85033,"p9999_ns":85033,"p99999_ns":85033,"max_ns":85033}
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_PHYSICAL","cpu":1,"measurement":"completed_execution_handoff","planned":10,"observed":12,"worker_handoffs":11,"overflow":0,"p50_ns":28638,"p99_ns":45505,"p999_ns":45505,"p9999_ns":45505,"p99999_ns":45505,"max_ns":45505}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_PHYSICAL","name":"SCHED.CONTEXT_SWITCH","planned":20,"observed":20,"valid":24,"failed_ops":0,"incomplete":0,"work_window_ns":2503685685,"summarize_ns":0,"min_ns":19990,"mean_ns":30476,"p50_ns":27988,"p90_ns":44524,"p95_ns":45505,"p99_ns":85033,"p999_ns":85033,"p9999_ns":85033,"p99999_ns":85033,"max_ns":85033,"over_1us":20,"over_10us":20,"over_50us":1}
+{"schema":"jasper.perf.v1","kind":"parallel_throughput","mode":"SMP_PHYSICAL","name":"SCHED.CONTEXT_SWITCH","observed_switches":24,"work_window_ns":2503685685,"switches_per_second":9,"workers":4,"target_per_cpu":10,"overflow":0}
+{"schema":"jasper.perf.v1","kind":"parallel_switch_stage","mode":"SMP_PHYSICAL","cpus":2,"iterations_per_cpu":1000,"measurement":"completed_execution_handoff"}
+[JSR-SMP-SW] stage=general_spawned cpu_count=2 tasks=4/4 target_per_cpu=1000
+[JSR-SMP-SW] stage=general_progress cpu=1 switches=100/1000 task_slot=4
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=100/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=1 switches=200/1000 task_slot=4
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=200/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=1 switches=300/1000 task_slot=4
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=300/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=1 switches=400/1000 task_slot=4
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=400/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=1 switches=500/1000 task_slot=4
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=500/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=1 switches=600/1000 task_slot=4
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=600/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=1 switches=700/1000 task_slot=4
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=700/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=1 switches=800/1000 task_slot=4
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=800/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=1 switches=900/1000 task_slot=4
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=900/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=1 switches=1000/1000 task_slot=4
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=1000/1000 task_slot=2
+[JSR-SMP-SW] stage=general_run_returned cpu_count=2 settled=true abort=false workers_done=4/4 target_per_cpu=1000
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_PHYSICAL","cpu":0,"measurement":"completed_execution_handoff","planned":1000,"observed":1002,"worker_handoffs":1001,"overflow":0,"p50_ns":20688,"p99_ns":57271,"p999_ns":182376,"p9999_ns":187332,"p99999_ns":187332,"max_ns":187332}
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_PHYSICAL","cpu":1,"measurement":"completed_execution_handoff","planned":1000,"observed":1002,"worker_handoffs":1001,"overflow":0,"p50_ns":28725,"p99_ns":74566,"p999_ns":122057,"p9999_ns":166814,"p99999_ns":166814,"max_ns":166814}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_PHYSICAL","name":"SCHED.CONTEXT_SWITCH","planned":2000,"observed":2000,"valid":2004,"failed_ops":0,"incomplete":0,"work_window_ns":2589588296,"summarize_ns":0,"min_ns":15711,"mean_ns":26350,"p50_ns":27829,"p90_ns":29483,"p95_ns":33349,"p99_ns":66348,"p999_ns":166814,"p9999_ns":187332,"p99999_ns":187332,"max_ns":187332,"over_1us":2000,"over_10us":2000,"over_50us":36}
+{"schema":"jasper.perf.v1","kind":"parallel_throughput","mode":"SMP_PHYSICAL","name":"SCHED.CONTEXT_SWITCH","observed_switches":2004,"work_window_ns":2589588296,"switches_per_second":773,"workers":4,"target_per_cpu":1000,"overflow":0}
+[JSR-SMP-SW] stage=spawned cpus=2 expected_tasks=4 spawned=true
+[JSR-SMP-SW] stage=controller_wait cpu=0 expected=4 deadline_s=20
+[JSR-SMP-SW] stage=worker_start cpu=0 role=measurer self_slot=1 expected=4
+[JSR-SMP-SW] stage=worker_start cpu=1 role=measurer self_slot=3 expected=4
+[JSR-SMP-SW] stage=worker_start cpu=0 role=partner self_slot=2 expected=4
+[JSR-SMP-SW] stage=worker_start cpu=1 role=partner self_slot=4 expected=4
+[JSR-SMP-SW] stage=partner_wait cpu=1 done=false
+[JSR-SMP-SW] stage=measure_begin cpu=0 first_slot=1
+[JSR-SMP-SW] stage=measure_begin cpu=1 first_slot=3
+[JSR-SMP-SW] stage=partner_wait cpu=0 done=false
+[JSR-SMP-SW] stage=first_partner_run cpu=0 request=1 runs=1
+[JSR-SMP-SW] stage=first_partner_run cpu=1 request=1 runs=1
+[JSR-SMP-SW] stage=first_resume cpu=0 switches=2 partner_runs=1 elapsed_cycles=1996850 last=Some((2, 8, 1, 8))
+[JSR-SMP-SW] stage=first_resume cpu=1 switches=2 partner_runs=1 elapsed_cycles=2157778 last=Some((4, 4, 3, 4))
+[JSR-SMP-SW] stage=first_partner_miss cpu=1 partner_runs=0 elapsed_cycles=753030 last=Some((4, 4, 3, 4))
+[JSR-SMP-SW] stage=progress cpu=0 sample=100/1000 valid=100 retries=0 missed=0 switches=200
+[JSR-SMP-SW] stage=progress cpu=1 sample=100/1000 valid=100 retries=1 missed=1 switches=200
+[JSR-SMP-SW] stage=progress cpu=1 sample=200/1000 valid=200 retries=1 missed=1 switches=400
+[JSR-SMP-SW] stage=progress cpu=0 sample=200/1000 valid=200 retries=0 missed=0 switches=400
+[JSR-SMP-SW] stage=progress cpu=1 sample=300/1000 valid=300 retries=1 missed=1 switches=602
+[JSR-SMP-SW] stage=progress cpu=0 sample=300/1000 valid=300 retries=0 missed=0 switches=600
+[JSR-SMP-SW] stage=progress cpu=1 sample=400/1000 valid=400 retries=1 missed=1 switches=802
+[JSR-SMP-SW] stage=progress cpu=0 sample=400/1000 valid=400 retries=0 missed=0 switches=800
+[JSR-SMP-SW] stage=progress cpu=1 sample=500/1000 valid=500 retries=1 missed=1 switches=1006
+[JSR-SMP-SW] stage=progress cpu=0 sample=500/1000 valid=500 retries=0 missed=0 switches=1000
+[JSR-SMP-SW] stage=progress cpu=1 sample=600/1000 valid=600 retries=1 missed=1 switches=1206
+[JSR-SMP-SW] stage=progress cpu=0 sample=600/1000 valid=600 retries=0 missed=0 switches=1200
+[JSR-SMP-SW] stage=progress cpu=1 sample=700/1000 valid=700 retries=1 missed=1 switches=1406
+[JSR-SMP-SW] stage=progress cpu=0 sample=700/1000 valid=700 retries=0 missed=0 switches=1400
+[JSR-SMP-SW] stage=progress cpu=1 sample=800/1000 valid=800 retries=1 missed=1 switches=1606
+[JSR-SMP-SW] stage=progress cpu=0 sample=800/1000 valid=800 retries=0 missed=0 switches=1600
+[JSR-SMP-SW] stage=progress cpu=1 sample=900/1000 valid=900 retries=1 missed=1 switches=1806
+[JSR-SMP-SW] stage=progress cpu=0 sample=900/1000 valid=900 retries=0 missed=0 switches=1800
+[JSR-SMP-SW] stage=progress cpu=1 sample=1000/1000 valid=1000 retries=1 missed=1 switches=2008
+[JSR-SMP-SW] stage=progress cpu=0 sample=1000/1000 valid=1000 retries=0 missed=0 switches=2000
+[JSR-SMP-SW] stage=run_returned ready=4/4 settled=true abort=false deadline_s=20
+[JSR-SMP-MEMORY] mode=SMP_PHYSICAL phase=during_raw_retained usable_kib=509412 free_kib=497012 used_kib=12400 heap_used_kib=10309 heap_peak_kib=10852 heap_free_kib=1026 heap_mapped_kib=11336
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_PHYSICAL","cpu":0,"measurement":"roundtrip_a_b_a","planned":1000,"observed":1000,"valid":1000,"failed_ops":0,"incomplete":0,"retries":0,"unexpected_windows":0,"switches":2000,"last_from_slot":2,"last_from_generation":8,"last_to_slot":1,"last_to_generation":8,"p50_ns":149153,"p99_ns":294439,"p999_ns":510954,"p9999_ns":554509,"p99999_ns":554509,"max_ns":554509}
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_PHYSICAL","cpu":1,"measurement":"roundtrip_a_b_a","planned":1000,"observed":1000,"valid":1000,"failed_ops":0,"incomplete":0,"retries":1,"unexpected_windows":0,"switches":2008,"last_from_slot":4,"last_from_generation":4,"last_to_slot":3,"last_to_generation":4,"p50_ns":148123,"p99_ns":238097,"p999_ns":459348,"p9999_ns":599197,"p99999_ns":599197,"max_ns":599197}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_PHYSICAL","name":"SCHED.CONTEXT_SWITCH_ROUND_TRIP","planned":2000,"observed":2000,"valid":2000,"failed_ops":0,"incomplete":0,"work_window_ns":159196319,"summarize_ns":1336984,"min_ns":66105,"mean_ns":144327,"p50_ns":148600,"p90_ns":154359,"p95_ns":157692,"p99_ns":259627,"p999_ns":510954,"p9999_ns":599197,"p99999_ns":599197,"max_ns":599197,"over_1us":2000,"over_10us":2000,"over_50us":2000}
+SMP_PHYSICAL RESULT COMPLETE=true TOTAL_METRICS=2 PLANNED_SAMPLES=4022 MEM_USED_KIB=12400 HEAP_USED_KIB=10293 HEAP_MAPPED_KIB=11336
+[JSR-SMP-RESOURCE] mode=SMP_PHYSICAL frames=124253/124253 objects=0/0 pending=0/0 pins=0,0 retained_heap_pages=0 reclaimed=true
+[JSR-SMP-MEMORY] mode=SMP_PHYSICAL phase=after usable_kib=509412 free_kib=497012 used_kib=12400 heap_used_kib=10293 heap_peak_kib=10852 heap_free_kib=1042 heap_mapped_kib=11336
+[JSR-SMP-MEMORY] mode=SMP_LOGICAL phase=before usable_kib=509412 free_kib=497012 used_kib=12400 heap_used_kib=10293 heap_peak_kib=10852 heap_free_kib=1042 heap_mapped_kib=11336
+[JSR-TSC-SKEW] mode=SMP_LOGICAL cpus=2 upper_bound_ns=6218 semantics=same_barrier_including_release_latency
+{"schema":"jasper.perf.v1","kind":"parallel_switch_stage","mode":"SMP_LOGICAL","cpus":2,"iterations_per_cpu":1,"measurement":"completed_execution_handoff"}
+[JSR-SMP-SW] stage=general_spawned cpu_count=2 tasks=4/4 target_per_cpu=1
+[JSR-SMP-SW] stage=general_run_returned cpu_count=2 settled=true abort=false workers_done=4/4 target_per_cpu=1
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_LOGICAL","cpu":0,"measurement":"completed_execution_handoff","planned":1,"observed":3,"worker_handoffs":2,"overflow":0,"p50_ns":21342,"p99_ns":21342,"p999_ns":21342,"p9999_ns":21342,"p99999_ns":21342,"max_ns":21342}
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_LOGICAL","cpu":1,"measurement":"completed_execution_handoff","planned":1,"observed":3,"worker_handoffs":2,"overflow":0,"p50_ns":28662,"p99_ns":28662,"p999_ns":28662,"p9999_ns":28662,"p99999_ns":28662,"max_ns":28662}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_LOGICAL","name":"SCHED.CONTEXT_SWITCH","planned":2,"observed":2,"valid":6,"failed_ops":0,"incomplete":0,"work_window_ns":2757211195,"summarize_ns":0,"min_ns":21342,"mean_ns":25002,"p50_ns":21342,"p90_ns":28662,"p95_ns":28662,"p99_ns":28662,"p999_ns":28662,"p9999_ns":28662,"p99999_ns":28662,"max_ns":28662,"over_1us":2,"over_10us":2,"over_50us":0}
+{"schema":"jasper.perf.v1","kind":"parallel_throughput","mode":"SMP_LOGICAL","name":"SCHED.CONTEXT_SWITCH","observed_switches":6,"work_window_ns":2757211195,"switches_per_second":2,"workers":4,"target_per_cpu":1,"overflow":0}
+{"schema":"jasper.perf.v1","kind":"parallel_switch_stage","mode":"SMP_LOGICAL","cpus":2,"iterations_per_cpu":10,"measurement":"completed_execution_handoff"}
+[JSR-SMP-SW] stage=general_spawned cpu_count=2 tasks=4/4 target_per_cpu=10
+[JSR-SMP-SW] stage=general_run_returned cpu_count=2 settled=true abort=false workers_done=4/4 target_per_cpu=10
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_LOGICAL","cpu":0,"measurement":"completed_execution_handoff","planned":10,"observed":12,"worker_handoffs":11,"overflow":0,"p50_ns":21365,"p99_ns":21984,"p999_ns":21984,"p9999_ns":21984,"p99999_ns":21984,"max_ns":21984}
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_LOGICAL","cpu":1,"measurement":"completed_execution_handoff","planned":10,"observed":12,"worker_handoffs":11,"overflow":0,"p50_ns":29270,"p99_ns":31234,"p999_ns":31234,"p9999_ns":31234,"p99999_ns":31234,"max_ns":31234}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_LOGICAL","name":"SCHED.CONTEXT_SWITCH","planned":20,"observed":20,"valid":24,"failed_ops":0,"incomplete":0,"work_window_ns":2761829907,"summarize_ns":0,"min_ns":20681,"mean_ns":25410,"p50_ns":21984,"p90_ns":29527,"p95_ns":29830,"p99_ns":31234,"p999_ns":31234,"p9999_ns":31234,"p99999_ns":31234,"max_ns":31234,"over_1us":20,"over_10us":20,"over_50us":0}
+{"schema":"jasper.perf.v1","kind":"parallel_throughput","mode":"SMP_LOGICAL","name":"SCHED.CONTEXT_SWITCH","observed_switches":24,"work_window_ns":2761829907,"switches_per_second":8,"workers":4,"target_per_cpu":10,"overflow":0}
+{"schema":"jasper.perf.v1","kind":"parallel_switch_stage","mode":"SMP_LOGICAL","cpus":2,"iterations_per_cpu":1000,"measurement":"completed_execution_handoff"}
+[JSR-SMP-SW] stage=general_spawned cpu_count=2 tasks=4/4 target_per_cpu=1000
+[JSR-SMP-SW] stage=general_progress cpu=1 switches=100/1000 task_slot=4
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=100/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=1 switches=200/1000 task_slot=4
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=200/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=1 switches=300/1000 task_slot=4
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=300/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=1 switches=400/1000 task_slot=4
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=400/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=1 switches=500/1000 task_slot=4
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=500/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=1 switches=600/1000 task_slot=4
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=600/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=1 switches=700/1000 task_slot=4
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=700/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=1 switches=800/1000 task_slot=4
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=800/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=1 switches=900/1000 task_slot=4
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=900/1000 task_slot=2
+[JSR-SMP-SW] stage=general_progress cpu=1 switches=1000/1000 task_slot=4
+[JSR-SMP-SW] stage=general_progress cpu=0 switches=1000/1000 task_slot=2
+[JSR-SMP-SW] stage=general_run_returned cpu_count=2 settled=true abort=false workers_done=4/4 target_per_cpu=1000
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_LOGICAL","cpu":0,"measurement":"completed_execution_handoff","planned":1000,"observed":1002,"worker_handoffs":1001,"overflow":0,"p50_ns":20756,"p99_ns":33464,"p999_ns":131766,"p9999_ns":132691,"p99999_ns":132691,"max_ns":132691}
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_LOGICAL","cpu":1,"measurement":"completed_execution_handoff","planned":1000,"observed":1002,"worker_handoffs":1001,"overflow":0,"p50_ns":28754,"p99_ns":43072,"p999_ns":96655,"p9999_ns":117529,"p99999_ns":117529,"max_ns":117529}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_LOGICAL","name":"SCHED.CONTEXT_SWITCH","planned":2000,"observed":2000,"valid":2004,"failed_ops":0,"incomplete":0,"work_window_ns":2844379534,"summarize_ns":0,"min_ns":15304,"mean_ns":25619,"p50_ns":27804,"p90_ns":29448,"p95_ns":30045,"p99_ns":41220,"p999_ns":129319,"p9999_ns":132691,"p99999_ns":132691,"max_ns":132691,"over_1us":2000,"over_10us":2000,"over_50us":16}
+{"schema":"jasper.perf.v1","kind":"parallel_throughput","mode":"SMP_LOGICAL","name":"SCHED.CONTEXT_SWITCH","observed_switches":2004,"work_window_ns":2844379534,"switches_per_second":704,"workers":4,"target_per_cpu":1000,"overflow":0}
+[JSR-SMP-SW] stage=spawned cpus=2 expected_tasks=4 spawned=true
+[JSR-SMP-SW] stage=controller_wait cpu=0 expected=4 deadline_s=20
+[JSR-SMP-SW] stage=worker_start cpu=0 role=measurer self_slot=1 expected=4
+[JSR-SMP-SW] stage=worker_start cpu=1 role=measurer self_slot=3 expected=4
+[JSR-SMP-SW] stage=worker_start cpu=0 role=partner self_slot=2 expected=4
+[JSR-SMP-SW] stage=worker_start cpu=1 role=partner self_slot=4 expected=4
+[JSR-SMP-SW] stage=partner_wait cpu=1 done=false
+[JSR-SMP-SW] stage=measure_begin cpu=0 first_slot=1
+[JSR-SMP-SW] stage=measure_begin cpu=1 first_slot=3
+[JSR-SMP-SW] stage=partner_wait cpu=0 done=false
+[JSR-SMP-SW] stage=first_partner_run cpu=0 request=1 runs=1
+[JSR-SMP-SW] stage=first_partner_run cpu=1 request=1 runs=1
+[JSR-SMP-SW] stage=first_resume cpu=0 switches=2 partner_runs=1 elapsed_cycles=1973238 last=Some((2, 12, 1, 12))
+[JSR-SMP-SW] stage=first_resume cpu=1 switches=2 partner_runs=1 elapsed_cycles=2079812 last=Some((4, 8, 3, 8))
+[JSR-SMP-SW] stage=progress cpu=1 sample=100/1000 valid=100 retries=0 missed=0 switches=200
+[JSR-SMP-SW] stage=progress cpu=0 sample=100/1000 valid=100 retries=0 missed=0 switches=200
+[JSR-SMP-SW] stage=first_partner_miss cpu=1 partner_runs=0 elapsed_cycles=702036 last=Some((4, 8, 3, 8))
+[JSR-SMP-SW] stage=progress cpu=1 sample=200/1000 valid=200 retries=1 missed=1 switches=400
+[JSR-SMP-SW] stage=progress cpu=0 sample=200/1000 valid=200 retries=0 missed=0 switches=400
+[JSR-SMP-SW] stage=progress cpu=1 sample=300/1000 valid=300 retries=1 missed=1 switches=600
+[JSR-SMP-SW] stage=progress cpu=0 sample=300/1000 valid=300 retries=0 missed=0 switches=600
+[JSR-SMP-SW] stage=progress cpu=1 sample=400/1000 valid=400 retries=1 missed=1 switches=802
+[JSR-SMP-SW] stage=progress cpu=0 sample=400/1000 valid=400 retries=0 missed=0 switches=800
+[JSR-SMP-SW] stage=progress cpu=1 sample=500/1000 valid=500 retries=1 missed=1 switches=1002
+[JSR-SMP-SW] stage=progress cpu=0 sample=500/1000 valid=500 retries=0 missed=0 switches=1000
+[JSR-SMP-SW] stage=progress cpu=1 sample=600/1000 valid=600 retries=1 missed=1 switches=1202
+[JSR-SMP-SW] stage=progress cpu=0 sample=600/1000 valid=600 retries=0 missed=0 switches=1200
+[JSR-SMP-SW] stage=progress cpu=1 sample=700/1000 valid=700 retries=1 missed=1 switches=1402
+[JSR-SMP-SW] stage=progress cpu=0 sample=700/1000 valid=700 retries=0 missed=0 switches=1400
+[JSR-SMP-SW] stage=progress cpu=1 sample=800/1000 valid=800 retries=1 missed=1 switches=1604
+[JSR-SMP-SW] stage=progress cpu=0 sample=800/1000 valid=800 retries=0 missed=0 switches=1600
+[JSR-SMP-SW] stage=progress cpu=1 sample=900/1000 valid=900 retries=1 missed=1 switches=1804
+[JSR-SMP-SW] stage=progress cpu=0 sample=900/1000 valid=900 retries=0 missed=0 switches=1800
+[JSR-SMP-SW] stage=progress cpu=1 sample=1000/1000 valid=1000 retries=1 missed=1 switches=2006
+[JSR-SMP-SW] stage=progress cpu=0 sample=1000/1000 valid=1000 retries=0 missed=0 switches=2000
+[JSR-SMP-SW] stage=run_returned ready=4/4 settled=true abort=false deadline_s=20
+[JSR-SMP-MEMORY] mode=SMP_LOGICAL phase=during_raw_retained usable_kib=509412 free_kib=497012 used_kib=12400 heap_used_kib=10309 heap_peak_kib=10852 heap_free_kib=1026 heap_mapped_kib=11336
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_LOGICAL","cpu":0,"measurement":"roundtrip_a_b_a","planned":1000,"observed":1000,"valid":1000,"failed_ops":0,"incomplete":0,"retries":0,"unexpected_windows":0,"switches":2000,"last_from_slot":2,"last_from_generation":12,"last_to_slot":1,"last_to_generation":12,"p50_ns":148957,"p99_ns":345267,"p999_ns":523610,"p9999_ns":547952,"p99999_ns":547952,"max_ns":547952}
+{"schema":"jasper.perf.v1","kind":"parallel_switch_cpu","mode":"SMP_LOGICAL","cpu":1,"measurement":"roundtrip_a_b_a","planned":1000,"observed":1000,"valid":1000,"failed_ops":0,"incomplete":0,"retries":1,"unexpected_windows":0,"switches":2006,"last_from_slot":4,"last_from_generation":8,"last_to_slot":3,"last_to_generation":8,"p50_ns":147917,"p99_ns":240392,"p999_ns":368951,"p9999_ns":577547,"p99999_ns":577547,"max_ns":577547}
+{"schema":"jasper.perf.v1","kind":"parallel_metric","mode":"SMP_LOGICAL","name":"SCHED.CONTEXT_SWITCH_ROUND_TRIP","planned":2000,"observed":2000,"valid":2000,"failed_ops":0,"incomplete":0,"work_window_ns":159254162,"summarize_ns":1294259,"min_ns":66308,"mean_ns":144643,"p50_ns":148486,"p90_ns":154098,"p95_ns":158150,"p99_ns":266387,"p999_ns":523610,"p9999_ns":577547,"p99999_ns":577547,"max_ns":577547,"over_1us":2000,"over_10us":2000,"over_50us":2000}
+SMP_LOGICAL RESULT COMPLETE=true TOTAL_METRICS=2 PLANNED_SAMPLES=4022 MEM_USED_KIB=12400 HEAP_USED_KIB=10293 HEAP_MAPPED_KIB=11336
+[JSR-SMP-RESOURCE] mode=SMP_LOGICAL frames=124253/124253 objects=0/0 pending=0/0 pins=0,0 retained_heap_pages=0 reclaimed=true
+[JSR-SMP-MEMORY] mode=SMP_LOGICAL phase=after usable_kib=509412 free_kib=497012 used_kib=12400 heap_used_kib=10293 heap_peak_kib=10852 heap_free_kib=1042 heap_mapped_kib=11336
+SMP CONCURRENT FINAL SINGLE=true PHYSICAL=true LOGICAL=true SINGLE_CPUS=1 PHYSICAL_CPUS=2 LOGICAL_CPUS=2 SMT=false RECLAIMED=true FAILED=0 TIMING_FAILED=0
+[JSR-MEM-USAGE] MEM smp-after RAM USABLE 497 MIB FREE 485 MIB USED 12400 KIB HEAP USED 10293 KIB PEAK 10852 KIB FREE 1042 KIB MAPPED 11336 KIB PHYSICAL_HEADROOM 485 MIB BLOCKS 3 GROWTH=on-demand 
+SMP BENCH RESULT FAILED=0 TIMING_FAILED=0
+{"schema":"jasper.perf.v1","kind":"summary","metrics":26,"failed":0,"timing_failed":0,"checks":10,"resources_reclaimed":true,"discovered_cpus":2,"online_cpus":2,"parallel_matrix_run":true,"single_mode_run":true,"physical_mode_run":true,"logical_mode_run":true}
