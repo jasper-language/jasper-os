@@ -48,6 +48,15 @@ fed by the existing kernel monotonic source and future providers, and
 RTC/NTP/NTS/PTP/GNSS access, TAI/UTC leap-second policy, uncertainty estimation
 and physical accuracy evidence remain open.
 
+The kernel now has a live `clock_fact` vertical fed by the existing monotonic
+scheduler clock. One source read produces both Time64 and Time128 values in the
+coherent snapshot cell. Linux compatibility `clock_gettime(CLOCK_MONOTONIC)`
+consumes that Time64 value, so 64/128 views do not independently drift. The
+runtime reports boot epoch, source, resolution, explicit unknown uncertainty,
+untrusted/unsynchronized state, and both widths. This wiring establishes the
+fact-source path only; it does not authenticate wall time or claim nanosecond
+physical accuracy.
+
 Time sources will be layered without a new time authority:
 
 - Kernel: clock reads, counter domains, deadlines/wakeups and controlled

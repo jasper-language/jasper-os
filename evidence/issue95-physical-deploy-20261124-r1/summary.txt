@@ -1,6 +1,6 @@
 source=/home/auth/.codex/worktrees/c72b/jasper-os-public/evidence/issue95-physical-deploy-20261124-r1/tftp
-kernel_sha256=a22941d362d7dcaf194f207f86eb49ffd9f60e4c1e19a74e516c53d3dd56f7c1
-bootloader_sha256=c21e82553c838189191e05c303eddde3dfb6b4e5893c02aa1a1bc1d2a2121b65
+kernel_sha256=0bf4ac7fceb6b56e2fa0ebf41ac11e5065c0418d43507c110e64a30763a166f8
+bootloader_sha256=61e9aaad21bacb98abfcfe02306c6322559db3ab68303e3fae3e4cc191042782
 sample_scale=1000000
 fast_leaf_yield=false
 profile=smp-matrix-only

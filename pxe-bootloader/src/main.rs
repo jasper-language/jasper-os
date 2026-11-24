@@ -227,15 +227,23 @@ fn load_file_from_tftp_boot_server(name: &CStr8) -> Option<&'static mut [u8]> {
     let mut base_code = open_pxe_base_code()?;
 
     let mode = base_code.mode();
+    // ProxyDHCP commonly leaves `siaddr` zero and carries the boot server in
+    // DHCP option 54. It must take precedence over a normal DHCP ACK whose
+    // `siaddr` may point at the LAN router rather than the PXE provider.
+    // ProxyDHCP 常用 option 54 携带启动服务器，必须优先于普通 DHCP ACK。
     let mut server_ip = Ipv4Addr::UNSPECIFIED;
-    if mode.dhcp_ack_received() {
-        server_ip = packet_server_ip(mode.dhcp_ack());
+    let mut server_source = "none";
+    if mode.pxe_reply_received() {
+        server_ip = packet_server_ip(mode.pxe_reply());
+        server_source = "pxe-reply";
     }
     if server_ip.is_unspecified() && mode.proxy_offer_received() {
         server_ip = packet_server_ip(mode.proxy_offer());
+        server_source = "proxy-offer";
     }
-    if server_ip.is_unspecified() && mode.pxe_reply_received() {
-        server_ip = packet_server_ip(mode.pxe_reply());
+    if server_ip.is_unspecified() && mode.dhcp_ack_received() {
+        server_ip = packet_server_ip(mode.dhcp_ack());
+        server_source = "dhcp-ack";
     }
     if server_ip.is_unspecified() {
         uefi::println!(
@@ -243,6 +251,10 @@ fn load_file_from_tftp_boot_server(name: &CStr8) -> Option<&'static mut [u8]> {
         );
         return None;
     }
+    uefi::println!(
+        "PXE TFTP server {:?} selected from {server_source}",
+        server_ip
+    );
 
     let file_size = match base_code.tftp_get_file_size(&server_ip.into(), name) {
         Ok(size) => size,
@@ -265,7 +277,38 @@ fn load_file_from_tftp_boot_server(name: &CStr8) -> Option<&'static mut [u8]> {
 
 fn packet_server_ip(packet: &uefi::proto::network::pxe::Packet) -> Ipv4Addr {
     let packet: &DhcpV4Packet = packet.as_ref();
-    Ipv4Addr::from_octets(packet.bootp_si_addr)
+    let direct = Ipv4Addr::from_octets(packet.bootp_si_addr);
+    if !direct.is_unspecified() {
+        return direct;
+    }
+    if packet.dhcp_magik() != DhcpV4Packet::DHCP_MAGIK {
+        return direct;
+    }
+    let mut index = 0usize;
+    while index < packet.dhcp_options.len() {
+        let code = packet.dhcp_options[index];
+        index += 1;
+        match code {
+            0 => continue,
+            255 => break,
+            _ => {}
+        }
+        let Some(&length) = packet.dhcp_options.get(index) else {
+            break;
+        };
+        index += 1;
+        let Some(value) = packet
+            .dhcp_options
+            .get(index..index.saturating_add(length as usize))
+        else {
+            break;
+        };
+        index = index.saturating_add(length as usize);
+        if code == 54 && value.len() == 4 {
+            return Ipv4Addr::new(value[0], value[1], value[2], value[3]);
+        }
+    }
+    direct
 }
 
 fn allocate_loader_data(size: usize) -> &'static mut [u8] {

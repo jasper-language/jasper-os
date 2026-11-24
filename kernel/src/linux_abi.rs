@@ -9375,7 +9375,7 @@ fn linux_clock_gettime(args: [u64; 6]) -> Result<u64, CompatErrno> {
     const CLOCK_REALTIME: u64 = 0;
     const CLOCK_MONOTONIC: u64 = 1;
     let now = match args[0] {
-        CLOCK_MONOTONIC => crate::sched::now_ns(),
+        CLOCK_MONOTONIC => crate::clock_fact::now_ns(),
         CLOCK_REALTIME => crate::arch::wall_clock_ns().ok_or(CompatErrno::NoSys)?,
         _ => return Err(CompatErrno::Invalid),
     };

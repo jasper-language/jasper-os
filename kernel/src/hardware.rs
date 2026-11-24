@@ -580,6 +580,7 @@ pub fn report() {
         kmain::VERSION,
         option_env!("JASPER_BUILD_COMMIT").unwrap_or("unknown")
     );
+    crate::clock_fact::report();
 }
 
 fn report_caches() {

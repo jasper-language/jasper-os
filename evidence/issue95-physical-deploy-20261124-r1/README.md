@@ -10,8 +10,8 @@ Status: **PXE/TFTP ready; physical result pending user restart.**
 - PXE/TFTP server: `192.168.68.52`
 
 ```text
-a22941d362d7dcaf194f207f86eb49ffd9f60e4c1e19a74e516c53d3dd56f7c1  kernel-x86_64
-c21e82553c838189191e05c303eddde3dfb6b4e5893c02aa1a1bc1d2a2121b65  bootloader.efi
+0bf4ac7fceb6b56e2fa0ebf41ac11e5065c0418d43507c110e64a30763a166f8  kernel-x86_64
+61e9aaad21bacb98abfcfe02306c6322559db3ab68303e3fae3e4cc191042782  bootloader.efi
 ```
 
 No physical performance result is claimed by this directory yet.
