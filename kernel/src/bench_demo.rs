@@ -1357,6 +1357,86 @@ fn general_switch_worker() {
     SWITCH_WORKERS_DONE.fetch_add(1, Ordering::AcqRel);
 }
 
+fn report_general_switch_state(
+    mode: &str,
+    stage: &str,
+    cpus: &[usize],
+    spawned: usize,
+    expected_workers: usize,
+) {
+    let scheduler_online = sched::online_cpus();
+    let audit = sched::queue_audit();
+    let mut runnable = alloc::string::String::new();
+    for (index, &cpu) in cpus.iter().enumerate() {
+        if index != 0 {
+            runnable.push(',');
+        }
+        runnable.push_str(&alloc::format!(
+            "{}:{}",
+            cpu,
+            sched::runnable_workers_on(cpu)
+        ));
+    }
+    let line = alloc::format!(
+        "{} SWITCH STATE stage={} SCHED_ONLINE={} SPAWNED={}/{} LIVE={} READY={}/{} DONE={}/{} QUEUED={} RUNNABLE={} MISPLACED={} COUNT_MISMATCH={} LIST_MISMATCH={} HOOK_ERRORS={}",
+        mode,
+        stage,
+        scheduler_online.len(),
+        spawned,
+        expected_workers,
+        sched::live_workers(),
+        CS_READY.load(Ordering::Acquire),
+        expected_workers,
+        SWITCH_WORKERS_DONE.load(Ordering::Acquire),
+        expected_workers,
+        audit.queued,
+        runnable,
+        audit.misplaced,
+        audit.count_mismatch,
+        audit.list_mismatch,
+        audit.hook_errors
+    );
+    kprintln!("[JSR-SMP-SW] {}", line);
+    early::append_progress(&line);
+}
+
+/// Drive the boot task while the real scheduler runs the switch workload.
+/// Unlike a tick-only deadline, this monitor always makes progress even if the
+/// BSP tick source is temporarily unavailable on physical firmware.
+fn drive_general_switch_workload(
+    mode: &str,
+    cpus: &[usize],
+    spawned: usize,
+    expected_workers: usize,
+    tick_deadline: u64,
+    cycle_deadline: u64,
+) -> bool {
+    sched::yield_with_cause("yield");
+    let hz = early::tsc_frequency_hz().unwrap_or(3_000_000_000);
+    let report_interval = hz.max(1);
+    let mut next_report = arch::measure_cycles().saturating_add(report_interval);
+    loop {
+        if sched::workers_settled() {
+            return true;
+        }
+        let now = arch::measure_cycles();
+        if crate::sched::timer_ticks() >= tick_deadline || now >= cycle_deadline {
+            report_general_switch_state(mode, "timeout", cpus, spawned, expected_workers);
+            return false;
+        }
+        arch::watchdog_pet_force();
+        if sched::has_runnable_worker() {
+            sched::yield_with_cause("yield");
+        } else {
+            core::hint::spin_loop();
+        }
+        if now >= next_report {
+            report_general_switch_state(mode, "waiting", cpus, spawned, expected_workers);
+            next_report = now.saturating_add(report_interval);
+        }
+    }
+}
+
 /// Measure every real scheduler handoff completed while a small task workload
 /// runs. Scheduler policy decides the task order; this fixture supplies runnable
 /// tasks and a stop target but never requires a particular A/B sequence.
@@ -1472,6 +1552,25 @@ fn run_general_switch_workload(
         spawned,
         expected_workers
     ));
+    let mut kick_failures = 0usize;
+    let local_cpu = arch::cpu_index();
+    for &cpu in cpus {
+        if cpu != local_cpu && crate::smp::reschedule(cpu).is_err() {
+            kick_failures += 1;
+        }
+    }
+    kprintln!(
+        "[JSR-SMP-SW] stage=general_kicks cpu_count={} failed={}",
+        cpus.len().saturating_sub(1),
+        kick_failures
+    );
+    report_general_switch_state(
+        mode,
+        "spawned",
+        cpus,
+        spawned,
+        expected_workers,
+    );
     let started = CS_RELEASE_CYCLES.load(Ordering::Acquire) as u64;
     if spawned != expected_workers {
         CS_ABORT.store(true, Ordering::Release);
@@ -1479,7 +1578,19 @@ fn run_general_switch_workload(
     }
     let tick_deadline = crate::sched::timer_ticks()
         .saturating_add(u64::from(config::ACTIVE.clock.timer_hz).saturating_mul(switch_seconds));
-    let settled = sched::run_until(tick_deadline);
+    let switch_deadline_cycles = arch::measure_cycles().saturating_add(
+        early::tsc_frequency_hz()
+            .unwrap_or(3_000_000_000)
+            .saturating_mul(switch_seconds),
+    );
+    let settled = drive_general_switch_workload(
+        mode,
+        cpus,
+        spawned,
+        expected_workers,
+        tick_deadline,
+        switch_deadline_cycles,
+    );
     let finished = arch::measure_cycles();
     if !settled {
         CS_ABORT.store(true, Ordering::Release);

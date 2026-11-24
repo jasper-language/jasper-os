@@ -1631,6 +1631,24 @@ pub fn queue_audit() -> scheduler::QueueAudit {
     with(|s| s.queue_audit())
 }
 
+/// Whether every worker has exited and every online CPU has settled its final
+/// execution context. This is the same boundary used by [`run`] and
+/// [`run_until`].
+pub fn workers_settled() -> bool {
+    with(|s| s.workers_settled())
+}
+
+/// Whether this CPU has runnable work locally or can obtain it from another
+/// run queue.
+pub fn has_runnable_worker() -> bool {
+    with(|s| s.has_runnable_worker())
+}
+
+/// Number of runnable workers assigned to `cpu`'s run queue.
+pub fn runnable_workers_on(cpu: usize) -> u32 {
+    with(|s| s.runnable_workers_on(cpu))
+}
+
 /// 默认档位的时间片（tick 数）。
 pub fn quantum_ticks() -> u32 {
     with(|s| s.default_quantum())

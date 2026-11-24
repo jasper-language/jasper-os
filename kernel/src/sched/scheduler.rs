@@ -3942,6 +3942,16 @@ impl Scheduler {
         self.workers == 0 && self.online.iter().all(leaf_execution_settled)
     }
 
+    /// Number of runnable workers currently assigned to `cpu`'s run queue.
+    pub fn runnable_workers_on(&self, cpu: usize) -> u32 {
+        self.listed(cpu)
+            .filter(|(slot, task)| {
+                is_worker(*slot) && task.home == cpu && task.state == TaskState::Runnable
+            })
+            .count()
+            .min(u32::MAX as usize) as u32
+    }
+
     /// 本处理器是否有可运行的工作任务可接（本队列中不含当前任务的，或可以从别的队列窃取的）。
     pub fn has_runnable_worker(&self) -> bool {
         let c = this_cpu();
