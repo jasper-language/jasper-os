@@ -1,0 +1,19 @@
+2026-11-24 13:16:32 Europe/Berlin
+
+Client MAC: 74:56:3c:ba:1f:c7
+Client IP: 192.168.68.54
+PXE server: 192.168.68.52
+Boot file: bootloader.efi
+
+dnsmasq-tftp:
+  sent images/pxe-amd-realtek-20261124/bootloader.efi to 192.168.68.54
+  sent images/pxe-amd-realtek-20261124/kernel-x86_64 to 192.168.68.54
+
+Kernel SHA-256:
+c4523830d7e347ead2a92125dfe71ce2ac04ca914b5570906bd4ad4ee18db952
+
+Kernel size: 2,786,648 bytes
+
+This proves the physical machine requested and received the deployed image.
+It does not prove any post-handoff kernel result; those results must come from
+the physical framebuffer or a physical serial capture.
