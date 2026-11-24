@@ -998,6 +998,7 @@ static CS_ABORT: AtomicBool = AtomicBool::new(false);
 static CS_EXPECTED: AtomicU32 = AtomicU32::new(0);
 static CS_RELEASE_CYCLES: AtomicUsize = AtomicUsize::new(0);
 static CS_SWITCH_DEADLINE: AtomicUsize = AtomicUsize::new(0);
+static CS_ITERATIONS: AtomicUsize = AtomicUsize::new(0);
 
 fn switch_deadline_reached() -> bool {
     let deadline = CS_SWITCH_DEADLINE.load(Ordering::Acquire);
@@ -1022,7 +1023,8 @@ fn parallel_switch_measurer() {
         sched::yield_with_cause("yield");
     }
     if !ptr.is_null() && !CS_ABORT.load(Ordering::Acquire) && !switch_deadline_reached() {
-        let samples = unsafe { core::slice::from_raw_parts_mut(ptr, CONTEXT_ITERS) };
+        let iterations = CS_ITERATIONS.load(Ordering::Acquire);
+        let samples = unsafe { core::slice::from_raw_parts_mut(ptr, iterations) };
         for (index, sample) in samples.iter_mut().enumerate() {
             if CS_ABORT.load(Ordering::Acquire) || switch_deadline_reached() {
                 CS_ABORT.store(true, Ordering::Release);
@@ -1082,7 +1084,7 @@ fn parallel_switch_measurer() {
                     "[JSR-SMP-SW] stage=progress cpu={} sample={}/{} valid={} retries={} missed={} switches={}",
                     cpu,
                     index,
-                    CONTEXT_ITERS,
+                    iterations,
                     CS_VALID[cpu].load(Ordering::Relaxed),
                     CS_RETRIES[cpu].load(Ordering::Relaxed),
                     CS_NONE[cpu].load(Ordering::Relaxed),
@@ -1092,7 +1094,7 @@ fn parallel_switch_measurer() {
                     early::append_progress(&alloc::format!(
                         "SCHED.CONTEXT_SWITCH CPU0 {}/{} VALID={} RETRIES={} MISSED={}",
                         index,
-                        CONTEXT_ITERS,
+                        iterations,
                         CS_VALID[cpu].load(Ordering::Relaxed),
                         CS_RETRIES[cpu].load(Ordering::Relaxed),
                         CS_NONE[cpu].load(Ordering::Relaxed)
@@ -1127,8 +1129,13 @@ fn parallel_switch_partner() {
     }
 }
 
-fn run_parallel_context_switch(mode: &str, cpus: &[usize], cal: &Calibration) -> bool {
-    let total = match CONTEXT_ITERS.checked_mul(cpus.len()) {
+fn run_parallel_context_switch(
+    mode: &str,
+    cpus: &[usize],
+    cal: &Calibration,
+    iterations: usize,
+) -> bool {
+    let total = match iterations.checked_mul(cpus.len()) {
         Some(total) => total,
         None => return false,
     };
@@ -1146,6 +1153,7 @@ fn run_parallel_context_switch(mode: &str, cpus: &[usize], cal: &Calibration) ->
     CS_ABORT.store(false, Ordering::Release);
     CS_RELEASE_CYCLES.store(0, Ordering::Release);
     CS_EXPECTED.store(cpus.len().saturating_mul(2) as u32, Ordering::Release);
+    CS_ITERATIONS.store(iterations, Ordering::Release);
     let switch_seconds = 120u64;
     CS_SWITCH_DEADLINE.store(
         arch::measure_cycles().saturating_add(
@@ -1182,9 +1190,9 @@ fn run_parallel_context_switch(mode: &str, cpus: &[usize], cal: &Calibration) ->
         };
         slot.store(
             unsafe {
-                samples.as_mut_ptr().add(
-                    cpus.iter().position(|candidate| *candidate == cpu).unwrap() * CONTEXT_ITERS,
-                )
+                samples
+                    .as_mut_ptr()
+                    .add(cpus.iter().position(|candidate| *candidate == cpu).unwrap() * iterations)
             } as usize,
             Ordering::Release,
         );
@@ -1318,7 +1326,7 @@ fn run_parallel_context_switch(mode: &str, cpus: &[usize], cal: &Calibration) ->
                 .map_or(0, |value| value.load(Ordering::Relaxed) as u64)
         })
         .sum::<u64>();
-    let expected_samples = (cpus.len() as u64).saturating_mul(CONTEXT_ITERS as u64);
+    let expected_samples = (cpus.len() as u64).saturating_mul(iterations as u64);
     let ok = spawned && all_ready && all_done && valid_total == expected_samples;
     check(ok, "并发上下文切换参与者、完成计数或样本不完整");
     if !ok {
@@ -1340,8 +1348,8 @@ fn run_parallel_context_switch(mode: &str, cpus: &[usize], cal: &Calibration) ->
     }
     let summarize_started = arch::measure_cycles();
     for (index, &cpu) in cpus.iter().enumerate() {
-        let start = index.saturating_mul(CONTEXT_ITERS);
-        let Some(end) = start.checked_add(CONTEXT_ITERS) else {
+        let start = index.saturating_mul(iterations);
+        let Some(end) = start.checked_add(iterations) else {
             return false;
         };
         let Some(cpu_summary) = summarize(&mut samples[start..end]) else {
@@ -1351,11 +1359,11 @@ fn run_parallel_context_switch(mode: &str, cpus: &[usize], cal: &Calibration) ->
             "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"parallel_switch_cpu\",\"mode\":\"{}\",\"cpu\":{},\"measurement\":\"roundtrip_a_b_a\",\"planned\":{},\"observed\":{},\"valid\":{},\"failed_ops\":{},\"incomplete\":{},\"retries\":{},\"unexpected_windows\":{},\"switches\":{},\"last_from_slot\":{},\"last_from_generation\":{},\"last_to_slot\":{},\"last_to_generation\":{},\"p50_ns\":{},\"p99_ns\":{},\"p999_ns\":{},\"p9999_ns\":{},\"p99999_ns\":{},\"max_ns\":{}}}",
             mode,
             cpu,
-            CONTEXT_ITERS,
+            iterations,
             cpu_summary.count,
             CS_VALID[cpu].load(Ordering::Relaxed),
-            CONTEXT_ITERS.saturating_sub(CS_VALID[cpu].load(Ordering::Relaxed) as usize),
-            CONTEXT_ITERS.saturating_sub(cpu_summary.count as usize),
+            iterations.saturating_sub(CS_VALID[cpu].load(Ordering::Relaxed) as usize),
+            iterations.saturating_sub(cpu_summary.count as usize),
             CS_RETRIES[cpu].load(Ordering::Relaxed),
             CS_UNEXPECTED[cpu].load(Ordering::Relaxed),
             CS_SWITCHES[cpu].load(Ordering::Relaxed),
@@ -1459,16 +1467,41 @@ fn run_parallel_mode(mode: &str, cpus: &[usize], cal: &Calibration) -> bool {
         early::append_progress(&progress);
         ok &= run_parallel_metric(mode, metric, cpus, cal);
     }
-    early::append_progress(&alloc::format!("{} RUNNING SCHED.CONTEXT_SWITCH", mode));
-    ok &= run_parallel_context_switch(mode, cpus, cal);
+    let mut switch_planned_samples = 0usize;
+    #[cfg(feature = "bench-switch-diagnostic")]
+    {
+        for iterations in [1usize, 10, 1_000] {
+            early::append_progress(&alloc::format!(
+                "{} RUNNING CONTEXT_SWITCH N={} CPUS={}",
+                mode,
+                iterations,
+                cpus.len()
+            ));
+            kprintln!(
+                "{{\"schema\":\"jasper.perf.v1\",\"kind\":\"parallel_switch_stage\",\"mode\":\"{}\",\"cpus\":{},\"iterations_per_cpu\":{},\"measurement\":\"roundtrip_a_b_a\"}}",
+                mode,
+                cpus.len(),
+                iterations
+            );
+            ok &= run_parallel_context_switch(mode, cpus, cal, iterations);
+            switch_planned_samples =
+                switch_planned_samples.saturating_add(iterations.saturating_mul(cpus.len()));
+        }
+    }
+    #[cfg(not(feature = "bench-switch-diagnostic"))]
+    {
+        early::append_progress(&alloc::format!("{} RUNNING SCHED.CONTEXT_SWITCH", mode));
+        ok &= run_parallel_context_switch(mode, cpus, cal, CONTEXT_ITERS);
+        switch_planned_samples = CONTEXT_ITERS.saturating_mul(cpus.len());
+    }
     let usable = crate::mm::frame::usable_frames();
     let free = crate::mm::frame::free_frames();
     let (heap_total, heap_free, _, heap_mapped) = crate::mm::heap::stats();
     let planned_samples = metrics
         .len()
         .saturating_mul(TAIL_ITERS)
-        .saturating_add(CONTEXT_ITERS)
-        .saturating_mul(cpus.len());
+        .saturating_mul(cpus.len())
+        .saturating_add(switch_planned_samples);
     let result = format_args!(
         "{} RESULT COMPLETE={} TOTAL_METRICS={} PLANNED_SAMPLES={} MEM_USED_KIB={} HEAP_USED_KIB={} HEAP_MAPPED_KIB={}",
         mode,
