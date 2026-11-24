@@ -98,6 +98,10 @@ jobs:
         run: |
           python3 scripts/check-issue42-mechanism-ledger.py --self-test
           python3 scripts/check-issue42-mechanism-ledger.py --final
+      - name: Native ABI operation domains
+        run: |
+          python3 scripts/check-native-abi-domains.py
+          python3 scripts/check-native-abi-domains.py --check-matrix
       - name: Issue #43 驱动兼容域退出门 / compatibility driver-domain ledger
         run: |
           python3 scripts/check-issue43-driver-ledger.py --self-test
