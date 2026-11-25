@@ -326,6 +326,60 @@ fn take_local_inbox(cpu: usize) -> LocalInbox {
     }
     out
 }
+
+#[cfg(feature = "bench-switch-diagnostic")]
+static SWITCH_TRACE_STARTED: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "bench-switch-diagnostic")]
+static SWITCH_TRACE_ACTIVE: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; kernel_core::smp::MAX_CPUS];
+
+#[cfg(feature = "bench-switch-diagnostic")]
+fn switch_trace_begin(cause: &'static str) -> bool {
+    if cpu::cpu_index() != 0
+        || cause != Cause::YIELD
+        || SWITCH_TRACE_STARTED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+    {
+        return false;
+    }
+    if let Some(active) = SWITCH_TRACE_ACTIVE.get(0) {
+        active.store(true, Ordering::Release);
+    }
+    switch_trace_stage("T01 yield entry");
+    true
+}
+
+#[cfg(feature = "bench-switch-diagnostic")]
+fn switch_trace_stage(stage: &'static str) {
+    let trace = SWITCH_TRACE_ACTIVE
+        .get(cpu::cpu_index())
+        .is_some_and(|active| active.load(Ordering::Acquire));
+    if trace {
+        crate::early::append_status("[SCHED] ", stage);
+        crate::early::mark_serial(stage);
+    }
+}
+
+#[cfg(feature = "bench-switch-diagnostic")]
+fn switch_trace_finish(stage: &'static str) {
+    switch_trace_stage(stage);
+    if let Some(active) = SWITCH_TRACE_ACTIVE.get(cpu::cpu_index()) {
+        active.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(not(feature = "bench-switch-diagnostic"))]
+fn switch_trace_begin(_cause: &'static str) -> bool {
+    false
+}
+
+#[cfg(not(feature = "bench-switch-diagnostic"))]
+fn switch_trace_stage(_stage: &'static str) {}
+
+#[cfg(not(feature = "bench-switch-diagnostic"))]
+fn switch_trace_finish(_stage: &'static str) {}
+
 struct StateGuard(crate::sync::IrqSpinLockGuard<'static, Scheduler>, bool);
 impl core::ops::Deref for StateGuard {
     type Target = Scheduler;
@@ -340,6 +394,7 @@ impl core::ops::DerefMut for StateGuard {
 }
 impl Drop for StateGuard {
     fn drop(&mut self) {
+        switch_trace_stage("T09 state guard drop enter");
         #[cfg(feature = "krn2-observe")]
         {
             self.0.raw_highres_phase = None;
@@ -357,10 +412,12 @@ impl Drop for StateGuard {
         self.0.publish_tick_lease_owners(|cpu, owner, permits| {
             publish_and_release_tick_guard(cpu, owner, permits);
         });
+        switch_trace_stage("T10 state guard drop exit");
     }
 }
 
 fn hold_tick_guard(cpu: usize) -> u32 {
+    switch_trace_stage("T06 tick guard enter");
     let slot = tick_guard_slot(cpu).unwrap_or_else(|| {
         crate::kprintln!("[JSR-SMP] reject=scheduler_tick_guard_missing cpu={}", cpu);
         crate::arch::halt_forever()
@@ -373,6 +430,7 @@ fn hold_tick_guard(cpu: usize) -> u32 {
     let (guard, spins) = lock.lock_counted();
     #[cfg(not(feature = "krn2-observe"))]
     let guard = lock.lock();
+    switch_trace_stage("T06 tick guard acquired");
     // SAFETY: KERNEL_SCHED is held for the complete transaction, serializing
     // every access to these slots and their guards.
     let held = unsafe { &mut *slot.0.get() };
@@ -384,6 +442,7 @@ fn hold_tick_guard(cpu: usize) -> u32 {
     }
     #[cfg(not(feature = "krn2-observe"))]
     {
+        switch_trace_stage("T06 tick guard published");
         0
     }
 }
@@ -467,8 +526,12 @@ fn lock_state_from_observed(
     // A CPU is the sole consumer of its inbox. Never retain this leaf while
     // taking KERNEL_SCHED: producers use global -> inbox ordering.
     let local_cpu = crate::arch::cpu_index();
+    switch_trace_stage("T04 scheduler inbox take begin");
     let inbox = cpu::without_irq(|| take_local_inbox(local_cpu));
+    switch_trace_stage("T04 scheduler inbox acquired");
+    switch_trace_stage("T05 global scheduler lock wait");
     let mut s = KERNEL_SCHED.lock();
+    switch_trace_stage("T05 global scheduler lock acquired");
     #[cfg(feature = "krn2-observe")]
     {
         s.raw_highres_phase = highres_irq_entry.map(|interrupt_entry| scheduler::WakePhaseSource {
@@ -546,6 +609,7 @@ fn lock_state_from_observed(
     if crate::hrtime::enabled() {
         s.settle_highres(crate::hrtime::now().expect("high-res monotonic clock"));
     }
+    switch_trace_stage("T08 scheduler guards ready");
     StateGuard(s, false)
 }
 
@@ -610,10 +674,12 @@ fn with_mut_from_observed<R>(
 
 /// 对需要重新调度的其他处理器发核间中断（不持任何锁时调用；目标不在线时忽略——它上线后自己会查队列）。
 fn send_kicks(kicks: CpuSet) {
+    switch_trace_stage("T11 send kicks enter");
     let me = cpu::cpu_index();
     for c in kicks.iter().filter(|&c| c != me) {
         let _ = crate::smp::reschedule(c);
     }
+    switch_trace_stage("T11 send kicks exit");
 }
 
 #[cfg(feature = "krn2-observe")]
@@ -636,6 +702,7 @@ pub(crate) fn wake_endpoint() -> kernel_core::raw_timing::Endpoint {
 
 /// 切换完成：在新执行流的开头（关中断时）调用，释放刚换下的任务并发出由此产生的重新调度请求。
 fn finish_switch() {
+    switch_trace_stage("T17 task finish_switch enter");
     #[cfg(feature = "krn2-observe")]
     let end = wake_endpoint();
     // The resumed CPU owns this completion.  Consume the leaf-local switch
@@ -652,6 +719,7 @@ fn finish_switch() {
         // completion and sends any migration kick after releasing the guard.
         with_mut(|_| {});
     }
+    switch_trace_stage("T17 task finish_switch exit");
 }
 
 /// 调度器锁遇到占用的次数（多处理器同时访问调度器时增长）。
@@ -836,8 +904,10 @@ static TIMER_TICKS: IrqU64 = IrqU64::new(0);
 
 /// 新任务的公共入口：执行任务体，返回后标记退出并让出 CPU（永不返回）。
 extern "C" fn task_trampoline() -> ! {
+    switch_trace_stage("T16 task trampoline enter");
     // 先完成切换（仍在关中断下）：换下的那个任务从此才可被其他处理器选中
     finish_switch();
+    switch_trace_stage("T17 task trampoline finish complete");
     // 新任务可能是在定时器中断里被首次切入的：那时 CPU 处于关中断状态，
     // 而这条路径不会经过中断返回来恢复标志位 ⇒ 抢占开启时必须在这里显式开中断，
     // 否则该任务将永远无法再被抢占。其他处理器上一律开中断：协作式演练只在引导处理器上进行，
@@ -846,6 +916,7 @@ extern "C" fn task_trampoline() -> ! {
         cpu::irq_enable();
     }
     if let Some(entry) = with(|s| s.current_entry()) {
+        switch_trace_finish("T18 worker entry");
         entry();
     }
     exit_current(Cause::EXIT);
@@ -1201,6 +1272,7 @@ pub fn yield_now() {
 /// 再次进入调度器（重入）。切换回来后恢复**本任务自己**被切走前的中断状态——
 /// 每个任务的中断标志随它的栈一起保存/恢复，互不影响。
 pub fn yield_with_cause(cause: &'static str) {
+    let trace = switch_trace_begin(cause);
     // The object-table transaction is bounded and must end before the current
     // task can be descheduled. Otherwise another task could resume while the
     // table remains owned by a suspended context.
@@ -1210,15 +1282,39 @@ pub fn yield_with_cause(cause: &'static str) {
             .holds(crate::lockorder::OBJECT_TABLE.rank),
         "task switch attempted while holding the object table"
     );
+    if trace {
+        switch_trace_stage("T02 object table clear");
+    }
     let was_enabled = cpu::irq_save_disable();
+    if trace {
+        switch_trace_stage("T02 interrupts masked");
+    }
     // 锁与借用都在本块内结束，不跨越下面的栈切换（中断仍关着）。
     let (plan, kicks) = {
         let mut s = lock_state_from(Origin::Switch);
         let plan = s.prepare_switch(cause);
-        (plan, s.take_kicks())
+        if trace {
+            switch_trace_stage(if plan.is_some() {
+                "T07 prepare switch returned plan"
+            } else {
+                "T07 prepare switch returned none"
+            });
+        }
+        let kicks = s.take_kicks();
+        drop(s);
+        if trace {
+            switch_trace_stage("T10 scheduler state released");
+        }
+        (plan, kicks)
     };
+    if trace {
+        switch_trace_stage("T10 prepare transaction complete");
+    }
     send_kicks(kicks);
     if let Some(plan) = plan {
+        if trace {
+            switch_trace_stage("T12 execute switch plan");
+        }
         execute_switch_plan(plan);
     } else {
         #[cfg(feature = "krn2-observe")]
@@ -1234,20 +1330,26 @@ pub fn yield_with_cause(cause: &'static str) {
 /// the plan in the same global transaction that performed accounting, so they
 /// do not reacquire `KERNEL_SCHED` between the decision and context switch.
 fn execute_switch_plan(plan: scheduler::SwitchPlan) {
+    switch_trace_stage("T12 stack setup");
     let kernel_space = *KERNEL_SPACE.call_once(cpu::current_space);
     if let Some(top) = plan.next_stack_top {
         cpu::set_kernel_stack(top);
     }
+    switch_trace_stage("T12 stack ready");
     let target = plan.next_space.unwrap_or(kernel_space);
     if cpu::current_space() != target {
         // SAFETY：任务记录的空间由其所有者保证在任务存活期间有效；内核空间始终有效。
         unsafe { cpu::switch_space(target) };
     }
+    switch_trace_stage("T13 address space ready");
     crate::smp::percpu::this().set_space(plan.next_space);
     crate::smp::percpu::this().set_current(plan.next_slot);
+    switch_trace_stage("T14 target identity published");
     // SAFETY：old/new 指向全局调度器内的任务上下文，在切换期间保持有效；
     // new 要么由栈池伪造，要么由上一次 switch_context 保存。
+    switch_trace_stage("T15 before switch_context");
     unsafe { switch_context(plan.old, plan.new) };
+    switch_trace_stage("T15 after switch_context");
     finish_switch();
 }
 
