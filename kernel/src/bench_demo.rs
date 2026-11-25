@@ -1424,8 +1424,8 @@ fn report_general_switch_state(
             let Some(per_cpu) = crate::smp::percpu::get(cpu) else {
                 continue;
             };
-            let line = alloc::format!(
-                "{} SWITCH AP cpu={} hw={} tick={} rsc={} call={} wake={} pending={} current={} leaf={} boot_running={} irq={} q={}",
+            let io = alloc::format!(
+                "{} AP c={} h={} t={} r={} i={} w={} p={}",
                 mode,
                 cpu,
                 per_cpu.hw_id(),
@@ -1433,7 +1433,14 @@ fn report_general_switch_state(
                 per_cpu.ipis(kernel_core::smp::IpiKind::Reschedule),
                 per_cpu.ipis(kernel_core::smp::IpiKind::Call),
                 per_cpu.idle_wakeups(),
-                per_cpu.resched_pending(),
+                per_cpu.resched_pending()
+            );
+            kprintln!("[JSR-SMP-SW] {}", io);
+            early::append_progress(&io);
+            let context = alloc::format!(
+                "{} CTX c={} cur={} lf={} bt={} irq={} q={}",
+                mode,
+                cpu,
                 per_cpu.current(),
                 sched::leaf_current(cpu).map_or(usize::MAX, |slot| slot),
                 if cpu == 0 {
@@ -1444,9 +1451,11 @@ fn report_general_switch_state(
                 crate::arch::irq_enabled().map_or(false, |enabled| enabled),
                 sched::runnable_workers_on(cpu)
             );
-            kprintln!("[JSR-SMP-SW] {}", line);
-            early::append_progress(&line);
+            kprintln!("[JSR-SMP-SW] {}", context);
+            early::append_progress(&context);
         }
+        // Keep the last diagnostic line off the physical screen's final row.
+        early::append_progress("");
     }
 }
 
@@ -1461,7 +1470,9 @@ fn drive_general_switch_workload(
     tick_deadline: u64,
     cycle_deadline: u64,
 ) -> bool {
+    early::append_progress(&alloc::format!("{} FIRST_YIELD_BEGIN", mode));
     sched::yield_with_cause("yield");
+    early::append_progress(&alloc::format!("{} FIRST_YIELD_RETURN", mode));
     let hz = early::tsc_frequency_hz().unwrap_or(3_000_000_000);
     let report_interval = hz.max(1);
     let mut next_report = arch::measure_cycles().saturating_add(report_interval);
