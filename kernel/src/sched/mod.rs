@@ -332,6 +332,16 @@ static SWITCH_TRACE_STARTED: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "bench-switch-diagnostic")]
 static SWITCH_TRACE_ACTIVE: [AtomicBool; kernel_core::smp::MAX_CPUS] =
     [const { AtomicBool::new(false) }; kernel_core::smp::MAX_CPUS];
+#[cfg(feature = "bench-switch-diagnostic")]
+static TRAMPOLINE_TRACE_LOOKUP: [AtomicBool; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; kernel_core::smp::MAX_CPUS];
+// Allocation-free, lock-free last-stage record. Updating this record never
+// allocates or waits; visible diagnostics remain feature-gated.
+#[cfg(feature = "bench-switch-diagnostic")]
+const TRAMPOLINE_TRACE_KIND_BASE: u32 = 0x1700;
+#[cfg(feature = "bench-switch-diagnostic")]
+static TRAMPOLINE_TRACE_LAST: [AtomicU32; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicU32::new(0) }; kernel_core::smp::MAX_CPUS];
 
 #[cfg(feature = "bench-switch-diagnostic")]
 fn switch_trace_begin(cause: &'static str) -> bool {
@@ -369,6 +379,43 @@ fn switch_trace_finish(stage: &'static str) {
     }
 }
 
+#[cfg(feature = "bench-switch-diagnostic")]
+fn trampoline_trace_stage(code: u32, stage: &'static str) {
+    let cpu = cpu::cpu_index();
+    if let Some(last) = TRAMPOLINE_TRACE_LAST.get(cpu) {
+        last.store(TRAMPOLINE_TRACE_KIND_BASE | code, Ordering::Release);
+    }
+    switch_trace_stage(stage);
+}
+
+#[cfg(feature = "bench-switch-diagnostic")]
+fn trampoline_trace_record(code: u32) {
+    if let Some(last) = TRAMPOLINE_TRACE_LAST.get(cpu::cpu_index()) {
+        last.store(TRAMPOLINE_TRACE_KIND_BASE | code, Ordering::Release);
+    }
+}
+
+#[cfg(feature = "bench-switch-diagnostic")]
+fn begin_trampoline_lookup(cpu: usize) {
+    if let Some(active) = TRAMPOLINE_TRACE_LOOKUP.get(cpu) {
+        active.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(feature = "bench-switch-diagnostic")]
+fn end_trampoline_lookup(cpu: usize) {
+    if let Some(active) = TRAMPOLINE_TRACE_LOOKUP.get(cpu) {
+        active.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(feature = "bench-switch-diagnostic")]
+fn in_trampoline_lookup(cpu: usize) -> bool {
+    TRAMPOLINE_TRACE_LOOKUP
+        .get(cpu)
+        .is_some_and(|active| active.load(Ordering::Acquire))
+}
+
 #[cfg(not(feature = "bench-switch-diagnostic"))]
 fn switch_trace_begin(_cause: &'static str) -> bool {
     false
@@ -379,6 +426,23 @@ fn switch_trace_stage(_stage: &'static str) {}
 
 #[cfg(not(feature = "bench-switch-diagnostic"))]
 fn switch_trace_finish(_stage: &'static str) {}
+
+#[cfg(not(feature = "bench-switch-diagnostic"))]
+fn trampoline_trace_stage(_code: u32, _stage: &'static str) {}
+
+#[cfg(not(feature = "bench-switch-diagnostic"))]
+fn trampoline_trace_record(_code: u32) {}
+
+#[cfg(not(feature = "bench-switch-diagnostic"))]
+fn begin_trampoline_lookup(_cpu: usize) {}
+
+#[cfg(not(feature = "bench-switch-diagnostic"))]
+fn end_trampoline_lookup(_cpu: usize) {}
+
+#[cfg(not(feature = "bench-switch-diagnostic"))]
+fn in_trampoline_lookup(_cpu: usize) -> bool {
+    false
+}
 
 struct StateGuard(crate::sync::IrqSpinLockGuard<'static, Scheduler>, bool);
 impl core::ops::Deref for StateGuard {
@@ -529,9 +593,17 @@ fn lock_state_from_observed(
     switch_trace_stage("T04 scheduler inbox take begin");
     let inbox = cpu::without_irq(|| take_local_inbox(local_cpu));
     switch_trace_stage("T04 scheduler inbox acquired");
-    switch_trace_stage("T05 global scheduler lock wait");
+    if in_trampoline_lookup(local_cpu) {
+        switch_trace_stage("T17.5 global scheduler lock wait");
+    } else {
+        switch_trace_stage("T05 global scheduler lock wait");
+    }
     let mut s = KERNEL_SCHED.lock();
-    switch_trace_stage("T05 global scheduler lock acquired");
+    if in_trampoline_lookup(local_cpu) {
+        switch_trace_stage("T17.5 global scheduler lock acquired");
+    } else {
+        switch_trace_stage("T05 global scheduler lock acquired");
+    }
     #[cfg(feature = "krn2-observe")]
     {
         s.raw_highres_phase = highres_irq_entry.map(|interrupt_entry| scheduler::WakePhaseSource {
@@ -908,14 +980,77 @@ extern "C" fn task_trampoline() -> ! {
     // 先完成切换（仍在关中断下）：换下的那个任务从此才可被其他处理器选中
     finish_switch();
     switch_trace_stage("T17 task trampoline finish complete");
+    let irq_before = cpu::irq_enabled().unwrap_or(false);
+    let preemption = PREEMPTION.load(Ordering::Relaxed);
+    trampoline_trace_stage(
+        1,
+        match (irq_before, preemption) {
+            (false, false) => "T17.1 irq=false preemption=false",
+            (false, true) => "T17.1 irq=false preemption=true",
+            (true, false) => "T17.1 irq=true preemption=false",
+            (true, true) => "T17.1 irq=true preemption=true",
+        },
+    );
+    // Resolve the task body while the first switch still masks interrupts.
+    // Re-enabling first made the trampoline immediately preemptible inside the
+    // scheduler lookup: a BSP timer could run several full scheduler
+    // transactions before the selected worker had ever reached its entry.
+    trampoline_trace_stage(4, "T17.4 before current_entry");
+    let local_cpu = cpu::cpu_index();
+    begin_trampoline_lookup(local_cpu);
+    #[cfg(feature = "bench-switch-diagnostic")]
+    let current = with(scheduler::Scheduler::trampoline_current);
+    #[cfg(not(feature = "bench-switch-diagnostic"))]
+    let current = with(|s| {
+        (
+            s.current_entry(),
+            crate::smp::percpu::this().current(),
+            0,
+            None,
+            None,
+            None,
+        )
+    });
+    end_trampoline_lookup(local_cpu);
+    let entry = current.0;
+    trampoline_trace_stage(
+        6,
+        if entry.is_some() {
+            "T17.6 current_entry returned some"
+        } else {
+            "T17.6 current_entry returned none"
+        },
+    );
+    if local_cpu == 0
+        && SWITCH_TRACE_ACTIVE
+            .get(0)
+            .is_some_and(|active| active.load(Ordering::Acquire))
+    {
+        crate::kprintln!(
+            "[JSR-TRAMPOLINE] cpu={} slot={} generation={:?} task={} state={:?} on_cpu={:?} percpu_current={} entry={}",
+            local_cpu,
+            current.1,
+            current.3.map(|token| token.generation),
+            current.2,
+            current.4,
+            current.5,
+            crate::smp::percpu::this().current(),
+            entry.is_some()
+        );
+    }
     // 新任务可能是在定时器中断里被首次切入的：那时 CPU 处于关中断状态，
     // 而这条路径不会经过中断返回来恢复标志位 ⇒ 抢占开启时必须在这里显式开中断，
     // 否则该任务将永远无法再被抢占。其他处理器上一律开中断：协作式演练只在引导处理器上进行，
     // 而其他处理器关着中断运行任务会收不到本地时钟与核间中断（该核从此不再参与调度）。
-    if PREEMPTION.load(Ordering::Relaxed) || cpu::cpu_index() != 0 {
+    trampoline_trace_stage(2, "T17.2 before irq_enable");
+    if preemption || local_cpu != 0 {
         cpu::irq_enable();
+        trampoline_trace_stage(3, "T17.3 after irq_enable irq=true");
+    } else {
+        trampoline_trace_stage(3, "T17.3 irq_enable skipped irq=false");
     }
-    if let Some(entry) = with(|s| s.current_entry()) {
+    if let Some(entry) = entry {
+        trampoline_trace_record(8);
         switch_trace_finish("T18 worker entry");
         entry();
     }
@@ -1553,6 +1688,7 @@ pub fn timer_progress_stats() -> (u64, u64, u64, u64, u64) {
 }
 
 pub fn on_highres_timer(entry: u64, interrupt_entry: Option<kernel_core::raw_timing::Endpoint>) {
+    switch_trace_stage("I01 high-resolution timer interrupt enter");
     crate::smp::percpu::this().take_resched();
     // Keep the due publication, scheduling decision and switch publication in
     // one transaction.  The old path returned a cause and immediately took
@@ -1897,6 +2033,7 @@ impl kernel_core::wait::TimeSource for TickClock {
 /// 被切走任务的中断帧留在它自己的栈上，将来切回时从这里返回、经中断返回恢复它被打断的位置与中断标志。
 /// EOI 必须先发，否则在切回本任务之前中断控制器不会再投递定时器中断。
 pub fn on_timer_interrupt(entry: u64) {
+    switch_trace_stage("I01 legacy timer interrupt enter");
     // Full locked decision below consumes requests already published before it.
     crate::smp::percpu::this().take_resched();
     let now = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1926,6 +2063,7 @@ pub fn defer_timer_tick() {
 /// 到检查点做周期均衡，需要时就地切换。空闲执行流被打断时不在这里切换（中断返回后空闲循环自己取任务）。
 /// Local timer entry of a secondary processor.
 pub fn on_local_timer(entry: u64) {
+    switch_trace_stage("I01 local timer interrupt enter");
     let requested = crate::smp::percpu::this().take_resched();
     // 欠账要在全局锁内补记，有欠账时不走租约快路径。
     let deferred = timer_take_deferred();

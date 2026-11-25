@@ -2669,6 +2669,39 @@ impl Scheduler {
         self.task(self.cur()).and_then(|t| t.entry)
     }
 
+    /// Snapshot the exact task identity used by the first-entry trampoline.
+    ///
+    /// The caller holds the scheduler transaction, so slot, generation and
+    /// execution-owner state are one coherent diagnostic value. No allocation
+    /// or callback occurs here.
+    #[cfg(feature = "bench-switch-diagnostic")]
+    pub(super) fn trampoline_current(
+        &self,
+    ) -> (
+        Option<fn()>,
+        usize,
+        u64,
+        Option<kernel_core::task_index::Token>,
+        Option<TaskState>,
+        Option<usize>,
+    ) {
+        let slot = self.cur();
+        let token = self
+            .epochs
+            .get(slot)
+            .and_then(SlotLifecycle::history)
+            .map(|record| record.token());
+        let task = self.task(slot);
+        (
+            task.and_then(|task| task.entry),
+            slot,
+            task.map_or(0, |task| task.id.0),
+            token,
+            task.map(|task| task.state),
+            task.and_then(|task| task.on_cpu),
+        )
+    }
+
     /// 当前运行任务的 id 与名字。
     pub fn current(&self) -> (TaskId, &'static str) {
         self.task(self.cur())
